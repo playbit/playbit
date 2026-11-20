@@ -1,0 +1,718 @@
+register a 1 ok
+register v1 1 ok
+register e1:1 1 ok
+register e1:2 1 ok
+register v2 1 ok
+register e2:1 1 ok
+register e2:2 1 ok
+register v3 1 ok
+register e3:1 1 ok
+register e3:2 1 ok
+register v4 1 ok
+register e4:1 1 ok
+register e4:2 1 ok
+register v5 1 ok
+register e5:1 1 ok
+register e5:2 1 ok
+register v6 1 ok
+register e6:1 1 ok
+register e6:2 1 ok
+register v7 1 ok
+register e7:1 1 ok
+register e7:2 1 ok
+register v8 1 ok
+register e8:1 1 ok
+register e8:2 1 ok
+register v9 1 ok
+register e9:1 1 ok
+register e9:2 1 ok
+register v10 1 ok
+register e10:1 1 ok
+register e10:2 1 ok
+register v11 1 ok
+register e11:1 1 capacity
+register e11:2 1 capacity
+register e1:1 1 started
+update e5:2 3 true - 2 true
+update v12 2 true - 13 false
+failgap e11:1 3 false
+drain 32 a 1 false catchingup - v1 1 false catchingup - e1:1 1 false catchingup - e1:2 1 false catchingup - v2 1 false catchingup - e2:1 1 false catchingup - e2:2 1 false catchingup - v3 1 false catchingup - e3:1 1 false catchingup - e3:2 1 false catchingup - v4 1 false catchingup - e4:1 1 false catchingup - e4:2 1 false catchingup - v5 1 false catchingup - e5:1 1 false catchingup - e5:2 1 true catchingup - v6 1 false catchingup - e6:1 1 false catchingup - e6:2 1 false catchingup - v7 1 false catchingup - e7:1 1 false catchingup - e7:2 1 false catchingup - v8 1 false catchingup - e8:1 1 false catchingup - e8:2 1 false catchingup - v9 1 false catchingup - e9:1 1 false catchingup - e9:2 1 false catchingup - v10 1 false catchingup - e10:1 1 false catchingup - e10:2 1 false catchingup - v11 1 false catchingup -
+begin e6:2 1 ok
+register e13:2 1 capacity
+drain 0
+register e13:1 2 capacity
+register e2:2 1 started
+stop e10:2 1 failed -
+failgap e5:2 3 false
+failgap e8:1 2 false
+update v6 3 false - - false
+begin e3:2 1 ok
+register e9:1 1 started
+update v4 3 false catchingup 469 false
+drain 1 e10:2 1 false failed -
+drain 0
+update e11:2 1 false gap - false
+failgap e5:1 2 false
+begin e6:1 1 ok
+update e5:1 1 true - - true
+stop e6:2 1 revoked 7
+register e10:1 3 busy
+release e3:2 1
+register e3:1 3 busy
+register e1:1 3 busy
+register e8:2 1 started
+register v3 2 busy
+begin e4:2 1 ok
+begin a 1 ok
+update e8:1 1 true - - true
+drain 3 e5:1 1 true catchingup - e6:2 1 false revoked 7 e8:1 1 true catchingup -
+failgap e1:2 3 false
+drain 0
+begin e7:2 1 ok
+stop e9:2 1 revoked 7
+failgap v9 2 false
+register e13:2 2 capacity
+state a 1 catchingup
+state v1 1 catchingup
+state e1:1 1 catchingup
+state e1:2 1 catchingup
+state v2 1 catchingup
+state e2:1 1 catchingup
+state e2:2 1 catchingup
+state v3 1 catchingup
+state e3:1 1 catchingup
+state e3:2 1 catchingup
+state v4 1 catchingup
+state e4:1 1 catchingup
+state e4:2 1 catchingup
+state v5 1 catchingup
+state e5:1 1 catchingup
+state e5:2 1 catchingup
+state v6 1 catchingup
+state e6:1 1 catchingup
+state e6:2 1 revoked
+state v7 1 catchingup
+state e7:1 1 catchingup
+state e7:2 1 catchingup
+state v8 1 catchingup
+state e8:1 1 catchingup
+state e8:2 1 catchingup
+state v9 1 catchingup
+state e9:1 1 catchingup
+state e9:2 1 revoked
+state v10 1 catchingup
+state e10:1 1 catchingup
+state e10:2 1 failed
+state v11 1 catchingup
+state e11:1 -
+state e11:2 -
+state v12 -
+state e12:1 -
+state e12:2 -
+state v13 -
+state e13:1 -
+state e13:2 -
+drain 1 e9:2 1 false revoked 7
+end
+failgap v1 3 false
+register v1 2 ok
+update v1 2 true - - true
+update e1:1 3 true - - false
+update e1:2 3 true failed - false
+begin v1 2 ok
+register a 3 ok
+drain 2 v1 2 true catchingup - a 3 false catchingup -
+stop a 3 revoked -
+release v1 2
+update e1:2 3 false - 278 false
+register e1:1 3 ok
+register e1:1 3 started
+stop e1:1 3 - -
+register v1 3 busy
+register v1 1 busy
+register e1:1 1 ok
+register v1 2 started
+drain 2 a 3 false revoked - e1:1 1 false catchingup -
+register e1:1 3 busy
+update v1 3 false gap - false
+update v1 2 true - - true
+failgap v1 3 false
+drain 1 v1 2 true catchingup -
+update a 2 false - - false
+register e1:1 2 busy
+register v1 1 busy
+register a 1 ok
+failgap v1 1 false
+begin e1:1 1 ok
+release e1:1 1
+update e1:1 3 false - - false
+drain 1 a 1 false catchingup -
+state a 1 catchingup
+state v1 2 catchingup
+state e1:1 1 catchingup
+state e1:2 -
+drain 0
+end
+register e1:1 1 ok
+register e1:1 1 started
+update e1:1 1 true - - true
+stop e1:1 1 - 7
+drain 1 e1:1 1 true catchingup 7
+register e1:2 3 ok
+drain 1 e1:2 3 false catchingup -
+register a 3 ok
+update a 2 false - - true
+failgap e1:2 3 false
+begin a 3 ok
+release a 3
+failgap e1:1 2 false
+register e1:2 1 busy
+register e1:1 2 ok
+register a 1 busy
+drain 2 e1:1 2 false catchingup - a 3 false catchingup -
+drain 0
+stop e1:2 3 disconnected -
+begin e1:1 2 ok
+update e1:1 1 false - 409 false
+release e1:1 2
+stop a 3 - 7
+drain 2 e1:2 3 false disconnected - a 3 false catchingup 7
+update v1 3 false - - false
+drain 0
+begin e1:1 2 ok
+drain 0
+failgap e1:2 3 false
+register a 1 ok
+release e1:1 2
+register v1 2 ok
+state a 1 catchingup
+state v1 2 catchingup
+state e1:1 2 catchingup
+state e1:2 3 disconnected
+drain 2 a 1 false catchingup - v1 2 false catchingup -
+end
+update a 2 false catchingup - false
+failgap e1:2 1 false
+update e1:1 2 true revoked - false
+update a 2 false - 458 false
+register a 1 ok
+begin a 1 ok
+register e1:2 2 ok
+stop a 1 disconnected 7
+update e1:1 1 true disconnected - false
+stop e1:2 2 gap 7
+register e1:1 1 ok
+failgap v1 3 false
+release a 1
+drain 3 a 1 false disconnected 7 e1:2 2 false gap 7 e1:1 1 false catchingup -
+update e1:2 1 true - - true
+update v1 2 false - - false
+update v1 2 false live - false
+drain 1 e1:2 2 true gap -
+register a 3 ok
+update v1 1 true - - false
+update a 3 false - - true
+drain 1 a 3 false catchingup -
+failgap e1:2 3 false
+register a 2 busy
+update v1 3 false - - false
+update a 1 false gap 304 false
+update e1:2 3 false gap - false
+update e1:1 2 true - 721 true
+stop e1:1 1 disconnected 7
+drain 1 e1:1 1 true disconnected 7
+update a 3 true - - true
+update e1:2 1 false - - false
+drain 1 a 3 true catchingup -
+state a 3 catchingup
+state v1 -
+state e1:1 1 disconnected
+state e1:2 2 gap
+drain 0
+end
+register a 3 ok
+stop a 3 gap -
+update v1 3 false - - false
+update a 2 false - - true
+failgap v1 1 false
+register a 2 ok
+update a 3 true - - true
+begin a 2 ok
+drain 1 a 2 true catchingup -
+update a 3 false disconnected - false
+update e1:1 3 true live 832 false
+register e1:1 3 ok
+update e1:2 2 true - - false
+drain 1 e1:1 3 false catchingup -
+update e1:2 1 false - 647 false
+release a 2
+failgap v1 2 false
+drain 0
+register e1:1 2 busy
+failgap a 1 false
+update e1:1 3 true gap - true
+register v1 3 ok
+stop v1 3 - 7
+failgap a 3 false
+update v1 2 true - - true
+failgap e1:1 2 false
+failgap a 2 false
+drain 2 e1:1 3 true gap - v1 3 true catchingup 7
+failgap v1 1 false
+stop e1:1 3 gap -
+begin a 2 ok
+register a 3 busy
+drain 1 e1:1 3 false gap -
+update a 1 true - 661 true
+stop a 2 disconnected -
+release a 2
+update v1 3 true - - true
+state a 2 disconnected
+state v1 3 catchingup
+state e1:1 3 gap
+state e1:2 -
+drain 2 a 2 true disconnected - v1 3 true catchingup -
+end
+update v1 2 false - - false
+update e1:1 2 false - - false
+update v1 1 false - - false
+drain 0
+update v1 2 true - 364 false
+drain 0
+register v1 1 ok
+update e1:1 3 false - - false
+update e1:2 3 false - - false
+update a 3 false live - false
+begin v1 1 ok
+register e1:2 3 ok
+failgap e1:2 1 false
+drain 2 v1 1 false catchingup - e1:2 3 false catchingup -
+update e1:1 2 false - - false
+update a 2 true failed 953 false
+update e1:1 1 false live 252 false
+register a 3 ok
+register e1:1 3 ok
+failgap e1:2 3 false
+failgap e1:2 3 false
+register a 1 busy
+stop a 3 - -
+drain 2 a 3 false catchingup - e1:1 3 false catchingup -
+update v1 1 true - - true
+begin e1:1 3 ok
+register e1:1 1 busy
+begin e1:2 3 ok
+update v1 3 true disconnected - true
+failgap e1:1 3 false
+update e1:1 2 false - - false
+release e1:2 3
+failgap a 2 false
+state a 3 catchingup
+state v1 1 catchingup
+state e1:1 3 catchingup
+state e1:2 3 catchingup
+drain 1 v1 1 true catchingup -
+end
+failgap e1:1 2 false
+update v1 1 true - - false
+register e1:1 1 ok
+update e1:1 1 true gap - true
+update a 1 true failed - false
+update e1:2 1 true gap - false
+update a 1 false live 970 false
+failgap e1:2 2 false
+begin e1:1 1 ok
+update e1:1 2 false - 951 true
+drain 1 e1:1 1 true gap -
+register e1:2 2 ok
+register a 1 ok
+update e1:1 1 true - - true
+release e1:1 1
+update a 3 true - - true
+drain 3 e1:1 1 true gap - e1:2 2 false catchingup - a 1 true catchingup -
+update e1:1 2 false - - false
+begin a 1 ok
+release a 1
+register e1:1 2 busy
+stop a 1 gap 7
+begin e1:2 2 ok
+stop e1:1 1 - 7
+register v1 1 ok
+register e1:2 2 started
+begin v1 1 ok
+failgap e1:2 1 false
+register a 3 ok
+release v1 1
+stop v1 1 revoked -
+stop a 3 gap -
+register e1:2 2 started
+register e1:1 2 ok
+state a 3 gap
+state v1 1 revoked
+state e1:1 2 catchingup
+state e1:2 2 catchingup
+drain 3 e1:1 2 false catchingup - a 3 false gap - v1 1 false revoked -
+end
+register a 1 ok
+register v1 1 ok
+register e1:1 1 ok
+register e1:2 1 ok
+register v2 1 ok
+register e2:1 1 ok
+register e2:2 1 ok
+register v3 1 ok
+register e3:1 1 ok
+register e3:2 1 ok
+register v4 1 ok
+register e4:1 1 ok
+register e4:2 1 ok
+register v5 1 ok
+register e5:1 1 ok
+register e5:2 1 ok
+register v6 1 ok
+register e6:1 1 ok
+register e6:2 1 ok
+register v7 1 ok
+register e7:1 1 ok
+register e7:2 1 ok
+register v8 1 ok
+register e8:1 1 ok
+register e8:2 1 ok
+register v9 1 ok
+register e9:1 1 ok
+register e9:2 1 ok
+register v10 1 ok
+register e10:1 1 ok
+register e10:2 1 ok
+register v11 1 ok
+register e11:1 1 capacity
+register e11:2 1 capacity
+register e10:1 3 busy
+stop e6:1 1 disconnected 7
+update e10:2 1 false - - true
+begin v1 1 ok
+release v1 1
+stop e1:2 1 gap -
+failgap e12:2 2 false
+begin e7:2 1 ok
+failgap v10 2 false
+register e11:2 2 capacity
+update e3:1 1 false - - true
+register v13 2 capacity
+begin e8:2 1 ok
+begin e4:1 1 ok
+register v5 2 busy
+update v5 2 false - 253 true
+failgap e7:1 2 false
+update v3 2 false - 469 true
+release e4:1 1
+begin e9:2 1 ok
+register e11:1 3 capacity
+drain 32 a 1 false catchingup - v1 1 false catchingup - e1:1 1 false catchingup - e1:2 1 false gap - v2 1 false catchingup - e2:1 1 false catchingup - e2:2 1 false catchingup - v3 1 false catchingup - e3:1 1 false catchingup - e3:2 1 false catchingup - v4 1 false catchingup - e4:1 1 false catchingup - e4:2 1 false catchingup - v5 1 false catchingup - e5:1 1 false catchingup - e5:2 1 false catchingup - v6 1 false catchingup - e6:1 1 false disconnected 7 e6:2 1 false catchingup - v7 1 false catchingup - e7:1 1 false catchingup - e7:2 1 false catchingup - v8 1 false catchingup - e8:1 1 false catchingup - e8:2 1 false catchingup - v9 1 false catchingup - e9:1 1 false catchingup - e9:2 1 false catchingup - v10 1 false catchingup - e10:1 1 false catchingup - e10:2 1 false catchingup - v11 1 false catchingup -
+stop v5 1 - -
+drain 0
+release e7:2 1
+drain 0
+update v3 3 false gap - false
+drain 0
+begin v1 1 ok
+update e5:1 3 false gap 411 false
+register e2:1 1 started
+failgap e7:2 1 false
+stop v6 1 - -
+drain 0
+drain 0
+failgap e6:2 3 false
+release e8:2 1
+register e5:1 1 started
+failgap v7 1 false
+stop e2:2 1 - 7
+state a 1 catchingup
+state v1 1 catchingup
+state e1:1 1 catchingup
+state e1:2 1 gap
+state v2 1 catchingup
+state e2:1 1 catchingup
+state e2:2 1 catchingup
+state v3 1 catchingup
+state e3:1 1 catchingup
+state e3:2 1 catchingup
+state v4 1 catchingup
+state e4:1 1 catchingup
+state e4:2 1 catchingup
+state v5 1 catchingup
+state e5:1 1 catchingup
+state e5:2 1 catchingup
+state v6 1 catchingup
+state e6:1 1 disconnected
+state e6:2 1 catchingup
+state v7 1 catchingup
+state e7:1 1 catchingup
+state e7:2 1 catchingup
+state v8 1 catchingup
+state e8:1 1 catchingup
+state e8:2 1 catchingup
+state v9 1 catchingup
+state e9:1 1 catchingup
+state e9:2 1 catchingup
+state v10 1 catchingup
+state e10:1 1 catchingup
+state e10:2 1 catchingup
+state v11 1 catchingup
+state e11:1 -
+state e11:2 -
+state v12 -
+state e12:1 -
+state e12:2 -
+state v13 -
+state e13:1 -
+state e13:2 -
+drain 1 e2:2 1 false catchingup 7
+end
+failgap e1:2 2 false
+update e1:1 2 true - - false
+register v1 3 ok
+begin v1 3 ok
+drain 1 v1 3 false catchingup -
+failgap e1:1 1 false
+update e1:1 2 true - 707 false
+register e1:1 2 ok
+stop e1:1 2 disconnected 7
+register e1:1 3 ok
+drain 1 e1:1 3 false catchingup -
+update v1 1 false - - false
+register e1:1 3 started
+register e1:1 3 started
+stop e1:1 3 disconnected -
+stop v1 3 revoked -
+register a 1 ok
+update v1 1 false - 989 true
+update v1 2 false live 139 true
+release v1 3
+register a 1 started
+update v1 2 false - - true
+begin a 1 ok
+register e1:2 3 ok
+release a 1
+stop e1:2 3 disconnected 7
+update v1 3 true - 476 true
+register v1 1 ok
+register e1:2 3 started
+update e1:2 1 true catchingup 978 true
+update e1:1 3 false - 96 true
+begin a 1 ok
+update v1 1 true - - true
+register e1:2 1 ok
+failgap a 3 false
+failgap e1:2 3 false
+update e1:1 2 false - - true
+register e1:1 3 started
+state a 1 catchingup
+state v1 1 catchingup
+state e1:1 3 disconnected
+state e1:2 1 catchingup
+drain 4 v1 1 true catchingup - e1:1 3 false disconnected 96 a 1 false catchingup - e1:2 1 true catchingup -
+end
+register a 2 ok
+update e1:1 2 true - 928 false
+begin a 2 ok
+stop a 2 revoked 7
+register a 1 busy
+register v1 1 ok
+update e1:1 3 true revoked - false
+release a 2
+failgap a 2 false
+register e1:1 1 ok
+begin v1 1 ok
+update e1:1 2 false gap - true
+failgap a 3 false
+register e1:2 1 ok
+update e1:1 1 true live - true
+release v1 1
+begin v1 1 ok
+register e1:1 1 started
+failgap e1:1 1 false
+update e1:1 2 true - - true
+release v1 1
+failgap a 1 false
+register e1:2 2 busy
+failgap e1:1 2 false
+register v1 3 busy
+stop e1:1 1 failed -
+failgap e1:1 2 false
+drain 4 a 2 false revoked 7 v1 1 false catchingup - e1:1 1 true failed - e1:2 1 false catchingup -
+update a 1 false - - false
+failgap v1 2 false
+stop e1:2 1 failed -
+stop v1 1 gap -
+update a 1 true - 668 true
+drain 3 a 2 true revoked - v1 1 false gap - e1:2 1 false failed -
+drain 0
+state a 2 revoked
+state v1 1 gap
+state e1:1 1 failed
+state e1:2 1 failed
+drain 0
+end
+register e1:1 1 ok
+update a 3 true - - false
+register v1 1 ok
+register e1:2 1 ok
+drain 3 e1:1 1 false catchingup - v1 1 false catchingup - e1:2 1 false catchingup -
+begin v1 1 ok
+drain 0
+update e1:2 1 true - - true
+update e1:2 1 true - - true
+update e1:1 1 false - - false
+begin e1:2 1 ok
+drain 1 e1:2 1 true catchingup -
+update a 2 true disconnected - false
+register e1:2 2 busy
+update e1:2 1 true - 50 true
+begin e1:1 1 ok
+failgap v1 2 false
+drain 1 e1:2 1 true catchingup 50
+drain 0
+update a 1 true - - false
+failgap e1:2 2 false
+register a 2 ok
+register v1 1 started
+register v1 3 busy
+drain 1 a 2 false catchingup -
+register a 3 busy
+drain 0
+begin a 2 ok
+update v1 3 true gap - true
+update a 3 false - - false
+drain 1 v1 1 true catchingup -
+update e1:2 3 false disconnected - false
+register v1 1 started
+failgap e1:1 2 false
+update e1:1 3 true - - true
+update e1:1 1 true live 294 true
+stop e1:2 1 gap -
+state a 2 catchingup
+state v1 1 catchingup
+state e1:1 1 live
+state e1:2 1 gap
+drain 2 e1:1 1 true live 294 e1:2 1 false gap -
+end
+drain 0
+update e1:2 2 false - - false
+drain 0
+failgap v1 1 false
+update v1 3 false - 30 false
+update e1:1 3 true - 504 false
+update v1 3 true - - false
+update e1:2 3 true failed 245 false
+update a 1 true live 63 false
+update e1:2 3 true failed 688 false
+failgap a 3 false
+drain 0
+update v1 2 false - - false
+failgap e1:1 2 false
+register v1 1 ok
+update e1:1 2 true - - false
+register e1:2 3 ok
+update v1 1 false disconnected - true
+register v1 2 busy
+register e1:1 2 ok
+drain 3 v1 1 false disconnected - e1:2 3 false catchingup - e1:1 2 false catchingup -
+failgap e1:1 2 false
+update e1:2 3 true - - true
+begin e1:2 3 ok
+update a 3 true - - false
+update e1:2 1 true revoked 294 true
+begin v1 1 ok
+stop e1:2 3 revoked -
+release v1 1
+failgap e1:2 1 false
+stop v1 1 - 7
+register a 3 ok
+state a 3 catchingup
+state v1 1 disconnected
+state e1:1 2 catchingup
+state e1:2 3 revoked
+drain 3 v1 1 false disconnected 7 e1:2 3 true revoked - a 3 false catchingup -
+end
+drain 0
+drain 0
+drain 0
+failgap v1 3 false
+register e1:2 2 ok
+begin e1:2 2 ok
+update a 1 false disconnected - false
+update e1:2 2 true - - true
+register a 2 ok
+release e1:2 2
+begin a 2 ok
+begin e1:2 2 ok
+stop a 2 - -
+update v1 3 true disconnected 661 false
+update e1:2 1 false failed 264 true
+update a 1 false - 26 true
+update a 1 false failed - true
+register v1 3 ok
+register e1:2 3 busy
+update a 2 true - - true
+update a 2 false - - true
+failgap a 2 false
+release e1:2 2
+stop e1:2 2 gap -
+drain 3 e1:2 2 true gap - a 2 true catchingup - v1 3 false catchingup -
+begin v1 3 ok
+failgap a 2 false
+register e1:1 1 ok
+begin e1:1 1 ok
+release e1:1 1
+failgap a 2 false
+drain 1 e1:1 1 false catchingup -
+register a 1 busy
+drain 0
+stop v1 3 failed 7
+state a 2 catchingup
+state v1 3 failed
+state e1:1 1 catchingup
+state e1:2 2 gap
+drain 1 v1 3 false failed 7
+end
+register e1:2 3 ok
+begin e1:2 3 ok
+register a 2 ok
+update e1:1 3 false - - false
+drain 2 e1:2 3 false catchingup - a 2 false catchingup -
+update e1:2 2 false live 168 false
+begin a 2 ok
+update v1 1 true - - false
+update e1:2 3 true - - true
+failgap e1:1 1 false
+register e1:2 1 busy
+drain 1 e1:2 3 true catchingup -
+update a 3 false - - false
+failgap e1:2 2 false
+drain 0
+stop e1:2 3 gap -
+drain 1 e1:2 3 false gap -
+failgap v1 3 false
+register a 1 busy
+update a 1 true disconnected - true
+update v1 2 false failed - false
+register v1 2 ok
+stop a 2 revoked -
+update v1 1 false - - true
+begin v1 2 ok
+stop v1 2 revoked -
+update e1:2 2 true - 667 true
+register v1 3 busy
+register e1:1 3 ok
+update v1 2 true - - true
+drain 4 e1:2 3 true gap - a 2 true revoked - v1 2 true revoked - e1:1 3 false catchingup -
+release a 2
+release v1 2
+register a 1 ok
+stop a 1 - -
+state a 1 catchingup
+state v1 2 revoked
+state e1:1 3 catchingup
+state e1:2 3 gap
+drain 1 a 1 false catchingup -
+end

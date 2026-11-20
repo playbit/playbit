@@ -1,0 +1,11 @@
+[package]
+name = "docdb"
+version.workspace = true
+edition = "2024"
+
+[lib]
+name = "multi_rs"
+path = "src/lib.rs"
+
+[dev-dependencies]
+libc = "0.2.189"

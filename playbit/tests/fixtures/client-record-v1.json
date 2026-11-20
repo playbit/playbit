@@ -1,0 +1,18 @@
+{
+    "format": "PBR/1 development vector, pending integrated release freeze",
+    "volume_hex_parts": [
+        "5042520108",
+        "01c0110000000600000000000000000000000000000000",
+        "02c006000000054e6f746573",
+        "03c0110000000600000000000000000000000000000000",
+        "04c0020000000100",
+        "05c0020000000101"
+    ],
+    "volume": {
+        "id": "1111111111111111",
+        "name": "Notes",
+        "owner": "1111111111111111",
+        "share_key_with_service": false,
+        "personal": true
+    }
+}

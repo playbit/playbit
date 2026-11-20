@@ -1,0 +1,8 @@
+app_id = "blobtest2"
+name = "blobtest2"
+lang = "rust"
+icon = "icon.svg"
+build_cmd = "cargo build --target wasm32-unknown-unknown"
+
+[release]
+build_cmd = "cargo build --release --target wasm32-unknown-unknown"

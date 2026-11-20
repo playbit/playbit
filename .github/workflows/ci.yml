@@ -1,0 +1,47 @@
+name: ci
+on:
+    push:
+        branches: [main]
+    pull_request:
+permissions:
+    contents: read
+jobs:
+    plan:
+        runs-on: ubuntu-24.04
+        timeout-minutes: 5
+        outputs:
+            linux: ${{ steps.plan.outputs.linux }}
+            macos: ${{ steps.plan.outputs.macos }}
+            web: ${{ steps.plan.outputs.web }}
+            storage_history: ${{ steps.plan.outputs.storage_history }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+                  fetch-depth: 0
+            - run: bash scripts/ci/check.sh tooling
+            - id: plan
+              env:
+                  CI_BASE: ${{ github.event.pull_request.base.sha }}
+              run: python3 scripts/ci.py plan --github
+    test:
+        needs: plan
+        uses: ./.github/workflows/public.yml
+        with:
+            check-linux: ${{ needs.plan.outputs.linux == 'true' }}
+            check-macos: ${{ needs.plan.outputs.macos == 'true' }}
+            check-web: ${{ needs.plan.outputs.web == 'true' }}
+            check-storage-history: ${{ needs.plan.outputs.storage_history == 'true' }}
+    checks:
+        if: always()
+        needs: [plan, test]
+        runs-on: ubuntu-24.04
+        timeout-minutes: 5
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+            - env:
+                  CI_EXPECTED: '{"plan":true,"test":true}'
+                  CI_RESULTS: ${{ toJSON(needs) }}
+              run: python3 scripts/ci.py gate

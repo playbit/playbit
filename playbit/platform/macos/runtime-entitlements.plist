@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<!-- Compiled guest code runs from MAP_JIT mappings owned by the runtime
+     (playbit/src/runtime/jit_memory.rs), which is exactly what allow-jit
+     authorizes. Do not add allow-unsigned-executable-memory: it would let any
+     memory-safety bug in the host turn arbitrary pages executable. -->
+<key>com.apple.security.cs.allow-jit</key><true/>
+</dict></plist>

@@ -1,0 +1,20 @@
+[package]
+name = "playbit-trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Bounded local trace recording and observation; shared with the instrumented vendored gpui"
+
+[dependencies]
+# Guest wire definitions and encoding helpers; decoding stays in this host crate.
+playbit-api = { path = "../../playbit-api" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+mach2 = "0.6"
+
+[lints]
+workspace = true

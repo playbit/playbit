@@ -1,0 +1,10 @@
+{
+  "account": "NCX9PNbvZtwyXe5YjATFzi",
+  "revision": 7,
+  "secret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "nonce": "a0a1a2a3a4a5a6a7a8a9aaab",
+  "pattern": "{\"name\":\"\\u0001\",\"database_key\":[31,32],\"blob_key\":[33,34]}",
+  "repetitions": 3000,
+  "ciphertext": "AqChoqOkpaanqKmqq56Ekeb-xsCPdmVHjlmXAlfZHlNUWqHsrjtGdCb3dtxZ0Cs8LbLT_7JBz1g-lYmT0Clu7eXMLaCKNhLsbABCS5luQVARZPfdLWuhqk3am5nvmF7-8ZCUzC-7IGvP5M8YwdrRfv5W-9rOy45TBdDduH1xBTT7i2DOaXqai_HhAKcYkETlKoYX1UJiDKveRx_Eg92M-D7rha_ZqJjooPqSYX6TTUrk4z8VQ9dffnc6h-O0InOozVcz-2vX1yNsCddKAmFjGZw1hO64pggVmhxxZ-AHvLG9ajaN7biUDbAIk48yPQRndOw4jGqV6RcKF14VKl7ol2rcByXSPvj4PzBmfcdCapzSupn3tTP2AtAybjmGbURfBe7vln-tMkOPt-XReM4dE_d1VyiYsDgbeab60wuNQosAXjOW9if1OPjA2OBWgItGhasgYELGjT5cwlGB8i6W00TDG2KlDUrBnz1vkRgURvcFg2R9Da-UVskm9kabmLlbBNBoV5XxURhFiLKGvH-e9G-gF8NWLQ3xPX74_Z5KsknNhG7QLn-78505NCd20hQVHRvip992LHarmgrdP1jum9Qi6IIlthLQ7qkncfAB--O5qY_AsYnDixm8ZVeOnIq8FmZB1SJ5yLF0kgjtpAOt3AHOUEfV2GkqE-0nLG5QiePtJMyIXrcSQbWtikRZFGKAmWUBSkjgJLHSusGORkGwz97YwzzXRvoq98_XsBk_Yu3gjbL6CCjK1giWFZPAaMinxyzlLETyfkgVa5bt4lni4sOSZf_PwkWl5ps2SJe6PF3qVtkctzJZyBPATJnjCy4H",
+  "source": "Node.js 26.13.1 WebCrypto AES-GCM and node:zlib deflateSync defaults; plaintext is pattern repeated repetitions times; AAD is UTF-8 app.playbit.credentials.v2 plus NUL, account raw16, revision u64LE. Fixed test-only key and nonce."
+}

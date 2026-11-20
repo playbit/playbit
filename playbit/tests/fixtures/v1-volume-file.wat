@@ -1,0 +1,116 @@
+;; Independent scalar guest: real engine volume or host roots, durable write, read,
+;; status and listing. Every Begin yields before its matching Take.
+(module
+(import "playbit" "pb_syscall" (func $sys (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+(memory (export "memory") 1)
+(data (i32.const 4096) "\18\00\00\00\00\00\00\00")
+(data (i32.const 160) "\18\00\00\00\00\00\00\00")
+(data (i32.const 320) "\20\00\00\00\00\00\00\00")
+(data (i32.const 352) "\1c\00\00\00\00\00\00\00")
+(global $root (mut i64) (i64.const 0))
+(global $host (mut i32) (i32.const 0))
+(global $listed (mut i32) (i32.const 0))
+(global $stage (mut i32) (i32.const 0))
+(data (i32.const 2048) "note")
+(data (i32.const 2056) "hello")
+(data (i32.const 2080) "file journey complete")
+
+    ;; This guest retains scalar handle results for subsequent turns.
+    (func $save_handle (param $output i32) (param $result i64) (result i64)
+        (if (result i64) (i64.lt_s (local.get $result) (i64.const 0))
+            (then (local.get $result))
+            (else (i64.store (local.get $output) (local.get $result)) (i64.const 0))))
+(func $ok (param $value i64)
+ (if (i64.ne (local.get $value) (i64.const 0)) (then unreachable)))
+(func $ready (param $value i64) (result i32)
+ (if (i64.eq (local.get $value) (i64.const -6)) (then (return (i32.const 0))))
+ (call $ok (local.get $value)) (i32.const 1))
+(func (export "pb_main") (local $index i32)
+(loop $events
+ (if (i64.ne (call $sys (i32.const 4) (i64.const 4096) (i64.const 4128) (i64.const 1024) (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const -6)) (then (br $events))))
+(if (i32.eq (global.get $stage) (i32.const 0)) (then
+(i32.store (i32.const 64) (i32.const 64))
+(i32.store (i32.const 92) (i32.const 80))
+(i32.store (i32.const 108) (i32.const 16))
+(i32.store (i32.const 512) (i32.const 80))
+(i32.store (i32.const 592) (i32.const 80))
+(i32.store (i32.const 672) (i32.const 80))
+(i32.store (i32.const 800) (i32.const 16))
+(i32.store (i32.const 816) (i32.const 16))
+(i32.store (i32.const 80) (i32.const 512))
+(i32.store (i32.const 84) (i32.const 3))
+(i32.store (i32.const 96) (i32.const 800))
+(i32.store (i32.const 100) (i32.const 2))
+(i32.store (i32.const 112) (i32.const 1024))
+(i32.store (i32.const 116) (i32.const 512))
+(call $ok (call $sys (i32.const 7) (i64.const 64) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
+(global.set $root (i64.load (i32.const 568)))
+(local.set $index (i32.const 0))
+(loop $roots
+ (if (i32.lt_u (local.get $index) (i32.load (i32.const 88))) (then
+  (if (i32.eq (i32.load offset=52 (i32.add (i32.const 512) (i32.mul (local.get $index) (i32.const 80)))) (i32.const 512)) (then
+   (global.set $host (i32.const 1))
+   (global.set $root (i64.load offset=56 (i32.add (i32.const 512) (i32.mul (local.get $index) (i32.const 80)))))))
+  (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $roots))))
+(call $ok (call $save_handle (i32.wrap_i64 (i64.const 128)) (call $sys (i32.const 336) (global.get $root) (i64.const 2048) (i64.const 4) (i64.const 4) (i64.const 0) (i64.const 0))))
+(global.set $stage (i32.const 1)) return))
+(if (i32.eq (global.get $stage) (i32.const 1)) (then
+(if (i32.eqz (call $ready (call $save_handle (i32.wrap_i64 (i64.const 136)) (call $sys (i32.const 337) (i64.load (i32.const 128)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))) (then return))
+(call $ok (call $save_handle (i32.wrap_i64 (i64.const 128)) (call $sys (i32.const 294) (i64.load (i32.const 136)) (i64.const 0) (i64.const 2056) (i64.const 5) (i64.const 0) (i64.const 0))))
+(global.set $stage (i32.const 2)) return))
+(if (i32.eq (global.get $stage) (i32.const 2)) (then
+(if (i32.eqz (call $ready (call $sys (i32.const 295) (i64.load (i32.const 128)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))) (then return))
+(call $ok (call $save_handle (i32.wrap_i64 (i64.const 128)) (call $sys (i32.const 340) (i64.load (i32.const 136)) (i64.const 1) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+(global.set $stage (i32.const 3)) return))
+(if (i32.eq (global.get $stage) (i32.const 3)) (then
+(if (i32.eqz (call $ready (call $sys (i32.const 341) (i64.load (i32.const 128)) (i64.const 160) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))) (then return))
+(if (i32.ne (i32.load (i32.const 168)) (i32.const 0)) (then unreachable))
+(if (i32.ne (i32.load (i32.const 172)) (i32.const 1)) (then unreachable))
+(call $ok (call $save_handle (i32.wrap_i64 (i64.const 128)) (call $sys (i32.const 336) (global.get $root) (i64.const 2048) (i64.const 4) (i64.const 1) (i64.const 0) (i64.const 0))))
+(global.set $stage (i32.const 4)) return))
+(if (i32.eq (global.get $stage) (i32.const 4)) (then
+(if (i32.eqz (call $ready (call $save_handle (i32.wrap_i64 (i64.const 136)) (call $sys (i32.const 337) (i64.load (i32.const 128)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))) (then return))
+(call $ok (call $save_handle (i32.wrap_i64 (i64.const 128)) (call $sys (i32.const 292) (i64.load (i32.const 136)) (i64.const 0) (i64.const 5) (i64.const 0) (i64.const 0) (i64.const 0))))
+(global.set $stage (i32.const 5)) return))
+(if (i32.eq (global.get $stage) (i32.const 5)) (then
+(if (i32.eqz (call $ready (call $sys (i32.const 293) (i64.load (i32.const 128)) (i64.const 300) (i64.const 5) (i64.const 264) (i64.const 0) (i64.const 0)))) (then return))
+(if (i32.ne (i32.load (i32.const 264)) (i32.const 5)) (then unreachable))
+(if (i32.ne (i32.load (i32.const 300)) (i32.const 1819043176)) (then unreachable))
+(if (i32.ne (i32.load8_u (i32.const 304)) (i32.const 111)) (then unreachable))
+(call $ok (call $save_handle (i32.wrap_i64 (i64.const 128)) (call $sys (i32.const 338) (i64.load (i32.const 136)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+(global.set $stage (i32.const 6)) return))
+(if (i32.eq (global.get $stage) (i32.const 6)) (then
+(if (i32.eqz (call $ready (call $sys (i32.const 339) (i64.load (i32.const 128)) (i64.const 320) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))) (then return))
+(if (i32.ne (i32.load (i32.const 328)) (i32.const 1)) (then unreachable))
+(if (i32.eqz (i32.and (i32.load (i32.const 332)) (i32.const 1))) (then unreachable))
+(if (i32.eqz (global.get $host)) (then
+ (if (i32.eqz (i32.and (i32.load (i32.const 332)) (i32.const 4))) (then unreachable))))
+(if (i32.ne (i32.load (i32.const 336)) (i32.const 5)) (then unreachable))
+(call $ok (call $save_handle (i32.wrap_i64 (i64.const 128)) (call $sys (i32.const 342) (global.get $root) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+(global.set $stage (i32.const 7)) return))
+(if (i32.eq (global.get $stage) (i32.const 7)) (then
+(if (i32.eqz (call $ready (call $save_handle (i32.wrap_i64 (i64.const 144)) (call $sys (i32.const 343) (i64.load (i32.const 128)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))) (then return))
+(call $ok (call $save_handle (i32.wrap_i64 (i64.const 128)) (call $sys (i32.const 344) (i64.load (i32.const 144)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+(global.set $stage (i32.const 8)) return))
+(if (i32.eq (global.get $stage) (i32.const 8)) (then
+(i32.store (i32.const 368) (i32.const 400))
+(i32.store (i32.const 372) (i32.const 255))
+(if (i32.eqz (call $ready (call $sys (i32.const 345) (i64.load (i32.const 128)) (i64.const 352) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))) (then return))
+(if (i32.ne (i32.load (i32.const 360)) (i32.const 1)) (then unreachable))
+(global.set $listed (i32.add (global.get $listed) (i32.const 1)))
+(if (i32.gt_u (global.get $listed) (i32.const 32)) (then unreachable))
+(if (i32.or (i32.ne (i32.load (i32.const 376)) (i32.const 4))
+            (i32.ne (i32.load (i32.const 400)) (i32.const 1702129518))) (then
+ (call $ok (call $save_handle (i32.wrap_i64 (i64.const 128)) (call $sys (i32.const 344) (i64.load (i32.const 144)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+ return))
+(if (i32.ne (i32.load (i32.const 364)) (i32.const 1)) (then unreachable))
+(call $ok (call $sys (i32.const 346) (i64.load (i32.const 144)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
+(call $ok (call $sys (i32.const 348) (i64.load (i32.const 136)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
+(local.set $index (i32.const 0))
+(loop $close_roots
+ (if (i32.lt_u (local.get $index) (i32.load (i32.const 88))) (then
+  (call $ok (call $sys (i32.const 348) (i64.load offset=56 (i32.add (i32.const 512) (i32.mul (local.get $index) (i32.const 80)))) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
+  (local.set $index (i32.add (local.get $index) (i32.const 1))) (br $close_roots))))
+(call $ok (call $sys (i32.const 2) (i64.const 2080) (i64.const 21) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
+(global.set $stage (i32.const 10)) return))
+))

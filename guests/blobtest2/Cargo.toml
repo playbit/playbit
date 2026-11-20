@@ -1,0 +1,18 @@
+[package]
+name = "playbit-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+playbit-api = { path = "../../playbit-api", features = ["guest"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+playbit = { path = "../../playbit", default-features = false, features = ["native-runtime"] }
+
+[dev-dependencies]
+playbit = { path = "../../playbit", default-features = false, features = ["app-host"] }
+tempfile = "3"

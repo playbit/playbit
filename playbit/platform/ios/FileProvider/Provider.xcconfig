@@ -1,0 +1,14 @@
+PRODUCT_BUNDLE_IDENTIFIER = $(ARCHIPELAGO_APP_ID).fileprovider
+PRODUCT_NAME = playbit-file-provider
+#include "../Generated/Version.xcconfig"
+CURRENT_PROJECT_VERSION = 1
+GENERATE_INFOPLIST_FILE = YES
+INFOPLIST_FILE = FileProvider/Info.plist
+CODE_SIGN_ENTITLEMENTS = FileProvider/Provider.entitlements
+SWIFT_OBJC_BRIDGING_HEADER = ../apple/FileProvider/ProviderBridge.h
+LIBRARY_SEARCH_PATHS = $(inherited) $(SRCROOT)/Generated/$(PLATFORM_NAME)
+OTHER_LDFLAGS = $(inherited) -lplaybit-provider -framework Security -framework SystemConfiguration -framework Network
+APPLICATION_EXTENSION_API_ONLY = YES
+SKIP_INSTALL = YES
+TARGETED_DEVICE_FAMILY = 1,2
+LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/Frameworks @executable_path/../../Frameworks

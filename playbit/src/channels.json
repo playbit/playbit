@@ -1,0 +1,12 @@
+{
+    "public": {
+        "ap_hostname": "ap.playbit.app",
+        "website": "https://playbit.app",
+        "macos_manifest": "https://playbit.app/download/macos.json"
+    },
+    "testing": {
+        "ap_hostname": "ap.testing.playbit.app",
+        "website": "https://testing.playbit.app",
+        "macos_manifest": "https://playbit.app/download/macos-testing.json"
+    }
+}

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="playbit-channel" content="public">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Playbit</title>
+<style>
+    [hidden] { display:none !important; }
+    :root { color-scheme: light dark; font: 16px system-ui; background: light-dark(#f5f5f2,#202322); color: light-dark(#202322,#f5f5f2); }
+    body { max-width: 680px; margin: 0 auto; padding: 24px; }
+    #invitation { margin-top:32px; } #invitation-detail { margin-top:12px; color:light-dark(#666,#bbb); line-height:1.5; }
+    form { display:flex; flex-direction:column; align-items:stretch; gap:16px; max-width:400px; } form label { display:flex; flex-direction:column; align-items:stretch; gap:8px; }
+    #onboarding { display:flex; flex-direction:column; gap:12px; align-items:flex-start; } button { cursor:pointer; } button:disabled { cursor:wait; opacity:.6; }
+    header { display:flex; justify-content:space-between; align-items:center; padding-bottom:24px; border-bottom:1px solid #8884; }
+    #environment-controls { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin-top:16px; font-size:13px; } #environment-controls label { padding:0; } #environment-controls select,#copy-environment { font:inherit; padding:6px 8px; } #testing { color:light-dark(#865700,#ffd88a); border:1px solid #b9903c; border-radius:4px; padding:2px 6px; }
+    a { color:inherit; margin-left:16px; } main { margin-top:24px; } #app:empty { display:none; }
+    .column { display:flex; flex-direction:column; gap:16px; } .row { display:flex; gap:12px; }
+    h1 { font-size:28px; margin:0; } p { margin:0; } .muted, #status, details { opacity:.7; font-size:14px; }
+    textarea,input[type=text]:not(.guest-field),input[type=email],input[type=password],input[type=url],button:not(.guest-button) { font:inherit; padding:12px; border:1px solid #8887; border-radius:6px; background:light-dark(white,#303632); color:inherit; }
+    textarea { box-sizing:border-box; width:100%; resize:vertical; }
+    #offline-edits select { font:inherit; padding:8px; border:1px solid #8887; border-radius:6px; background:light-dark(white,#303632); color:inherit; }
+    #offline-edits { margin-top:16px; } #offline-edits p { line-height:1.5; }
+    label { display:flex; align-items:center; gap:12px; padding:8px 0; }
+    input[type=checkbox] { width:20px; height:20px; }
+    canvas { width:100%; max-width:480px; height:auto; touch-action:none; border-radius:6px; outline-offset:3px; }
+    #status { margin:24px 0; } details { overflow-wrap:anywhere; margin-top:24px; }
+    #install-playbit { margin-bottom:20px; } #install-playbit p { margin-top:10px; line-height:1.5; }
+    pre { white-space:pre-wrap; } #error { color:light-dark(#a32415,#ff8c7d); }
+    body.store-corrupt { background:light-dark(#fff,#202322); min-height:calc(100vh - 48px); }
+    .store-corrupt > .muted, .store-corrupt > details, .store-corrupt #status { display:none; }
+    .store-corrupt header { border:0; justify-content:center; }
+    .store-corrupt #onboarding { min-height:65vh; max-width:480px; margin:auto; justify-content:center; gap:24px; }
+    .store-corrupt #onboarding h1 { color:light-dark(#555,#ccc); font-size:24px; }
+    .store-corrupt #onboarding p { color:light-dark(#555,#ccc); font-size:20px; line-height:1.35; }
+    .store-corrupt #onboarding button { align-self:center; border:0; border-radius:999px; padding:12px 24px; background:#0088f5; color:#fff; }
+    .store-corrupt #error { max-width:480px; margin:0 auto; }
+</style>
+<link rel="stylesheet" href="./controls.css">
+<header><strong>Playbit</strong><nav><a id="open-installed" hidden>Open in Playbit</a> <button id="close-app" hidden>Close app</button> <button id="sign-out" hidden>Sign out</button></nav></header>
+<div id="environment-controls"><label>Environment <select id="environment"><option value="public">Public</option><option value="testing">Testing</option></select></label><span id="testing" hidden>Testing</span><button id="copy-environment" type="button">Copy diagnostics</button></div><pre id="environment-details" hidden></pre>
+<section id="invitation"><h1 id="invitation-title"></h1><p id="invitation-detail"></p></section>
+<details id="install-playbit" hidden><summary>Install Playbit for Mac</summary>
+<p><a id="download-playbit" download>Download for Mac (Apple silicon)</a></p>
+<p id="install-instructions">Open the downloaded zip and move Playbit to Applications. Then return to this page and choose Open in Playbit. Your invitation stays here while you install and sign in.</p>
+</details>
+<p class="muted">Browser participation is experimental. <span id="native-preference">Prefer Open in Playbit for the native beta.</span> <a href="/docs/">Manual and help</a></p>
+<p id="status" role="status">Opening…</p><p id="error" role="alert"></p>
+<section id="onboarding"></section>
+<main id="app"></main>
+<details><summary>Offline edits</summary><section id="offline-edits" hidden></section></details>
+<details><summary>Local session</summary><pre id="identity"></pre></details>
+<script type="module" src="./native-handoff.js"></script>
+<script type="module" src="./playbit.js"></script>
+</html>

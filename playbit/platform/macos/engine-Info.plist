@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleIdentifier</key><string>@PLAYBIT_APP_ID@</string>
+    <key>CFBundleExecutable</key><string>playbit-engine</string>
+    <key>CFBundleName</key><string>Playbit Engine</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleVersion</key><string>@PLAYBIT_BUNDLE_VERSION@</string>
+    <key>LSBackgroundOnly</key><true/>
+</dict></plist>

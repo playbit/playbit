@@ -1,0 +1,8 @@
+{
+    "status": "release_candidate",
+    "description": "Independent literal logical profile entries; fake public test identity and seed, never a user profile. Preserve these bytes when adding future formats.",
+    "descriptor": "{\"format\":\"playbit.profile\",\"revision\":1,\"required_read_features\":[],\"required_write_features\":[]}",
+    "account": "{\"id\":\"Jm7bFte1RhDuT9QwJX1Hx1\",\"public_key\":\"fd1724385aa0c75b64fb78cd602fa1d991fdebf76b13c58ed702eac835e9f618\"}",
+    "account_seed_byte": 9,
+    "installation_byte": 10
+}

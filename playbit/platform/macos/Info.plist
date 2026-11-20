@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>@PLAYBIT_APP_ID@</string>
+<key>CFBundleName</key><string>@PLAYBIT_APP_NAME@</string>
+<key>CFBundleDisplayName</key><string>@PLAYBIT_APP_NAME@</string>
+<key>CFBundleExecutable</key><string>Playbit</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>@PLAYBIT_BUNDLE_VERSION@</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>PlaybitVersion</key><string>@PLAYBIT_VERSION@</string>
+<!-- Orders updates when several builds have the same semantic version. -->
+<key>PlaybitReleaseSequence</key><string>@PLAYBIT_RELEASE_SEQUENCE@</string>
+<key>LSMinimumSystemVersion</key><string>@MACOSX_DEPLOYMENT_TARGET@</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>UTExportedTypeDeclarations</key><array><dict>
+<key>UTTypeIdentifier</key><string>app.playbit.database</string>
+<key>UTTypeDescription</key><string>Playbit Database</string>
+<key>UTTypeConformsTo</key><array><string>public.data</string></array>
+<key>UTTypeTagSpecification</key><dict>
+<key>public.filename-extension</key><array><string>pbdb</string></array>
+</dict>
+</dict><dict>
+<key>UTTypeIdentifier</key><string>app.playbit.app</string>
+<key>UTTypeDescription</key><string>Playbit App</string>
+<key>UTTypeConformsTo</key><array><string>public.data</string><string>public.content</string></array>
+<key>UTTypeIconFile</key><string>pbapp.icns</string>
+<key>UTTypeTagSpecification</key><dict>
+<key>public.filename-extension</key><array><string>pbapp</string></array>
+</dict>
+</dict></array>
+<key>CFBundleDocumentTypes</key><array><dict>
+<key>CFBundleTypeName</key><string>Playbit Database</string>
+<key>CFBundleTypeRole</key><string>Editor</string>
+<key>LSHandlerRank</key><string>Owner</string>
+<key>LSItemContentTypes</key><array><string>app.playbit.database</string></array>
+</dict><dict>
+<key>CFBundleTypeName</key><string>Playbit App</string>
+<key>CFBundleTypeRole</key><string>Viewer</string>
+<key>CFBundleTypeIconFile</key><string>pbapp.icns</string>
+<key>LSHandlerRank</key><string>Owner</string>
+<key>LSItemContentTypes</key><array><string>app.playbit.app</string></array>
+</dict></array>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>Playbit session invitation</string>
+<key>CFBundleURLSchemes</key><array><string>playbit</string></array>
+</dict></array>
+</dict></plist>

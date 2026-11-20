@@ -1,0 +1,21 @@
+PRODUCT_BUNDLE_IDENTIFIER = $(ARCHIPELAGO_APP_ID)
+PRODUCT_NAME = Archipelago
+#include "../Generated/Version.xcconfig"
+CURRENT_PROJECT_VERSION = 1
+TARGETED_DEVICE_FAMILY = 1,2
+GENERATE_INFOPLIST_FILE = YES
+INFOPLIST_FILE = $(SRCROOT)/Host/Info.plist
+INFOPLIST_KEY_CFBundleDisplayName = Playbit
+INFOPLIST_KEY_UILaunchScreen_Generation = YES
+INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight
+SWIFT_OBJC_BRIDGING_HEADER = $(SRCROOT)/Host/ArchipelagoBridge.h
+LIBRARY_SEARCH_PATHS = $(inherited) $(SRCROOT)/Generated/$(PLATFORM_NAME)
+OTHER_LDFLAGS = $(inherited) -lplaybit -lc++ -liconv -framework Security -framework SystemConfiguration -framework Network
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(PLAYBIT_QUALIFICATION)
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(PLAYBIT_QUALIFICATION)
+EXCLUDED_SOURCE_FILE_NAMES = starter.pbapp
+
+// Distribution builds opt into the provisioned shared group through Distribution. Local Debug and Release builds have no Keychain capability.
+PLAYBIT_KEYCHAIN_ACCESS_GROUP =
+
+CODE_SIGN_ENTITLEMENTS = Host/Provider.entitlements

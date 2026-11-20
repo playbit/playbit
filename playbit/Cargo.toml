@@ -1,0 +1,326 @@
+[package]
+name = "playbit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+# Benchmarks and diagnostics live in benchmarks/, not examples/. Native GUI
+# qualification uses feature-gated binaries to avoid dev-dependency features.
+autoexamples = false
+autobins = false
+
+[lib]
+# The web (wasm32 cdylib) and iOS (staticlib) artifacts are requested per
+# invocation with `cargo rustc --crate-type`; see platform/web/build.sh and
+# platform/ios/qualify.sh. Declaring them here would link them on every
+# desktop build for nothing.
+crate-type = ["rlib"]
+
+[[bin]]
+name = "playbit-engine"
+path = "src/bin/playbit-engine.rs"
+required-features = ["process"]
+
+[[bin]]
+name = "pb"
+path = "src/bin/pb/main.rs"
+required-features = ["process"]
+
+[[bin]]
+name = "playbit-mcp"
+path = "src/bin/playbit-mcp/main.rs"
+required-features = ["process"]
+
+[[bin]]
+name = "bloblog"
+path = "src/bin/bloblog/main.rs"
+required-features = ["process"]
+
+[[bin]]
+name = "playbit-file-provider"
+path = "src/bin/playbit-file-provider.rs"
+required-features = ["process"]
+
+# Most benchmarks and diagnostics are example targets: built on demand,
+# compile-checked by `cargo test`, with embedded tests run via `cargo test
+# --example NAME`. Native GUI qualification binaries require their own feature
+# and must be built separately from examples to avoid GPUI test support.
+# None of these targets demonstrates API usage.
+[[example]]
+name = "benchmark-account-record"
+path = "benchmarks/benchmark-account-record.rs"
+
+[[example]]
+name = "benchmark-identifiers"
+path = "benchmarks/benchmark-identifiers.rs"
+
+[[example]]
+name = "benchmark-receipt-roots"
+path = "benchmarks/benchmark-receipt-roots.rs"
+required-features = ["local-store"]
+
+[[example]]
+name = "benchmark-entry-recovery"
+path = "benchmarks/benchmark-entry-recovery.rs"
+required-features = ["local-store"]
+
+[[example]]
+name = "benchmark-file-publication"
+path = "benchmarks/benchmark-file-publication.rs"
+required-features = ["local-store"]
+
+[[example]]
+name = "benchmark-volume-index"
+path = "benchmarks/benchmark-volume-index.rs"
+required-features = ["local-store"]
+
+[[example]]
+name = "benchmark-ipc"
+path = "benchmarks/benchmark-ipc.rs"
+required-features = ["app-host"]
+
+[[example]]
+name = "benchmark-ipc-codec"
+path = "benchmarks/benchmark-ipc-codec.rs"
+required-features = ["app-host"]
+
+[[example]]
+name = "benchmark-startup-check"
+path = "benchmarks/benchmark-startup-check.rs"
+required-features = ["process"]
+
+[[example]]
+name = "mcp-memory-fixtures"
+path = "benchmarks/mcp-memory-fixtures.rs"
+required-features = ["process"]
+
+[[example]]
+name = "local-ipc-driver"
+path = "benchmarks/local-ipc-driver.rs"
+required-features = ["process"]
+
+[[bin]]
+name = "check-presentation"
+path = "benchmarks/check-presentation.rs"
+required-features = ["presentation"]
+bench = false
+
+[[example]]
+name = "benchmark-canvas"
+path = "benchmarks/benchmark-canvas.rs"
+required-features = ["desktop-ui"]
+
+[[example]]
+name = "check-occluded-frame-demand"
+path = "benchmarks/check-occluded-frame-demand.rs"
+required-features = ["desktop-ui"]
+
+[[example]]
+name = "check-desktop-ui"
+path = "benchmarks/check-desktop-ui.rs"
+required-features = ["desktop-ui"]
+
+[[bin]]
+name = "check-status-bar"
+path = "benchmarks/check-status-bar.rs"
+required-features = ["desktop", "desktop-qualification"]
+bench = false
+
+[[bin]]
+name = "check-updater"
+path = "benchmarks/check-updater.rs"
+required-features = ["desktop", "desktop-qualification"]
+bench = false
+
+[[bin]]
+name = "check-sidebar"
+path = "benchmarks/check-sidebar.rs"
+required-features = ["desktop", "desktop-qualification"]
+bench = false
+
+[features]
+# The shared GUI does not export the separate SDK/provider host C entry points.
+macos-shared-runtime = ["playbit-api/host"]
+default = ["desktop"]
+# Semantic scene decoding without an executor, storage host, network or renderer.
+presentation = []
+# Developer capture/Accessibility tests; never enabled in ordinary release packages.
+dev_always_render = ["desktop-ui", "gpui/dev_always_render"]
+# Concrete compositions: core local embedding, connected Wasm host, and native
+# product adapters. These gates select dependencies as well as entry points.
+local-store = ["ap-protocol", "kvdb/redb", "dep:core-foundation", "dep:crossbeam-queue", "dep:dirs", "dep:getrandom", "dep:parking_lot", "dep:redb", "dep:ring", "dep:rustix", "dep:security-framework", "dep:security-framework-sys", "dep:zeroize"]
+# Shared AP wire codecs for constrained transports; no socket, TLS or local-store dependency.
+ap-protocol = []
+# Bounded native WebSocket adapter; TLS/socket ownership remains with its host.
+ap-websocket = ["ap-protocol", "dep:tungstenite"]
+ap-tls = ["ap-protocol", "dep:rustls"]
+# Shared enrollment keys/CSR/identity; hosts supply secure RNG and protected storage.
+ap-identity = ["ap-protocol", "dep:x509-parser", "dep:rcgen", "dep:rustls", "dep:thiserror", "dep:ring", "dep:zeroize"]
+network = ["ap-identity", "local-store", "dep:quinn", "dep:rustls-pemfile", "dep:rustls-platform-verifier", "dep:tokio"]
+# VM compiler/executor debt is confined to this selection; local embedding does
+# not compile Wasmtime. Native app execution will use the shared operation core.
+native-runtime = ["dep:getrandom", "dep:tokio"]
+# Isolated sidebar, updater and status-bar qualification fixtures.
+desktop-qualification = []
+# Tier B native PCM output uses the existing bounded lock-free queue dependency.
+native-audio = ["dep:crossbeam-queue"]
+wasm-runtime = ["dep:getrandom", "dep:wasm-encoder", "dep:wasmtime", "dep:mach2", "dep:tokio"]
+# Account, recovery and AP replication without an app executor.
+connected-engine = ["network"]
+app-host = ["connected-engine", "wasm-runtime", "dep:socket2", "dep:polling", "dep:rkyv", "dep:icu_collator"]
+# CLI native app packaging rasterizes the configured icon without loading a UI.
+process = ["file-provider", "app-host", "artwork", "dep:notify", "dep:semver", "dep:git2", "dep:ureq", "dep:objc"]
+native-ui = ["dep:icu_collator", "dep:unicode-segmentation"]
+# Existing Mac renderer and event-driven caret activity; no engine or VM.
+desktop-ui = ["native-ui", "native-audio", "dep:image", "dep:moxcms", "dep:gpui", "dep:objc", "dep:cocoa", "dep:block", "dep:raw-window-handle", "dep:async-channel", "dep:log"]
+desktop = ["process", "native-runtime", "desktop-ui", "artwork", "presentation", "dep:ureq", "dep:zip", "dep:log"]
+file-provider = ["connected-engine"]
+ios = ["file-provider", "app-host", "native-ui", "native-audio", "artwork"]
+# Artwork is useful to packaging without selecting an app executor or iOS ABI.
+artwork = ["dep:image", "dep:resvg"]
+# Sandboxed Finder thumbnailing; no engine, executor or UI composition.
+quicklook = ["artwork"]
+# Fixture APIs require the corresponding real composition explicitly.
+test-support = []
+phase1-qualification = ["ios"]
+
+# Every target, including wasm32: package, store, trace, platform::web.
+[dependencies]
+miniz_oxide = "0.8.9"
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "pkcs8", "zeroize"] }
+
+base64 = "0.22"
+blake3 = "1"
+kvdb = { path = "kvdb" }
+playbit-api = { path = "../playbit-api" }
+playbit-trace = { path = "trace" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+toml = "0.8"
+wasmparser = { version = "=0.261.0", default-features = false, features = ["std"] }
+image = { version = "0.25.1", default-features = false, features = ["png", "jpeg"], optional = true }
+resvg = { version = "0.45.0", default-features = false, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+x509-parser = "0.18"
+
+# Native only: the local engine, runtime, AP client, CLI, and desktop.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+x509-parser = { version = "0.18", optional = true }
+# Desktop HTTP and ZIP support; process clients also validate installation SemVer.
+ureq = { version = "3.4.2", optional = true }
+# Tier B: local repository initialization only. Reuses the desktop's locked Git
+# implementation; removal would restore a system-Git requirement for pb init.
+git2 = { version = "=0.20.4", default-features = false, optional = true }
+semver = { version = "1", optional = true }
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib"], optional = true }
+object = { version = "0.37.3", default-features = false, features = ["read_core", "macho", "std", "unaligned"] }
+async-channel = { version = "2.5.0", optional = true }
+crossbeam-queue = { version = "0.3", optional = true }
+# Tier B volume admission needs FIFO handoff to bound reader starvation.
+# Removal requires another fair lock with the same bounded admission and panic fence.
+parking_lot = { version = "0.12.5", optional = true }
+dirs = { version = "5", optional = true }
+# Tier A platform entropy for storage and guest random.fill; removal requires
+# equivalent secure OS RNG adapters on every native host.
+getrandom = { version = "0.3", optional = true }
+gpui = { version = "=0.2.2", default-features = false, features = ["font-kit"], optional = true }
+# Tier C: route GPUI and dependency diagnostics into the desktop process log.
+# Already used by GPUI; removal requires replacing its logging facade.
+log = { version = "0.4", optional = true }
+# Tier B local IPC archives: validated borrowed replies and verbatim byte payloads.
+# Removal requires replacing the local codec and archive derives on shared wire types.
+rkyv = { version = "=0.8.18", default-features = false, features = ["std", "bytecheck", "little_endian", "aligned", "pointer_width_32"], optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+# Package file admission uses O_NOFOLLOW even without an app executor.
+libc = "0.2"
+polling = { version = "3.11", optional = true }
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"], optional = true }
+rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "pem", "ring"], optional = true }
+redb = { version = "=3.1.3", optional = true }
+ring = { version = "0.17", optional = true }
+zeroize = { version = "1.9", optional = true }
+rustix = { version = "1.1", features = ["fs", "net"], optional = true }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rustls-pemfile = { version = "2.2.0", optional = true }
+rustls-platform-verifier = { version = "0.7", optional = true }
+socket2 = { version = "0.6", optional = true }
+thiserror = { version = "2", optional = true }
+tokio = { version = "1.53.3", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"], optional = true }
+tungstenite = { version = "=0.29.0", default-features = false, features = ["handshake"], optional = true }
+unicode-segmentation = { version = "1.13.3", optional = true }
+# Tier C: Unicode Collation Algorithm for natural-language display names.
+# Reuses the locked ICU4X family, adding six transitive crates. Removing it
+# requires another UCA implementation; storage keys and cursors retain their order.
+icu_collator = { version = "=2.3.1", optional = true }
+wasm-encoder = { version = "=0.261.0", features = ["wasmparser"], optional = true }
+# Guest trap reports resolve bundled DWARF and demangle language-level function names.
+# Removal requires another resolver for bundled guest symbols.
+wasmtime = { version = "=50.0.0", default-features = false, features = ["addr2line", "anyhow", "cranelift", "demangle", "gc", "gc-copying", "pulley", "reexport-wasmparser", "runtime", "std", "threads"], optional = true }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+mach2 = { version = "0.6", optional = true }
+# Resolve the host's bundle identifier for its credential namespace.
+core-foundation = { version = "0.10", optional = true }
+
+# Optional provisioned distribution account recovery; local profiles own their keys.
+security-framework = { version = "3.7", features = ["OSX_10_15"], optional = true }
+security-framework-sys = { version = "2.17", optional = true }
+[target.'cfg(target_os = "macos")'.dependencies]
+# Tier C JPEG upload uses the existing image dependency's CMS directly, selecting
+# only an in-place RGBA8 transform that fits native worker stacks. Remove with a
+# bounded typed conversion API in image; this adds no transitive crates.
+moxcms = { version = "0.8.1", features = ["in_place"], optional = true }
+block = { version = "0.1", optional = true }
+cocoa = { version = "0.26", optional = true }
+notify = { version = "8.2", optional = true }
+objc = { version = "0.2.7", optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+
+[dev-dependencies]
+# Use the real app crate; scripts/prepare-apps.sh generates its metadata with pb.
+todo = { path = "../guests/todo", features = ["fixture-root"] }
+playbit-test-fixtures = { path = "test-fixtures", features = ["wasm"] }
+playbit-api = { path = "../playbit-api", features = ["guest"] }
+playbit = { path = ".", default-features = false, features = ["test-support", "process", "ios"] }
+polling = "3.11"
+socket2 = "0.6"
+tempfile = "3"
+# Generate source-mapped crash fixtures without a separate guest compiler.
+wat = { version = "1", features = ["dwarf"] }
+
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+libc = { version = "0.2", features = ["extra_traits"] }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui = { version = "=0.2.2", default-features = false, features = ["test-support"] }
+
+[lints]
+workspace = true
+
+[[example]]
+name = "check-segmented"
+path = "benchmarks/check-segmented.rs"
+required-features = ["desktop-ui"]
+
+[[example]]
+name = "check-scrollbars"
+path = "benchmarks/check-scrollbars.rs"
+required-features = ["desktop-ui"]
+
+[[example]]
+name = "check-sign-in"
+path = "benchmarks/check-sign-in.rs"
+required-features = ["desktop-ui"]
+
+[[example]]
+name = "keychain-fixture"
+path = "benchmarks/keychain-fixture.rs"
+required-features = ["process"]
+
+[build-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Tier B IPC build identity. Remove only when another automatic identity rejects
+# mismatched archived layouts before decoding; no hashing runs on the IPC path.
+blake3 = "1"

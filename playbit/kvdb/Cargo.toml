@@ -1,0 +1,64 @@
+[package]
+name = "kvdb"
+description = "Local-first CRDT key-value store: prolly tree + HLC clocks + sans-io sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+# Benchmarks live in benchmarks/, CLI examples in examples/; the example
+# targets are declared explicitly at the end of this file.
+autoexamples = false
+
+[features]
+# The durable native storage backend (`kvdb::redb`). The core is
+# `no_std + alloc`; this feature needs `std`.
+redb = ["dep:redb", "dep:rustix"]
+
+[dependencies]
+blake3 = { version = "1", default-features = false }
+redb = { version = "3", optional = true }
+rustix = { version = "1.1", features = ["fs"], optional = true }
+
+[dev-dependencies]
+# Benchmark transport only; the no_std library gains no network dependency.
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "pem", "ring"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std"] }
+tokio = { version = "1.53.3", features = ["io-util", "net", "rt", "time"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+
+# CLI examples demonstrating the API.
+[[example]]
+name = "kvdb"
+required-features = ["redb"]
+
+[[example]]
+name = "storage"
+required-features = ["redb"]
+
+# Operator benchmarks. Example targets so they build on demand and are
+# compile-checked by `cargo test`, without linking into ordinary builds.
+[[example]]
+name = "local_indexes"
+path = "benchmarks/local_indexes.rs"
+required-features = ["redb"]
+
+[[example]]
+name = "benchmark"
+path = "benchmarks/benchmark.rs"
+required-features = ["redb"]
+
+[[example]]
+name = "combine_deltas"
+path = "benchmarks/combine_deltas.rs"
+
+[[example]]
+name = "sync"
+path = "benchmarks/sync.rs"
+required-features = ["redb"]
+
+[lints]
+workspace = true

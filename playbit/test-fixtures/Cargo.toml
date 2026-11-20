@@ -1,0 +1,13 @@
+[package]
+name = "playbit-test-fixtures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Dev dependencies enable this; ordinary workspace builds need no Wasm fixtures.
+wasm = []
+
+[lints]
+workspace = true

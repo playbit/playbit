@@ -1,0 +1,14 @@
+[package]
+name = "playbit-ocaml-bindgen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+# Build-time Rust syntax inspection; no dependency enters playbit-api or the guest.
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+
+[dev-dependencies]
+playbit-api = { path = "../../../../playbit-api" }

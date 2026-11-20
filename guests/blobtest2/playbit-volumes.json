@@ -1,0 +1,24 @@
+{
+    "root": {
+        "permissions": {
+            "grants": [
+                {
+                    "subject": {
+                        "kind": "public"
+                    },
+                    "permissions": ["read"]
+                }
+            ]
+        },
+        "databases": [
+            {
+                "id": "6HjCtfN3h9KMGQeXKZnTn",
+                "name": "logs/activity",
+                "kind": {
+                    "type": "blob_log"
+                }
+            }
+        ],
+        "blobs": []
+    }
+}

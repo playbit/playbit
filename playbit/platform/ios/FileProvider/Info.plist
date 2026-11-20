@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>Playbit</string>
+	<key>CFBundleName</key>
+	<string>Playbit</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionFileProviderDocumentGroup</key>
+		<string>$(PLAYBIT_PROVIDER_GROUP)</string>
+		<key>NSExtensionFileProviderDownloadPipelineDepth</key>
+		<integer>2</integer>
+		<key>NSExtensionFileProviderMetadataOnlyUploadPipelineDepth</key>
+		<integer>2</integer>
+		<key>NSExtensionFileProviderSupportsEnumeration</key>
+		<true/>
+		<key>NSExtensionFileProviderUploadPipelineDepth</key>
+		<integer>2</integer>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.fileprovider-nonui</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>FileProviderExtension</string>
+	</dict>
+	<key>PlaybitContainingAppIdentifier</key>
+	<string>$(ARCHIPELAGO_APP_ID)</string>
+	<key>PlaybitProviderGroup</key>
+	<string>$(PLAYBIT_PROVIDER_GROUP)</string>
+	<key>PlaybitPushEnvironment</key>
+	<string>$(PLAYBIT_PUSH_ENVIRONMENT)</string>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Playbit Database</string>
+			<key>UTTypeIdentifier</key>
+			<string>app.playbit.database</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>pbdb</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
+</dict>
+</plist>

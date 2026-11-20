@@ -1,0 +1,10 @@
+{
+  "account": "NCX9PNbvZtwyXe5YjATFzi",
+  "secret": "11111111111111111111111111111111",
+  "nonce": "030303030303030303030303",
+  "logical_key": "volume/00112233445566778899aabbccddeeff",
+  "clock": "30064771081",
+  "plaintext": "{\"kind\":\"volume\",\"name\":\"Private notes\"}",
+  "key": "07a89b2df34fdfc9269dc495730f9e536636c00d107474a9b3417f954300fd53",
+  "envelope": "010303030303030303030303038ac0c43e1ede0539f0dcb040a9f90f0ce0dbf44947014c90867665235912fe358705b7ed059cbcc1028048730ddaa583cbe13580c705ee4c"
+}

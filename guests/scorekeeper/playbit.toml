@@ -1,0 +1,5 @@
+app_id = "scorekeeper"
+name = "Scorekeeper"
+lang = "ocaml"
+required_host_features = ["automatic-volumes.v1"]
+icon = "icon.svg"

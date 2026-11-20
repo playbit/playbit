@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>PlaybitProviderGroup</key><string>$(PLAYBIT_PROVIDER_GROUP)</string>
+<key>PlaybitPushEnvironment</key><string>$(PLAYBIT_PUSH_ENVIRONMENT)</string>
+<key>PlaybitKeychainAccessGroup</key><string>$(PLAYBIT_KEYCHAIN_ACCESS_GROUP)</string>
+<key>PlaybitVersion</key><string>$(PLAYBIT_VERSION)</string>
+<key>ITSAppUsesNonExemptEncryption</key><false/>
+<key>UIApplicationSceneManifest</key><dict>
+<key>UIApplicationSupportsMultipleScenes</key><false/>
+<key>UISceneConfigurations</key><dict>
+<key>UIWindowSceneSessionRoleApplication</key><array><dict>
+<key>UISceneConfigurationName</key><string>Playbit</string>
+<key>UISceneDelegateClassName</key><string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+</dict></array>
+</dict>
+</dict>
+<key>UIFileSharingEnabled</key><true/>
+<key>LSSupportsOpeningDocumentsInPlace</key><true/>
+<key>UISupportedInterfaceOrientations~ipad</key><array>
+<string>UIInterfaceOrientationPortrait</string>
+<string>UIInterfaceOrientationPortraitUpsideDown</string>
+<string>UIInterfaceOrientationLandscapeLeft</string>
+<string>UIInterfaceOrientationLandscapeRight</string>
+</array>
+<key>UTExportedTypeDeclarations</key><array><dict>
+<key>UTTypeIdentifier</key><string>app.playbit.database</string>
+<key>UTTypeDescription</key><string>Playbit Database</string>
+<key>UTTypeConformsTo</key><array><string>public.data</string></array>
+<key>UTTypeTagSpecification</key><dict>
+<key>public.filename-extension</key><array><string>pbdb</string></array>
+</dict>
+</dict></array>
+<key>CFBundleDocumentTypes</key><array><dict>
+<key>CFBundleTypeName</key><string>Playbit Database</string>
+<key>CFBundleTypeRole</key><string>Editor</string>
+<key>LSHandlerRank</key><string>Owner</string>
+<key>LSItemContentTypes</key><array><string>app.playbit.database</string></array>
+</dict></array>
+<key>CFBundleURLTypes</key><array><dict>
+<key>CFBundleURLName</key><string>playbit.invitation</string>
+<key>CFBundleURLSchemes</key><array><string>playbit</string></array>
+</dict></array>
+</dict></plist>

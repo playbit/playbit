@@ -1,0 +1,79 @@
+{
+    "protocol": 1,
+    "operation_id": "1111111111111111",
+    "cases": [
+        {
+            "name": "baseline_request",
+            "major": 1,
+            "request": "{\"op\":\"get_credential_vault\",\"operation_id\":\"1111111111111111\"}",
+            "expected": "accepted"
+        },
+        {
+            "name": "describe",
+            "major": 1,
+            "request": "{\"op\":\"describe\",\"operation_id\":\"1111111111111111\"}",
+            "expected": "accepted"
+        },
+        {
+            "name": "unsupported_operation",
+            "major": 1,
+            "request": "{\"op\":\"future_operation\",\"operation_id\":\"1111111111111111\",\"payload\":{\"uninterpreted\":true}}",
+            "expected": "unsupported_operation"
+        },
+        {
+            "name": "unsupported_feature_before_payload",
+            "major": 1,
+            "request": "{\"op\":\"upload_build\",\"operation_id\":\"1111111111111111\",\"required_features\":[\"future.format.v1\"],\"build_id\":false}",
+            "expected": "unsupported_feature"
+        },
+        {
+            "name": "unknown_mutation_field",
+            "major": 1,
+            "request": "{\"op\":\"get_credential_vault\",\"operation_id\":\"1111111111111111\",\"grant_all\":true}",
+            "expected": "invalid_request"
+        },
+        {
+            "name": "duplicate_operation",
+            "major": 1,
+            "request": "{\"op\":\"describe\",\"op\":\"upload_build\",\"operation_id\":\"1111111111111111\"}",
+            "expected": "invalid_envelope"
+        },
+        {
+            "name": "duplicate_identity",
+            "major": 1,
+            "request": "{\"op\":\"describe\",\"operation_id\":\"1111111111111111\",\"operation_id\":\"1111111111111111\"}",
+            "expected": "invalid_envelope"
+        },
+        {
+            "name": "incompatible_protocol_zero",
+            "major": 0,
+            "request": "{\"op\":\"get_credential_vault\",\"operation_id\":\"1111111111111111\"}",
+            "expected": "incompatible_protocol"
+        },
+        {
+            "name": "incompatible_before_json",
+            "major": 2,
+            "request": "not JSON",
+            "expected": "incompatible_protocol"
+        }
+    ],
+    "optional_metadata_reply": {
+        "timing": [],
+        "ok": true,
+        "operation_id": "1111111111111111",
+        "code": null,
+        "error": null,
+        "denial": null,
+        "data": {
+            "baseline": true
+        },
+        "future_metadata": {
+            "ignored": true
+        }
+    },
+    "reference_wire": {
+        "hello_request": "580000000000000000000000000000000707070707070707070707070707070700000000000000000000000000000000b081086b0000000051b596de667e947f81cf7c0718f5ffe671f6b6069a69ec7aedcc190a541bb4aa",
+        "hello_response": "5c00000000000000000000000000000002005b5d0707070707070707070707070707070700000000000000000000000000000000b081086b0000000051b596de667e947f81cf7c0718f5ffe671f6b6069a69ec7aedcc190a541bb4aa",
+        "describe_response": "bb010000020107107365727669636531313131313131313131313131313131007b2274696d696e67223a5b5d2c226f7065726174696f6e5f6964223a2231313131313131313131313131313131222c226f6b223a747275652c22636f6465223a6e756c6c2c226572726f72223a6e756c6c2c2264656e69616c223a6e756c6c2c2264617461223a7b2270726f746f636f6c223a312c226f7065726174696f6e73223a5b226465736372696265222c226765745f63726564656e7469616c5f7661756c74225d2c226665617475726573223a5b5d2c22616c676f726974686d73223a7b226b7664625f70756c6c223a226b7664622e70756c6c2e7631222c226b7664625f64656c7461223a226b7664622e64656c74612e7631222c227265706c6963615f6576656e7473223a2261702e7265706c6963612e7631227d2c226c696d697473223a7b226672616d655f6279746573223a313034383537362c22726571756573745f6279746573223a3236323134342c2272657175697265645f6665617475726573223a31362c22666561747572655f6e616d655f6279746573223a36347d7d2c226675747572655f6d65746164617461223a747275657d"
+    }
+}

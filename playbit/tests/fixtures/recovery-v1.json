@@ -1,0 +1,8 @@
+{
+  "account": "NCX9PNbvZtwyXe5YjATFzi",
+  "revision": 7,
+  "secret": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "nonce": "a0a1a2a3a4a5a6a7a8a9aaab",
+  "plaintext": "{\"sessions\":[\"retained\"],\"blob_key\":[31,32]}",
+  "ciphertext": "AaChoqOkpaanqKmqq506D0g2uGvQDBal6VxYsrsEzTB-99NgMbAsROoQySpqtw9lxfQRYhFsrlm15tLtWpgI0xPta2n7DpF6Lw"
+}

@@ -1,0 +1,66 @@
+/* archipelago-ui::Theme::light roles, in sRGB; rendered with semantic HTML. */
+@font-face { font-family: Inter; src: url('./InterVariable.ttf') format('truetype'); font-weight: 100 900; font-display: block; }
+#app {
+    --control-background: #fff; --control-pressed: #f5f5f5; --control-disabled: #ffffff03;
+    --text: #000c; --text-secondary: #0008; --text-disabled: #0006;
+    --border: #0000004d; --focus-ring: #0009; --text-selection: #c2d8ff;
+    --primary-background: #6b6b6b; --primary-pressed: #555; --primary-text: #fff;
+    --destructive-background: #ec4000; --destructive-pressed: #cb2c00; --destructive-text: #fff;
+    color-scheme: light; background: #ececec; color: var(--text); padding: 12px;
+    font: 500 11px/16px Inter, sans-serif; letter-spacing: .22px;
+}
+#app .column { gap: 4px; } #app .row { gap: 0; align-items: center; }
+body:has(#app .guest-scroll) { display: flex; flex-direction: column; height: 100dvh; box-sizing: border-box; }
+body:has(#app .guest-scroll) > * { flex-shrink: 0; }
+#app:has(.guest-scroll) { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+#app .column:has(.guest-scroll), #app .row:has(.guest-scroll), #app .guest-scroll {
+    flex: 1; min-width: 0; min-height: 0; align-self: stretch;
+}
+#app .guest-scroll { overflow: auto; }
+#app .guest-scroll:has(.guest-scroll) { display: flex; flex-direction: column; }
+#app .guest-scroll[data-complex-background='true'] { scrollbar-color: #666 #eee; }
+#app h1 { font: 600 20px/28px Inter, sans-serif; letter-spacing: 0; }
+#app .muted { color: var(--text-secondary); opacity: 1; font-size: inherit; }
+#app .guest-field, #app .guest-button {
+    box-sizing: border-box; height: 24px; min-width: 0; margin: 4px;
+    font: inherit; letter-spacing: inherit; border: 0; color: var(--text);
+    background: var(--control-background); opacity: 1;
+}
+#app .guest-field {
+    flex: 1; padding: 0 4px; border-radius: 1px;
+    box-shadow: 0 0 0 .5px var(--border), inset 0 1px 1px #00000021;
+}
+#app .guest-field::placeholder { color: var(--text-disabled); opacity: 1; }
+#app .guest-field::selection { background: var(--text-selection); color: var(--text); }
+#app .guest-field:focus { outline: 2px solid var(--focus-ring); outline-offset: 0; }
+#app .guest-field:disabled { color: var(--text-disabled); background: var(--control-disabled); }
+#app .guest-button {
+    padding: 0 8px; border-radius: 4px; cursor: default;
+    box-shadow: 0 0 0 .5px var(--border), 0 1px 1px #00000021, 0 1px 4px #0003;
+}
+#app .guest-button[data-style='1'] { color: var(--primary-text); background: var(--primary-background); }
+#app .guest-button[data-style='2'] { color: var(--destructive-text); background: var(--destructive-background); }
+#app .guest-button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 0; }
+#app .guest-button:active:not(:disabled) { background: var(--control-pressed); box-shadow: 0 0 0 .5px var(--border), 0 1.5px 0 #ffffff80; }
+#app .guest-button[data-style='1']:active:not(:disabled) { background: var(--primary-pressed); }
+#app .guest-button[data-style='2']:active:not(:disabled) { background: var(--destructive-pressed); }
+#app .guest-button:disabled { color: var(--text-disabled); background: var(--control-disabled); box-shadow: 0 0 0 .5px var(--border); }
+#app .guest-button[data-style='1']:disabled { background: #6b6b6b99; color: var(--primary-text); }
+#app .guest-button[data-style='2']:disabled { background: #ec400099; color: var(--destructive-text); }
+#app .guest-check { gap: 8px; box-sizing: border-box; min-height: 24px; padding: 2px 4px; }
+#app .guest-check input {
+    appearance: none; box-sizing: border-box; flex: 0 0 16px; width: 16px; height: 16px;
+    margin: 0; border: 0; border-radius: 2px; background: var(--control-background);
+    box-shadow: 0 0 0 .5px var(--border), 0 1px 1px #00000021;
+    background-repeat: no-repeat; background-position: 3.142893px 4.392893px; background-size: 9.91421px 7.62132px;
+}
+#app .guest-check input:checked { background-image: url('./check-on.svg'); }
+#app .guest-check input:indeterminate { background-image: url('./check-mixed.svg'); background-position: center; background-size: 16px 16px; }
+#app .guest-check input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 0; }
+#app .guest-check:active input:not(:disabled) { background-color: var(--control-pressed); box-shadow: 0 0 0 .5px var(--border); }
+#app .guest-check input:disabled { opacity: .4; background-color: var(--control-disabled); }
+#app .guest-check:has(input:disabled) { color: var(--text-disabled); }
+@media (pointer: coarse) {
+    #app .guest-check { min-height: 44px; }
+    #app .guest-button, #app .guest-field { min-height: 44px; font-size: 16px; }
+}

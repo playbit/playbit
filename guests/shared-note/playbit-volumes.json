@@ -1,0 +1,15 @@
+{
+    "session": {
+        "databases": [],
+        "permissions": {
+            "grants": []
+        },
+        "blobs": [
+            {
+                "id": "6HjCtfN3h9KMGQeXKZnTn",
+                "name": "note.txt",
+                "bytes": []
+            }
+        ]
+    }
+}

@@ -1,0 +1,10 @@
+{
+  "account": "FspcPpiokSGBAHrzsxUavj",
+  "code": "FFUk4yL7S6oHXq7rrK6a48",
+  "envelope": "AQMDAwMDAwMDAwMDA_lGahoY7qpFovnkNjj4Q2KKMbuCKVGdvQBmV1A-TScNDL5X0SzAIhQAceJRiH1HvQ9O2sFAQRWIIW0l0x2SQrIjF7vLEYzU-ecKRn4cxT_o91ebeRitikQ5PfWHF5icuZ3RS3B27Aheo-3W6kr_AdIdsNaVAduqIwegdqB4c5OQrLcoY6euJolYaXVPVuIfViJhC2JYkAQlgBSnD5TsDZQ3vB6lunZzNei-armakOfajC82Z-rlhO7Z7aiPPQiSIhZRIiLEZThfxsad_zZPe4S497totE-ZeQgCYp3n7HiIV0B31Q0n9FjSN-tFuz60jdccduuSjq2sr8Qz9Mfd-4mWOy0qVMIOBqWrXe-VShL6qWVOFsVdsMUmtBJ-lw3ctMxDTiPwuYFpCS3tvpck-SuLjyFUR6O9Q7o8JUqbGqMRLZvIitSwzQ71eH81dvNZC9tinolCk0jMNTWserOAZx741CWapbLY_2cIP9MYUOL3u14KEDrHZUKQJMj6XxZa1UJwm15uYymvf5hAfyzuw6Rns8MWcXOSYTEB6o7V1YRc3CaRx6xoFEt61NgmeiWetSHD0C4ac9LsRBhu6S4Za1bKmndHYX8NSlYtKOWq9LIBhsdJCKpq6JlnF7H00woCjGUkMjWoXV8C3pFjQeMdxGKn2kk1LOSoW0883Cn-_67gtXqdCOD3kjrLgU1UK-dlTrhTLW8ZogYXzBeQxMYZgpApQXI7OjMarfDQrVXku_F3RBRBM9npIgykLTtNeXQb3rv1ZzWqVutjQiOHt9em7XowALk0QKOuzk2p_58XKPDqSEIlORjrDJOFinSyt9vYJ4ByBiuq5Y3FJcfKqU4j7jkgkQZVHpn1xG6lleV8VAeQuYg5llbd1OlSJj-QPFj33NRerM3Suc7cDlLyqeRds6huE6ZOM-FIsl-MSmdvLzpEyt6iAsOQ",
+  "nonce": "030303030303030303030303",
+  "plaintext": "{\"session\":{\"app\":{\"publisher\":\"SQzAiQXLSsQWSYDuxdmi3N\",\"app_id\":\"test\"},\"id\":\"7UhvHSFUyoH745TvJ7xhmBRJiByx3f4GugtfSiyRwewk\",\"selector\":{\"kind\":\"exact\",\"build_id\":\"29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2\"},\"resolved_build_id\":\"29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2\",\"root_volume\":\"NCX9PNbvZtwyXe5YjATFzi\",\"creator\":\"SQzAiQXLSsQWSYDuxdmi3N\",\"update_authority\":\"creator\"},\"root\":{\"id\":\"NCX9PNbvZtwyXe5YjATFzi\",\"name\":\"TODO\",\"owner\":\"SQzAiQXLSsQWSYDuxdmi3N\",\"share_key_with_service\":true,\"personal\":false},\"root_credentials\":{\"database_key\":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],\"blob_key\":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]}}",
+  "proof": "b5dd837b33a78e7f165636a535cb33d567adb1f4e3b3b73a01005302e9036bfbf6ad0b32d5e70990918d36c2c8c3af8b87355f0d2465a268b52c1de165e4870c",
+  "seed": "73657373696f6e2d736565642d763121",
+  "session_id": "7UhvHSFUyoH745TvJ7xhmBRJiByx3f4GugtfSiyRwewk"
+}

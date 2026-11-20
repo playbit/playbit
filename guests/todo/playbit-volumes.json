@@ -1,0 +1,63 @@
+{
+    "session": {
+        "blobs": [],
+        "permissions": {
+            "grants": []
+        },
+        "databases": [
+            {
+                "id": "6HjCtfN3h9KMGQeXKZnTn",
+                "name": "data",
+                "kind": {
+                    "type": "object_db",
+                    "schema": {
+                        "types": {
+                            "8C2kCzsB2fJy9MiZos1mS": {
+                                "name": "Todo",
+                                "deprecated": false,
+                                "fields": {
+                                    "FP4VQzjM4KcwHiS8cj2Xs": {
+                                        "name": "title",
+                                        "repeated": false,
+                                        "deprecated": false,
+                                        "value_type": {
+                                            "kind": "text"
+                                        }
+                                    },
+                                    "Na6EczbX5yvuS59hRb3JJ": {
+                                        "name": "done",
+                                        "repeated": false,
+                                        "deprecated": false,
+                                        "value_type": {
+                                            "kind": "boolean"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "objects": [
+                        {
+                            "type_id": "8C2kCzsB2fJy9MiZos1mS",
+                            "id": "L2QSPpThia1svErp3N4FAk",
+                            "fields": {
+                                "FP4VQzjM4KcwHiS8cj2Xs": [
+                                    {
+                                        "kind": "text",
+                                        "value": "Try Playbit offline"
+                                    }
+                                ],
+                                "Na6EczbX5yvuS59hRb3JJ": [
+                                    {
+                                        "kind": "boolean",
+                                        "value": false
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+}

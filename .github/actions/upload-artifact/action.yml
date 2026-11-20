@@ -1,0 +1,70 @@
+name: Upload artifact with retries
+description: Upload with at most three attempts and five-second pauses
+inputs:
+    name:
+        description: Artifact name
+        required: true
+    path:
+        description: Files to upload
+        required: true
+    if-no-files-found:
+        description: Behavior when no files match
+        default: warn
+    retention-days:
+        description: Artifact retention in days
+        default: '1'
+    compression-level:
+        description: ZIP compression level
+        default: '6'
+outputs:
+    artifact-id:
+        description: ID of the successfully uploaded artifact
+        value: ${{ steps.first.outputs.artifact-id || steps.second.outputs.artifact-id || steps.third.outputs.artifact-id }}
+    artifact-url:
+        description: URL of the successfully uploaded artifact
+        value: ${{ steps.first.outputs.artifact-url || steps.second.outputs.artifact-url || steps.third.outputs.artifact-url }}
+    artifact-digest:
+        description: SHA-256 of the successfully uploaded artifact
+        value: ${{ steps.first.outputs.artifact-digest || steps.second.outputs.artifact-digest || steps.third.outputs.artifact-digest }}
+runs:
+    using: composite
+    steps:
+        # Explicit status checks also permit diagnostic uploads after a failed
+        # build, while cancellation stops further attempts.
+        - uses: actions/upload-artifact@v7
+          id: first
+          if: ${{ !cancelled() }}
+          continue-on-error: true
+          with:
+              name: ${{ inputs.name }}
+              path: ${{ inputs.path }}
+              if-no-files-found: ${{ inputs.if-no-files-found }}
+              retention-days: ${{ inputs.retention-days }}
+              compression-level: ${{ inputs.compression-level }}
+        - name: Pause before the second upload attempt
+          if: ${{ !cancelled() && steps.first.outcome == 'failure' }}
+          shell: bash
+          run: sleep 5
+        - uses: actions/upload-artifact@v7
+          id: second
+          if: ${{ !cancelled() && steps.first.outcome == 'failure' }}
+          continue-on-error: true
+          with:
+              name: ${{ inputs.name }}
+              path: ${{ inputs.path }}
+              if-no-files-found: ${{ inputs.if-no-files-found }}
+              retention-days: ${{ inputs.retention-days }}
+              compression-level: ${{ inputs.compression-level }}
+        - name: Pause before the third upload attempt
+          if: ${{ !cancelled() && steps.second.outcome == 'failure' }}
+          shell: bash
+          run: sleep 5
+        - uses: actions/upload-artifact@v7
+          id: third
+          if: ${{ !cancelled() && steps.second.outcome == 'failure' }}
+          with:
+              name: ${{ inputs.name }}
+              path: ${{ inputs.path }}
+              if-no-files-found: ${{ inputs.if-no-files-found }}
+              retention-days: ${{ inputs.retention-days }}
+              compression-level: ${{ inputs.compression-level }}

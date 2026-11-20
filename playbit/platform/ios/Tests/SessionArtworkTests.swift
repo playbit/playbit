@@ -1,0 +1,46 @@
+import Foundation
+
+@main enum SessionArtworkTests {
+    static func main() {
+        var cache = SessionArtworkState<NSObject>()
+        cache.reconcile([])
+        precondition(cache.next() == nil)
+        cache.reconcile((0..<300).map(String.init), source: 1)
+        precondition(cache.count == 256)
+        precondition(cache.next() == "0")
+        precondition(cache.next() == nil, "One in-flight job even if the UI is blocked")
+        cache.reconcile(["new"], source: 2)
+        precondition(cache.next() == nil)
+        precondition(cache.complete("0", .ready(NSObject())) == nil, "Retired result discarded")
+        precondition(cache.count == 1 && cache.image("0") == nil)
+        precondition(cache.next() == "new")
+        let image = NSObject()
+        precondition(cache.complete("new", .ready(image)) == 2)
+        precondition(cache.image("new") === image)
+        cache.reconcile(Array(repeating: "new", count: 128), source: 3)
+        precondition(cache.count == 1 && cache.next() == nil, "Shared immutable builds reuse pixels")
+        cache.reconcile(["bad", "none", "changed"])
+        precondition(cache.image("new") == nil)
+        precondition(cache.next() == "bad")
+        _ = cache.complete("bad", .failed)
+        precondition(cache.failed("bad"))
+        precondition(cache.next() == "none")
+        _ = cache.complete("none", .ready(nil))
+        precondition(!cache.failed("none") && cache.image("none") == nil)
+        precondition(cache.next() == "changed")
+        _ = cache.complete("changed", .ready(NSObject()))
+        cache.reconcile(["bad", "none", "changed"])
+        precondition(cache.next() == nil, "No per-edit reload or error retry")
+        cache.reconcile([]) // Missing build excluded by status until it becomes local.
+        cache.reconcile(["bad"])
+        precondition(cache.next() == "bad")
+        cache.reconcile([])
+        cache.reconcile(["bad"], source: 4)
+        precondition(cache.complete("bad", .failed) == nil,
+            "A retired job cannot poison a build which became available again")
+        precondition(cache.next() == "bad")
+        precondition(cache.complete("bad", .ready(image)) == 4)
+        precondition(cache.image("bad") === image)
+        print("SessionArtworkTests: bounded admission, stale completion, shared pixels and availability passed")
+    }
+}

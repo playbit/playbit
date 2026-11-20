@@ -1,0 +1,2445 @@
+{
+  "directories": {
+    "playbit/src/runtime": {
+      "lines": 4412,
+      "functions": 197,
+      "assertions": 204,
+      "unwrap": 0,
+      "expect": 7,
+      "limit_constants": 15,
+      "unsafe": 12,
+      "lines_over_100": 5,
+      "unwrap_expect": 7,
+      "assertions_per_function": 1.0355329949238579,
+      "long_functions": []
+    },
+    "playbit/src/store": {
+      "lines": 9774,
+      "functions": 476,
+      "assertions": 22,
+      "unwrap": 0,
+      "expect": 26,
+      "limit_constants": 17,
+      "unsafe": 0,
+      "lines_over_100": 2,
+      "unwrap_expect": 26,
+      "assertions_per_function": 0.046218487394957986,
+      "long_functions": [
+        {
+          "id": "playbit/src/store/local/received.rs::adopt_received_volume#1",
+          "path": "playbit/src/store/local/received.rs",
+          "name": "adopt_received_volume",
+          "line": 136,
+          "lines": 159,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local/recovery_catalog.rs::import_credentials#1",
+          "path": "playbit/src/store/local/recovery_catalog.rs",
+          "name": "import_credentials",
+          "line": 243,
+          "lines": 110,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::cached_db#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "cached_db",
+          "line": 2004,
+          "lines": 109,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/catalog/streamed.rs::schema#1",
+          "path": "playbit/src/store/catalog/streamed.rs",
+          "name": "schema",
+          "line": 287,
+          "lines": 108,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::merge_received_creation#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "merge_received_creation",
+          "line": 1285,
+          "lines": 105,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::write_file#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "write_file",
+          "line": 2545,
+          "lines": 104,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::open#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "open",
+          "line": 680,
+          "lines": 93,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::merge_received_delta#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "merge_received_delta",
+          "line": 1175,
+          "lines": 92,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/account/record.rs::decode#1",
+          "path": "playbit/src/store/account/record.rs",
+          "name": "decode",
+          "line": 42,
+          "lines": 85,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/creation.rs::inspect#1",
+          "path": "playbit/src/store/creation.rs",
+          "name": "inspect",
+          "line": 55,
+          "lines": 84,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/creation.rs::inspect_value#1",
+          "path": "playbit/src/store/creation.rs",
+          "name": "inspect_value",
+          "line": 384,
+          "lines": 82,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::create_object_with_fields#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "create_object_with_fields",
+          "line": 2300,
+          "lines": 82,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::create_session#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "create_session",
+          "line": 1783,
+          "lines": 81,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::operations#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "operations",
+          "line": 577,
+          "lines": 80,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/catalog/streamed.rs::field_stamp#1",
+          "path": "playbit/src/store/catalog/streamed.rs",
+          "name": "field_stamp",
+          "line": 570,
+          "lines": 79,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/catalog.rs::authorize_write_inner#1",
+          "path": "playbit/src/store/catalog.rs",
+          "name": "authorize_write_inner",
+          "line": 278,
+          "lines": 74,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/src/engine": {
+      "lines": 17043,
+      "functions": 645,
+      "assertions": 23,
+      "unwrap": 1,
+      "expect": 146,
+      "limit_constants": 25,
+      "unsafe": 27,
+      "lines_over_100": 68,
+      "unwrap_expect": 147,
+      "assertions_per_function": 0.03565891472868217,
+      "long_functions": [
+        {
+          "id": "playbit/src/engine/background.rs::complete_background_inner#1",
+          "path": "playbit/src/engine/background.rs",
+          "name": "complete_background_inner",
+          "line": 875,
+          "lines": 444,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/replication.rs::run#1",
+          "path": "playbit/src/engine/replication.rs",
+          "name": "run",
+          "line": 794,
+          "lines": 304,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/admission.rs::run_once#1",
+          "path": "playbit/src/engine/admission.rs",
+          "name": "run_once",
+          "line": 681,
+          "lines": 282,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/background.rs::begin_network_work#1",
+          "path": "playbit/src/engine/background.rs",
+          "name": "begin_network_work",
+          "line": 450,
+          "lines": 255,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/turns.rs::new#1",
+          "path": "playbit/src/engine/turns.rs",
+          "name": "new",
+          "line": 267,
+          "lines": 212,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/mod.rs::dispatch_inner#1",
+          "path": "playbit/src/engine/mod.rs",
+          "name": "dispatch_inner",
+          "line": 879,
+          "lines": 197,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/publisher.rs::command#1",
+          "path": "playbit/src/engine/publisher.rs",
+          "name": "command",
+          "line": 1061,
+          "lines": 170,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/publisher.rs::publish#1",
+          "path": "playbit/src/engine/publisher.rs",
+          "name": "publish",
+          "line": 1653,
+          "lines": 142,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/developer.rs::execute#1",
+          "path": "playbit/src/engine/developer.rs",
+          "name": "execute",
+          "line": 108,
+          "lines": 135,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/peer.rs::respond#1",
+          "path": "playbit/src/engine/peer.rs",
+          "name": "respond",
+          "line": 353,
+          "lines": 134,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/turns.rs::collect_creations#1",
+          "path": "playbit/src/engine/turns.rs",
+          "name": "collect_creations",
+          "line": 897,
+          "lines": 120,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/remote.rs::sync_owned#1",
+          "path": "playbit/src/engine/remote.rs",
+          "name": "sync_owned",
+          "line": 1427,
+          "lines": 118,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/remote.rs::sync_session#1",
+          "path": "playbit/src/engine/remote.rs",
+          "name": "sync_session",
+          "line": 1721,
+          "lines": 118,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/updates.rs::finish_update#1",
+          "path": "playbit/src/engine/updates.rs",
+          "name": "finish_update",
+          "line": 128,
+          "lines": 107,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/admission.rs::route_ready#1",
+          "path": "playbit/src/engine/admission.rs",
+          "name": "route_ready",
+          "line": 155,
+          "lines": 102,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/publisher/account.rs::account_command#1",
+          "path": "playbit/src/engine/publisher/account.rs",
+          "name": "account_command",
+          "line": 156,
+          "lines": 100,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/remote.rs::recover_scope_once#1",
+          "path": "playbit/src/engine/remote.rs",
+          "name": "recover_scope_once",
+          "line": 1188,
+          "lines": 100,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/remote.rs::transfer_database#1",
+          "path": "playbit/src/engine/remote.rs",
+          "name": "transfer_database",
+          "line": 2208,
+          "lines": 96,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/turns.rs::submit_turn#1",
+          "path": "playbit/src/engine/turns.rs",
+          "name": "submit_turn",
+          "line": 1113,
+          "lines": 93,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/turns.rs::collect_turns#1",
+          "path": "playbit/src/engine/turns.rs",
+          "name": "collect_turns",
+          "line": 1206,
+          "lines": 90,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/remote.rs::sync_inner#1",
+          "path": "playbit/src/engine/remote.rs",
+          "name": "sync_inner",
+          "line": 1614,
+          "lines": 88,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/remote.rs::reconnect#1",
+          "path": "playbit/src/engine/remote.rs",
+          "name": "reconnect",
+          "line": 1015,
+          "lines": 85,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/recovery/control.rs::execute#1",
+          "path": "playbit/src/engine/recovery/control.rs",
+          "name": "execute",
+          "line": 46,
+          "lines": 84,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/mod.rs::prepare_creation#1",
+          "path": "playbit/src/engine/mod.rs",
+          "name": "prepare_creation",
+          "line": 591,
+          "lines": 83,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/publisher.rs::run#1",
+          "path": "playbit/src/engine/publisher.rs",
+          "name": "run",
+          "line": 959,
+          "lines": 82,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/embedded.rs::advance#1",
+          "path": "playbit/src/engine/embedded.rs",
+          "name": "advance",
+          "line": 75,
+          "lines": 78,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/launch.rs::ensure#1",
+          "path": "playbit/src/engine/launch.rs",
+          "name": "ensure",
+          "line": 86,
+          "lines": 75,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/remote.rs::receive_volume_with#1",
+          "path": "playbit/src/engine/remote.rs",
+          "name": "receive_volume_with",
+          "line": 2077,
+          "lines": 73,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/admission.rs::request_ready#1",
+          "path": "playbit/src/engine/admission.rs",
+          "name": "request_ready",
+          "line": 49,
+          "lines": 72,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/engine/recovery.rs::backup_credentials#1",
+          "path": "playbit/src/engine/recovery.rs",
+          "name": "backup_credentials",
+          "line": 144,
+          "lines": 72,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/src/network": {
+      "lines": 3208,
+      "functions": 152,
+      "assertions": 41,
+      "unwrap": 0,
+      "expect": 30,
+      "limit_constants": 10,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 30,
+      "assertions_per_function": 0.26973684210526316,
+      "long_functions": [
+        {
+          "id": "playbit/src/network/ap/client.rs::authenticate#1",
+          "path": "playbit/src/network/ap/client.rs",
+          "name": "authenticate",
+          "line": 677,
+          "lines": 72,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/src/desktop": {
+      "lines": 7739,
+      "functions": 222,
+      "assertions": 5,
+      "unwrap": 0,
+      "expect": 26,
+      "limit_constants": 4,
+      "unsafe": 3,
+      "lines_over_100": 31,
+      "unwrap_expect": 26,
+      "assertions_per_function": 0.02252252252252252,
+      "long_functions": [
+        {
+          "id": "playbit/src/desktop/mod.rs::render#2",
+          "path": "playbit/src/desktop/mod.rs",
+          "name": "render",
+          "line": 1532,
+          "lines": 550,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/mod.rs::new#3",
+          "path": "playbit/src/desktop/mod.rs",
+          "name": "new",
+          "line": 490,
+          "lines": 460,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/controls.rs::render#1",
+          "path": "playbit/src/desktop/controls.rs",
+          "name": "render",
+          "line": 249,
+          "lines": 411,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/mod.rs::recovery_panel#1",
+          "path": "playbit/src/desktop/mod.rs",
+          "name": "recovery_panel",
+          "line": 1121,
+          "lines": 387,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/management.rs::management_sidebar#1",
+          "path": "playbit/src/desktop/management.rs",
+          "name": "management_sidebar",
+          "line": 112,
+          "lines": 272,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/mod.rs::start_worker#1",
+          "path": "playbit/src/desktop/mod.rs",
+          "name": "start_worker",
+          "line": 2085,
+          "lines": 271,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/guest_window.rs::render_node#1",
+          "path": "playbit/src/desktop/guest_window.rs",
+          "name": "render_node",
+          "line": 242,
+          "lines": 202,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/text_editor.rs::render#1",
+          "path": "playbit/src/desktop/text_editor.rs",
+          "name": "render",
+          "line": 957,
+          "lines": 201,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/guest_window.rs::render#1",
+          "path": "playbit/src/desktop/guest_window.rs",
+          "name": "render",
+          "line": 556,
+          "lines": 194,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/text_editor.rs::prepaint#1",
+          "path": "playbit/src/desktop/text_editor.rs",
+          "name": "prepaint",
+          "line": 1272,
+          "lines": 179,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/text_editor.rs::paint#1",
+          "path": "playbit/src/desktop/text_editor.rs",
+          "name": "paint",
+          "line": 1452,
+          "lines": 161,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/mod.rs::present#1",
+          "path": "playbit/src/desktop/mod.rs",
+          "name": "present",
+          "line": 363,
+          "lines": 110,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/guest_window.rs::apply#1",
+          "path": "playbit/src/desktop/guest_window.rs",
+          "name": "apply",
+          "line": 152,
+          "lines": 90,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/account_profile.rs::account_profile#1",
+          "path": "playbit/src/desktop/account_profile.rs",
+          "name": "account_profile",
+          "line": 27,
+          "lines": 72,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/desktop/worker_recovery.rs::start#1",
+          "path": "playbit/src/desktop/worker_recovery.rs",
+          "name": "start",
+          "line": 102,
+          "lines": 71,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/src/platform": {
+      "lines": 2843,
+      "functions": 148,
+      "assertions": 20,
+      "unwrap": 0,
+      "expect": 31,
+      "limit_constants": 8,
+      "unsafe": 119,
+      "lines_over_100": 8,
+      "unwrap_expect": 31,
+      "assertions_per_function": 0.13513513513513514,
+      "long_functions": [
+        {
+          "id": "playbit/src/platform/web/mod.rs::dispatch#1",
+          "path": "playbit/src/platform/web/mod.rs",
+          "name": "dispatch",
+          "line": 515,
+          "lines": 231,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/platform/ios/mod.rs::pb_ios_qualification_seed#1",
+          "path": "playbit/src/platform/ios/mod.rs",
+          "name": "pb_ios_qualification_seed",
+          "line": 343,
+          "lines": 83,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/platform/web/mod.rs::visit_candidate#1",
+          "path": "playbit/src/platform/web/mod.rs",
+          "name": "visit_candidate",
+          "line": 271,
+          "lines": 77,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/platform/ios/mod.rs::pb_ios_open#1",
+          "path": "playbit/src/platform/ios/mod.rs",
+          "name": "pb_ios_open",
+          "line": 106,
+          "lines": 74,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/src/package": {
+      "lines": 512,
+      "functions": 18,
+      "assertions": 6,
+      "unwrap": 0,
+      "expect": 2,
+      "limit_constants": 6,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 2,
+      "assertions_per_function": 0.3333333333333333,
+      "long_functions": [
+        {
+          "id": "playbit/src/package/artwork.rs::vector#1",
+          "path": "playbit/src/package/artwork.rs",
+          "name": "vector",
+          "line": 43,
+          "lines": 78,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/src/bin": {
+      "lines": 1727,
+      "functions": 44,
+      "assertions": 1,
+      "unwrap": 0,
+      "expect": 9,
+      "limit_constants": 2,
+      "unsafe": 16,
+      "lines_over_100": 20,
+      "unwrap_expect": 9,
+      "assertions_per_function": 0.022727272727272728,
+      "long_functions": [
+        {
+          "id": "playbit/src/bin/pb/main.rs::run#1",
+          "path": "playbit/src/bin/pb/main.rs",
+          "name": "run",
+          "line": 20,
+          "lines": 211,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/bin/pb/developer.rs::run#1",
+          "path": "playbit/src/bin/pb/developer.rs",
+          "name": "run",
+          "line": 299,
+          "lines": 121,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/bin/bloblog/main.rs::run#1",
+          "path": "playbit/src/bin/bloblog/main.rs",
+          "name": "run",
+          "line": 29,
+          "lines": 87,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/bin/playbit-mcp/main.rs::main#1",
+          "path": "playbit/src/bin/playbit-mcp/main.rs",
+          "name": "main",
+          "line": 47,
+          "lines": 82,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/kvdb/src": {
+      "lines": 5403,
+      "functions": 312,
+      "assertions": 54,
+      "unwrap": 0,
+      "expect": 36,
+      "limit_constants": 9,
+      "unsafe": 0,
+      "lines_over_100": 4,
+      "unwrap_expect": 36,
+      "assertions_per_function": 0.17307692307692307,
+      "long_functions": [
+        {
+          "id": "playbit/kvdb/src/sync.rs::process_inner#1",
+          "path": "playbit/kvdb/src/sync.rs",
+          "name": "process_inner",
+          "line": 702,
+          "lines": 160,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/kvdb/src/tree.rs::rechunk#1",
+          "path": "playbit/kvdb/src/tree.rs",
+          "name": "rechunk",
+          "line": 360,
+          "lines": 158,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/kvdb/src/sync/prepared.rs::merge#1",
+          "path": "playbit/kvdb/src/sync/prepared.rs",
+          "name": "merge",
+          "line": 136,
+          "lines": 102,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/kvdb/src/sync.rs::combine_deltas#1",
+          "path": "playbit/kvdb/src/sync.rs",
+          "name": "combine_deltas",
+          "line": 1246,
+          "lines": 76,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/kvdb/src/sync.rs::handle_frame#1",
+          "path": "playbit/kvdb/src/sync.rs",
+          "name": "handle_frame",
+          "line": 1741,
+          "lines": 73,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/kvdb/src/sync.rs::process_inner#2",
+          "path": "playbit/kvdb/src/sync.rs",
+          "name": "process_inner",
+          "line": 1548,
+          "lines": 72,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit-api/src": {
+      "lines": 1456,
+      "functions": 93,
+      "assertions": 36,
+      "unwrap": 0,
+      "expect": 4,
+      "limit_constants": 17,
+      "unsafe": 2,
+      "lines_over_100": 0,
+      "unwrap_expect": 4,
+      "assertions_per_function": 0.3870967741935484,
+      "long_functions": []
+    }
+  },
+  "tier_a": {
+    "playbit/src/runtime": {
+      "lines": 4412,
+      "functions": 197,
+      "assertions": 204,
+      "unwrap": 0,
+      "expect": 7,
+      "limit_constants": 15,
+      "unsafe": 12,
+      "lines_over_100": 5,
+      "unwrap_expect": 7,
+      "assertions_per_function": 1.0355329949238579,
+      "long_functions": []
+    },
+    "playbit/src/store": {
+      "lines": 9774,
+      "functions": 476,
+      "assertions": 22,
+      "unwrap": 0,
+      "expect": 26,
+      "limit_constants": 17,
+      "unsafe": 0,
+      "lines_over_100": 2,
+      "unwrap_expect": 26,
+      "assertions_per_function": 0.046218487394957986,
+      "long_functions": [
+        {
+          "id": "playbit/src/store/local/received.rs::adopt_received_volume#1",
+          "path": "playbit/src/store/local/received.rs",
+          "name": "adopt_received_volume",
+          "line": 136,
+          "lines": 159,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local/recovery_catalog.rs::import_credentials#1",
+          "path": "playbit/src/store/local/recovery_catalog.rs",
+          "name": "import_credentials",
+          "line": 243,
+          "lines": 110,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::cached_db#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "cached_db",
+          "line": 2004,
+          "lines": 109,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/catalog/streamed.rs::schema#1",
+          "path": "playbit/src/store/catalog/streamed.rs",
+          "name": "schema",
+          "line": 287,
+          "lines": 108,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::merge_received_creation#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "merge_received_creation",
+          "line": 1285,
+          "lines": 105,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::write_file#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "write_file",
+          "line": 2545,
+          "lines": 104,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::open#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "open",
+          "line": 680,
+          "lines": 93,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::merge_received_delta#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "merge_received_delta",
+          "line": 1175,
+          "lines": 92,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/account/record.rs::decode#1",
+          "path": "playbit/src/store/account/record.rs",
+          "name": "decode",
+          "line": 42,
+          "lines": 85,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/creation.rs::inspect#1",
+          "path": "playbit/src/store/creation.rs",
+          "name": "inspect",
+          "line": 55,
+          "lines": 84,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/creation.rs::inspect_value#1",
+          "path": "playbit/src/store/creation.rs",
+          "name": "inspect_value",
+          "line": 384,
+          "lines": 82,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::create_object_with_fields#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "create_object_with_fields",
+          "line": 2300,
+          "lines": 82,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::create_session#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "create_session",
+          "line": 1783,
+          "lines": 81,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/local.rs::operations#1",
+          "path": "playbit/src/store/local.rs",
+          "name": "operations",
+          "line": 577,
+          "lines": 80,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/catalog/streamed.rs::field_stamp#1",
+          "path": "playbit/src/store/catalog/streamed.rs",
+          "name": "field_stamp",
+          "line": 570,
+          "lines": 79,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/store/catalog.rs::authorize_write_inner#1",
+          "path": "playbit/src/store/catalog.rs",
+          "name": "authorize_write_inner",
+          "line": 278,
+          "lines": 74,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/src/network": {
+      "lines": 3208,
+      "functions": 152,
+      "assertions": 41,
+      "unwrap": 0,
+      "expect": 30,
+      "limit_constants": 10,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 30,
+      "assertions_per_function": 0.26973684210526316,
+      "long_functions": [
+        {
+          "id": "playbit/src/network/ap/client.rs::authenticate#1",
+          "path": "playbit/src/network/ap/client.rs",
+          "name": "authenticate",
+          "line": 677,
+          "lines": 72,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/src/package": {
+      "lines": 512,
+      "functions": 18,
+      "assertions": 6,
+      "unwrap": 0,
+      "expect": 2,
+      "limit_constants": 6,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 2,
+      "assertions_per_function": 0.3333333333333333,
+      "long_functions": [
+        {
+          "id": "playbit/src/package/artwork.rs::vector#1",
+          "path": "playbit/src/package/artwork.rs",
+          "name": "vector",
+          "line": 43,
+          "lines": 78,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/src/platform/web": {
+      "lines": 2296,
+      "functions": 127,
+      "assertions": 20,
+      "unwrap": 0,
+      "expect": 29,
+      "limit_constants": 7,
+      "unsafe": 73,
+      "lines_over_100": 2,
+      "unwrap_expect": 29,
+      "assertions_per_function": 0.15748031496062992,
+      "long_functions": [
+        {
+          "id": "playbit/src/platform/web/mod.rs::dispatch#1",
+          "path": "playbit/src/platform/web/mod.rs",
+          "name": "dispatch",
+          "line": 515,
+          "lines": 231,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/src/platform/web/mod.rs::visit_candidate#1",
+          "path": "playbit/src/platform/web/mod.rs",
+          "name": "visit_candidate",
+          "line": 271,
+          "lines": 77,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit/kvdb/src": {
+      "lines": 5403,
+      "functions": 312,
+      "assertions": 54,
+      "unwrap": 0,
+      "expect": 36,
+      "limit_constants": 9,
+      "unsafe": 0,
+      "lines_over_100": 4,
+      "unwrap_expect": 36,
+      "assertions_per_function": 0.17307692307692307,
+      "long_functions": [
+        {
+          "id": "playbit/kvdb/src/sync.rs::process_inner#1",
+          "path": "playbit/kvdb/src/sync.rs",
+          "name": "process_inner",
+          "line": 702,
+          "lines": 160,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/kvdb/src/tree.rs::rechunk#1",
+          "path": "playbit/kvdb/src/tree.rs",
+          "name": "rechunk",
+          "line": 360,
+          "lines": 158,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/kvdb/src/sync/prepared.rs::merge#1",
+          "path": "playbit/kvdb/src/sync/prepared.rs",
+          "name": "merge",
+          "line": 136,
+          "lines": 102,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/kvdb/src/sync.rs::combine_deltas#1",
+          "path": "playbit/kvdb/src/sync.rs",
+          "name": "combine_deltas",
+          "line": 1246,
+          "lines": 76,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/kvdb/src/sync.rs::handle_frame#1",
+          "path": "playbit/kvdb/src/sync.rs",
+          "name": "handle_frame",
+          "line": 1741,
+          "lines": 73,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "playbit/kvdb/src/sync.rs::process_inner#2",
+          "path": "playbit/kvdb/src/sync.rs",
+          "name": "process_inner",
+          "line": 1548,
+          "lines": 72,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "playbit-api/src": {
+      "lines": 1456,
+      "functions": 93,
+      "assertions": 36,
+      "unwrap": 0,
+      "expect": 4,
+      "limit_constants": 17,
+      "unsafe": 2,
+      "lines_over_100": 0,
+      "unwrap_expect": 4,
+      "assertions_per_function": 0.3870967741935484,
+      "long_functions": []
+    },
+    "playbit/src/desktop/update/archive.rs": {
+      "lines": 219,
+      "functions": 5,
+      "assertions": 0,
+      "unwrap": 0,
+      "expect": 1,
+      "limit_constants": 4,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 1,
+      "assertions_per_function": 0.0,
+      "long_functions": []
+    },
+    "playbit/src/desktop/update/package.rs": {
+      "lines": 204,
+      "functions": 10,
+      "assertions": 0,
+      "unwrap": 0,
+      "expect": 0,
+      "limit_constants": 1,
+      "unsafe": 0,
+      "lines_over_100": 1,
+      "unwrap_expect": 0,
+      "assertions_per_function": 0.0,
+      "long_functions": []
+    },
+    "playbit/src/desktop/update/install.rs": {
+      "lines": 225,
+      "functions": 10,
+      "assertions": 0,
+      "unwrap": 0,
+      "expect": 0,
+      "limit_constants": 0,
+      "unsafe": 2,
+      "lines_over_100": 0,
+      "unwrap_expect": 0,
+      "assertions_per_function": 0.0,
+      "long_functions": []
+    }
+  },
+  "decoders": [
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_view#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_view",
+      "line": 383,
+      "lines": 36,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/decode_view.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_record#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_record",
+      "line": 431,
+      "lines": 45,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_theme#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_theme",
+      "line": 477,
+      "lines": 22,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_container_start#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_container_start",
+      "line": 500,
+      "lines": 9,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_context_menu_start#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_context_menu_start",
+      "line": 510,
+      "lines": 24,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_container_end#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_container_end",
+      "line": 535,
+      "lines": 20,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_text#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_text",
+      "line": 556,
+      "lines": 7,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_canvas#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_canvas",
+      "line": 564,
+      "lines": 30,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_file_image#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_file_image",
+      "line": 595,
+      "lines": 23,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_image_description#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_image_description",
+      "line": 619,
+      "lines": 23,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_button#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_button",
+      "line": 643,
+      "lines": 14,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_text_field#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_text_field",
+      "line": 658,
+      "lines": 24,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_autocomplete_field#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_autocomplete_field",
+      "line": 683,
+      "lines": 49,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_checkbox#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_checkbox",
+      "line": 733,
+      "lines": 14,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_radio#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_radio",
+      "line": 748,
+      "lines": 18,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_popup_button#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_popup_button",
+      "line": 767,
+      "lines": 29,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_list_row#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_list_row",
+      "line": 797,
+      "lines": 24,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/mod.rs::decode_menu_entries#1",
+      "path": "playbit/src/runtime/mod.rs",
+      "name": "decode_menu_entries",
+      "line": 861,
+      "lines": 70,
+      "fuzz_annotation": "decode_view",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/syscall.rs::validate_input#1",
+      "path": "playbit/src/runtime/syscall.rs",
+      "name": "validate_input",
+      "line": 42,
+      "lines": 59,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/runtime/syscall.rs::validate_view_ids#1",
+      "path": "playbit/src/runtime/syscall.rs",
+      "name": "validate_view_ids",
+      "line": 104,
+      "lines": 44,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/runtime/syscall.rs::validate_guest#1",
+      "path": "playbit/src/runtime/syscall.rs",
+      "name": "validate_guest",
+      "line": 600,
+      "lines": 3,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/runtime/syscall.rs::validate_volumes#1",
+      "path": "playbit/src/runtime/syscall.rs",
+      "name": "validate_volumes",
+      "line": 937,
+      "lines": 30,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/runtime/syscall.rs::validate_context#1",
+      "path": "playbit/src/runtime/syscall.rs",
+      "name": "validate_context",
+      "line": 968,
+      "lines": 50,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/runtime/syscall.rs::validate_participants#1",
+      "path": "playbit/src/runtime/syscall.rs",
+      "name": "validate_participants",
+      "line": 1019,
+      "lines": 10,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/runtime/syscall.rs::validate_resource_name#1",
+      "path": "playbit/src/runtime/syscall.rs",
+      "name": "validate_resource_name",
+      "line": 1030,
+      "lines": 10,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/runtime/syscall.rs::validate_scene_capabilities#1",
+      "path": "playbit/src/runtime/syscall.rs",
+      "name": "validate_scene_capabilities",
+      "line": 1155,
+      "lines": 23,
+      "fuzz_annotation": "syscall_dispatch",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/runtime/syscall.rs::validate_query_page#1",
+      "path": "playbit/src/runtime/syscall.rs",
+      "name": "validate_query_page",
+      "line": 1992,
+      "lines": 33,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/runtime/wasm_atomics.rs::validate_memories#1",
+      "path": "playbit/src/runtime/wasm_atomics.rs",
+      "name": "validate_memories",
+      "line": 62,
+      "lines": 19,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/account/record.rs::validate_display_name#1",
+      "path": "playbit/src/store/account/record.rs",
+      "name": "validate_display_name",
+      "line": 8,
+      "lines": 12,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/account/record.rs::decode#1",
+      "path": "playbit/src/store/account/record.rs",
+      "name": "decode",
+      "line": 42,
+      "lines": 85,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/account.rs::validate_envelope#1",
+      "path": "playbit/src/store/account.rs",
+      "name": "validate_envelope",
+      "line": 30,
+      "lines": 11,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/account.rs::validate_delta#1",
+      "path": "playbit/src/store/account.rs",
+      "name": "validate_delta",
+      "line": 54,
+      "lines": 3,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/account.rs::validate_delta#2",
+      "path": "playbit/src/store/account.rs",
+      "name": "validate_delta",
+      "line": 179,
+      "lines": 3,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/bloblog.rs::parse#1",
+      "path": "playbit/src/store/bloblog.rs",
+      "name": "parse",
+      "line": 29,
+      "lines": 11,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/bloblog.rs::validate_blobs#1",
+      "path": "playbit/src/store/bloblog.rs",
+      "name": "validate_blobs",
+      "line": 68,
+      "lines": 12,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/bloblog.rs::decode#1",
+      "path": "playbit/src/store/bloblog.rs",
+      "name": "decode",
+      "line": 107,
+      "lines": 60,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/catalog/bounded.rs::decode_value#1",
+      "path": "playbit/src/store/catalog/bounded.rs",
+      "name": "decode_value",
+      "line": 79,
+      "lines": 7,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/catalog/bounded.rs::decode_reader#1",
+      "path": "playbit/src/store/catalog/bounded.rs",
+      "name": "decode_reader",
+      "line": 86,
+      "lines": 6,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/catalog/bounded.rs::validate_pending#1",
+      "path": "playbit/src/store/catalog/bounded.rs",
+      "name": "validate_pending",
+      "line": 96,
+      "lines": 5,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/catalog/received.rs::validate#1",
+      "path": "playbit/src/store/catalog/received.rs",
+      "name": "validate",
+      "line": 53,
+      "lines": 8,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/catalog/streamed.rs::decode_read#1",
+      "path": "playbit/src/store/catalog/streamed.rs",
+      "name": "decode_read",
+      "line": 41,
+      "lines": 4,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/catalog.rs::validate_volume_label#1",
+      "path": "playbit/src/store/catalog.rs",
+      "name": "validate_volume_label",
+      "line": 32,
+      "lines": 6,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/catalog.rs::validate#1",
+      "path": "playbit/src/store/catalog.rs",
+      "name": "validate",
+      "line": 433,
+      "lines": 7,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/catalog.rs::validate_metadata_entry#1",
+      "path": "playbit/src/store/catalog.rs",
+      "name": "validate_metadata_entry",
+      "line": 517,
+      "lines": 38,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/catalog.rs::validate_version#1",
+      "path": "playbit/src/store/catalog.rs",
+      "name": "validate_version",
+      "line": 574,
+      "lines": 10,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/catalog.rs::decode#1",
+      "path": "playbit/src/store/catalog.rs",
+      "name": "decode",
+      "line": 588,
+      "lines": 3,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/creation.rs::decode#1",
+      "path": "playbit/src/store/creation.rs",
+      "name": "decode",
+      "line": 23,
+      "lines": 12,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/creation.rs::validate#1",
+      "path": "playbit/src/store/creation.rs",
+      "name": "validate",
+      "line": 207,
+      "lines": 29,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/id.rs::parse#1",
+      "path": "playbit/src/store/id.rs",
+      "name": "parse",
+      "line": 20,
+      "lines": 17,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/invitation.rs::parse_session_code#1",
+      "path": "playbit/src/store/invitation.rs",
+      "name": "parse_session_code",
+      "line": 74,
+      "lines": 17,
+      "fuzz_annotation": "store_contract",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/invitation.rs::parse_envelope_text#1",
+      "path": "playbit/src/store/invitation.rs",
+      "name": "parse_envelope_text",
+      "line": 97,
+      "lines": 12,
+      "fuzz_annotation": "store_contract",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/invitation.rs::parse_session_link#1",
+      "path": "playbit/src/store/invitation.rs",
+      "name": "parse_session_link",
+      "line": 112,
+      "lines": 11,
+      "fuzz_annotation": "store_contract",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/invitation.rs::validate#1",
+      "path": "playbit/src/store/invitation.rs",
+      "name": "validate",
+      "line": 127,
+      "lines": 27,
+      "fuzz_annotation": "store_contract",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/local/account_replica.rs::decode#1",
+      "path": "playbit/src/store/local/account_replica.rs",
+      "name": "decode",
+      "line": 62,
+      "lines": 8,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/local/account_replica.rs::validate_account_projection#1",
+      "path": "playbit/src/store/local/account_replica.rs",
+      "name": "validate_account_projection",
+      "line": 288,
+      "lines": 25,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/local/received.rs::validate_retained_catalog#1",
+      "path": "playbit/src/store/local/received.rs",
+      "name": "validate_retained_catalog",
+      "line": 377,
+      "lines": 30,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/local/recovery_catalog.rs::parse#1",
+      "path": "playbit/src/store/local/recovery_catalog.rs",
+      "name": "parse",
+      "line": 65,
+      "lines": 37,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/local/recovery_catalog.rs::validate_incoming_catalog#1",
+      "path": "playbit/src/store/local/recovery_catalog.rs",
+      "name": "validate_incoming_catalog",
+      "line": 187,
+      "lines": 37,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/local.rs::validate_file_reference#1",
+      "path": "playbit/src/store/local.rs",
+      "name": "validate_file_reference",
+      "line": 2536,
+      "lines": 9,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/object_contract.rs::validate#1",
+      "path": "playbit/src/store/object_contract.rs",
+      "name": "validate",
+      "line": 55,
+      "lines": 21,
+      "fuzz_annotation": "store_contract",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/object_contract.rs::validate#2",
+      "path": "playbit/src/store/object_contract.rs",
+      "name": "validate",
+      "line": 155,
+      "lines": 23,
+      "fuzz_annotation": "store_contract",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/object_contract.rs::validate_successor#1",
+      "path": "playbit/src/store/object_contract.rs",
+      "name": "validate_successor",
+      "line": 215,
+      "lines": 9,
+      "fuzz_annotation": "store_contract",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/store/query.rs::validate_projection#1",
+      "path": "playbit/src/store/query.rs",
+      "name": "validate_projection",
+      "line": 29,
+      "lines": 11,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/query.rs::decode_value#1",
+      "path": "playbit/src/store/query.rs",
+      "name": "decode_value",
+      "line": 214,
+      "lines": 32,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/query.rs::decode_cell#1",
+      "path": "playbit/src/store/query.rs",
+      "name": "decode_cell",
+      "line": 269,
+      "lines": 41,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/recovery.rs::parse_secret#1",
+      "path": "playbit/src/store/recovery.rs",
+      "name": "parse_secret",
+      "line": 24,
+      "lines": 14,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/recovery.rs::decode_ciphertext#1",
+      "path": "playbit/src/store/recovery.rs",
+      "name": "decode_ciphertext",
+      "line": 44,
+      "lines": 10,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/store/recovery.rs::validate_envelope#1",
+      "path": "playbit/src/store/recovery.rs",
+      "name": "validate_envelope",
+      "line": 120,
+      "lines": 6,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/network/ap/client.rs::validate_preissued#1",
+      "path": "playbit/src/network/ap/client.rs",
+      "name": "validate_preissued",
+      "line": 179,
+      "lines": 7,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/network/ap/client.rs::validate_private_identity_file#1",
+      "path": "playbit/src/network/ap/client.rs",
+      "name": "validate_private_identity_file",
+      "line": 250,
+      "lines": 8,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/network/ap/client.rs::validate_private_identity_file#2",
+      "path": "playbit/src/network/ap/client.rs",
+      "name": "validate_private_identity_file",
+      "line": 260,
+      "lines": 6,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/network/ap/client.rs::validate_authenticated_identity#1",
+      "path": "playbit/src/network/ap/client.rs",
+      "name": "validate_authenticated_identity",
+      "line": 750,
+      "lines": 18,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/network/ap/client.rs::validate_registration_identity#1",
+      "path": "playbit/src/network/ap/client.rs",
+      "name": "validate_registration_identity",
+      "line": 776,
+      "lines": 9,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/network/ap/client.rs::parse#1",
+      "path": "playbit/src/network/ap/client.rs",
+      "name": "parse",
+      "line": 869,
+      "lines": 24,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/network/ap/hello.rs::decode#1",
+      "path": "playbit/src/network/ap/hello.rs",
+      "name": "decode",
+      "line": 47,
+      "lines": 22,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/mod.rs::decode#1",
+      "path": "playbit/src/network/ap/mod.rs",
+      "name": "decode",
+      "line": 114,
+      "lines": 26,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/mod.rs::validate#1",
+      "path": "playbit/src/network/ap/mod.rs",
+      "name": "validate",
+      "line": 141,
+      "lines": 23,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/mod.rs::decode#2",
+      "path": "playbit/src/network/ap/mod.rs",
+      "name": "decode",
+      "line": 177,
+      "lines": 30,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate",
+      "line": 27,
+      "lines": 17,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate#2",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate",
+      "line": 365,
+      "lines": 48,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_identity#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_identity",
+      "line": 415,
+      "lines": 24,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_running_scope#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_running_scope",
+      "line": 441,
+      "lines": 29,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_create_deployment#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_create_deployment",
+      "line": 472,
+      "lines": 15,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_get_deployment#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_get_deployment",
+      "line": 489,
+      "lines": 34,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_list_deployments#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_list_deployments",
+      "line": 525,
+      "lines": 11,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_resolve_session#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_resolve_session",
+      "line": 538,
+      "lines": 12,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_advance_session#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_advance_session",
+      "line": 552,
+      "lines": 14,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_put_credential_vault#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_put_credential_vault",
+      "line": 607,
+      "lines": 18,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_resolve_volume_grantee#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_resolve_volume_grantee",
+      "line": 627,
+      "lines": 11,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_register_volume#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_register_volume",
+      "line": 640,
+      "lines": 11,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_register_session#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_register_session",
+      "line": 653,
+      "lines": 39,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_provision_replica#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_provision_replica",
+      "line": 694,
+      "lines": 11,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_open_session#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_open_session",
+      "line": 707,
+      "lines": 12,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_session_listen#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_session_listen",
+      "line": 721,
+      "lines": 11,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_session_send#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_session_send",
+      "line": 734,
+      "lines": 16,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_peer_listen#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_peer_listen",
+      "line": 752,
+      "lines": 11,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_peer_request#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_peer_request",
+      "line": 765,
+      "lines": 15,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_peer_reply#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_peer_reply",
+      "line": 782,
+      "lines": 11,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_volume_usage#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_volume_usage",
+      "line": 795,
+      "lines": 11,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_upload_blob#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_upload_blob",
+      "line": 808,
+      "lines": 14,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_download_build#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_download_build",
+      "line": 824,
+      "lines": 11,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_subscribe_replica#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_subscribe_replica",
+      "line": 837,
+      "lines": 16,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_sync_database#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_sync_database",
+      "line": 855,
+      "lines": 15,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/operation.rs::validate_upload_build#1",
+      "path": "playbit/src/network/ap/operation.rs",
+      "name": "validate_upload_build",
+      "line": 872,
+      "lines": 11,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/replication.rs::validate_delta#1",
+      "path": "playbit/src/network/ap/replication.rs",
+      "name": "validate_delta",
+      "line": 47,
+      "lines": 6,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/network/ap/replication.rs::decode_creation#1",
+      "path": "playbit/src/network/ap/replication.rs",
+      "name": "decode_creation",
+      "line": 56,
+      "lines": 12,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/replication.rs::validate_checkpoint#1",
+      "path": "playbit/src/network/ap/replication.rs",
+      "name": "validate_checkpoint",
+      "line": 81,
+      "lines": 6,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/network/ap/replication.rs::validate#1",
+      "path": "playbit/src/network/ap/replication.rs",
+      "name": "validate",
+      "line": 89,
+      "lines": 29,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/replication.rs::decode#1",
+      "path": "playbit/src/network/ap/replication.rs",
+      "name": "decode",
+      "line": 153,
+      "lines": 44,
+      "fuzz_annotation": "ap_codec",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/replication.rs::validate#2",
+      "path": "playbit/src/network/ap/replication.rs",
+      "name": "validate",
+      "line": 207,
+      "lines": 6,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/replication.rs::validate#3",
+      "path": "playbit/src/network/ap/replication.rs",
+      "name": "validate",
+      "line": 223,
+      "lines": 6,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/network/ap/service_client.rs::parse_response#1",
+      "path": "playbit/src/network/ap/service_client.rs",
+      "name": "parse_response",
+      "line": 99,
+      "lines": 13,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/src/package/artwork.rs::decode#1",
+      "path": "playbit/src/package/artwork.rs",
+      "name": "decode",
+      "line": 8,
+      "lines": 34,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs",
+        "playbit/fuzz/fuzz_targets/package_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/package/mod.rs::validate#1",
+      "path": "playbit/src/package/mod.rs",
+      "name": "validate",
+      "line": 257,
+      "lines": 30,
+      "fuzz_annotation": "package_contract",
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/package_contract.rs",
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/src/platform/web/mod.rs::validate_grants#1",
+      "path": "playbit/src/platform/web/mod.rs",
+      "name": "validate_grants",
+      "line": 391,
+      "lines": 13,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit/kvdb/src/clock.rs::decode#1",
+      "path": "playbit/kvdb/src/clock.rs",
+      "name": "decode",
+      "line": 76,
+      "lines": 4,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/kvdb/src/encoding.rs::decode#1",
+      "path": "playbit/kvdb/src/encoding.rs",
+      "name": "decode",
+      "line": 92,
+      "lines": 29,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/kvdb/src/encoding.rs::decode#2",
+      "path": "playbit/kvdb/src/encoding.rs",
+      "name": "decode",
+      "line": 203,
+      "lines": 27,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/decode_view.rs",
+        "playbit/fuzz/fuzz_targets/kvdb_encoding.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit/kvdb/src/sync.rs::decode_ent_state#1",
+      "path": "playbit/kvdb/src/sync.rs",
+      "name": "decode_ent_state",
+      "line": 317,
+      "lines": 8,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "playbit-api/src/abi/syscall.rs::decode#1",
+      "path": "playbit-api/src/abi/syscall.rs",
+      "name": "decode",
+      "line": 279,
+      "lines": 14,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/decode_view.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit-api/src/abi/syscall.rs::decode#2",
+      "path": "playbit-api/src/abi/syscall.rs",
+      "name": "decode",
+      "line": 313,
+      "lines": 10,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/decode_view.rs"
+      ],
+      "covered": true
+    },
+    {
+      "id": "playbit-api/src/abi/syscall.rs::decode#3",
+      "path": "playbit-api/src/abi/syscall.rs",
+      "name": "decode",
+      "line": 339,
+      "lines": 8,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/decode_view.rs"
+      ],
+      "covered": true
+    }
+  ],
+  "crates": {
+    "playbit (desktop)": {
+      "count": 358,
+      "unavailable": null
+    },
+    "playbit (no default features)": {
+      "count": 143,
+      "unavailable": null
+    },
+    "kvdb (redb)": {
+      "count": 10,
+      "unavailable": null
+    }
+  }
+}

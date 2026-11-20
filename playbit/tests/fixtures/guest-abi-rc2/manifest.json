@@ -1,0 +1,694 @@
+{
+    "candidate": "v1-rc2",
+    "status": "release_candidate",
+    "abi": "playbit.syscall/1",
+    "toolchains": {
+        "clang": "Homebrew clang version 22.1.5\nTarget: arm64-apple-darwin27.2.0\nThread model: posix\nInstalledDir: /opt/homebrew/Cellar/llvm/22.1.5/bin\nConfiguration file: /opt/homebrew/Cellar/llvm/22.1.5/etc/clang/arm64-apple-darwin.cfg",
+        "wasm-ld": "Homebrew LLD 22.1.5",
+        "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: aarch64-apple-darwin\nrelease: 1.99.0\nLLVM version: 23.1.1"
+    },
+    "source_snapshot": {
+        "file": "sources.tar.gz",
+        "bytes": 92543,
+        "sha256": "84138f49168658a8a98e27999013548210ed87db78f29c5527db1af71669c68e",
+        "blake3": "29096436b750dce5d5d13e664c1cc1396421adf521c35a67ae547aa1f0f13b33"
+    },
+    "inputs": [
+        {
+            "file": "playbit-api/include/playbit/sys/abi.h",
+            "bytes": 41365,
+            "sha256": "4da249bb636baeb7b1552cf7ce837947e47a1466cea608399313a2a62bb1dc55"
+        },
+        {
+            "file": "playbit-api/src/abi/authenticated.rs",
+            "bytes": 3476,
+            "sha256": "0159a1442636503f777b7ae3f4b94554890895e0f0e00966b44ce4eab0edb1a1"
+        },
+        {
+            "file": "playbit-api/src/abi/bloblog.rs",
+            "bytes": 8912,
+            "sha256": "37d87fbb2dac411e827e4c62645746068b45e7eaffd6e3337272a7d5a826df3b"
+        },
+        {
+            "file": "playbit-api/src/abi/bloblog/tests.rs",
+            "bytes": 2643,
+            "sha256": "2efa2b9fe3b9f6c7be559aa5e22629ce3e22fc71c2f8126481c41825e2bc7525"
+        },
+        {
+            "file": "playbit-api/src/abi/data.rs",
+            "bytes": 12269,
+            "sha256": "1207f5538ee869ec6d35e93c1d67c499921776b3dbb6a04491a36b76934775ab"
+        },
+        {
+            "file": "playbit-api/src/abi/descriptors.rs",
+            "bytes": 11560,
+            "sha256": "16d3759385ccd40efd78c739f8b078d248197a65e889b0575f3d2033feb2c8ea"
+        },
+        {
+            "file": "playbit-api/src/abi/dispatch.rs",
+            "bytes": 7373,
+            "sha256": "6bf06cb9ad40e518f2d586258e0231cea87a28fe0037f568d1b37ce360265bd8"
+        },
+        {
+            "file": "playbit-api/src/abi/environment.rs",
+            "bytes": 10260,
+            "sha256": "45005f854451698692ea1d4aafe05298c641c51512155dfa54e79f76a591e415"
+        },
+        {
+            "file": "playbit-api/src/abi/files.rs",
+            "bytes": 15151,
+            "sha256": "81ce84e644f9b5e4717764f11e9d936df9c93c9473522bf7f8769495a6af81df"
+        },
+        {
+            "file": "playbit-api/src/abi/invocation.rs",
+            "bytes": 1597,
+            "sha256": "cf82fb5aa6a9e3395711c5ac4f23a33541b5ee17fda58083c8ee0fbac60e1cab"
+        },
+        {
+            "file": "playbit-api/src/abi/kv.rs",
+            "bytes": 15136,
+            "sha256": "f74b3de5f1e826884eab2b925a6021ba982235597705b0db4ba0fd5a9ddfb677"
+        },
+        {
+            "file": "playbit-api/src/abi/kv/tests.rs",
+            "bytes": 4219,
+            "sha256": "60d2edb86044a77c234d81666577a0b3b1097b9b72c61ba3cafbe3448d76848e"
+        },
+        {
+            "file": "playbit-api/src/abi/mod.rs",
+            "bytes": 766,
+            "sha256": "1826f71e8051d13321017f8471be1fe9fac6b01ef91234b703d715e46315f6c6"
+        },
+        {
+            "file": "playbit-api/src/abi/operations.rs",
+            "bytes": 7481,
+            "sha256": "87b666d8df06cf12adaa8d3158276ed38e7cb417cee8c928596ae81274ed2611"
+        },
+        {
+            "file": "playbit-api/src/abi/pending.rs",
+            "bytes": 9153,
+            "sha256": "c0d1cc84a9e2932cfb6213fd212712dacefba0b1a5eda05590cb0c8cb488dc46"
+        },
+        {
+            "file": "playbit-api/src/abi/record.rs",
+            "bytes": 10408,
+            "sha256": "51bc3fc359068d213a3fd482cfbd84597c558b3aa41a408e870f2b9217e1d1d8"
+        },
+        {
+            "file": "playbit-api/src/abi/schema.rs",
+            "bytes": 5817,
+            "sha256": "1d8b7b956a574520cdebf886a295aaf31949ff530910c3e1fdc5976ae7a6df9a"
+        },
+        {
+            "file": "playbit-api/src/abi/session.rs",
+            "bytes": 536,
+            "sha256": "9bfba10eea584e89e584c25dc97bcf177f569e3c8fa91791f7b7c57692488295"
+        },
+        {
+            "file": "playbit-api/src/abi/syscall.rs",
+            "bytes": 35950,
+            "sha256": "a9c121183d1dbf60534261b7bf991958b50775e8e6e889235d6af193be60e861"
+        },
+        {
+            "file": "playbit-api/src/abi/trace.rs",
+            "bytes": 2585,
+            "sha256": "bba8d6c3f1c0ff244763f1c4f028dfec7dbfa172b77e98ce24555d05aebc7338"
+        },
+        {
+            "file": "playbit-api/src/app.rs",
+            "bytes": 54751,
+            "sha256": "cbdd8ae8fec492987202c0464f306507efec542ff7ddad4f640241c4ddbb2dab"
+        },
+        {
+            "file": "playbit-api/src/context.rs",
+            "bytes": 8031,
+            "sha256": "2577bb8f7b8a21eb67398857a1706b237ac13f7fd7042e0f1003c100d8622703"
+        },
+        {
+            "file": "playbit-api/src/context/authenticated.rs",
+            "bytes": 5364,
+            "sha256": "f8f798d8d9d498e27871dc102534deffbd1e6fb6203fb5a909051e0a9854567a"
+        },
+        {
+            "file": "playbit-api/src/context/bloblog.rs",
+            "bytes": 4236,
+            "sha256": "5413bed8df767ff5deea4956ab5f604a2c83ca54fc4aedb5c27fd6d2e48cd875"
+        },
+        {
+            "file": "playbit-api/src/context/data.rs",
+            "bytes": 23557,
+            "sha256": "e319509b1702a1aa151b0b7c3ef867f54442f49af2249112beb147c3b2914321"
+        },
+        {
+            "file": "playbit-api/src/context/environment.rs",
+            "bytes": 5209,
+            "sha256": "39e64f6be91c6d45f7a0c84f2215cf763b98407bd4fc341e6a6cac518783e993"
+        },
+        {
+            "file": "playbit-api/src/context/events.rs",
+            "bytes": 7913,
+            "sha256": "51502ffa90030962ed2f21b0245b1f56dcd8d465309098469a9f20a38b7c2d5e"
+        },
+        {
+            "file": "playbit-api/src/context/file_ownership.rs",
+            "bytes": 12783,
+            "sha256": "471d7f2d67d77468b67ae95b97f75a63652ecf577f93d45803e0ed204ee57376"
+        },
+        {
+            "file": "playbit-api/src/context/files.rs",
+            "bytes": 8837,
+            "sha256": "4fb7bd37599b4a645d555d1d7a5276507bf89323fc4f00e572e7357fa300da0f"
+        },
+        {
+            "file": "playbit-api/src/context/kv.rs",
+            "bytes": 6818,
+            "sha256": "5c1451d77ef7856f02b4c51d3c7ad4756210f40ff8276c31a59688b1598836e9"
+        },
+        {
+            "file": "playbit-api/src/context/pending.rs",
+            "bytes": 5946,
+            "sha256": "fb6fea5c1c28b470710867921f79575aed3b372c7be3d691ab66c6effab4b2db"
+        },
+        {
+            "file": "playbit-api/src/context/schema.rs",
+            "bytes": 8207,
+            "sha256": "d760cad88066248b6f7d57801a9ee76b1d6c3e342f1f876db7f0e8600354f398"
+        },
+        {
+            "file": "playbit-api/src/context/session.rs",
+            "bytes": 5687,
+            "sha256": "7ae04e762c119364959c12e4121bffb9b68689e1c6c88096fe63bbd6d33245b4"
+        },
+        {
+            "file": "playbit-api/src/context/trace.rs",
+            "bytes": 5458,
+            "sha256": "0bc781af988953e6b36f31c9da27d3dd1bdb92e61a403dbc2189a2d33fcbe838"
+        },
+        {
+            "file": "playbit-api/src/lib.rs",
+            "bytes": 375,
+            "sha256": "b13075b05cef9dfe95985de01486c67c0a845710bdcd94ce925d0f56be8a143f"
+        },
+        {
+            "file": "playbit-api/src/ui/elements.rs",
+            "bytes": 7493,
+            "sha256": "c86cdade8491721475d2d765ce1e437e4a6a79e7410012ae71b7baaa7cda5995"
+        },
+        {
+            "file": "playbit-api/src/ui/mod.rs",
+            "bytes": 49597,
+            "sha256": "cd117b360e86a5ea29c48c88e254c8818bca4a0b9639584f99c664fa46d846aa"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/authenticated-app.c",
+            "bytes": 2014,
+            "sha256": "9f4ff54b1e882c112997b67ba9425eed761843fef3dc6c5794801286a83c9711"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/authenticated-app.rs",
+            "bytes": 1893,
+            "sha256": "b9d302c03849217fd0488049a01b304fbfea5e2e3df763df1f3d4799d2e8db45"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/events-app.rs",
+            "bytes": 845,
+            "sha256": "652c5f7af7b237ee8af72609d66d03ae6e2a1ad1fcd31cbf95b369bd4912aa2b"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/memory-app.c",
+            "bytes": 2296,
+            "sha256": "1f67ca5f2c696b495a8fcdadbbc1d9cb7264695ccbdd9b23db64bd1fdbfa847e"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/memory-app.rs",
+            "bytes": 2190,
+            "sha256": "2bc830ffa97ed717c4354bee4ba46561a8dabaad0e850a07ec6940b3092020d2"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/pending-app.c",
+            "bytes": 1907,
+            "sha256": "38300c92a5d03f507655bb0933262bf0bb85448b97b20fbf8724078578839f04"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/pending-app.rs",
+            "bytes": 1463,
+            "sha256": "3bcb5fb26252fce7be2510513e176bb524cf6c3b83db209c9510b9f4948c8280"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/query-app.c",
+            "bytes": 2977,
+            "sha256": "d5ccba8b7eb5ad89f04d95798acdfdd2a44fe6e8c3ec7237735ae70bab18a88f"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/query-app.rs",
+            "bytes": 2851,
+            "sha256": "adb0196a5c5a82d2bf0f0ad34ab73172d40cdf305c3545d7a94ebdec075f5cff"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/result-app.c",
+            "bytes": 5163,
+            "sha256": "44f788574fd831ba97ddec2e9fde659235c0e74ffcf876f6bd21753b3091785f"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/result-app.rs",
+            "bytes": 5140,
+            "sha256": "4ec5b30342122846e2e54ae20331caacdf50200b4905b9b4b01d62ce6ff5c537"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/schema-app.c",
+            "bytes": 3703,
+            "sha256": "a175d9bdb2067d1f5a01c68fd39bda688ad853589ad81455e815f81d7fd78b34"
+        },
+        {
+            "file": "playbit/platform/native/wasm-probe/schema-app.rs",
+            "bytes": 3249,
+            "sha256": "983de471207d72dab3269df231e336b4b879a2c2b70b0eefaf93b4320d60cbd1"
+        }
+    ],
+    "commands": [
+        [
+            "rustc",
+            "--edition=2024",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--crate-name",
+            "playbit_api",
+            "--crate-type",
+            "rlib",
+            "-D",
+            "warnings",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "panic=abort",
+            "playbit-api/src/lib.rs",
+            "-o",
+            "out/libplaybit_api.rlib"
+        ],
+        [
+            "clang",
+            "--target=wasm32",
+            "-std=c17",
+            "-ffreestanding",
+            "-nostdlib",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-O2",
+            "-I",
+            "playbit-api/include",
+            "-c",
+            "playbit/platform/native/wasm-probe/memory-app.c",
+            "-o",
+            "out/memory.o"
+        ],
+        [
+            "wasm-ld",
+            "--no-entry",
+            "--export=probe_memory_begin",
+            "--export=probe_memory_take",
+            "out/memory.o",
+            "-o",
+            "out/memory-c.wasm"
+        ],
+        [
+            "rustc",
+            "--edition=2024",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--crate-name",
+            "memory_probe",
+            "--crate-type",
+            "cdylib",
+            "-D",
+            "warnings",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "panic=abort",
+            "-C",
+            "strip=symbols",
+            "--extern",
+            "playbit_api=out/libplaybit_api.rlib",
+            "playbit/platform/native/wasm-probe/memory-app.rs",
+            "-o",
+            "out/memory-rust.wasm"
+        ],
+        [
+            "clang",
+            "--target=wasm32",
+            "-std=c17",
+            "-ffreestanding",
+            "-nostdlib",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-O2",
+            "-I",
+            "playbit-api/include",
+            "-c",
+            "playbit/platform/native/wasm-probe/result-app.c",
+            "-o",
+            "out/result.o"
+        ],
+        [
+            "wasm-ld",
+            "--no-entry",
+            "--export=probe_results",
+            "--export=probe_result_begin",
+            "--export=probe_result_take",
+            "out/result.o",
+            "-o",
+            "out/result-c.wasm"
+        ],
+        [
+            "rustc",
+            "--edition=2024",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--crate-name",
+            "result_probe",
+            "--crate-type",
+            "cdylib",
+            "-D",
+            "warnings",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "panic=abort",
+            "-C",
+            "strip=symbols",
+            "--extern",
+            "playbit_api=out/libplaybit_api.rlib",
+            "playbit/platform/native/wasm-probe/result-app.rs",
+            "-o",
+            "out/result-rust.wasm"
+        ],
+        [
+            "clang",
+            "--target=wasm32",
+            "-std=c17",
+            "-ffreestanding",
+            "-nostdlib",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-O2",
+            "-I",
+            "playbit-api/include",
+            "-c",
+            "playbit/platform/native/wasm-probe/schema-app.c",
+            "-o",
+            "out/schema.o"
+        ],
+        [
+            "wasm-ld",
+            "--no-entry",
+            "--export=probe_schema",
+            "--export=probe_schema_establish_begin",
+            "--export=probe_schema_establish_take",
+            "--export=probe_schema_read_begin",
+            "out/schema.o",
+            "-o",
+            "out/schema-c.wasm"
+        ],
+        [
+            "rustc",
+            "--edition=2024",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--crate-name",
+            "schema_probe",
+            "--crate-type",
+            "cdylib",
+            "-D",
+            "warnings",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "panic=abort",
+            "-C",
+            "strip=symbols",
+            "--extern",
+            "playbit_api=out/libplaybit_api.rlib",
+            "playbit/platform/native/wasm-probe/schema-app.rs",
+            "-o",
+            "out/schema-rust.wasm"
+        ],
+        [
+            "clang",
+            "--target=wasm32",
+            "-std=c17",
+            "-ffreestanding",
+            "-nostdlib",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-O2",
+            "-I",
+            "playbit-api/include",
+            "-c",
+            "playbit/platform/native/wasm-probe/query-app.c",
+            "-o",
+            "out/query.o"
+        ],
+        [
+            "wasm-ld",
+            "--no-entry",
+            "--export=probe_query_begin",
+            "--export=probe_query_take",
+            "out/query.o",
+            "-o",
+            "out/query-c.wasm"
+        ],
+        [
+            "rustc",
+            "--edition=2024",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--crate-name",
+            "query_probe",
+            "--crate-type",
+            "cdylib",
+            "-D",
+            "warnings",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "panic=abort",
+            "-C",
+            "strip=symbols",
+            "--extern",
+            "playbit_api=out/libplaybit_api.rlib",
+            "playbit/platform/native/wasm-probe/query-app.rs",
+            "-o",
+            "out/query-rust.wasm"
+        ],
+        [
+            "clang",
+            "--target=wasm32",
+            "-std=c17",
+            "-ffreestanding",
+            "-nostdlib",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-O2",
+            "-I",
+            "playbit-api/include",
+            "-c",
+            "playbit/platform/native/wasm-probe/pending-app.c",
+            "-o",
+            "out/pending.o"
+        ],
+        [
+            "wasm-ld",
+            "--no-entry",
+            "--export=probe_pending",
+            "out/pending.o",
+            "-o",
+            "out/pending-c.wasm"
+        ],
+        [
+            "rustc",
+            "--edition=2024",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--crate-name",
+            "pending_probe",
+            "--crate-type",
+            "cdylib",
+            "-D",
+            "warnings",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "panic=abort",
+            "-C",
+            "strip=symbols",
+            "--extern",
+            "playbit_api=out/libplaybit_api.rlib",
+            "playbit/platform/native/wasm-probe/pending-app.rs",
+            "-o",
+            "out/pending-rust.wasm"
+        ],
+        [
+            "clang",
+            "--target=wasm32",
+            "-std=c17",
+            "-ffreestanding",
+            "-nostdlib",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-O2",
+            "-I",
+            "playbit-api/include",
+            "-c",
+            "playbit/platform/native/wasm-probe/authenticated-app.c",
+            "-o",
+            "out/authenticated.o"
+        ],
+        [
+            "wasm-ld",
+            "--no-entry",
+            "--export=probe_authenticated",
+            "--export=probe_authenticated_begin",
+            "out/authenticated.o",
+            "-o",
+            "out/authenticated-c.wasm"
+        ],
+        [
+            "rustc",
+            "--edition=2024",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--crate-name",
+            "authenticated_probe",
+            "--crate-type",
+            "cdylib",
+            "-D",
+            "warnings",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "panic=abort",
+            "-C",
+            "strip=symbols",
+            "--extern",
+            "playbit_api=out/libplaybit_api.rlib",
+            "playbit/platform/native/wasm-probe/authenticated-app.rs",
+            "-o",
+            "out/authenticated-rust.wasm"
+        ],
+        [
+            "rustc",
+            "--edition=2024",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--crate-name",
+            "events_probe",
+            "--crate-type",
+            "cdylib",
+            "-D",
+            "warnings",
+            "-C",
+            "opt-level=2",
+            "-C",
+            "panic=abort",
+            "--extern",
+            "playbit_api=out/libplaybit_api.rlib",
+            "playbit/platform/native/wasm-probe/events-app.rs",
+            "-o",
+            "out/events-rust.wasm"
+        ]
+    ],
+    "artifacts": [
+        {
+            "file": "authenticated-c.wasm",
+            "bytes": 1113,
+            "sha256": "e191d9b17a95253e7c61f8196a9d5b0c9b95ef172299d11506e1b30cbf81061c",
+            "blake3": "490590395fb65aab0dfb11bff9f573b4f91cf45bc8f99f01a7d08a290e9c2d28"
+        },
+        {
+            "file": "authenticated-rust.wasm",
+            "bytes": 36552,
+            "sha256": "307102b67c78b68580342e568ebe084598a0643eacd30b5fa6bd84f91ae20416",
+            "blake3": "e95688deb4edc10f8b24384f87784dd76aee1aa1b6fa281cfe06f17e1c1ad5b6"
+        },
+        {
+            "file": "events-rust.wasm",
+            "bytes": 1671611,
+            "sha256": "4fe307b330e68832deb29f0d7d19585f783aab7c64d87d163062f4fd46be5646",
+            "blake3": "c3e0553d0962211c0dfad7f0afc6e6419e0136eb6b1305c23847754c6ade0db4"
+        },
+        {
+            "file": "memory-c.wasm",
+            "bytes": 1595,
+            "sha256": "a5e44277bffa5a008236e946ccf296ea5ee8d8f40218ddb2451a7a8fd743f8cc",
+            "blake3": "6812ed543773be0e10e4ad2f728ddf9bce0253f7ba67393094a3751e03c159ce"
+        },
+        {
+            "file": "memory-rust.wasm",
+            "bytes": 34279,
+            "sha256": "a1250309ccb2ec16b35f3962a79c4ddf35ba36dbcfb12c033ce234e3fa4f661c",
+            "blake3": "77ade76b61e09de9609bdde2a5818aeccb28ee6732a0b3a4a50221b47a44ec2f"
+        },
+        {
+            "file": "pending-c.wasm",
+            "bytes": 1225,
+            "sha256": "11ce7602ee9cc7daf9a53d4740ea1ceeb601064b523968a270a73e4166bb9891",
+            "blake3": "00e0b7641145f15ef6b5152bd9da4f53f2bbfa1511d07f918c76094116021746"
+        },
+        {
+            "file": "pending-rust.wasm",
+            "bytes": 34133,
+            "sha256": "23198a7aeaaac821a07fa70897fec00270face6967981003458c7bd13dc9273b",
+            "blake3": "62623af7d255018a7e8be084b1331c62689344dd4bd388b0ed94d7e1cbdfb7a7"
+        },
+        {
+            "file": "query-c.wasm",
+            "bytes": 1478,
+            "sha256": "e1b3f226941aaaeebfdab4fe08cb2ff6e78f2691f5f12b9d5399f29306a85377",
+            "blake3": "003d3563c09858f8c826e9ddd0b1f02283b6e2155fbf45d7faaead774e3b9812"
+        },
+        {
+            "file": "query-rust.wasm",
+            "bytes": 38400,
+            "sha256": "d8bcb59a7af7841acfd865282b643416d0443c03f79bc3e8290570ce4b33ab50",
+            "blake3": "7425d229b8cdc0f39f98c306f7ff51ef54714d931dfa757c9f0ccdba55a1c5e1"
+        },
+        {
+            "file": "result-c.wasm",
+            "bytes": 2689,
+            "sha256": "60245ae8196e75953d3e14f23a6c8134fa7e0dcc240037d97ad6c53040ebb3ff",
+            "blake3": "2125b4d0baf424eea27fcc51e7c5d3a29c819f2dbb30c460086863969915e0bf"
+        },
+        {
+            "file": "result-rust.wasm",
+            "bytes": 52930,
+            "sha256": "93e4ad4635977f7127a18cd10b751c68a1130d5d63f597146a9312bedf8e1ee0",
+            "blake3": "e99ad12111c3afbb91c707fe4ce1ffd52d702b20dd7723dd41abe4e700c5994c"
+        },
+        {
+            "file": "schema-c.wasm",
+            "bytes": 2108,
+            "sha256": "9d4da5b489a1cedde9956a5024a0bf4177194d623f5bd755bf56ff46ab6f7ead",
+            "blake3": "be6a9006b36c06392a876485a64bfe63c235b62357197fc5e25b160834f76434"
+        },
+        {
+            "file": "schema-rust.wasm",
+            "bytes": 37183,
+            "sha256": "9168c79c47d9c4794a4abb56691f016a4ffd9d5f141afe1c83cbad8bc81abec2",
+            "blake3": "0a668b5d305df49fcc902027652f92a05451d4d520cd52fae7b514cc6c627ead"
+        }
+    ],
+    "event_capture": {
+        "source_revision": "493eaccf8f72a084414937167ed44801f045918c",
+        "sha256": "e554627cf4bad25ced57ca0365b6087fd4bfca7b5056d7120cf4cd3445b295c4",
+        "preserved_exactly": true
+    },
+    "stripping": "Six Rust asynchronous candidates were built with -C strip=symbols before their first freeze; the original 05 event artifact is unmodified.",
+    "source_base_revision": "531dae61a15702315d397ce45d40e83930bf0e41",
+    "source_description": "Exact working-tree SDK and probe sources for the capability table and signed syscall result candidate; sources.tar.gz is authoritative. The base revision does not describe these uncommitted changes."
+}

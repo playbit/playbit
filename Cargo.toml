@@ -1,0 +1,116 @@
+[workspace]
+resolver = "3"
+members = ["playbit", "playbit/platform/macos/runtime", "playbit/trace", "playbit-api", "playbit/test-fixtures", "playbit/kvdb", "playbit/docdb", "guests/*", "vendor/gpui"]
+default-members = ["playbit", "playbit-api", "playbit/kvdb", "playbit/docdb"]
+# Non-Rust guests are not Cargo members.
+exclude = ["guests/counter-ocaml", "guests/scorekeeper", "guests/touchline"]
+
+[workspace.package]
+version = "0.1.2-beta"
+edition = "2024"
+license = "BUSL-1.1"
+repository = "https://github.com/playbit/playbit"
+
+[profile.release]
+lto = "thin"
+
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
+accesskit_macos = { path = "vendor/accesskit_macos" }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "allow"
+
+# Keep the host debuggable while its Wasm compiler runs at production speed.
+
+[profile.dev.package.cranelift-assembler-x64]
+opt-level = 3
+
+[profile.dev.package.cranelift-assembler-x64-meta]
+opt-level = 3
+
+[profile.dev.package.cranelift-bforest]
+opt-level = 3
+
+[profile.dev.package.cranelift-bitset]
+opt-level = 3
+
+[profile.dev.package.cranelift-codegen]
+opt-level = 3
+
+[profile.dev.package.cranelift-codegen-meta]
+opt-level = 3
+
+[profile.dev.package.cranelift-codegen-shared]
+opt-level = 3
+
+[profile.dev.package.cranelift-control]
+opt-level = 3
+
+[profile.dev.package.cranelift-entity]
+opt-level = 3
+
+[profile.dev.package.cranelift-frontend]
+opt-level = 3
+
+[profile.dev.package.cranelift-isle]
+opt-level = 3
+
+[profile.dev.package.cranelift-native]
+opt-level = 3
+
+[profile.dev.package.cranelift-srcgen]
+opt-level = 3
+
+[profile.dev.package.pulley-interpreter]
+opt-level = 3
+
+[profile.dev.package.pulley-macros]
+opt-level = 3
+
+[profile.dev.package.regalloc2]
+opt-level = 3
+
+[profile.dev.package.target-lexicon]
+opt-level = 3
+
+[profile.dev.package.wasm-encoder]
+opt-level = 3
+
+[profile.dev.package.wasmparser]
+opt-level = 3
+
+[profile.dev.package.wasmtime]
+opt-level = 3
+
+[profile.dev.package.wasmtime-environ]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-component-util]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-core]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-fiber]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-jit-debug]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-jit-icache-coherence]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-unwinder]
+opt-level = 3
+
+[profile.dev.package.wasmtime-internal-versioned-export-macros]
+opt-level = 3

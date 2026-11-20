@@ -1,0 +1,9 @@
+app_id = "touchline"
+name = "Touchline"
+lang = "ocaml"
+icon = "icon.svg"
+required_host_features = [
+    "automatic-volumes.v1", "clock.read", "identity.read", "presence.read",
+    "session.channel", "session.channel.begin", "session.channel.take",
+    "session.read", "ui.canvas.pixels.v1", "ui.canvas.viewport.v1", "wake.after",
+]

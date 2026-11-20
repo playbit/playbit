@@ -1,0 +1,20 @@
+[package]
+name = "ui-gallery"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+playbit-api = { path = "../../playbit-api", features = ["guest"] }
+
+[dev-dependencies]
+playbit-test-fixtures = { path = "../../playbit/test-fixtures", features = ["wasm"] }
+playbit = { path = "../../playbit", default-features = false, features = ["app-host", "test-support"] }
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "warn"

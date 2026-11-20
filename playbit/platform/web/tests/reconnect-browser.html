@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Browser reconnect regression</title>
+<h1>Browser reconnect regression</h1>
+<p>Actual runtime owner and live-replication code in a native Worker, with a synthetic AP and local store. This does not qualify real AP, OPFS, sleep/wake or overnight behavior.</p>
+<pre id="result">Running…</pre>
+<script type="module">
+try {
+    const response = await fetch('../runtime-worker.js');
+    const source = (await response.text()).replace(/from (["'])(\.\/[^"']+)\1/g,
+        (_, quote, path) => `from ${quote}${new URL(path, response.url)}${quote}`);
+    const harness = await (await fetch('./reconnect-browser-worker.js')).text();
+    const url = URL.createObjectURL(new Blob([source, '\n', harness], {type:'text/javascript'}));
+    const worker = new Worker(url, {type:'module'});
+    worker.onmessage = ({data}) => {
+        if (data.evidence || data.failure) {
+            document.querySelector('#result').textContent = JSON.stringify(data, null, 2);
+            worker.terminate(); URL.revokeObjectURL(url);
+        }
+    };
+    worker.onerror = event => { document.querySelector('#result').textContent=event.message; worker.terminate(); };
+} catch(error) { document.querySelector('#result').textContent=String(error.stack ?? error); }
+</script>

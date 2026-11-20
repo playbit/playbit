@@ -1,0 +1,21 @@
+*.wasm
+!playbit/tests/fixtures/guest-abi-rc1/*.wasm
+/_*
+/target/
+/.archipelago/
+.DS_Store
+/.env
+__pycache__/
+*.pyc
+node_modules/
+.wrangler/
+*.cpuprofile
+/services/*/worker-configuration.d.ts
+.pnpm-store
+
+*.pbapp
+
+**/target/
+
+# Local development captures; reusable benchmarks belong in source/test directories.
+/evidence/

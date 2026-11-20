@@ -1,0 +1,17 @@
+[package]
+name = "playbit-macos-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "playbit_runtime"
+path = "lib.rs"
+crate-type = ["cdylib"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+playbit = { path = "../../..", features = ["macos-shared-runtime"] }
+
+[features]
+dev_always_render = ["playbit/dev_always_render"]

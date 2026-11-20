@@ -1,0 +1,13 @@
+{
+    "session": {
+        "permissions": { "grants": [] },
+        "databases": [
+            {
+                "id": "6HjCtfN3h9KMGQeXKZnTn",
+                "name": "scorebook",
+                "kind": { "type": "kv_db" }
+            }
+        ],
+        "blobs": []
+    }
+}

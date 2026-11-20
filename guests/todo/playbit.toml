@@ -1,0 +1,31 @@
+app_id = "todo"
+required_host_features = ["session-volume.v1"]
+name = "TODO"
+build_cmd = "cargo rustc --lib --crate-type cdylib --target wasm32-unknown-unknown"
+
+[release]
+build_cmd = "cargo rustc --release --lib --crate-type cdylib --target wasm32-unknown-unknown"
+
+
+[trace]
+version = 1
+
+[[trace.names]]
+name = "todo.turn"
+kind = "span"
+description = "Consume pending events and submit the scene"
+
+[[trace.names]]
+name = "todo.input"
+kind = "span"
+description = "Handle one delivered input or host event"
+
+[[trace.names]]
+name = "todo.refresh"
+kind = "span"
+description = "Read the current TODO rows"
+
+[[trace.names]]
+name = "todo.rows"
+kind = "mark"
+description = "Number of rows in the current app view"

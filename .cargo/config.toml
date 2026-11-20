@@ -1,0 +1,8 @@
+[env]
+# One target for Rust, native compilers, shaders, bundles and the exported SDK.
+# Native scripts read this single-line, forced entry with sed.
+MACOSX_DEPLOYMENT_TARGET = { value = "15.0", force = true }
+
+[target.wasm32-unknown-unknown]
+# Guest memory is private; these builds do not require Wasm threads/atomics.
+rustflags = ["-Ctarget-feature=+bulk-memory,+simd128"]

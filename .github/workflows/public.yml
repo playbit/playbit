@@ -1,0 +1,138 @@
+name: public
+on:
+    workflow_call:
+        inputs:
+            check-linux:
+                type: boolean
+                default: true
+            check-macos:
+                type: boolean
+                default: true
+            check-web:
+                type: boolean
+                default: true
+            check-storage-history:
+                description: Full namespace histories within the macOS check
+                type: boolean
+                default: true
+env:
+    RUST_BACKTRACE: 1
+
+permissions:
+    contents: read
+jobs:
+    linux:
+        if: inputs.check-linux
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+        env:
+            RUSTFLAGS: -D warnings
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+            - uses: dtolnay/rust-toolchain@1.99.0
+              with:
+                  targets: wasm32-unknown-unknown, thumbv7em-none-eabi
+                  components: clippy
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
+            - name: Run shared linux checks
+              run: bash scripts/ci/check.sh linux
+    macos:
+        if: inputs.check-macos
+        runs-on: macos-latest
+        timeout-minutes: 60
+        env:
+            CI_STORAGE_HISTORY: ${{ inputs.check-storage-history }}
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+            - uses: dtolnay/rust-toolchain@1.99.0
+              with:
+                  targets: wasm32-unknown-unknown, aarch64-apple-ios
+                  components: clippy
+            - name: Prepare independent Wasm compiler
+              run: brew install llvm lld
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  # PR-only copies evict the shared baseline from the cache budget.
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 26
+                  package-manager-cache: false
+            - name: Prepare build-time Metal compiler
+              run: xcodebuild -downloadComponent MetalToolchain
+            - name: Run shared macos checks
+              run: bash scripts/ci/check.sh macos
+            - uses: ./.github/actions/upload-artifact
+              with:
+                  name: public-client-products-${{ github.run_attempt }}
+                  path: ${{ runner.temp }}/client-products
+                  if-no-files-found: error
+                  retention-days: 1
+            - name: Check packaged client workflows
+              run: bash scripts/ci/check.sh macos-packaged
+    web:
+        if: inputs.check-web
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+            - uses: dtolnay/rust-toolchain@1.99.0
+              with:
+                  targets: wasm32-unknown-unknown
+            - uses: Swatinem/rust-cache@v2
+              with:
+                  key: public-web
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 26
+                  package-manager-cache: false
+            - name: Identify runner image for LLVM cache
+              id: llvm-runner-image
+              # The downloaded dependency set depends on the preinstalled packages.
+              run: echo "version=${ImageVersion:?}" >> "$GITHUB_OUTPUT"
+            - name: Cache LLVM toolchain packages
+              id: llvm-cache
+              uses: actions/cache@v6
+              with:
+                  path: ${{ runner.temp }}/llvm-packages/*.deb
+                  # Bump the revision to refresh the LLVM 23 snapshot.
+                  key: llvm-23-ubuntu-24.04-${{ runner.arch }}-${{ steps.llvm-runner-image.outputs.version }}-v1
+            - name: Download LLVM toolchain packages
+              if: steps.llvm-cache.outputs.cache-hit != 'true'
+              run: |
+                  curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key -o "$RUNNER_TEMP/llvm.asc"
+                  sudo install -m 644 "$RUNNER_TEMP/llvm.asc" /usr/share/keyrings/llvm.asc
+                  echo 'deb [signed-by=/usr/share/keyrings/llvm.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' | sudo tee /etc/apt/sources.list.d/llvm-23.list
+                  sudo apt-get update
+                  mkdir -p "$RUNNER_TEMP/llvm-packages"
+                  sudo apt-get install -y --no-install-recommends --download-only \
+                    -o Dir::Cache::archives="$RUNNER_TEMP/llvm-packages" clang-23 lld-23
+            - name: Install cached LLVM toolchain
+              run: |
+                  # Install the complete bundle directly, without APT's archive acquisition.
+                  sudo dpkg --install "$RUNNER_TEMP"/llvm-packages/*.deb
+            - name: Run shared web checks
+              run: bash scripts/ci/check.sh web
+    checks:
+        if: always()
+        needs: [linux, macos, web]
+        runs-on: ubuntu-24.04
+        timeout-minutes: 5
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+            - name: Require every selected public check to succeed
+              env:
+                  CI_EXPECTED: '{"linux":${{ inputs.check-linux }},"macos":${{ inputs.check-macos }},"web":${{ inputs.check-web }}}'
+                  CI_RESULTS: ${{ toJSON(needs) }}
+              run: python3 scripts/ci.py gate

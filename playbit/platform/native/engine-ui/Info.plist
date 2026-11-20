@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Test-only bundle metadata for the LocalLists AppKit embedding fixture,
+    packaged by playbit/platform/native/build-engine-ui.sh. The fixture embeds
+    two local engine profiles directly and has no Playbit app package.
+
+    Normal native app bundles generate Info.plist in
+    playbit/src/bin/pb/native/bundle.rs. Session guest wrappers generate it in
+    playbit/src/desktop/guest_app.rs.
+-->
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>playbit.engine-ui</string>
+<key>CFBundleName</key><string>Local Lists</string>
+<key>CFBundleExecutable</key><string>LocalLists</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>@MACOSX_DEPLOYMENT_TARGET@</string>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>

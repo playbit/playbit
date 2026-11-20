@@ -1,0 +1,187 @@
+include module type of Playbit_generated
+
+exception Host_error of int32
+
+val log : string -> unit
+val submit : string -> unit
+
+(** Fill at most [max_random_bytes] (64 KiB) with cryptographically secure
+    platform randomness. Discard the buffer on [Host_error]. *)
+val random_fill : bytes -> unit
+val host_platform : unit -> int32
+val host_limit : int32 -> int32
+val quit_on_last_window : bool -> unit
+
+(** Replace the pending wake with a [Wake] event after at least this many
+    milliseconds. The host accepts delays of 1,000 to 86,400,000. *)
+val wake_after : int -> unit
+
+(** Raw monotonic nanoseconds. All 64 bits are timestamp data. *)
+val monotonic_ns : unit -> int64
+
+type event = { generation : int64; kind : int32; target : int32; data : bytes }
+
+val optional_event_kind_bit : int32
+val poll : unit -> event option
+val run : (unit -> unit) -> unit
+
+module Session : sig
+  type channel
+  type operation
+  type completion = Pending | Ready
+
+  (** The local context's account, device and instance IDs, each 16 bytes. *)
+  val identity : unit -> string
+
+  (** Live authenticated tuples in the same layout as [identity]. The local
+      member's transport device may differ from the context device. *)
+  val presence : unit -> string list
+
+  (** Compare the account and instance IDs of two identity or presence
+      tuples. Use the full tuple from [presence] as the live sender identity. *)
+  val same_instance : string -> string -> bool
+
+  (** Open or return the live handle for this name in the current instance. *)
+  val open_channel : string -> channel
+  val subscribe : channel -> operation
+  val publish : channel -> string -> operation
+
+  (** Stop the subscription. Messages already queued can still arrive.
+      The handle remains available to publish or subscribe again. *)
+  val unsubscribe : channel -> operation
+
+  (** Retire the handle once the operation is admitted and stop receiving.
+      Take the returned operation to observe cleanup completion. Opening
+      the name again returns a fresh handle. *)
+  val close : channel -> operation
+  val take : operation -> completion
+
+  (** Decode any [DataReady] handle. Match it against an outstanding
+      channel operation before calling [take]. *)
+  val ready : event -> operation option
+
+  (** Channel, authenticated sender tuple and message bytes. *)
+  val message : event -> (channel * string * string) option
+  val status : event -> int32 option
+end
+
+module Input : sig
+  type pointer = { x : int; y : int; phase : int; buttons : int }
+  type key = { key : int; pressed : bool }
+
+  type surface = {
+    width : int;
+    height : int;
+    pixel_scale : float;
+    inputs : int;
+  }
+
+  val pointer : bytes -> pointer
+  val key : bytes -> key
+  val frame : bytes -> float
+  val surface : bytes -> surface
+end
+
+module View : sig
+  val create : unit -> Buffer.t
+  val column_start : Buffer.t -> unit
+  val column_end : Buffer.t -> unit
+  val row_start : Buffer.t -> unit
+  val row_end : Buffer.t -> unit
+  val text : Buffer.t -> int -> string -> unit
+  val button : Buffer.t -> int32 -> int -> string -> unit
+
+  (** Wrap a single view written by the callback in a native context menu.
+      Action IDs are nonzero and unique within the view. Choosing an item
+      delivers a [Click] event with its action ID as the target. *)
+  val context_menu : Buffer.t -> (int32 * string) list -> (unit -> unit) -> unit
+
+  type rect = { x : int; y : int; width : int; height : int; color : int32 }
+
+  type item =
+    | Rect of rect
+    | Text of rect * int * bool * string
+    | Pixels of rect * int * int * bytes
+
+  val canvas :
+    Buffer.t ->
+    int32 ->
+    width:int ->
+    height:int ->
+    continuous:bool ->
+    item list ->
+    unit
+
+  (** Place the canvas at the scene root, optionally inside a context menu.
+      The host clips the previous canvas to its resized viewport while the app
+      prepares a new scene. Requires [ui.canvas.viewport.v1]. *)
+  val viewport_canvas :
+    Buffer.t ->
+    int32 ->
+    width:int ->
+    height:int ->
+    continuous:bool ->
+    item list ->
+    unit
+
+  val finish : Buffer.t -> string
+end
+
+module Data : sig
+  type volume
+  type volume_info = { volume : volume; can_write : bool }
+  type volume_role = Root | Session | User | User_session | Local | Local_session
+  type entry
+  type operation
+  type 'a completion = Pending | Ready of 'a
+
+  val volume : volume_role -> volume
+  val root_volume : unit -> volume
+
+  (** The selected handle and write permission from the same enumeration. *)
+  val volume_info : volume_role -> volume_info
+  val resolve : volume -> string -> operation
+  val take_entry : operation -> entry completion
+  type key_cursor
+
+  (** List binary KV keys in ascending order. Pass the returned cursor to
+      continue the same snapshot. If the snapshot changes, [take_keys] raises
+      [Host_error (Int32.of_int Error.conflict)]. *)
+  val keys : ?cursor:key_cursor -> entry -> operation
+  val take_keys : operation -> (string list * key_cursor option) completion
+  val read : entry -> string -> limit:int -> operation
+  val take_read : operation -> limit:int -> bytes completion
+  val put : entry -> string -> bytes -> operation
+  val take_put : operation -> unit completion
+  val dispose : operation -> unit
+end
+
+module Audio : sig
+  type t
+  type operation
+  type 'a completion = Pending | Ready of 'a
+
+  val open_begin : preferred_sample_rate:int -> operation
+  val open_take : operation -> t completion
+  val dispose : operation -> unit
+  val close : t -> unit
+  val sample_rate : t -> int
+  val volume : t -> float
+  val set_volume : t -> float -> unit
+end
+
+module Sound : sig
+  type t
+  type instance
+
+  val loop : int32
+  val open_pcm : Audio.t -> channel_count:int -> sample_rate:int -> bytes -> t
+  val close : t -> unit
+  val instance : t -> int32 -> instance
+  val play : instance -> gain:float -> start:int64 -> length:int64 -> flags:int32 -> unit
+  val tell : instance -> int64
+  val seek : instance -> int64 -> unit
+  val set_gain : instance -> float -> unit
+  val set_balance : instance -> float -> unit
+  val stop : instance -> unit
+end

@@ -1,0 +1,27 @@
+[package]
+name = "playbit-api"
+version.workspace = true
+edition = "2024"
+license = "Apache-2.0"
+description = "What Playbit apps compile against: the guest ABI and the UI description"
+
+[dependencies]
+# First-party document model exposed to apps; bundled with the installed SDK.
+docdb = { path = "../playbit/docdb", optional = true }
+
+[features]
+# ABI-only consumers can opt out of the document model.
+default = ["docdb"]
+# Guest entry exports are excluded when the SDK is linked into a host.
+guest = []
+# Hosts must not export a guest descriptor when workspace features unify.
+host = []
+
+# The installed crate also builds outside the repository's workspace.
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "allow"

@@ -1,0 +1,7 @@
+app_id = "shared-note"
+required_host_features = ["session-volume.v1"]
+name = "Shared Note"
+build_cmd = "cargo build --target wasm32-unknown-unknown"
+
+[release]
+build_cmd = "cargo build --release --target wasm32-unknown-unknown"

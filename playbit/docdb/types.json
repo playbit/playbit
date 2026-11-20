@@ -1,0 +1,72 @@
+[
+{
+	"name": "Animal",
+	"mode": "root",
+	"fields": [
+		{ "key": "age", "type": "i32" },
+		{ "key": "weight", "type": "i32" },
+		{ "key": "name", "type": "bytes" },
+		{ "key": "discussion", "type": "utf8-string" },
+		{ "key": "favorite_numbers", "type": "list-of-u16" }
+	]
+},
+{
+	"name": "NotebookRoot",
+	"mode": "root",
+	"fields": [
+		{ "key": "pages", "type": "list-of-links" }
+	]
+},
+{
+	"name": "NotebookPage",
+	"mode": "anon",
+	"fields": [
+		{ "key": "blocks", "type": "list-of-links" },
+		{ "key": "name", "type": "utf8-string" }
+	]
+},
+{
+	"name": "NotebookBlock",
+	"mode": "anon",
+	"fields": [
+		{ "key": "text", "type": "bytes" },
+		{ "key": "type", "type": "u8" },
+		{ "key": "identation", "type": "u8" },
+		{ "key": "background_color", "type": "u8" },
+		{ "key": "embedded_media", "type": "bytes" },
+		{ "key": "fixed_height", "type": "i32" },
+		{ "key": "claimed_by", "type": "bytes" }
+	]
+},
+{
+	"name": "EditBox",
+	"mode": "root",
+	"fields": [
+		{ "key": "text", "type": "utf8-string" },
+		{ "key": "rich_text", "type": "rich-text-document" }
+	]
+},
+{
+	"name": "Show",
+	"mode": "table",
+	"fields": [
+		{ "key": "name", "type": "utf8-string" }
+	]
+},
+{
+	"name": "Actor",
+	"mode": "table",
+	"fields": [
+		{ "key": "name", "type": "utf8-string" }
+	]
+},
+{
+	"name": "Character",
+	"mode": "table",
+	"fields": [
+		{ "key": "name", "type": "utf8-string" },
+		{ "key": "show", "type": "u64" },
+		{ "key": "actor", "type": "u64" }
+	]
+}
+]

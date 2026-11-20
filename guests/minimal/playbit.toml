@@ -1,0 +1,6 @@
+app_id = "minimal"
+name = "Template"
+build_cmd = "cargo build --target wasm32-unknown-unknown"
+
+[release]
+build_cmd = "cargo build --release --target wasm32-unknown-unknown"
