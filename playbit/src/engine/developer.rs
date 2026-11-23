@@ -281,7 +281,7 @@ pub(super) fn update_session(
     } else {
         // Ordinary sessions keep their authoritative AP selection. The network
         // task prepares and adopts that selection after this CAS succeeds.
-        remote.prepare_publication(store)?;
+        remote.prepare_publication(store, Some(old.replica_volume()))?;
         let current = remote.resolve_session(store, &session)?;
         remote.advance_session(
             store,
@@ -330,7 +330,7 @@ pub(super) fn execute(
             if store.volume(volume)?.owner != store.account().id {
                 return Err("only the volume owner may grant access".into());
             }
-            remote.prepare_publication(store)?;
+            remote.prepare_publication(store, Some(volume))?;
             let account = remote.resolve_volume_grantee(store, volume, &email)?;
             store.grant_volume(&Access::owner(store.account().id), volume, account, write)?;
             DeveloperReply::VolumeGranted {
@@ -375,7 +375,7 @@ pub(super) fn execute(
             if app.publisher != store.account().id {
                 return Err("only the authenticated publisher may publish an app".into());
             }
-            remote.prepare_publication(store)?;
+            remote.prepare_publication(store, None)?;
             let current: AppResponse = serde_json::from_value(remote.get_app(store, app)?)?;
             DeveloperReply::App(serde_json::from_value(remote.publish_app(
                 store,

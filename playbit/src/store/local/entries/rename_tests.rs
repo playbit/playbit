@@ -3,7 +3,7 @@
     reason = "Tests assert current component-rename authority and identities."
 )]
 use super::*;
-use crate::store::object_contract::{Grant, Subject};
+use crate::store::object_contract::{Grant, Principal, Subject};
 
 fn fixture() -> (tempfile::TempDir, LocalStore, Access, Id) {
     let directory = tempfile::tempdir().unwrap();

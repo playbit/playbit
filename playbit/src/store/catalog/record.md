@@ -108,7 +108,7 @@ reuse a removed tag or discriminant. Each row has its own type's tags.
 | Permission | 1 Read; 2 Write; 3 Append; 4 ManagePermissions. |
 | DatabaseProtocol | 1 Kvdb; 2 BlobLog. |
 | Principal | 1 Human; 2 Service. Both carry ID in field 1. |
-| Subject | 1 Public; 2 Principal with principal in field 1. |
+| Subject | 1 Public; 2 Principal with principal in field 1; 3 SessionParticipants with an empty payload. |
 | EntryAcl | 1 Inherit; 2 Replace with ACL in field 1. |
 | ValueType | 1 Text; 2 Boolean; 3 Integer; 4 Float; 5 Bytes; 6 File; 7 Reference with type ID in field 1. |
 | EntryKind | 1 Directory; 2 KvDb; 3 ObjectDb with schema in field 1; 4 Blob with 1 len_bytes, 2 digest, 3 encrypted_key, 4 published_at_micros. |

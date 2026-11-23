@@ -584,7 +584,7 @@ fn complete(result: Result<Completion, String>, recovering: bool, cx: &mut App) 
     let write = state.active.take().expect("one local draft operation is active");
     match result.and_then(|completion| state.complete(&write, completion)) {
         Ok(true) => crate::ui::desktop::alert::show(
-            crate::ui::desktop::alert::Kind::LocalDraft,
+            crate::ui::desktop::alert::Kind::DraftRetained,
             "Your local edit was discarded. Another local copy of this draft remains available.",
             cx,
         ),
@@ -728,6 +728,7 @@ mod tests {
         cx.update(|cx| {
             let alerts = crate::ui::desktop::alert::take_presented(cx);
             assert_eq!(alerts.len(), 1);
+            assert_eq!(alerts[0].0, crate::ui::desktop::alert::Kind::DraftRetained);
             assert!(alerts[0].1.contains("Another local copy"));
         });
     }

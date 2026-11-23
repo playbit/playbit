@@ -491,6 +491,7 @@ final class GuestController: UIViewController, UITextFieldDelegate {
                 control.addTarget(self, action: #selector(activated(_:)), for: .touchUpInside); view = control
             case .canvas:
                 let canvas = CanvasView()
+                canvas.isOpaque = false
                 if id != 0 {
                     canvas.event = { [weak self] words in self?.send(kind: 11, target: id, data: words.flatMap(Self.bytes)) }
                 }
@@ -724,14 +725,17 @@ final class CanvasView: UIView {
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext(), let scene,
               scene.width > 0, scene.height > 0 else { return }
+        if let clear = scene.clearColor {
+            context.setFillColor(Self.color(clear).cgColor)
+            context.fill(bounds)
+        }
         context.scaleBy(x: bounds.width / CGFloat(scene.width), y: bounds.height / CGFloat(scene.height))
         for item in scene.items {
             let geometry: GuestScene.Rect
             switch item {
             case .rect(let value), .text(let value, _, _, _), .pixels(let value, _, _, _): geometry = value
             }
-            let rgba = geometry.color
-            let color = UIColor(displayP3Red: CGFloat((rgba >> 24) & 255)/255, green: CGFloat((rgba >> 16) & 255)/255, blue: CGFloat((rgba >> 8) & 255)/255, alpha: CGFloat(rgba & 255)/255)
+            let color = Self.color(geometry.color)
             let area = CGRect(x: CGFloat(geometry.x), y: CGFloat(geometry.y), width: CGFloat(geometry.width), height: CGFloat(geometry.height))
             if !area.intersects(context.boundingBoxOfClipPath) { continue }
             switch item {
@@ -755,6 +759,10 @@ final class CanvasView: UIView {
                 context.restoreGState()
             }
         }
+    }
+    private static func color(_ rgba: UInt32) -> UIColor {
+        UIColor(displayP3Red: CGFloat((rgba >> 24) & 255) / 255, green: CGFloat((rgba >> 16) & 255) / 255,
+            blue: CGFloat((rgba >> 8) & 255) / 255, alpha: CGFloat(rgba & 255) / 255)
     }
     private func touch(_ touches: Set<UITouch>, phase: UInt32) {
         guard let point = touches.first?.location(in: self), point.x.isFinite, point.y.isFinite,

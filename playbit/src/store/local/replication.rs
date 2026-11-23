@@ -53,8 +53,7 @@ fn validate_pending(
     }
 }
 
-fn append_relayer(policy: &DatabasePolicy, account: Id) -> Result<bool> {
-    let principal = crate::store::object_contract::Principal::Human(account);
+fn append_relayer(policy: &DatabasePolicy, principal: DataActor) -> Result<bool> {
     match policy.authorize(principal, Permission::Write) {
         Ok(()) => Ok(false),
         Err(Error::AccessDenied(_)) => {
@@ -253,7 +252,7 @@ impl LocalStore {
             &index,
             &policy,
             address.entry,
-            access.account,
+            self.data_actor(access, policy.volume())?,
         ) {
             Ok(snapshot) => snapshot,
             Err(Error::AccessDenied(_)) => return Ok(None),
@@ -272,7 +271,6 @@ impl LocalStore {
         volume: Id,
         database: DatabaseId,
     ) -> Result<bool> {
-        use crate::store::object_contract::Principal;
         let operations = self.access_operations(access, volume)?;
         let guards = operations.lock()?;
         let index = self.db(volume, DatabaseId::Index)?;
@@ -296,7 +294,7 @@ impl LocalStore {
         if database == DatabaseId::Revocations {
             return Ok(policy.volume.volume().owner == access.account);
         }
-        let principal = Principal::Human(access.account);
+        let principal = self.data_actor(access, policy.volume.volume())?;
         for permission in [Permission::Write, Permission::Append] {
             match policy.authorize(principal, permission) {
                 Ok(()) => return Ok(true),
@@ -406,16 +404,17 @@ impl LocalStore {
         let index = self.db(volume, DatabaseId::Index)?;
         let policy = DatabasePolicy::read_source(&index, database)?;
         let grant = self.admit_access(access, &policy.volume)?;
+        let actor = self.data_actor(access, policy.volume.volume())?;
         policy.ordinary_protocol()?;
         if let Some(entry) = entry {
             let readable = DatabasePolicy::read_source(&index, DatabaseId::Entry(entry))?
-                .metadata_readable(access.account)?;
+                .metadata_readable(actor)?;
             if !readable && grant.is_some_and(|grant| !grant.write) {
                 return Err(Error::AccessDenied("personal volume is read-only"));
             }
             check_entry_delivery(access, entry, database, readable, bytes)?;
         } else {
-            policy.authorize_reader(ReplicaReader::Participant(access.account))?;
+            policy.authorize_reader(ReplicaReader::SessionParticipant(actor))?;
         }
         self.apply_received_delta(volume, database, &policy, bytes, entry.zip(evidence))
     }
@@ -541,8 +540,8 @@ impl LocalStore {
         if self.admit_access(access, &policy.volume)?.is_some_and(|grant| !grant.write) {
             return Err(Error::AccessDenied("read-only personal selection"));
         }
-        let entries =
-            crate::store::authorize_publication_delta(&index, &policy, access.account, bytes)?;
+        let actor = self.data_actor(access, policy.volume.volume())?;
+        let entries = crate::store::authorize_publication_delta(&index, &policy, actor, bytes)?;
         if entries.is_empty() {
             self.check_authority(access, volume, None)?;
         }
@@ -607,10 +606,7 @@ impl LocalStore {
             return Err(Error::AccessDenied("personal volume is read-only"));
         }
         if let Some(permission) = permission {
-            policy.authorize(
-                crate::store::object_contract::Principal::Human(access.account),
-                permission,
-            )?;
+            policy.authorize(self.data_actor(access, policy.volume.volume())?, permission)?;
         } else if access.session_id.is_none() && access.account != policy.volume.volume.owner {
             return Err(Error::AccessDenied("replica owner or session admission required"));
         }
@@ -695,7 +691,8 @@ impl LocalStore {
         let index = self.db(volume, DatabaseId::Index)?;
         let policy = DatabasePolicy::read_source(&index, database)?;
         self.authorize_replica_merge(access, volume, database, &policy)?;
-        let append = append_relayer(&policy, access.account)?;
+        let actor = self.data_actor(access, policy.volume.volume())?;
+        let append = append_relayer(&policy, actor)?;
         let before = volume_index::IndexSnapshot::new(index.begin_read()?);
         let rejected = RefCell::new(None);
         let resolver = |delta: &kvdb::sync::SyncDelta<'_>| {
@@ -705,15 +702,14 @@ impl LocalStore {
                     before.authorize_source(
                         &policy.volume.volume,
                         policy.volume.default_permissions(),
-                        access.account,
+                        actor,
                         source,
                     )
                 })
             } else {
                 // Reserved policy writes always require the authenticated owner.
-                let writer =
-                    (append || !matches!(database, DatabaseId::Entry(_))).then_some(access.account);
-                policy.validate_sync_source(delta, writer).map(|_| ())
+                let writer = (append || !matches!(database, DatabaseId::Entry(_))).then_some(actor);
+                policy.validate_sync_source_as(delta, writer).map(|_| ())
             };
             if let Err(error) = admitted {
                 *rejected.borrow_mut() = Some(error);

@@ -53,6 +53,8 @@ pub struct Browser {
     payload_size: payload_size::PayloadSize,
     volume_permissions_admission: Option<u64>,
     available_volumes: Vec<Volume>,
+    shared_volume_owners: BTreeMap<Id, Id>,
+    finder_volume: bool,
     signed_in_account: Option<Id>,
     signed_in_name: Option<String>,
     open_target: Option<values::Target>,
@@ -131,7 +133,9 @@ impl Browser {
                 .is_ok()
         });
         let mut browser = Self {
+            finder_volume: volume.personal,
             available_volumes: vec![volume.clone()],
+            shared_volume_owners: BTreeMap::new(),
             signed_in_account: None,
             signed_in_name: None,
             open_target: None,
@@ -232,12 +236,27 @@ impl Browser {
             display_name.map(str::trim).filter(|name| !name.is_empty()).map(str::to_owned);
     }
 
+    fn request_session(&self) -> Option<Box<[u8; 32]>> {
+        self.shared_session().map(Box::new)
+    }
+
+    pub(super) fn shared_session(&self) -> Option<[u8; 32]> {
+        self.send.1
+    }
+
     pub fn refresh(&mut self) {
         self.invalidate_payload_size();
         self.refresh_catalog();
-        self.submit(Request::VolumeDetails { volume: self.volume.id });
+        self.submit(Request::VolumeDetails {
+            session: self.request_session(),
+            volume: self.volume.id,
+        });
         if let Some(entry) = self.selected {
-            self.submit(Request::EntryDetails { volume: self.volume.id, entry });
+            self.submit(Request::EntryDetails {
+                session: self.request_session(),
+                volume: self.volume.id,
+                entry,
+            });
         }
         self.refresh_history();
         self.refresh_picker();
@@ -306,7 +325,11 @@ impl Browser {
         self.close_grant_editor(cx);
         self.adding_type = false;
         self.adding_field = false;
-        self.submit(Request::EntryDetails { volume: self.volume.id, entry });
+        self.submit(Request::EntryDetails {
+            session: self.request_session(),
+            volume: self.volume.id,
+            entry,
+        });
         self.start_detail_loading(cx);
         cx.notify();
     }
@@ -801,9 +824,10 @@ impl Render for Browser {
             self.alerted_error.clear();
         } else if self.error != self.alerted_error {
             self.alerted_error = self.error.clone();
-            crate::ui::desktop::alert::show(
+            crate::ui::desktop::alert::show_in_window(
                 crate::ui::desktop::alert::Kind::Recoverable,
                 &self.error,
+                window.window_handle(),
                 cx,
             );
         }

@@ -1,8 +1,8 @@
 //! Checked PCM spans and full-width scalar capability results.
-use super::{WasmState, call};
+use super::{StoreData, call};
 use crate::runtime::syscall::{Opcode, OperationHandle, audio};
 use wasmtime::Caller;
-pub(super) fn dispatch(caller: Caller<'_, WasmState>, opcode: Opcode, args: [u64; 6]) -> i64 {
+pub(super) fn dispatch(caller: Caller<'_, impl StoreData>, opcode: Opcode, args: [u64; 6]) -> i64 {
     let [a, b, c, d, e, f] = args;
     call(caller, |state, memory| match opcode {
         Opcode::AudioOpenBegin => {

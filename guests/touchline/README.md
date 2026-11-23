@@ -25,9 +25,10 @@ Use the Playbit client and OCaml SDK from this checkout. From this directory, ru
 pb run --release
 ```
 
-Use the session ID printed by `pb run` with `pb session volumes SESSION` to
+Use the session code printed by `pb run` with `pb session volumes SESSION` to
 find the volume whose role is `session`. Grant each friend's Playbit account
-read access and send them the session link from the window title bar.
+read access, click **Copy Session Link** at the top right of the game window,
+and send them the link.
 
 ```sh
 pb volume grant SHARED_VOLUME_ID friend@example.com r

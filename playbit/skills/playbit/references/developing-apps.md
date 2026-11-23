@@ -105,9 +105,12 @@ root volume and its ordinary permissions.
 
 ## Verification tools
 
-Use `pb session instances SESSION` to identify the running GUI owner. Consult
-`pb frame --help`, `pb input --help`, and `pb logs --help` for inspection and
-interaction. Inspect the real GUI too: a scene dump does not prove layout or
-image rendering. Reopen the retained session to verify persistence. Test failures
+Use `pb session instances SESSION` to identify the running GUI owner. Read
+the scene with `pb frame` and capture the actual rendered window with
+`pb screenshot SESSION window.png --instance INSTANCE`. Use `pb input --help`
+for keyboard transitions and pointer gestures in canvas-local coordinates.
+Playbit MCP exposes `playbit_gui` with `instance-list`, `key-input`,
+`pointer-input` and `screenshot` operations. Its screenshot response contains a
+PNG image. Read guest diagnostics with `pb logs`. Reopen the retained session to verify persistence. Test failures
 and cancellation relevant to the app, and distinguish verified behavior from
 anything needing unavailable platform capabilities.

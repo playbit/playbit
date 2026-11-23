@@ -237,7 +237,7 @@ mod tests {
             let server = std::thread::spawn(move || {
                 let (mut socket, _) = listener.accept().unwrap();
                 assert!(
-                    matches!(request(&mut socket), Request::DuplicateEntry { address: source } if source == address)
+                    matches!(request(&mut socket), Request::DuplicateEntry { address: source, .. } if source == address)
                 );
                 let reply = if failed {
                     Reply::Error { error: "Fixture copy failed".into() }
@@ -376,7 +376,7 @@ mod tests {
                 let received = request(&mut socket);
                 if size {
                     assert!(
-                        matches!(received, Request::PayloadSize { volume, entry: None } if volume == source)
+                        matches!(received, Request::PayloadSize { volume, entry: None, .. } if volume == source)
                     );
                 } else {
                     assert!(
@@ -388,7 +388,7 @@ mod tests {
                 if size {
                     let (mut next_socket, _) = listener.accept().unwrap();
                     assert!(
-                        matches!(request(&mut next_socket), Request::PayloadSize { volume, entry: None } if volume == next)
+                        matches!(request(&mut next_socket), Request::PayloadSize { volume, entry: None, .. } if volume == next)
                     );
                     let reply = Reply::Diagnostic(DiagnosticReply::PayloadSize {
                         volume: next,

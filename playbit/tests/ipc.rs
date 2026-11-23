@@ -45,6 +45,7 @@ fn retained_history_and_recovery_replies_bind_address_cursor_and_selected_revisi
     ] {
         assert_eq!(
             reply.matches_request(&Request::EntryRevisions {
+                session: None,
                 address: target,
                 after: cursor,
                 limit: 64
@@ -80,6 +81,7 @@ fn retained_history_and_recovery_replies_bind_address_cursor_and_selected_revisi
     ] {
         assert_eq!(
             reply.matches_request(&Request::EntryRevisions {
+                session: None,
                 address,
                 after: Some(after),
                 limit: 1
@@ -150,11 +152,13 @@ fn file_replies_bind_the_complete_entry_address() {
     }));
     let reply = ipc::codec::access::<ArchivedReply>(&bytes).unwrap();
     assert!(reply.matches_request(&Request::FileCreate {
+        session: None,
         volume,
         name: "Files/readme.txt".into(),
         path: "input.txt".into()
     }));
     assert!(!reply.matches_request(&Request::FileCreate {
+        session: None,
         volume,
         name: "Other/readme.txt".into(),
         path: "input.txt".into()
@@ -191,18 +195,32 @@ fn object_replies_bind_database_object_type_and_page_cursor() {
     )
     .unwrap();
     let reply = ipc::codec::access::<ArchivedReply>(&encoded).unwrap();
-    assert!(reply.matches_request(&Request::ReadObject { database, object }));
+    assert!(reply.matches_request(&Request::ReadObject { session: None, database, object }));
     let wrong_database = EntryAddress { entry: EntryId::from_bytes([5; 15]).unwrap(), ..database };
-    assert!(!reply.matches_request(&Request::ReadObject { database: wrong_database, object }));
+    assert!(!reply.matches_request(&Request::ReadObject {
+        session: None,
+        database: wrong_database,
+        object
+    }));
     let wrong_volume = EntryAddress { volume: Id::from_bytes([6; 16]), ..database };
-    assert!(!reply.matches_request(&Request::ReadObject { database: wrong_volume, object }));
-    assert!(!reply.matches_request(&Request::ReadObject { database, object: type_id }));
+    assert!(!reply.matches_request(&Request::ReadObject {
+        session: None,
+        database: wrong_volume,
+        object
+    }));
+    assert!(!reply.matches_request(&Request::ReadObject {
+        session: None,
+        database,
+        object: type_id
+    }));
     assert!(!reply.matches_request(&Request::CreateObject {
+        session: None,
         database,
         type_id: object,
         fields: Default::default()
     }));
     assert!(!reply.matches_request(&Request::CreateObject {
+        session: None,
         database,
         type_id,
         fields: Default::default()
@@ -217,11 +235,12 @@ fn object_replies_bind_database_object_type_and_page_cursor() {
     .unwrap();
     let reply = ipc::codec::access::<ArchivedReply>(&encoded).unwrap();
     assert!(reply.matches_request(&Request::CreateObject {
+        session: None,
         database,
         type_id,
         fields: Default::default()
     }));
-    assert!(!reply.matches_request(&Request::ReadObject { database, object }));
+    assert!(!reply.matches_request(&Request::ReadObject { session: None, database, object }));
     let encoded = ipc::codec::encode(
         &Reply::Objects(ObjectPageResult {
             database,
@@ -234,15 +253,28 @@ fn object_replies_bind_database_object_type_and_page_cursor() {
     .unwrap();
     let reply = ipc::codec::access::<ArchivedReply>(&encoded).unwrap();
     assert!(reply.matches_request(&Request::Objects {
+        session: None,
         database,
         type_id,
         after: Some(object),
         limit: 64
     }));
     for request in [
-        Request::Objects { database: wrong_database, type_id, after: Some(object), limit: 64 },
-        Request::Objects { database, type_id: object, after: Some(object), limit: 64 },
-        Request::Objects { database, type_id, after: None, limit: 64 },
+        Request::Objects {
+            session: None,
+            database: wrong_database,
+            type_id,
+            after: Some(object),
+            limit: 64,
+        },
+        Request::Objects {
+            session: None,
+            database,
+            type_id: object,
+            after: Some(object),
+            limit: 64,
+        },
+        Request::Objects { session: None, database, type_id, after: None, limit: 64 },
     ] {
         assert!(!reply.matches_request(&request));
     }

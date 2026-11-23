@@ -2,7 +2,6 @@
 use super::*;
 use crate::store::{
     DatabaseId, EntryType, MAX_REPLICA_DELTA_BYTES, key_value,
-    object_contract::Principal,
     volume_index::{DatabaseProtocol, EntryAddress, IndexSnapshot},
 };
 
@@ -28,7 +27,7 @@ impl LocalStore {
         snapshot.authorize(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             address.entry,
             permission,
         )?;

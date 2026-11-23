@@ -159,12 +159,10 @@ pub async fn listen(
     store: Arc<LocalStore>,
     session: Session,
 ) -> Result<JoinHandle<()>> {
+    if session.shared_volume.is_some() {
+        return Err("Shared volumes require hosted replication".into());
+    }
     let own = Access::session(store.account().id, &session.id);
-    store.authorize_replication(
-        &own,
-        session.replica_volume(),
-        crate::store::object_contract::Permission::Read,
-    )?;
     store.authorize_replication(&own, session.replica_volume(), Permission::Read)?;
     let request = ServiceRequest::PeerListen {
         operation_id: Id::generate()?.to_string(),
@@ -326,6 +324,9 @@ fn begin_request(
     direction: SyncDirection,
     database_key: [u8; 32],
 ) -> Result<(ApStream, Cipher, PeerEvent)> {
+    if session.shared_volume.is_some() {
+        return Err("Shared volumes require hosted replication".into());
+    }
     let request = ServiceRequest::PeerRequest {
         operation_id: Id::generate()?.to_string(),
         session_id: session.id.clone(),

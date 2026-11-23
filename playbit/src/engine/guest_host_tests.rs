@@ -459,6 +459,8 @@ fn broken_event_continuity_freezes_new_operations_without_reconnection() {
 fn ordered_selected_build_stop_reports_its_cause_and_closes_admission() {
     use crate::engine::service_events::{Notice, StopReason};
     let (_directory, listener, mut host, inbox, wake) = fixture();
+    host.session_key_secret = Some([3; 16]);
+    assert!(host.session_key_secret().unwrap().is_some());
     let server = std::thread::spawn(move || {
         let (mut stream, request) = receive_request(&listener);
         assert!(matches!(request, Request::InstanceEvents { .. }));
@@ -483,6 +485,7 @@ fn ordered_selected_build_stop_reports_its_cause_and_closes_admission() {
     wait(&wake, &inbox, |state| state.failure.is_some());
     assert_eq!(inbox.failure(), Some(StopReason::SelectedBuildChanged.message()));
     assert_eq!(inbox.stop_reason(), Some(StopReason::SelectedBuildChanged));
+    assert!(matches!(host.session_key_secret(), Err(HostError::Unavailable)));
     assert_eq!(host.begin_data(9, read()), Err(HostError::Unavailable));
     let listener = server.join().unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -806,6 +809,8 @@ fn released_out_of_order_completions_cannot_exceed_the_engine_operation_window()
     let shared = Arc::new(Shared { state: Mutex::new(State::default()), wake: Arc::new(|| {}) });
     let (send, receive) = mpsc::sync_channel(MAX_CALLS);
     let mut host = GuestHost {
+        renderer: crate::engine::GuestRenderer::Embedded,
+        session_key_secret: None,
         shared: shared.clone(),
         mutations: send.clone(),
         reads: send.clone(),

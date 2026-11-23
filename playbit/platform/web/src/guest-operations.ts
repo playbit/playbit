@@ -3,6 +3,8 @@ import { ABI as L } from './guest-layout.ts';
 import { ChannelHost } from "./channel-host.ts";
 import type { ChannelExports } from "./channel-host.ts";
 import type { GuestOperations } from "./guest-imports.ts";
+import { supportsDeadline } from "./guest-imports.ts";
+import { clockNs, INDEFINITE } from "./guest-deadline.ts";
 import { AbiError, Input, Output, admit, bytes, captureResult, disjoint, view, record, recordArray, publishRecord } from "./guest-memory.ts";
 import type { BufferLayout, ResultSnapshot } from "./guest-memory.ts";
 import { fileOperations } from "./file-operations.ts";
@@ -38,17 +40,26 @@ export interface ObjectHost extends OwnedFileHost, ChannelExports {
     pb_web_object_edit(entry: number, object: number, fields: number, count: number, stride: number): number;
 }
 export interface LogConnection { generation: number; expires: number }
+export interface GuestIdentity {
+    account: Uint8Array;
+    device: Uint8Array;
+    instance: Uint8Array;
+    session: Uint8Array;
+}
 interface Services {
     logConnection?(): Promise<LogConnection>;
     appendLog?(prepared: Uint8Array<ArrayBuffer>, appendId: Uint8Array<ArrayBuffer>, connection: LogConnection): Promise<void>;
     readLog?(entry: Uint8Array<ArrayBuffer>, read: () => Promise<Uint8Array<ArrayBuffer>>): Promise<Uint8Array<ArrayBuffer>>;
     channels?(): import("./session-channels.ts").SessionChannels;
+    identity?(): GuestIdentity | undefined;
+    sessionKeySecret?(): ArrayLike<number> | undefined;
     memory(): WebAssembly.Memory;
     host(): ObjectHost;
     events: QueuedEvent[];
     work: GuestWork;
     log(text: string): void;
     wouldBlock?(): void;
+    waitForEvent?(deadline: bigint): Promise<void>;
     submit(scene: Uint8Array<ArrayBuffer>): void;
     ready?(): void;
     revision?(): string;
@@ -154,6 +165,41 @@ export function guestOperations(services: Services): RuntimeOperations {
             throw error;
         }
     }
+    function pollEvent(pointer: number, payload: number, capacity: number): number {
+        try {
+            const memory = services.memory(), header = record(memory, pointer, L.event);
+            const output = admit(memory, payload, capacity, 1, 1, MAX_TEXT_EVENT_BYTES);
+            disjoint([header, output]);
+            view(memory, header).setUint32(L.event.offsets.written, 0, true);
+            const event = services.events[0]; if (!event) return -6;
+            if (event.data.length > output.length) return event.data.length;
+            bytes(memory, output).set(event.data);
+            const data = new Uint8Array(L.event.size), result = new DataView(data.buffer);
+            result.setBigUint64(8, services.work.epoch, true); result.setUint32(16, event.kind, true); result.setUint32(20, event.target, true);
+            publishRecord(memory, header, L.event, data);
+            services.work.poll(); if(event.kind===18)session().consumed(event.data.length,event.data.slice(8,88),event.data.slice(88,104)); queueVolumeChange(); return event.data.length;
+        } catch (error) {
+            if (error instanceof AbiError) return error.status; throw error;
+        }
+    }
+    function pollDeadline(pointer: number, payload: number, capacity: number, deadline: bigint): number | Promise<number> {
+        const poll = () => {
+            const result = pollEvent(pointer, payload, capacity);
+            if (result !== -6) return result;
+            if (services.work.draining) return -10;
+            if (deadline !== INDEFINITE && deadline <= clockNs()) return -6;
+        };
+        const initial = poll();
+        if (initial !== undefined) return initial;
+        return (async () => {
+            for (;;) {
+                await services.waitForEvent!(deadline);
+                // Re-admit both caller-owned spans on the resumed Wasm turn.
+                const result = poll();
+                if (result !== undefined) return result;
+            }
+        })();
+    }
     return {
         admitOperation: services.admitOperation,
         data: pending,
@@ -184,8 +230,26 @@ export function guestOperations(services: Services): RuntimeOperations {
             if(action===4)channelHost.close(generation,slot);return result;
         }),
         pb_channel_take: (generation,slot) => call(()=>pending.take(generation,slot,16,()=>0)),
+        pb_session_info: pointer => call(() => {
+            const memory = services.memory(), output = record(memory, pointer, L.sessionInfo);
+            view(memory, output).setUint32(L.sessionInfo.offsets.written, 0, true);
+            const identity = services.identity?.();
+            if (!identity) return -1;
+            const data = new Uint8Array(L.sessionInfo.size), { offsets } = L.sessionInfo;
+            data.set(identity.session, offsets.internal_id);
+            const keySecret = services.sessionKeySecret?.();
+            if (keySecret) {
+                new DataView(data.buffer).setUint32(offsets.flags, 1, true);
+                data.set(keySecret, offsets.key_secret);
+            }
+            publishRecord(memory, output, L.sessionInfo, data);
+            return 0;
+        }),
         pb_identity: pointer => call(() => {
-            const memory = services.memory(), output = record(memory, pointer, L.identity), identity = session().identity;
+            const memory = services.memory(), output = record(memory, pointer, L.identity);
+            view(memory, output).setUint32(L.identity.offsets.written, 0, true);
+            const identity = services.identity?.();
+            if (!identity) return -1;
             const data = new Uint8Array(L.identity.size), result = new DataView(data.buffer);
             result.setBigUint64(8, services.work.epoch, true); data.set(identity.account, 16); data.set(identity.device, 32);
             data.set(identity.instance, 48); data.set(identity.session, 64); result.setUint32(96, 2, true);
@@ -234,18 +298,8 @@ export function guestOperations(services: Services): RuntimeOperations {
             const memory = services.memory(), region = admit(memory, pointer, length, 1, 1, 1024 * 1024);
             services.submit(bytes(memory, region)); return 0;
         }),
-        pb_event_poll: (pointer, payload, capacity) => call(() => {
-            const memory = services.memory(), header = record(memory, pointer, L.event);
-            const output = admit(memory, payload, capacity, 1, 1, MAX_TEXT_EVENT_BYTES);
-            disjoint([header, output]);
-            const event = services.events[0]; if (!event) return -6;
-            if (event.data.length > output.length) return event.data.length;
-            bytes(memory, output).set(event.data);
-            const data = new Uint8Array(L.event.size), result = new DataView(data.buffer);
-            result.setBigUint64(8, services.work.epoch, true); result.setUint32(16, event.kind, true); result.setUint32(20, event.target, true);
-            publishRecord(memory, header, L.event, data);
-            services.work.poll(); if(event.kind===18)session().consumed(event.data.length,event.data.slice(8,88),event.data.slice(88,104)); queueVolumeChange(); return event.data.length;
-        }),
+        pb_event_poll: (pointer, payload, capacity) => call(() => pollEvent(pointer, payload, capacity)),
+        ...(services.waitForEvent && supportsDeadline() ? { pb_event_poll_deadline: pollDeadline } : {}),
         pb_entry_resolve_begin: (generation, slot, name, length) => call(() => {
             const memory = services.memory();
             const input = new Input(memory), nameOffset = input.text(name, length, 4096), source = input.finish();

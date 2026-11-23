@@ -68,8 +68,10 @@ The Rust starter has seven maintained files: `Cargo.toml`, `playbit.toml`,
 `src/app.rs`, `playbit-volumes.json`, `icon.svg`, `.gitignore` and
 `.cargo/config.toml`. Its only app dependency is `playbit-api`.
 
-`playbit.toml` declares the app ID, build commands, required host features and
-optional `[trace]`, within 320 KiB. `playbit-volumes.json` is a closed map of
+`playbit.toml` declares the app ID, build commands, bundled resources, required
+host features and optional trace names. See the [manifest reference](playbit-toml.md).
+
+`playbit-volumes.json` is a closed map of
 `root`, `session`, `user`, `user-session`, `local` and `local-session` declarations.
 Each has the existing permissions, database/schema, seed-object and blob fields,
 bounded to 64 KiB and 64 seed objects per role. Omitted roles are empty. Omitted
@@ -136,6 +138,13 @@ read those databases under the existing permission model. A fresh session with
 a declared Shared initializer and the default World binding also synchronizes
 its separate Shared data after first use. Its invitation lets another authorized
 device join that same Shared backing.
+
+A new synchronized Shared volume has one default grant for **Session
+participants** with **Read + Write**. A signed-in player who opens the session
+invitation can use those permissions in that session. The owner can inspect or
+change the grant in the volume's permissions. Entry-specific permissions still
+apply. Shared uses ordinary AP database replication and file contents retain
+their existing encryption.
 Copying a signed `.pbapp` alone creates a separate session and grants no access
 to private data. User and Local scopes, their session variants, and existing
 local-only data stay on their original device. Ordinary sessions retain their
@@ -173,6 +182,22 @@ session without launching. It returns JSON including `id`, `root_volume` and
 `resolved_build_id`. Use `pb session join ID` to open it. Explicit World or User
 overrides must already exist and be authorized; they are retained in the session
 and never reseeded. Resume with `pb run --session ID` to preserve all bindings.
+
+An app can read its current session with `ctx.session_info()?` in Rust or
+`Session.info ()` in OCaml. The record contains the 32-byte internal ID and,
+when the host retains it, the 16-byte invitation key. The Rust `code()` method
+and OCaml `Session.code` function encode the key as the 22-character URL fragment.
+A guest in the production environment can build a link like this.
+
+```rust
+let url = ctx.session_info()?.and_then(|info| info.code())
+    .map(|code| format!("https://playbit.app/s#{code}"));
+```
+
+Use the website origin of the session's deployment. Reading the key requires no
+user action. Anyone given the code can use a published invitation, so keep it
+out of logs. The read is local. Opening the link on another device requires
+the session to support sharing and its invitation to be available there.
 
 Copied or cloned source uses the same effective identity for its publishing
 account. No canonical source path, runner account or source-side volume binding
@@ -442,19 +467,11 @@ toolchain selection, `--sdk` controls and explicit SDK updates.
 
 ## Bundled files
 
-Declare files explicitly in `playbit.toml`, or import a directory:
-
-```toml
-files_dir = "assets"
-
-[files]
-"examples/readme.txt" = "examples/readme.txt"
-```
-
-Paths are relative to the project, and must not traverse symlinks. Bundle paths
-are sorted by UTF-8 bytes; collisions and the reserved `app/` namespace fail.
-Every source package requires `playbit-volumes.json`; `{}` declares empty scopes. File changes need repackaging but no
-resource-specific code generation.
+In `playbit.toml`, top-level `files_dir = "assets"` packages
+`assets/sounds/bell.wav` as `sounds/bell.wav`. To choose a destination for a
+single file, add `"help/start.txt" = "docs/getting-started.txt"` under `[files]`.
+You can use both forms in the same project. See the
+[resource syntax, path rules and limits](playbit-toml.md#bundled-resources).
 
 Find the volume with backing `VOLUME_BUNDLE` (`0x300`) through `volume.list`,
 then open, list and read it with ordinary asynchronous File operations. This

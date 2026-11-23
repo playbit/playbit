@@ -236,6 +236,8 @@ impl Inbox {
     }
 }
 pub struct InProcessHost {
+    pub(super) renderer: super::GuestRenderer,
+    pub(super) session_key_secret: Option<crate::store::Seed>,
     shared: Arc<Shared>,
     reads: Option<mpsc::SyncSender<Work>>,
     bulk: Option<mpsc::SyncSender<Work>>,
@@ -320,6 +322,8 @@ impl InProcessHost {
         let (bulk, bulk_worker) = lane("local-bulk", bulk, &shared)?;
         Ok((
             Self {
+                renderer: super::GuestRenderer::Embedded,
+                session_key_secret: None,
                 reads: Some(reads),
                 mutations: Some(mutations),
                 bulk: Some(bulk),
@@ -332,6 +336,9 @@ impl InProcessHost {
     }
 }
 impl Host for InProcessHost {
+    fn session_key_secret(&self) -> HostResult<Option<crate::store::Seed>> {
+        Ok(self.session_key_secret)
+    }
     fn channel_consumed(
         &mut self,
         recipient: [u8; 16],
@@ -434,7 +441,7 @@ impl Host for InProcessHost {
         self.limits
     }
     fn supported_features(&self) -> &[&str] {
-        super::guest_features()
+        self.renderer.features()
     }
     fn audio_wake(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
         Some(self.shared.wake.clone())

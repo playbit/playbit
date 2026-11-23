@@ -16,6 +16,7 @@ fn native_schema_sdk_owns_inputs_and_retains_the_same_read_snapshot() {
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const crate::runtime::native::Context).cast_mut().cast();
     let volume = abi::EntryHandle {
@@ -84,6 +85,7 @@ fn native_begin_owns_inputs_and_take_admits_outputs_before_consuming() {
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const crate::runtime::native::Context).cast_mut().cast();
     let volume = abi::EntryHandle {
@@ -179,6 +181,7 @@ fn native_query_retains_projected_page_and_edit_has_a_terminal_completion() {
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const crate::runtime::native::Context).cast_mut().cast();
     let volume = abi::EntryHandle {
@@ -277,6 +280,7 @@ fn native_file_sdk_owns_write_input_and_retains_one_read_until_terminal_take() {
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const crate::runtime::native::Context).cast_mut().cast();
     // SAFETY: fixture retains a live active context on its callback thread.
@@ -359,6 +363,7 @@ fn native_name_resolution_owns_utf8_and_returns_the_complete_stable_entry_id() {
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const crate::runtime::native::Context).cast_mut().cast();
     // SAFETY: the fixture retains its active context on the owner thread.
@@ -415,6 +420,7 @@ fn owned_files_cross_callbacks_and_drop_without_publishing_or_spending_operation
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*native as *const crate::runtime::native::Context).cast_mut().cast();
     let owner = FileResources::default();
@@ -484,6 +490,7 @@ fn owned_file_takes_accept_large_storage_and_preserve_short_buffer_retries() {
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*native as *const crate::runtime::native::Context).cast_mut().cast();
     let owner = FileResources::default();

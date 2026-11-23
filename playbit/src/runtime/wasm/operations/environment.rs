@@ -1,4 +1,4 @@
-use super::{WasmState, call, output::Buffer};
+use super::{StoreData, call, output::Buffer};
 use crate::runtime::linear_memory::layout::{
     data::range,
     environment::{
@@ -10,14 +10,14 @@ use crate::runtime::syscall::{HostError, environment};
 use playbit_api::abi::syscall as contract;
 use wasmtime::Caller;
 
-pub(super) fn random_fill(caller: Caller<'_, WasmState>, pointer: u32, length: u32) -> i64 {
+pub(super) fn random_fill(caller: Caller<'_, impl StoreData>, pointer: u32, length: u32) -> i64 {
     call(caller, |state, memory| {
         let output = memory.admit(pointer, length, 1, 1, contract::MAX_RANDOM_BYTES as u32)?;
         environment::random_fill(state, output.bytes_mut(memory.data)).map(|()| 0)
     })
 }
 
-pub(super) fn capabilities(caller: Caller<'_, WasmState>, pointer: u32) -> i64 {
+pub(super) fn capabilities(caller: Caller<'_, impl StoreData>, pointer: u32) -> i64 {
     call(caller, |state, memory| {
         let descriptor = memory.record(pointer, caps_layout::LAYOUT, false, None)?;
         let names = Buffer::records(
@@ -50,7 +50,7 @@ pub(super) fn capabilities(caller: Caller<'_, WasmState>, pointer: u32) -> i64 {
     })
 }
 
-pub(super) fn startup_arguments(caller: Caller<'_, WasmState>, pointer: u32) -> i64 {
+pub(super) fn startup_arguments(caller: Caller<'_, impl StoreData>, pointer: u32) -> i64 {
     call(caller, |state, memory| {
         let descriptor = memory.record(pointer, args_layout::LAYOUT, false, None)?;
         let arguments = Buffer::records(
@@ -87,7 +87,7 @@ pub(super) fn startup_arguments(caller: Caller<'_, WasmState>, pointer: u32) -> 
 }
 
 pub(super) fn presence(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     pointer: u32,
     capacity: u32,
     stride: u32,
@@ -124,10 +124,10 @@ pub(super) fn presence(
     })
 }
 
-pub(super) fn host_platform(caller: Caller<'_, WasmState>) -> i64 {
+pub(super) fn host_platform(caller: Caller<'_, impl StoreData>) -> i64 {
     call(caller, |state, _| environment::host_platform(state))
 }
 
-pub(super) fn host_limit(caller: Caller<'_, WasmState>, kind: u32) -> i64 {
+pub(super) fn host_limit(caller: Caller<'_, impl StoreData>, kind: u32) -> i64 {
     call(caller, |state, _| environment::host_limit(state, kind))
 }

@@ -30,7 +30,7 @@ use crate::runtime::instance::{
 
 pub use super::host::HostResult;
 
-fn require_supported(state: &State, opcode: Opcode) -> HostResult<()> {
+pub(in crate::runtime) fn require_supported(state: &State, opcode: Opcode) -> HostResult<()> {
     if state.supported.contains(&opcode) { Ok(()) } else { Err(HostError::Unsupported) }
 }
 const MAX_VALUES: u32 = abi::MAX_VALUES;

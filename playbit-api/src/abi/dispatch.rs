@@ -84,10 +84,10 @@ pub const fn layout(opcode: Opcode) -> Layout {
         Capabilities => (1, 0b000001, 0b000000, false),
         StartupArguments => (1, 0b000001, 0b000000, false),
         Presence => (4, 0b001001, 0b000000, false),
-        Log => (2, 0b000001, 0b000000, false),
-        ViewSubmit => (2, 0b000001, 0b000000, false),
+        Log | ViewSubmit => (2, 0b000001, 0b000000, false),
         EventPoll => (3, 0b000011, 0b000000, false),
-        Identity => (1, 0b000001, 0b000000, false),
+        EventPollDeadline => (4, 0b000011, 0b001000, false),
+        Identity | SessionInfo => (1, 0b000001, 0b000000, false),
         WakeAfter => (1, 0b000000, 0b000000, false),
         UpdateDefer => (1, 0b000000, 0b000001, false),
     };

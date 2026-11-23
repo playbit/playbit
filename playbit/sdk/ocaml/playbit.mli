@@ -23,12 +23,27 @@ type event = { generation : int64; kind : int32; target : int32; data : bytes }
 
 val optional_event_kind_bit : int32
 val poll : unit -> event option
+
+(** Wait for one event until the absolute deadline from [monotonic_ns], returning
+    [None] on timeout. [0L] polls immediately and [Int64.minus_one] waits
+    indefinitely. A queued event wins even at an expired deadline.
+    Include [event.poll.deadline] in the package's [required_host_features]. *)
+val poll_deadline : int64 -> event option
 val run : (unit -> unit) -> unit
 
 module Session : sig
   type channel
   type operation
   type completion = Pending | Ready
+  type info = private { internal_id : string; key_secret : string option }
+
+  (** Read the current session's 32-byte public ID and optional 16-byte invitation
+      seed. Returns [None] outside a session. Requires the [session.info] feature. *)
+  val info : unit -> info option
+
+  (** The 22-character invitation code to append to the deployment's [/s#] URL.
+      Anyone with the code can use the invitation. *)
+  val code : info -> string option
 
   (** The local context's account, device and instance IDs, each 16 bytes. *)
   val identity : unit -> string
@@ -79,6 +94,8 @@ module Input : sig
   val pointer : bytes -> pointer
   val key : bytes -> key
   val frame : bytes -> float
+  (** Dimensions are in logical units in the current canvas extent. The window
+      extent includes the space beneath a full-size titlebar. *)
   val surface : bytes -> surface
 end
 
@@ -88,6 +105,24 @@ module View : sig
   val column_end : Buffer.t -> unit
   val row_start : Buffer.t -> unit
   val row_end : Buffer.t -> unit
+
+  (** Set semantic colors before writing the root. Each [ThemeColor] role may
+      occur once. Colors are Display P3 [0xRRGGBBAA]. *)
+  val theme : Buffer.t -> (int * int32) list -> unit
+
+  (** Set the complete native window style before writing the root. Combine
+      [WindowStyle] flags with [lor]. Requires [ui.window.style.v1]. *)
+  val window_style : Buffer.t -> int -> unit
+
+  (** Declare limits on the window's content size in logical units. Call once
+      before the root in each scene that needs them. Bounds support fractional
+      values up to 2^24. A zero or omitted bound leaves that edge unrestricted.
+      [aspect_ratio] is width divided by height. Zero or omission unlocks
+      resizing. Requires [ui.window.size-constraints.v1]. *)
+  val window_size_constraints :
+    ?min_width:float -> ?min_height:float -> ?max_width:float -> ?max_height:float ->
+    ?aspect_ratio:float -> Buffer.t -> unit
+
   val text : Buffer.t -> int -> string -> unit
   val button : Buffer.t -> int32 -> int -> string -> unit
 
@@ -112,10 +147,29 @@ module View : sig
     item list ->
     unit
 
-  (** Place the canvas at the scene root, optionally inside a context menu.
-      The host clips the previous canvas to its resized viewport while the app
-      prepares a new scene. Requires [ui.canvas.viewport.v1]. *)
+  (** Draw a transparent root canvas in the padded content viewport.
+      A context menu may wrap the canvas. Requires [ui.canvas.viewport.v1]. *)
   val viewport_canvas :
+    Buffer.t ->
+    int32 ->
+    width:int ->
+    height:int ->
+    continuous:bool ->
+    item list ->
+    unit
+
+  type canvas_extent = Inline | Viewport | Window
+
+  (** [Viewport] and [Window] are root extents. [Window] removes the host
+      content insets and extends behind the controls of a decorated window.
+      Its logical dimensions may reach [max_window_canvas_edge] per axis.
+      Inline canvases, padded viewports and source bitmaps keep [max_canvas_edge].
+      [clear_color] fills the canvas before its items, in Display P3 [0xRRGGBBAA].
+      Declare [ui.canvas.clear.v1] for a clear color, [ui.canvas.viewport.v1]
+      for [Viewport], and [ui.canvas.window.v1] for [Window]. *)
+  val canvas_with_options :
+    ?clear_color:int32 ->
+    extent:canvas_extent ->
     Buffer.t ->
     int32 ->
     width:int ->

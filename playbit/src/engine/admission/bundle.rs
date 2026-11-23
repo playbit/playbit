@@ -85,9 +85,10 @@ impl Task {
                     @ (Request::DuplicateVolume { .. } | Request::DuplicateEntry { .. }) => {
                         crate::engine::diagnostics::copy(request, &store).map(Reply::Diagnostic)
                     }
-                    Request::PayloadSize { volume, entry } => {
+                    request @ Request::PayloadSize { volume, entry, .. } => {
                         crate::engine::diagnostics::payload_size(
                             &store,
+                            &request.management_access(&store)?,
                             volume,
                             entry,
                             cancelled.as_deref().expect("size work owns cancellation"),

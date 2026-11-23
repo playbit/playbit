@@ -6,17 +6,39 @@ use crate::network::ap::{
 use super::service;
 pub use super::service::Result;
 
+#[derive(Debug)]
+pub(crate) struct SharedServiceUpgradeRequired;
+impl std::fmt::Display for SharedServiceUpgradeRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(service::SHARED_SERVICE_UPGRADE_REQUIRED)
+    }
+}
+impl std::error::Error for SharedServiceUpgradeRequired {}
+
 pub async fn begin(connection: &ApConnection, request: &ServiceRequest) -> Result<ApStream> {
-    let features = match request {
-        ServiceRequest::PublishBloblog { .. } | ServiceRequest::GetBloblog { .. } => {
-            &["bloblog-append-v1"][..]
+    begin_with_features(connection, request, service::required_features(request)).await
+}
+
+pub(crate) async fn require_features(
+    connection: &ApConnection,
+    required_features: &[&str],
+) -> Result<()> {
+    service::validate_features(required_features)?;
+    if required_features.is_empty() {
+        return Ok(());
+    }
+    let description = connection.describe().await?;
+    if let Some(feature) = required_features
+        .iter()
+        .copied()
+        .find(|name| !description.features.iter().any(|supported| supported == name))
+    {
+        if service::SHARED_REGISTRATION_FEATURES.contains(&feature) {
+            return Err(SharedServiceUpgradeRequired.into());
         }
-        ServiceRequest::RegisterSession { shared_volume_id: Some(_), .. } => {
-            &["shared-session.v1"][..]
-        }
-        _ => &[],
-    };
-    begin_with_features(connection, request, features).await
+        return Err("required AP feature is unavailable".into());
+    }
+    Ok(())
 }
 
 pub async fn begin_with_features(
@@ -24,21 +46,7 @@ pub async fn begin_with_features(
     request: &ServiceRequest,
     required_features: &[&str],
 ) -> Result<ApStream> {
-    service::validate_features(required_features)?;
-    if !required_features.is_empty() {
-        let description = connection.describe().await?;
-        if let Some(feature) = required_features
-            .iter()
-            .copied()
-            .find(|name| !description.features.iter().any(|supported| supported == name))
-        {
-            return Err(match feature {
-                "shared-session.v1" => service::SHARED_SERVICE_UPGRADE_REQUIRED,
-                _ => "required AP feature is unavailable",
-            }
-            .into());
-        }
-    }
+    require_features(connection, required_features).await?;
     let provider_operation = match request {
         ServiceRequest::RegisterFileProviderAccountPush { .. } => {
             Some("register_file_provider_account_push")

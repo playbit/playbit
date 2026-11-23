@@ -1,4 +1,4 @@
-//! A local display capability. Remote session identity never contains this seed.
+//! A local invitation reference for sharing and guest admission. The AP addresses sessions by public ID.
 use super::{Error, Result, Seed};
 use crate::release_channel::ReleaseChannel;
 use serde::Serialize;
@@ -17,6 +17,25 @@ impl std::fmt::Debug for SessionReference {
 impl SessionReference {
     pub fn new(seed: Seed) -> Result<Self> {
         Ok(Self { id: super::session_id(&seed)?, seed })
+    }
+    /// Only a retained session can supply a guest's invitation credential.
+    #[cfg(all(
+        feature = "connected-engine",
+        any(feature = "native-runtime", feature = "wasm-runtime")
+    ))]
+    pub(crate) fn retained(store: &super::LocalStore, id: &str) -> Result<Self> {
+        let reference = Self::new(store.session_seed(id)?)?;
+        if reference.internal_id() != id {
+            return Err(Error::corrupt("retained invitation differs from the session identity"));
+        }
+        Ok(reference)
+    }
+    #[cfg(all(
+        feature = "connected-engine",
+        any(feature = "native-runtime", feature = "wasm-runtime")
+    ))]
+    pub(crate) fn key_secret(&self) -> Seed {
+        self.seed
     }
     pub fn from_link(value: &str, channel: ReleaseChannel) -> Result<Self> {
         Self::new(super::parse_session_link(value, channel)?)

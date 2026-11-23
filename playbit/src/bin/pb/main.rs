@@ -318,7 +318,7 @@ fn run() -> Result<()> {
         })?,
         "status" => output(Request::Status)?,
         "schema" | "object-create" | "objects" => data::run(&args, &call)?,
-        "stop" | "frame" | "input" | "logs" => control::run(&args, &profile, &call, channel)?,
+        "stop" | "frame" | "input" | "logs" | "screenshot" => control::run(&args, &profile, &call, channel)?,
         "invite" => {
             let value = call(Request::Invitation {
                 session: session_argument(argument(&args, 1)?, channel)?,

@@ -138,6 +138,19 @@ impl Prepared {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct GuestOptions {
+    pub fuel_limit: Option<std::num::NonZeroU64>,
+    pub renderer: super::GuestRenderer,
+}
+
+// Existing callers that supply only a fuel limit use the embedded renderer.
+impl From<Option<std::num::NonZeroU64>> for GuestOptions {
+    fn from(fuel_limit: Option<std::num::NonZeroU64>) -> Self {
+        Self { fuel_limit, ..Self::default() }
+    }
+}
+
 pub struct Guest {
     admission: Admission,
     guest: GuestInstance,
@@ -155,11 +168,11 @@ impl Guest {
         session: &str,
         root: Id,
         wake: Arc<dyn Fn() + Send + Sync>,
-        fuel_limit: Option<std::num::NonZeroU64>,
+        options: impl Into<GuestOptions>,
     ) -> Result<Self> {
         let admission = claim(profile, instance, session, root)?;
         let package = read_package(profile, &admission.instance.build)?;
-        Self::create(profile, admission, package, wake, fuel_limit)
+        Self::create(profile, admission, package, wake, options.into())
     }
     /// Reconstruction after restart or selected-build adoption. Record
     /// the exact target before admission: a lost reply or failed construction
@@ -169,7 +182,7 @@ impl Guest {
         prior: &Admission,
         attempted: &mut (Id, String),
         wake: Arc<dyn Fn() + Send + Sync>,
-        fuel_limit: Option<std::num::NonZeroU64>,
+        options: impl Into<GuestOptions>,
         stop_reason: Option<super::service_events::StopReason>,
     ) -> Result<Self> {
         let Reply::InstanceStatus { incarnation, .. } =
@@ -250,24 +263,23 @@ impl Guest {
             );
         }
         let package = read_package(profile, &admission.instance.build)?;
-        Self::create(profile, admission, package, wake, fuel_limit)
+        Self::create(profile, admission, package, wake, options.into())
     }
     fn create(
         profile: &Path,
         admission: Admission,
         package: Package,
         wake: Arc<dyn Fn() + Send + Sync>,
-        fuel_limit: Option<std::num::NonZeroU64>,
+        options: GuestOptions,
     ) -> Result<Self> {
         let context = admission.context;
         startup(profile, context, None, super::session_instance::StartupPhase::Loading)?;
-        let result = Self::prepare(profile, admission, package, wake, fuel_limit).and_then(
-            |mut prepared| {
+        let result =
+            Self::prepare(profile, admission, package, wake, options).and_then(|mut prepared| {
                 prepared.load_compiled()?;
                 prepared.report_startup = true;
                 prepared.instantiate()
-            },
-        );
+            });
         if result.is_err() {
             let _ = startup(profile, context, None, super::session_instance::StartupPhase::Failed);
         }
@@ -278,11 +290,13 @@ impl Guest {
         mut admission: Admission,
         package: Package,
         wake: Arc<dyn Fn() + Send + Sync>,
-        fuel_limit: Option<std::num::NonZeroU64>,
+        options: GuestOptions,
     ) -> Result<Prepared> {
+        admission.session_reference.validate()?;
         if admission.context.instance != admission.instance.id
             || admission.context.owner_generation != admission.instance.owner_generation
             || admission.instance.state != super::session_instance::State::Owned
+            || admission.session_reference.internal_id() != admission.instance.session
             || admission.session.id != admission.instance.session
             || admission.session.resolved_build_id != admission.instance.build
             || admission.session.root_volume != admission.instance.root
@@ -318,11 +332,13 @@ impl Guest {
             participants: vec![],
         };
         let (mut host, inbox) = GuestHost::start(profile.to_owned(), admission.context, wake)?;
+        host.renderer = options.renderer;
+        host.session_key_secret = Some(admission.session_reference.key_secret());
         context.volumes = host
             .prepare_files(context.volumes, admission.instance.restore_host_mounts)
             .map_err(|error| format!("File root preparation failed: {error:?}"))?;
         admission.volumes = context.volumes.clone();
-        let runtime = Runtime::with_fuel_limit(fuel_limit)?;
+        let runtime = Runtime::with_fuel_limit(options.fuel_limit)?;
         Ok(Prepared {
             admission,
             wasm: package.wasm()?,

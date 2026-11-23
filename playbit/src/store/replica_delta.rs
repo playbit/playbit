@@ -1,7 +1,7 @@
 //! Recipient admission for bounded, already committed database changes.
-use crate::store::object_contract::{Permission, Principal};
+use crate::store::object_contract::Permission;
 use crate::store::volume_index::{self, IndexSnapshot};
-use crate::store::{DatabaseId, DatabasePolicy, EntryId, Error, Id, ReplicaReader, Result};
+use crate::store::{DataActor, DatabaseId, DatabasePolicy, EntryId, Error, ReplicaReader, Result};
 use std::collections::BTreeSet;
 pub const MAX_REPLICA_DELTA_BYTES: usize = 64 * 1024;
 
@@ -11,9 +11,11 @@ pub const MAX_REPLICA_DELTA_BYTES: usize = 64 * 1024;
 pub fn authorize_publication_delta<S: kvdb::Storage>(
     index: &kvdb::Db<S>,
     policy: &DatabasePolicy,
-    account: Id,
+    actor: impl Into<DataActor>,
     bytes: &[u8],
 ) -> Result<Vec<EntryId>> {
+    let actor = actor.into();
+    let account = actor.human()?;
     let snapshot = IndexSnapshot::new(index.begin_read()?);
     let mut entries = BTreeSet::new();
     let mut admission = Ok(());
@@ -30,15 +32,15 @@ pub fn authorize_publication_delta<S: kvdb::Storage>(
                 snapshot.authorize_committed_source(
                     policy.volume.volume(),
                     policy.volume.default_permissions(),
-                    account,
+                    actor,
                     key,
                     remote,
                 )?;
                 entries.insert(entry);
             } else {
-                match policy.authorize(Principal::Human(account), Permission::Write) {
+                match policy.authorize(actor, Permission::Write) {
                     Err(Error::AccessDenied(_)) => {
-                        policy.authorize(Principal::Human(account), Permission::Append)?;
+                        policy.authorize(actor, Permission::Append)?;
                     }
                     result => result?,
                 }
@@ -80,6 +82,7 @@ pub fn project_replica_delta(
 #[allow(clippy::unwrap_used, reason = "Tests assert successful bounded storage fixtures.")]
 mod tests {
     use super::*;
+    use crate::store::Id;
     use crate::store::object_contract::{Acl, EntryAcl};
     use crate::store::{MetadataPolicy, Volume};
     use volume_index::{DatabaseProtocol, EntryInfo, EntryKind};

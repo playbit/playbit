@@ -1,4 +1,4 @@
-use super::{WasmState, call, output::Buffer, read::write_value};
+use super::{StoreData, call, output::Buffer, read::write_value};
 use crate::runtime::host::{DataOperation, DataResult};
 use crate::runtime::linear_memory::layout::{
     authenticated::{field, metadata as metadata_layout},
@@ -10,7 +10,12 @@ use crate::runtime::{
 };
 use playbit_api::abi::syscall as contract;
 use wasmtime::Caller;
-pub(super) fn begin(caller: Caller<'_, WasmState>, entry: u32, object: u32, field: u32) -> i64 {
+pub(super) fn begin(
+    caller: Caller<'_, impl StoreData>,
+    entry: u32,
+    object: u32,
+    field: u32,
+) -> i64 {
     call(caller, |state, memory| {
         let (entry, _) = input::entry_handle(memory, entry, None)?;
         pending_data::admit_entry(state, entry, Opcode::ObjectFieldReadAuthenticatedBegin)?;
@@ -71,7 +76,12 @@ fn admit(
     Ok((descriptor, metadata_record, values, bytes))
 }
 
-pub(super) fn take(caller: Caller<'_, WasmState>, generation: u32, slot: u32, output: u32) -> i64 {
+pub(super) fn take(
+    caller: Caller<'_, impl StoreData>,
+    generation: u32,
+    slot: u32,
+    output: u32,
+) -> i64 {
     call(caller, |state, memory| {
         let operation = OperationHandle { generation, slot };
         pending_data::admit_take(state, operation, Opcode::ObjectFieldReadAuthenticatedTake)?;

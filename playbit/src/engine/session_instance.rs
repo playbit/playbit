@@ -147,6 +147,9 @@ pub struct ReconstructionTarget {
 
 #[derive(Clone, Debug, serde::Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct Admission {
+    /// Sent only to the authenticated owner in the private, build-matched IPC archive.
+    #[serde(skip)]
+    pub(crate) session_reference: crate::store::SessionReference,
     pub instance: SessionInstance,
     pub context: Context,
     pub session: crate::store::Session,

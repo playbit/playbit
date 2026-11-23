@@ -4,7 +4,7 @@
 use super::objects::Directory;
 use super::*;
 use crate::store::{
-    object_contract::{EntryAcl, Principal},
+    object_contract::EntryAcl,
     volume_index::{self, EntryInfo, EntryKind, IndexSnapshot},
 };
 
@@ -98,7 +98,7 @@ impl Destination {
                     .authorize_namespace(
                         policy.volume(),
                         policy.default_permissions(),
-                        Principal::Human(host.account),
+                        host.actor(&volume),
                         entry.id,
                         Permission::Write,
                     )
@@ -147,7 +147,7 @@ impl Destination {
                 .authorize_staged_write(
                     policy.volume(),
                     policy.default_permissions(),
-                    Principal::Human(host.account),
+                    host.actor(&volume),
                     self.entry,
                 )
                 .map_err(store_error)?;
@@ -173,7 +173,7 @@ impl Destination {
                 .authorize_namespace(
                     policy.volume(),
                     policy.default_permissions(),
-                    Principal::Human(host.account),
+                    host.actor(&volume),
                     self.entry,
                     Permission::Write,
                 )

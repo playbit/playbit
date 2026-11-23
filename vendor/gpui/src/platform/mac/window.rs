@@ -2,6 +2,7 @@ mod accessibility;
 mod input_policy;
 mod text_checking;
 mod window_drag;
+mod window_style;
 
 use super::{BoolExt, MacDisplay, NSRange, NSStringExt, ns_string, renderer};
 use crate::{
@@ -356,7 +357,15 @@ unsafe fn build_window_class(
             sel!(windowWillExitFullScreen:),
             window_will_exit_fullscreen as extern "C" fn(&Object, Sel, id),
         );
+        decl.add_method(
+            sel!(windowDidExitFullScreen:),
+            window_did_exit_fullscreen as extern "C" fn(&Object, Sel, id),
+        );
         decl.add_method(sel!(windowDidMove:), window_did_move as extern "C" fn(&Object, Sel, id));
+        decl.add_method(
+            sel!(playbitScreenParametersChanged:),
+            window_style::screen_parameters_changed as extern "C" fn(&Object, Sel, id),
+        );
         decl.add_method(
             sel!(windowDidChangeScreen:),
             window_did_change_screen as extern "C" fn(&Object, Sel, id),
@@ -452,7 +461,12 @@ struct MacWindowState {
     last_key_equivalent: Option<KeyDownEvent>,
     synthetic_drag_counter: usize,
     traffic_light_position: Option<Point<Pixels>>,
+    native_button_origins: Option<[CGPoint; 3]>,
     transparent_titlebar: bool,
+    applied_style: Option<crate::MacWindowStyle>,
+    pending_style: Option<crate::MacWindowStyle>,
+    // The requested style can change during fullscreen while AppKit owns geometry.
+    guest_constraint_display: Option<window_style::ConstraintDisplay>,
     previous_modifiers_changed_event: Option<PlatformInput>,
     keystroke_for_do_command: Option<Keystroke>,
     do_command_handled: Option<bool>,
@@ -469,6 +483,12 @@ struct MacWindowState {
 }
 
 impl MacWindowState {
+    fn has_custom_titlebar(&self) -> bool {
+        self.pending_style.or(self.applied_style).map_or(self.transparent_titlebar, |style| {
+            style.full_size_content && style.transparent_titlebar
+        })
+    }
+
     fn titlebar_double_click(&self) {
         let window = self.native_window;
         self.executor
@@ -511,53 +531,42 @@ impl MacWindowState {
             .detach();
     }
 
-    fn move_traffic_light(&self) {
-        if let Some(traffic_light_position) = self.traffic_light_position {
-            if self.is_fullscreen() {
-                // Moving traffic lights while fullscreen doesn't work,
-                // see https://github.com/zed-industries/zed/issues/4712
+    fn move_traffic_light(&mut self) {
+        if (self.traffic_light_position.is_none() && self.native_button_origins.is_none())
+            || self.is_fullscreen()
+        {
+            return;
+        }
+        unsafe {
+            let buttons = [
+                NSWindowButton::NSWindowCloseButton,
+                NSWindowButton::NSWindowMiniaturizeButton,
+                NSWindowButton::NSWindowZoomButton,
+            ]
+            .map(|kind| self.native_window.standardWindowButton_(kind));
+            if buttons.iter().any(|button| button.is_null()) {
                 return;
             }
-
-            let titlebar_height = self.titlebar_height();
-
-            unsafe {
-                let close_button: id = msg_send![
-                    self.native_window,
-                    standardWindowButton: NSWindowButton::NSWindowCloseButton
-                ];
-                let min_button: id = msg_send![
-                    self.native_window,
-                    standardWindowButton: NSWindowButton::NSWindowMiniaturizeButton
-                ];
-                let zoom_button: id = msg_send![
-                    self.native_window,
-                    standardWindowButton: NSWindowButton::NSWindowZoomButton
-                ];
-
-                let mut close_button_frame: CGRect = msg_send![close_button, frame];
-                let mut min_button_frame: CGRect = msg_send![min_button, frame];
-                let mut zoom_button_frame: CGRect = msg_send![zoom_button, frame];
-                let mut origin = point(
-                    traffic_light_position.x,
-                    titlebar_height
-                        - traffic_light_position.y
-                        - px(close_button_frame.size.height as f32),
-                );
-                let button_spacing =
-                    px((min_button_frame.origin.x - close_button_frame.origin.x) as f32);
-
-                close_button_frame.origin = CGPoint::new(origin.x.into(), origin.y.into());
-                let _: () = msg_send![close_button, setFrame: close_button_frame];
-                origin.x += button_spacing;
-
-                min_button_frame.origin = CGPoint::new(origin.x.into(), origin.y.into());
-                let _: () = msg_send![min_button, setFrame: min_button_frame];
-                origin.x += button_spacing;
-
-                zoom_button_frame.origin = CGPoint::new(origin.x.into(), origin.y.into());
-                let _: () = msg_send![zoom_button, setFrame: zoom_button_frame];
-                origin.x += button_spacing;
+            let frames: [CGRect; 3] = buttons.map(|button| msg_send![button, frame]);
+            let origins = if let Some(inset) = self.traffic_light_position {
+                let spacing = frames[1].origin.x - frames[0].origin.x;
+                if spacing <= 0. || frames[0].size.height <= 0. {
+                    return; // AppKit has not laid the buttons out yet.
+                }
+                // Save native positions before the first custom placement. AppKit
+                // can reuse these same buttons when switching titlebar styles.
+                self.native_button_origins.get_or_insert_with(|| frames.map(|frame| frame.origin));
+                let top = self.titlebar_height().to_f64() - inset.y.to_f64();
+                std::array::from_fn(|i| {
+                    CGPoint::new(inset.x.to_f64() + i as f64 * spacing, top - frames[i].size.height)
+                })
+            } else if let Some(origins) = self.native_button_origins.take() {
+                origins
+            } else {
+                return;
+            };
+            for (button, origin) in buttons.into_iter().zip(origins) {
+                let _: () = msg_send![button, setFrameOrigin: origin];
             }
         }
     }
@@ -682,6 +691,7 @@ impl MacWindow {
         handle: AnyWindowHandle,
         WindowParams {
             bounds,
+            frame_autosave_name,
             titlebar,
             kind,
             is_movable,
@@ -830,12 +840,16 @@ impl MacWindow {
                     sensitive_input: false,
                     last_key_equivalent: None,
                     synthetic_drag_counter: 0,
+                    native_button_origins: None,
                     traffic_light_position: titlebar
                         .as_ref()
                         .and_then(|titlebar| titlebar.traffic_light_position),
                     transparent_titlebar: titlebar
                         .as_ref()
                         .is_none_or(|titlebar| titlebar.appears_transparent),
+                    applied_style: None,
+                    pending_style: None,
+                    guest_constraint_display: None,
                     previous_modifiers_changed_event: None,
                     keystroke_for_do_command: None,
                     do_command_handled: None,
@@ -973,17 +987,24 @@ impl MacWindow {
                 }
             }
 
-            if focus && show {
-                native_window.makeKeyAndOrderFront_(nil);
-            } else if show {
-                native_window.orderFront_(nil);
-            }
-
             // Set the initial position of the window to the specified origin.
             // Although we already specified the position using `initWithContentRect_styleMask_backing_defer_screen_`,
             // the window position might be incorrect if the main screen (the screen that contains the window that has focus)
             //  is different from the primary screen.
             NSWindow::setFrameTopLeftPoint_(native_window, window_rect.origin);
+            if let Some(name) = frame_autosave_name {
+                // Assigning the name restores the saved frame before the first presentation.
+                let name = NSString::alloc(nil).init_str(&name).autorelease();
+                let accepted: BOOL = msg_send![native_window, setFrameAutosaveName: name];
+                if accepted == NO {
+                    log::warn!("AppKit rejected the window frame autosave name");
+                }
+            }
+            if focus && show {
+                native_window.makeKeyAndOrderFront_(nil);
+            } else if show {
+                native_window.orderFront_(nil);
+            }
             window.0.lock().move_traffic_light();
 
             pool.drain();
@@ -1054,11 +1075,15 @@ impl MacWindow {
 
 impl Drop for MacWindow {
     fn drop(&mut self) {
-        let activate_callback = {
+        let (activate_callback, observer) = {
             let mut state = self.0.lock();
             state.owner_dropped = true;
-            state.activate_callback.take()
+            let observer = state.guest_constraint_display.take().map(|_| state.native_window);
+            (state.activate_callback.take(), observer)
         };
+        if let Some(native) = observer {
+            unsafe { window_style::observe_screen_parameters(native, false) };
+        }
         drop(activate_callback);
         input_policy::clear(&self.0);
         let checking = self.0.lock().text_checking.take();
@@ -1400,6 +1425,14 @@ impl PlatformWindow for MacWindow {
 
     fn set_app_id(&mut self, _app_id: &str) {}
 
+    fn set_macos_window_style(&self, style: crate::MacWindowStyle) {
+        window_style::schedule(&self.0, style);
+    }
+
+    fn titlebar_height(&self) -> Pixels {
+        self.0.lock().titlebar_height()
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut this = self.0.as_ref().lock();
 
@@ -1588,7 +1621,7 @@ impl PlatformWindow for MacWindow {
 
     fn set_window_non_draggable_regions(&self, regions: &[Bounds<Pixels>]) {
         let mut state = self.0.lock();
-        if !state.transparent_titlebar {
+        if !state.has_custom_titlebar() {
             return;
         }
         let window = state.native_window;
@@ -2146,6 +2179,13 @@ extern "C" fn window_will_exit_fullscreen(this: &Object, _: Sel, _: id) {
     }
 }
 
+extern "C" fn window_did_exit_fullscreen(this: &Object, _: Sel, _: id) {
+    // AppKit restores the mask it saved at entry. The guest may have requested
+    // a different normal window while macOS owned fullscreen decorations.
+    let state = unsafe { get_window_state(this) };
+    window_style::reapply(&state);
+}
+
 pub(crate) fn is_macos_version_at_least(version: NSOperatingSystemVersion) -> bool {
     unsafe { NSProcessInfo::processInfo(nil).isOperatingSystemAtLeastVersion(version) }
 }
@@ -2163,8 +2203,8 @@ extern "C" fn window_did_move(this: &Object, _: Sel, _: id) {
 
 extern "C" fn window_did_change_screen(this: &Object, _: Sel, _: id) {
     let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.as_ref().lock();
-    lock.start_display_link();
+    window_state.lock().start_display_link();
+    window_style::display_changed(&window_state);
 }
 
 extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) {
@@ -2307,13 +2347,13 @@ extern "C" fn view_did_change_backing_properties(this: &Object, _: Sel) {
 
     lock.renderer.update_drawable_size(drawable_size);
 
-    if let Some(mut callback) = lock.resize_callback.take() {
-        let content_size = lock.content_size();
-        let scale_factor = lock.scale_factor();
-        drop(lock);
-        callback(content_size, scale_factor);
+    let resize = lock.resize_callback.take();
+    drop(lock);
+    if let Some(mut callback) = resize {
+        callback(size, scale_factor);
         window_state.as_ref().lock().resize_callback = Some(callback);
-    };
+    }
+    window_style::display_changed(&window_state);
 }
 
 extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {

@@ -10,13 +10,12 @@ use serde::{Deserialize, Serialize};
 
 pub const SEED_BYTES: usize = 16;
 pub type Seed = [u8; SEED_BYTES];
-/// 58^22 exceeds 2^128, so every seed fits a fixed 22-character code.
-pub const CODE_CHARS: usize = 22;
+pub use playbit_api::abi::session::{CODE_CHARS, session_code};
 pub const MAX_ENVELOPE_BYTES: usize = 4096;
 #[cfg(all(not(target_arch = "wasm32"), feature = "local-store"))]
 const ENVELOPE_OVERHEAD: usize = 29;
 const _: () = assert!(MAX_ENVELOPE_BYTES > 1 + 12 + 16);
-const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+use playbit_api::abi::session::CODE_ALPHABET as ALPHABET;
 const LOCAL_PREFIX: &str = "session:";
 #[cfg(all(not(target_arch = "wasm32"), feature = "local-store"))]
 const SALT: &[u8] = b"app.playbit.session.v1";
@@ -62,16 +61,6 @@ struct Body {
     shared: Option<SharedVolume>,
 }
 
-pub fn session_code(seed: &Seed) -> String {
-    let mut value = u128::from_be_bytes(*seed);
-    let mut code = [b'1'; CODE_CHARS];
-    for slot in code.iter_mut().rev() {
-        *slot = ALPHABET[(value % 58) as usize];
-        value /= 58;
-    }
-    assert_eq!(value, 0, "fixed-width base58 code holds the complete seed");
-    code.iter().map(|&byte| byte as char).collect()
-}
 pub fn session_link(seed: &Seed, channel: crate::release_channel::ReleaseChannel) -> String {
     format!("{}/s#{}", channel.website(), session_code(seed))
 }

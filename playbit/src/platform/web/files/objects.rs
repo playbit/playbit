@@ -8,7 +8,6 @@ use crate::{
     },
     store::{
         EntryType,
-        object_contract::Principal,
         volume_index::{BlobVersion, EntryAddress, EntryKind, IndexSnapshot},
     },
 };
@@ -62,7 +61,7 @@ impl Directory {
     pub(super) fn check(&self, host: &Host, retained: bool) -> Result<Rc<Volume>> {
         let volume = host.replica_volume(self.volume)?;
         let policy = host.admit_volume(&volume, Permission::Read)?;
-        policy.authorize(host.account, Permission::Read).map_err(store_error)?;
+        policy.authorize(host.actor(&volume), Permission::Read).map_err(store_error)?;
         authority::check(host, &volume, self.parent)?;
         let snapshot = IndexSnapshot::new(volume.index.begin_read().map_err(map_error)?);
         if !retained {
@@ -73,7 +72,7 @@ impl Directory {
                 .authorize_retained_read(
                     policy.volume(),
                     policy.default_permissions(),
-                    Principal::Human(host.account),
+                    host.actor(&volume),
                     parent,
                 )
                 .map_err(store_error)?;
@@ -98,7 +97,7 @@ impl Directory {
             .authorize_namespace(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(host.account),
+                host.actor(&volume),
                 entry.id,
                 Permission::Read,
             )

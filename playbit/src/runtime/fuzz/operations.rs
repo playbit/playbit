@@ -284,6 +284,7 @@ fn output_layout(opcode: Opcode) -> Option<crate::runtime::linear_memory::record
         Opcode::StartupArguments => e::arguments::LAYOUT,
         Opcode::EventPoll => o::event::LAYOUT,
         Opcode::Identity => o::identity::LAYOUT,
+        Opcode::SessionInfo => crate::runtime::linear_memory::layout::session::session_info::LAYOUT,
         Opcode::ObjectReadTake => d::object::LAYOUT,
         Opcode::ObjectQueryTake => d::page::LAYOUT,
         Opcode::SchemaReadTake => s::schema::LAYOUT,
@@ -326,6 +327,7 @@ fn cleared_output(input: &[u8], length: usize) -> HostResult<Vec<u8>> {
             | Opcode::StartupArguments
             | Opcode::EventPoll
             | Opcode::Identity
+            | Opcode::SessionInfo
     ));
     let pointer = u64::from_le_bytes(input[4 + slot * 8..12 + slot * 8].try_into().expect("slot"));
     let pointer = u32::try_from(pointer).map_err(|_| HostError::InvalidArgument)?;

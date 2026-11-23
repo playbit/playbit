@@ -70,6 +70,7 @@ fn failed_permission_save_releases_only_pending_state_and_preserves_edits(
         browser.update_permission_dirty();
         assert!(browser.retain_local_drafts(cx));
         let other = Request::EntryPermissions {
+            session: None,
             volume: volume(2).id,
             entry: entry(1).id,
             permissions: EntryAcl::Inherit,
@@ -422,6 +423,127 @@ fn subject_popup_changes_identity_without_changing_flags_and_rejects_duplicates(
 }
 
 #[gpui::test]
+fn participants_picker_restores_shared_defaults_and_entry_overrides(cx: &mut gpui::TestAppContext) {
+    use crate::package::{AppIdentity, AutomaticVolumeRole as Role};
+    use crate::runtime::MenuEntry;
+    use crate::store::{BuildSelector, Session, UpdateAuthority};
+
+    let app = AppIdentity { publisher: volume(1).owner, app_id: "lounge".into() };
+    let session_id = [7; 32];
+    let shared = Volume {
+        id: app.volume_id(Role::Session, Some(session_id), None, None).unwrap(),
+        personal: false,
+        share_key_with_service: true,
+        ..volume(1)
+    };
+    let world =
+        Volume { id: app.volume_id(Role::Root, None, None, None).unwrap(), ..shared.clone() };
+    let session = Session {
+        id: crate::identifier::encode(&session_id),
+        root_volume: world.id,
+        shared_volume: Some(shared.id),
+        creator: shared.owner,
+        selector: BuildSelector::Exact { build_id: "build".into() },
+        resolved_build_id: "build".into(),
+        update_authority: UpdateAuthority::Creator,
+        app,
+    };
+    let (host, _window, _requests) = crate::desktop::test_support::host(cx);
+    let browser = host.update(cx, |host, cx| {
+        host.apply_application_catalog(vec![session], cx);
+        host.select_volume(shared.clone(), cx);
+        host.browser.as_ref().unwrap().clone()
+    });
+    let remove = browser.update(cx, |browser, cx| {
+        browser.receive(
+            Reply::VolumeDetails {
+                details: crate::store::VolumeDetails {
+                    volume: shared.clone(),
+                    permissions: Acl {
+                        grants: vec![Grant {
+                            subject: Subject::SessionParticipants,
+                            permissions: vec![Permission::Read, Permission::Write],
+                        }],
+                    },
+                    created_clock: 1,
+                    name_clock: 1,
+                },
+            },
+            cx,
+        );
+        browser.volume_permissions_panel(true, cx);
+        browser.controls["remove-grant-0"].read(cx).popup_for_test().2
+    });
+    cx.update(|cx| remove(0, cx));
+    let start = browser.update(cx, |browser, cx| {
+        assert!(!browser.has_permission_subject(&Subject::SessionParticipants));
+        browser.volume_permissions_panel(true, cx);
+        browser.controls["start-grant"].read(cx).popup_for_test().2
+    });
+    cx.update(|cx| start(0, cx));
+    let add = browser.update(cx, |browser, cx| {
+        browser.volume_permissions_panel(true, cx);
+        let (items, _, activate) = browser.controls["grant-kind"].read(cx).popup_for_test();
+        assert!(items.iter().any(|item| matches!(item, MenuEntry::Action { id: 4, label, disabled: false, .. } if label == "Session participants")));
+        activate
+    });
+    cx.update(|cx| add(4, cx));
+    let change = browser.update(cx, |browser, cx| {
+        assert!(browser.has_permission_subject(&Subject::SessionParticipants));
+        browser.begin_grant_editor(Some(Subject::SessionParticipants), false, cx);
+        browser.volume_permissions_panel(true, cx);
+        let (items, _, _) = browser.controls["grant-kind"].read(cx).popup_for_test();
+        let checked: Vec<_> = items
+            .iter()
+            .filter_map(|item| match item {
+                MenuEntry::Action { id, checked: Some(true), .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(checked, [1], "only the selected Account input is checked");
+        browser.close_grant_editor(cx);
+        let mut custom = configured(2);
+        custom.grants[0].permissions.push(Permission::Write);
+        let current = details(3, EntryAcl::Replace(custom));
+        set_current(browser, current.clone());
+        browser.permissions_panel(&current, true, cx);
+        let (items, _, activate) = browser.controls["grant-subject-0"].read(cx).popup_for_test();
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, MenuEntry::Action { id: 4, disabled: false, .. }))
+        );
+        activate
+    });
+    cx.update(|cx| change(4, cx));
+    browser.update(cx, |browser, cx| {
+        let expected = Grant {
+            subject: Subject::SessionParticipants,
+            permissions: vec![Permission::Read, Permission::Write],
+        };
+        assert_eq!(browser.permissions, EntryAcl::Replace(Acl { grants: vec![expected] }));
+        for other in [world, volume(2)] {
+            browser.volume = other;
+            let current = details(3, EntryAcl::Replace(configured(2)));
+            set_current(browser, current.clone());
+            browser.begin_grant_editor(None, false, cx);
+            browser.permissions_panel(&current, true, cx);
+            for key in ["grant-kind", "grant-subject-0"] {
+                let (items, _, _) = browser.controls[key].read(cx).popup_for_test();
+                assert!(items.iter().all(|item| !matches!(item, MenuEntry::Action { id: 4, .. })));
+            }
+        }
+    });
+    // An open menu must recheck the binding if the retained session disappears.
+    browser.update(cx, |browser, _| browser.volume = shared);
+    host.update(cx, |host, cx| host.apply_application_catalog(Vec::new(), cx));
+    cx.update(|cx| change(4, cx));
+    browser.read_with(cx, |browser, _| {
+        assert_eq!(browser.permissions, EntryAcl::Replace(configured(2)))
+    });
+}
+
+#[gpui::test]
 fn volume_acl_drafts_use_shared_rows_and_correlated_save_baselines(cx: &mut gpui::TestAppContext) {
     // Fenced reads retire data with inline readiness; the same error from a save still alerts.
     let (host, window, requests, responses) = crate::desktop::test_support::host_with_responses(cx);
@@ -473,7 +595,8 @@ fn volume_acl_drafts_use_shared_rows_and_correlated_save_baselines(cx: &mut gpui
     };
     browser.update(cx, |browser, cx| {
         browser.failed(
-            Failure::for_request(&Request::VolumeDetails { volume: volume(2).id }).unwrap(),
+            Failure::for_request(&Request::VolumeDetails { session: None, volume: volume(2).id })
+                .unwrap(),
             error,
             cx,
         );
@@ -493,6 +616,7 @@ fn volume_acl_drafts_use_shared_rows_and_correlated_save_baselines(cx: &mut gpui
         browser.refresh_catalog();
         for (cut, waiting) in [(Some(99), false), (None, true)] {
             let request = Request::DirectoryEntries {
+                session: None,
                 volume: volume(1).id,
                 target: crate::store::volume_index::DirectoryTarget::Root,
                 cut,
@@ -520,7 +644,7 @@ fn volume_acl_drafts_use_shared_rows_and_correlated_save_baselines(cx: &mut gpui
     });
     let mut failure = crate::desktop::WorkerResponse::from_reply(Err(error.into()));
     failure.browser_failure =
-        Failure::for_request(&Request::VolumeDetails { volume: volume(1).id });
+        Failure::for_request(&Request::VolumeDetails { session: None, volume: volume(1).id });
     responses.try_send(failure).unwrap();
     cx.run_until_parked();
     browser.update(cx, |browser, cx| {
@@ -655,7 +779,8 @@ fn volume_acl_drafts_use_shared_rows_and_correlated_save_baselines(cx: &mut gpui
         let Message::Request(queued) = requests.try_recv().unwrap() else { panic!("save") };
         assert!(matches!(&queued.request, Request::Permissions { .. }));
         browser.failed(
-            Failure::for_request(&Request::VolumeDetails { volume: volume(1).id }).unwrap(),
+            Failure::for_request(&Request::VolumeDetails { session: None, volume: volume(1).id })
+                .unwrap(),
             error,
             cx,
         );

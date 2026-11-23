@@ -1,6 +1,5 @@
 //! Qualified AP cuts retain rejected local state before canonical publication.
 use super::*;
-use crate::store::object_contract::Principal;
 use crate::store::volume_index::{EntryChange, EntryKind, IndexSnapshot};
 use std::io::{Read, Write};
 
@@ -223,6 +222,7 @@ impl LocalStore {
         index: &Database,
     ) -> Result<Vec<EntryId>> {
         let accepted = MetadataPolicy::read(&stage.metadata)?;
+        let actor = self.data_actor(access, accepted.volume())?;
         let current = index.begin_read()?;
         let mut entries = Vec::new();
         let mut after = None;
@@ -236,7 +236,7 @@ impl LocalStore {
                     &current,
                     &stage.metadata,
                     &accepted,
-                    access.account,
+                    actor,
                     entry.id,
                 )?;
                 let backing_differs =
@@ -265,13 +265,14 @@ impl LocalStore {
         if IndexSnapshot::new(index.begin_read()?).backing_quarantined(entry)? {
             return Ok(false);
         }
-        if retains_log_appends(&stage.metadata, access.account, entry)? {
+        let actor = self.data_actor(access, accepted.volume())?;
+        if retains_log_appends(&stage.metadata, actor, entry)? {
             return Ok(false);
         }
         let writable = IndexSnapshot::new(stage.metadata.begin_read()?).authorize_staged_entry(
             accepted.volume(),
             accepted.default_permissions(),
-            Principal::Human(access.account),
+            actor,
             entry,
             Permission::Write,
         );
@@ -309,7 +310,7 @@ impl LocalStore {
                     remote,
                     &local,
                     &policy,
-                    access.account,
+                    actor,
                 )
             })?
         } else {
@@ -400,7 +401,7 @@ pub(super) fn merge_backing(
     source: &Database,
     target: &Database,
     policy: &DatabasePolicy,
-    account: Id,
+    actor: DataActor,
     replace_all: bool,
 ) -> Result<()> {
     let failure = std::cell::RefCell::new(None);
@@ -412,7 +413,7 @@ pub(super) fn merge_backing(
             if replace_all {
                 Ok(kvdb::sync::Resolution::UseRemote)
             } else {
-                match backing_resolution(delta, policy, account) {
+                match backing_resolution(delta, policy, actor) {
                     Ok(resolution) => Ok(resolution),
                     Err(error) => {
                         *failure.borrow_mut() = Some(error);
@@ -438,7 +439,7 @@ pub(super) fn merge_backing(
 pub(super) fn backing_resolution(
     delta: &kvdb::sync::SyncDelta<'_>,
     policy: &DatabasePolicy,
-    account: Id,
+    actor: DataActor,
 ) -> Result<kvdb::sync::Resolution> {
     use kvdb::sync::{Lww, Resolution, SyncDelta, SyncResolver};
     let ranked = Lww.resolve(delta)?;
@@ -446,7 +447,7 @@ pub(super) fn backing_resolution(
         return Ok(ranked);
     }
     let proposed = SyncDelta { key: delta.key, local: delta.remote, remote: delta.local };
-    match policy.validate_sync_source(&proposed, Some(account)) {
+    match policy.validate_sync_source_as(&proposed, Some(actor)) {
         Ok(_) => Ok(ranked),
         Err(Error::AccessDenied(_)) => Ok(Resolution::UseRemote),
         Err(error) => Err(error),
@@ -458,7 +459,7 @@ fn rejected_backing(
     source: &Database,
     target: &Database,
     policy: &DatabasePolicy,
-    account: Id,
+    actor: DataActor,
 ) -> Result<bool> {
     use kvdb::sync::{Lww, Resolution, SyncReceiver, SyncResolver, SyncSender, SyncStatus};
     if replica_root(source)? == replica_root(target)? {
@@ -468,7 +469,7 @@ fn rejected_backing(
     let failure = std::cell::RefCell::new(None);
     let resolver = |delta: &kvdb::sync::SyncDelta<'_>| {
         if Lww.resolve(delta)? == Resolution::KeepLocal {
-            match backing_resolution(delta, policy, account) {
+            match backing_resolution(delta, policy, actor) {
                 Ok(Resolution::UseRemote) => rejected.set(true),
                 Ok(_) => {}
                 Err(error) => *failure.borrow_mut() = Some(error),
@@ -516,7 +517,7 @@ pub(super) fn merge_local_index(
     scratch: &Path,
     stage: &ReceivedVolume,
     local: &Database,
-    account: Id,
+    actor: DataActor,
 ) -> Result<()> {
     use kvdb::sync::{Lww, Resolution, SyncResolver};
     let cut = RejectedCut::read(&stage._directory.0)?;
@@ -543,7 +544,7 @@ pub(super) fn merge_local_index(
                     accepted.authorize_source(
                         policy.volume(),
                         policy.default_permissions(),
-                        account,
+                        actor,
                         change,
                     )
                 });
@@ -580,7 +581,7 @@ pub(super) fn merge_canonical_index(
     scratch: &Path,
     stage: &ReceivedVolume,
     target: &Database,
-    account: Id,
+    actor: DataActor,
 ) -> Result<bool> {
     use kvdb::sync::{Lww, Resolution, SyncResolver};
     let Some(cut) = RejectedCut::read(&stage._directory.0)? else {
@@ -590,7 +591,7 @@ pub(super) fn merge_canonical_index(
     {
         return Err(Error::AccessDenied("canonical replacement requires its qualified AP cut"));
     }
-    let unavailable = missing_rejected_backings(stage, &cut, account)?;
+    let unavailable = missing_rejected_backings(stage, &cut, actor)?;
     let rejected = std::cell::RefCell::new(None);
     let resolver =
         |delta: &kvdb::sync::SyncDelta<'_>| match canonical_index_resolution(stage, &cut, delta) {
@@ -673,14 +674,14 @@ fn repair_canonical_cut(
 fn missing_rejected_backings(
     stage: &ReceivedVolume,
     cut: &RejectedCut,
-    account: Id,
+    actor: DataActor,
 ) -> Result<Vec<EntryId>> {
     let mut unavailable = Vec::new();
     for entry in &cut.entries {
         let file = DatabaseId::Entry(*entry).file_name();
         if cut.files.contains_key(&file)
             && !stage._directory.0.join(file).is_file()
-            && !retains_log_appends(&stage.metadata, account, *entry)?
+            && !retains_log_appends(&stage.metadata, actor, *entry)?
         {
             unavailable.push(*entry);
         }
@@ -688,7 +689,7 @@ fn missing_rejected_backings(
     Ok(unavailable)
 }
 
-fn retains_log_appends(index: &Database, account: Id, entry: EntryId) -> Result<bool> {
+fn retains_log_appends(index: &Database, actor: DataActor, entry: EntryId) -> Result<bool> {
     let policy = match DatabasePolicy::read_source(index, DatabaseId::Entry(entry)) {
         Ok(policy) => policy,
         Err(Error::NotFound(_)) => return Ok(false),
@@ -699,7 +700,7 @@ fn retains_log_appends(index: &Database, account: Id, entry: EntryId) -> Result<
     {
         return Ok(false);
     }
-    match policy.authorize(Principal::Human(account), Permission::Append) {
+    match policy.authorize(actor, Permission::Append) {
         Ok(()) => Ok(true),
         Err(Error::AccessDenied(_) | Error::NotFound(_)) => Ok(false),
         Err(error) => Err(error),

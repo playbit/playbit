@@ -159,7 +159,7 @@ ap-identity = ["ap-protocol", "dep:x509-parser", "dep:rcgen", "dep:rustls", "dep
 network = ["ap-identity", "local-store", "dep:quinn", "dep:rustls-pemfile", "dep:rustls-platform-verifier", "dep:tokio"]
 # VM compiler/executor debt is confined to this selection; local embedding does
 # not compile Wasmtime. Native app execution will use the shared operation core.
-native-runtime = ["dep:getrandom", "dep:tokio"]
+native-runtime = ["dep:corosensei", "dep:getrandom", "dep:tokio"]
 # Isolated sidebar, updater and status-bar qualification fixtures.
 desktop-qualification = []
 # Tier B native PCM output uses the existing bounded lock-free queue dependency.
@@ -186,6 +186,9 @@ phase1-qualification = ["ios"]
 
 # Every target, including wasm32: package, store, trace, platform::web.
 [dependencies]
+# Tier A native deadline polling parks a C callback on a guard-paged stack.
+# Removing this dependency requires an equivalent same-thread stack switch.
+corosensei = { version = "=0.3.4", optional = true }
 miniz_oxide = "0.8.9"
 ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std", "pkcs8", "zeroize"] }
 
@@ -256,7 +259,7 @@ icu_collator = { version = "=2.3.1", optional = true }
 wasm-encoder = { version = "=0.261.0", features = ["wasmparser"], optional = true }
 # Guest trap reports resolve bundled DWARF and demangle language-level function names.
 # Removal requires another resolver for bundled guest symbols.
-wasmtime = { version = "=50.0.0", default-features = false, features = ["addr2line", "anyhow", "cranelift", "demangle", "gc", "gc-copying", "pulley", "reexport-wasmparser", "runtime", "std", "threads"], optional = true }
+wasmtime = { version = "=50.0.0", default-features = false, features = ["addr2line", "anyhow", "async", "cranelift", "demangle", "gc", "gc-copying", "pulley", "reexport-wasmparser", "runtime", "std", "threads"], optional = true }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 mach2 = { version = "0.6", optional = true }

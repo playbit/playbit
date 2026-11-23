@@ -29,6 +29,7 @@ const PREVIEW_SIDE_MAX: u32 = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Target {
+    session: Option<[u8; 32]>,
     address: EntryAddress,
     revision: EntryId,
     len_bytes: u64,
@@ -157,6 +158,7 @@ impl Browser {
             && (1..=INPUT_BYTES_MAX).contains(&len_bytes)
             && gate.accepts(epoch))
         .then_some(Target {
+            session: self.shared_session(),
             address: EntryAddress { volume: self.volume.id, entry: details.entry.id },
             revision: details.entry.content_revision,
             len_bytes,
@@ -309,7 +311,7 @@ fn load(
     cancellation: &Cancellation,
 ) -> crate::engine::Result<Arc<RenderImage>> {
     let exchange = |request| cancellation.exchange(profile, request, gate, target.epoch);
-    let mut context = DataContext::open_volume(target.address.volume, &exchange)?;
+    let mut context = DataContext::open_browser(target.address.volume, target.session, &exchange)?;
     let mut execute = |operation| {
         context.execute(DataCall { volume: *target.address.volume.as_bytes(), operation })
     };
@@ -530,6 +532,7 @@ mod tests {
 
     fn target(bytes: &[u8]) -> Target {
         Target {
+            session: None,
             address: EntryAddress {
                 volume: Id::from_bytes([1; 16]),
                 entry: EntryId::from_bytes([2; 15]).unwrap(),

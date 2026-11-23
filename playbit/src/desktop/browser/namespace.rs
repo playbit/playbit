@@ -125,6 +125,7 @@ impl Browser {
     }
     fn request_directory(&mut self, pending: Pending) {
         if self.submit(Request::DirectoryEntries {
+            session: self.request_session(),
             volume: self.volume.id,
             target: pending.target,
             cut: pending.cut,
@@ -232,7 +233,11 @@ impl Browser {
         self.catalog.columns[index].selected = None;
         if let Some(entry) = parent {
             self.selected = Some(entry);
-            self.submit(Request::EntryDetails { volume: self.volume.id, entry });
+            self.submit(Request::EntryDetails {
+                session: self.request_session(),
+                volume: self.volume.id,
+                entry,
+            });
             self.start_detail_loading(cx);
         }
         let column = &mut self.catalog.columns[index];

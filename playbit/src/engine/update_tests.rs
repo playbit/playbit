@@ -35,13 +35,17 @@ fn resolved(engine: &Engine, session: &str, package: &Package) -> updates::Prepa
         package.to_bytes().unwrap(),
     )
     .unwrap();
+    resolved_build(engine, session, &version)
+}
+
+fn resolved_build(engine: &Engine, session: &str, version: &str) -> updates::PreparedUpdate {
     updates::prepare_candidate(
         &engine.runtime,
         &engine.services.store,
         session,
         &engine.services.path.join(crate::paths::BUILDS),
         serde_json::json!({"resolved_build_id":version,
-            "selector":BuildSelector::Exact { build_id: package.id().unwrap() }}),
+            "selector":BuildSelector::Exact { build_id: version.to_owned() }}),
     )
     .unwrap()
 }
@@ -416,7 +420,7 @@ fn automatic_foreign_root_update_requires_candidate_provisioning() {
     assert_eq!(store.session(&old.id).unwrap(), old);
     owner.provision_version(&owner_access, root.id, &target).unwrap();
     controls(&owner, &store, root.id, directory.path());
-    let candidate = resolved(&engine, &old.id, &trapping_package());
+    let candidate = resolved_build(&engine, &old.id, &target);
     engine.finish_update(&old.id, Ok(candidate));
     assert_eq!(engine.updates.get(&old.id).map(|update| update.message.as_str()), None);
     let selected = store.session(&old.id).unwrap();

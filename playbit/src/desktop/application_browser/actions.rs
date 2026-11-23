@@ -70,7 +70,7 @@ impl Shell {
                 let Some(volume) = ready else {
                     return self.open_application_scope(role, volume, session, cx);
                 };
-                if !self.select_volume(volume, cx) {
+                if !self.select_scope_volume(volume, role, session, cx) {
                     return false;
                 }
                 self.applications.pending_scope = None;
@@ -94,6 +94,31 @@ impl Shell {
         }
         cx.notify();
         true
+    }
+
+    fn select_scope_volume(
+        &mut self,
+        volume: crate::store::Volume,
+        role: Role,
+        in_session: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut binding = None;
+        if in_session && role == Role::Session {
+            let Some(selected) = self.selected_session_id().and_then(|id| {
+                self.applications.sessions().iter().find(|session| session.id == id)
+            }) else {
+                return false;
+            };
+            if selected.shared_volume.is_some() {
+                if selected.shared_volume != Some(volume.id) {
+                    return false;
+                }
+                let Ok(id) = crate::identifier::decode(&selected.id) else { return false };
+                binding = Some(id);
+            }
+        }
+        self.select_volume_in(volume, binding, cx)
     }
 
     fn open_application_scope(
@@ -158,7 +183,7 @@ impl Shell {
                 }
                 match result {
                     Ok(opened) if current => {
-                        if host.select_volume(opened, cx) {
+                        if host.select_scope_volume(opened, role, in_session, cx) {
                             host.sidebar_volumes = false;
                             host.applications.root_open = true;
                             host.applications.selected_role = Some(role);

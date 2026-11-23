@@ -843,6 +843,34 @@ pub(crate) mod operations {
     }
 }
 
+pub(crate) mod session {
+    pub(crate) mod session_info {
+        use super::super::Layout;
+        pub(crate) const MIN_SIZE: u32 = 64;
+        pub(crate) const SIZEOF: u32 = 64;
+        pub(crate) const ALIGNMENT: u32 = 4;
+        pub(crate) const SIZE: usize = 0;
+        pub(crate) const WRITTEN: usize = 4;
+        pub(crate) const FLAGS: usize = 8;
+        pub(crate) const RESERVED: usize = 12;
+        pub(crate) const INTERNAL_ID: usize = 16;
+        pub(crate) const KEY_SECRET: usize = 48;
+        pub(crate) const LAYOUT: Layout = Layout {
+            minimum: MIN_SIZE,
+            size: SIZEOF,
+            alignment: ALIGNMENT,
+            fields: &[
+                (SIZE, 4),
+                (WRITTEN, 4),
+                (FLAGS, 4),
+                (RESERVED, 4),
+                (INTERNAL_ID, 32),
+                (KEY_SECRET, 16),
+            ],
+        };
+    }
+}
+
 pub(crate) mod authenticated {
     pub(crate) mod metadata {
         use super::super::Layout;

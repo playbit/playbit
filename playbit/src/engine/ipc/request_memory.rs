@@ -364,6 +364,38 @@ impl Budget {
 /// Exhaustive matching makes new request shapes require an explicit review.
 pub fn required(request: &R) -> Result<usize> {
     let mut b = Budget(std::mem::size_of::<Request>());
+    // Ordinary management reads share the compact embedded request queue.
+    // Only a request bearing a selected Shared session allocates its identifier.
+    match request {
+        R::Entries { session, .. }
+        | R::DirectoryEntries { session, .. }
+        | R::VolumeDetails { session, .. }
+        | R::EntryDetails { session, .. }
+        | R::EntryRevisions { session, .. }
+        | R::CreateDatabase { session, .. }
+        | R::CreateDatabaseIn { session, .. }
+        | R::RenameEntry { session, .. }
+        | R::RemoveEntry { session, .. }
+        | R::EntryPermissions { session, .. }
+        | R::BloblogCreate { session, .. }
+        | R::BloblogCreateIn { session, .. }
+        | R::FileCreate { session, .. }
+        | R::FileCreateIn { session, .. }
+        | R::PayloadSize { session, .. }
+        | R::Schema { session, .. }
+        | R::CreateObject { session, .. }
+        | R::ReadObject { session, .. }
+        | R::EditObject { session, .. }
+        | R::RemoveObject { session, .. }
+        | R::Objects { session, .. }
+        | R::RenameEntryComponent { session, .. }
+        | R::KvRename { session, .. }
+            if session.is_some() =>
+        {
+            b.add(std::mem::size_of::<[u8; 32]>())?;
+        }
+        _ => {}
+    }
     match request {
         R::GetAppDisplay { app, .. }
         | R::SetAppEnabled { app, .. }
@@ -492,7 +524,7 @@ pub fn required(request: &R) -> Result<usize> {
         R::Schema { schema, .. } => b.schema(schema)?,
         R::CreateObject { fields, .. } | R::EditObject { fields, .. } => b.fields(fields)?,
         R::PublishApp { bundle, notes, .. } => b.payloads(&[bundle.len(), notes.len()])?,
-        R::KvRename { mutation } => {
+        R::KvRename { mutation, .. } => {
             let (old_key, new_key, value) = (&mutation.old_key, &mutation.new_key, &mutation.value);
             b.add(std::mem::size_of::<crate::engine::KvRenameMutation>())?;
             if old_key.is_empty()
@@ -514,7 +546,7 @@ pub fn required(request: &R) -> Result<usize> {
         R::InstanceInspect { .. } | R::InstanceStopReason { .. } | R::InstanceStartup { .. } | R::InstanceShow { .. } | R::InstanceCompile { .. } | R::InstanceClaim { .. } | R::InstanceRestore { .. } | R::InstanceConfiguration { .. }
         | R::InstanceLaunchFailed { .. } | R::InstanceChannelsAck { .. } | R::InstanceChannelsClose { .. } | R::InstanceEvents { .. } | R::ToolContextClose { .. }
         | R::ToolContextOpen { scope: crate::engine::service_call::ArchivedToolScope::Account }
-        | R::ToolContextOpen { scope: crate::engine::service_call::ArchivedToolScope::Volume(_) }
+        | R::ToolContextOpen { scope: crate::engine::service_call::ArchivedToolScope::Volume(_) | crate::engine::service_call::ArchivedToolScope::BrowserVolume(_) }
         | R::DeleteVolume { .. } | R::DuplicateVolume { .. } | R::DuplicateEntry { .. }
         | R::LocalProtocol | R::AcceptAgreement { .. } | R::Entries { .. } | R::DirectoryEntries { .. } | R::VolumeDetails { .. } | R::EntryDetails { .. }
         | R::EntryRevisions { .. } | R::RejectedEntries { .. } | R::Objects { .. } | R::ReadObject { .. }
@@ -548,6 +580,7 @@ mod tests {
             (1, 1, store::key_value::MAX_BYTES + 1, false),
         ] {
             let request = Request::KvRename {
+                session: None,
                 mutation: Box::new(crate::engine::KvRenameMutation {
                     address,
                     old_key: vec![b'a'; old],
@@ -666,13 +699,20 @@ mod tests {
         for length in [maximum, maximum + 1] {
             for request in [
                 Request::CreateDatabaseIn {
+                    session: None,
                     volume,
                     parent,
                     name: "x".repeat(length),
                     kind: Box::new(store::volume_index::EntryKind::KvDb {}),
                 },
-                Request::BloblogCreateIn { volume, parent, name: "x".repeat(length) },
+                Request::BloblogCreateIn {
+                    session: None,
+                    volume,
+                    parent,
+                    name: "x".repeat(length),
+                },
                 Request::FileCreateIn {
+                    session: None,
                     volume,
                     parent,
                     name: "x".repeat(length),
@@ -690,8 +730,9 @@ mod tests {
     fn component_name_is_bounded_before_owned_request_materialization() {
         // Valid archives still cannot allocate a component larger than the namespace permits.
         let limit = store::volume_index::namespace::MAX_COMPONENT_BYTES;
-        for length in [limit, limit + 1] {
+        for (length, session) in [(limit, None), (limit, Some([3; 32])), (limit + 1, None)] {
             let request = Request::RenameEntryComponent {
+                session: session.map(Box::new),
                 volume: store::Id::from_bytes([1; 16]),
                 entry: store::EntryId::from_bytes([2; 15]).unwrap(),
                 name: "x".repeat(length),
@@ -699,7 +740,8 @@ mod tests {
             let bytes = codec::encode(&request, codec::MAX_ARCHIVE).unwrap();
             let budget = required(codec::access::<R>(&bytes).unwrap());
             if length == limit {
-                assert_eq!(budget.unwrap(), std::mem::size_of::<Request>() + length);
+                let id = session.as_ref().map_or(0, std::mem::size_of_val);
+                assert_eq!(budget.unwrap(), std::mem::size_of::<Request>() + length + id);
             } else {
                 assert!(budget.is_err());
             }

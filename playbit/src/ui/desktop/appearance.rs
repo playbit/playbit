@@ -10,19 +10,36 @@ unsafe extern "C" {
     static NSAppearanceNameAqua: *mut Object;
 }
 
-/// Called on AppKit's main thread before creating any windows. Our current UI
-/// is light-only; native windows and panels must inherit the same appearance.
+/// Called by the light-themed desktop shell before creating its windows.
 pub fn set_light_appearance() {
     let _timing = crate::trace::Span::new("ui.set_light_appearance");
     unsafe {
-        let appearance: *mut Object =
-            msg_send![class!(NSAppearance), appearanceNamed: NSAppearanceNameAqua];
-        assert!(!appearance.is_null(), "AppKit must provide the Aqua appearance");
         let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
-        let _: () = msg_send![app, setAppearance: appearance];
+        let _: () = msg_send![app, setAppearance: aqua()];
     }
 }
 
+pub(super) fn aqua() -> *mut Object {
+    // AppKit owns this named appearance for the lifetime of the process.
+    let appearance: *mut Object =
+        unsafe { msg_send![class!(NSAppearance), appearanceNamed: NSAppearanceNameAqua] };
+    assert!(!appearance.is_null(), "AppKit must provide the Aqua appearance");
+    appearance
+}
+
+/// The shared sign-in panel has a light design even in a guest process that
+/// follows system appearance. AppKit may reenter GPUI when appearance changes.
+#[cfg(feature = "connected-engine")]
+pub(super) fn set_light_panel(window: &gpui::Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else { return };
+    unsafe {
+        let native: *mut Object = msg_send![handle.ns_view.as_ptr() as *mut Object, window];
+        let _: () = msg_send![native, performSelector: sel!(setAppearance:)
+            withObject: aqua() afterDelay: 0.0_f64];
+    }
+}
 /// Read on the UI thread when beginning a decorative transition.
 pub fn reduce_motion() -> bool {
     unsafe {

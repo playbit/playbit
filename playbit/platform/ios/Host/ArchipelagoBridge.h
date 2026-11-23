@@ -144,6 +144,8 @@ typedef struct {
     size_t placeholder_len, children;
     uint32_t width, height, frames;
     size_t items;
+    uint32_t clear_color;
+    uint8_t has_clear_color;
 } SceneNode;
 typedef struct {
     uint32_t kind, x, y, width, height, color, font_size;

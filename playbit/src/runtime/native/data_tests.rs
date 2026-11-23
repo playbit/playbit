@@ -210,6 +210,7 @@ fn object_output_round_trips_all_value_types_and_rejects_overlap_without_writes(
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const NativeContext).cast_mut().cast();
     let projection = [[1; 16], [2; 16], [3; 16]];

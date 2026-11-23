@@ -242,7 +242,7 @@ fn visit_excluded(
     index: &Database,
     stage: &ReceivedVolume,
     policy: &MetadataPolicy,
-    account: Id,
+    actor: DataActor,
     retained: usize,
     mut emit: impl FnMut(Witness) -> Result<usize>,
 ) -> Result<()> {
@@ -274,7 +274,7 @@ fn visit_excluded(
             &local,
             &stage.metadata,
             policy,
-            account,
+            actor,
             entry,
             &mut scan,
             |key, clock, bytes, scan| {
@@ -317,19 +317,13 @@ impl LocalStore {
             + 32
             + confirmed_ids.len() * 64
             + confirmed.iter().map(|row| 512 + row.source.observed.heap_bytes()).sum::<usize>();
-        visit_excluded(
-            &index,
-            stage,
-            policy,
-            access.account,
-            confirmed_bytes + ids.len() * 64,
-            |source| {
-                if !confirmed_ids.contains(&source.id()?) {
-                    add_ids(&mut ids, &source)?;
-                }
-                Ok(confirmed_bytes + ids.len() * 64)
-            },
-        )?;
+        let actor = self.data_actor(access, policy.volume())?;
+        visit_excluded(&index, stage, policy, actor, confirmed_bytes + ids.len() * 64, |source| {
+            if !confirmed_ids.contains(&source.id()?) {
+                add_ids(&mut ids, &source)?;
+            }
+            Ok(confirmed_bytes + ids.len() * 64)
+        })?;
         let dictionary: Arc<[EntryId]> = ids.into_iter().collect::<Vec<_>>().into();
         let mut rows = BTreeMap::new();
         let base = dictionary.len() * 15 + 32 + confirmed_ids.len() * 64;
@@ -351,7 +345,7 @@ impl LocalStore {
         for row in confirmed {
             retained = insert(row)?;
         }
-        visit_excluded(&index, stage, policy, access.account, retained, |source| {
+        visit_excluded(&index, stage, policy, actor, retained, |source| {
             // A selected projection can deliver an accepted head while omitting
             // its history copy. Both physical keys identify the same event.
             if !confirmed_ids.contains(&source.id()?) {
@@ -367,7 +361,7 @@ impl LocalStore {
     pub(super) fn preflight_namespace_plan(
         &self,
         stage: &ReceivedVolume,
-        account: Id,
+        actor: DataActor,
     ) -> Result<Option<[u8; 32]>> {
         let index = self.db(stage.volume, DatabaseId::Index)?;
         let snapshot = index.begin_read()?;
@@ -395,7 +389,7 @@ impl LocalStore {
             && rejected.is_none()
         {
             DatabasePolicy::read_source(&stage.metadata, DatabaseId::Entry(entry))?
-                .metadata_readable(account)?
+                .metadata_readable(actor)?
         } else {
             true
         };

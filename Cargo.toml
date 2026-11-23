@@ -6,7 +6,7 @@ default-members = ["playbit", "playbit-api", "playbit/kvdb", "playbit/docdb"]
 exclude = ["guests/counter-ocaml", "guests/scorekeeper", "guests/touchline"]
 
 [workspace.package]
-version = "0.1.2-beta"
+version = "0.1.3-beta"
 edition = "2024"
 license = "BUSL-1.1"
 repository = "https://github.com/playbit/playbit"

@@ -66,9 +66,9 @@ impl Scene {
             surface: super::surface::Observer::default(),
         }
     }
-    /// Observe the host's padded viewport, independently of its scrollable content.
-    pub fn surface_observer(&self, right_inset: f32) -> impl IntoElement {
-        self.surface.element(self.send.clone(), right_inset)
+    /// Observe the drawable viewport independently of the guest's scrollable content.
+    pub fn surface_observer(&self, extent: playbit_api::ui::CanvasExtent) -> impl IntoElement {
+        self.surface.element(self.send.clone(), extent)
     }
     /// A new app instance must receive the current viewport even without a resize.
     pub fn reset_surface(&self) {
@@ -245,7 +245,9 @@ impl Scene {
         inline: bool,
     ) -> gpui::AnyElement {
         match node {
-            ViewNode::Theme { child, theme } => self.render_node(child, theme, window, cx, inline),
+            ViewNode::Theme { child, theme, .. } => {
+                self.render_node(child, theme, window, cx, inline)
+            }
             ViewNode::Scroll { id, complex_background, child } => {
                 let bars = self
                     .scrolls
@@ -555,7 +557,7 @@ impl Scene {
                 control.update(cx, |control, cx| control.set_popup_items(items, cx));
                 controls::element(control, window, cx)
             }
-            ViewNode::Canvas { id, width, height, items, .. } => {
+            ViewNode::Canvas { id, width, height, clear_color, items, .. } => {
                 if self.canvas_index == self.canvas_images.len() {
                     self.canvas_images.push(cx.new(super::canvas_images::CanvasImages::new));
                 }
@@ -569,13 +571,15 @@ impl Scene {
                 let active = self.active;
                 canvas_element(
                     id,
-                    width,
-                    height,
+                    (width, height),
+                    *clear_color,
                     items.clone(),
                     images,
                     f32::from(window.rem_size()) / 16.,
                     move |data| {
-                        if !active {
+                        // A release over host chrome reaches every canvas's
+                        // mouse-up-out listener. Only its press owner may send it.
+                        if !active || (data.phase != 1 && pointer.get() != Some(id)) {
                             return;
                         }
                         let pressed = data.buttons == 1 && data.phase < 2;
@@ -595,7 +599,7 @@ impl Scene {
     }
     fn update_controls(&mut self, view: &ViewNode, theme: &playbit_api::ui::Theme, cx: &mut App) {
         let properties = match view {
-            ViewNode::Theme { theme, child } => {
+            ViewNode::Theme { theme, child, .. } => {
                 self.update_controls(child, theme, cx);
                 return;
             }
@@ -982,7 +986,8 @@ mod rendering_tests {
             width: 32,
             height: 16,
             frames: playbit_api::ui::CanvasFrames::Continuous,
-            viewport: false,
+            extent: playbit_api::ui::CanvasExtent::Inline,
+            clear_color: None,
             items: vec![crate::runtime::CanvasItem::Pixels {
                 bounds: playbit_api::ui::CanvasRect {
                     x: 0,
@@ -1073,7 +1078,8 @@ mod rendering_tests {
             width,
             height,
             frames: playbit_api::ui::CanvasFrames::Static,
-            viewport: false,
+            extent: playbit_api::ui::CanvasExtent::Inline,
+            clear_color: None,
             items: vec![],
         };
         let scroll =

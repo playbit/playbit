@@ -57,6 +57,44 @@ fn permission_choice(
 }
 
 impl Browser {
+    pub(in crate::desktop) fn set_session_shared_volumes(
+        &mut self,
+        sessions: &[crate::store::Session],
+    ) {
+        self.finder_volume = self.volume.personal
+            && !sessions.iter().any(|session| session.replica_volume() == self.volume.id);
+        self.shared_volume_owners = sessions
+            .iter()
+            .filter_map(|session| {
+                let shared = session.shared_volume?;
+                session.validate_shared_volume().ok()?;
+                Some((shared, session.creator))
+            })
+            .collect();
+    }
+
+    fn is_session_shared(&self) -> bool {
+        !self.volume.personal
+            && self.volume.share_key_with_service
+            && self.shared_volume_owners.get(&self.volume.id) == Some(&self.volume.owner)
+    }
+
+    fn add_participants_choice(
+        &self,
+        items: &mut Vec<crate::runtime::MenuEntry>,
+        target: Option<&Subject>,
+    ) {
+        if self.is_session_shared() {
+            let checked = target == Some(&Subject::SessionParticipants);
+            items.push(permission_choice(
+                4,
+                "Session participants".into(),
+                Some(checked),
+                !checked && self.has_permission_subject(&Subject::SessionParticipants),
+            ));
+        }
+    }
+
     pub(super) fn permissions_panel(
         &mut self,
         details: &EntryDetails,
@@ -377,6 +415,7 @@ impl Browser {
             super::drafts::canonical_permissions(&self.permissions, &self.retained_permissions);
         let request = if let Some(entry) = self.selected {
             Request::EntryPermissions {
+                session: self.request_session(),
                 volume: self.volume.id,
                 entry,
                 permissions: self.permissions.clone(),
@@ -601,7 +640,7 @@ impl Browser {
             .h(ui(24.))
             .flex()
             .items_center()
-            .gap(ui(8.))
+            .gap(ui(if grant.subject == Subject::SessionParticipants { 4. } else { 8. }))
             .child(div().flex_1().min_w_0().child(subject))
             .child(permissions)
             .child(remove)
@@ -680,17 +719,21 @@ impl Browser {
         cx: &mut Context<Self>,
     ) -> Entity<controls::Control> {
         let (label, detail, icon) = match grant.subject {
-            Subject::Public => ("Everyone".into(), String::new(), "permission-person-popup"),
+            Subject::Public => ("Everyone".into(), String::new(), Some("permission-person-popup")),
+            Subject::SessionParticipants => ("Session participants".into(), String::new(), None),
             Subject::Principal(Principal::Human(id)) => {
-                (self.permission_human_label(id), id.to_string(), "permission-person-popup")
+                (self.permission_human_label(id), id.to_string(), Some("permission-person-popup"))
             }
             Subject::Principal(Principal::Service(id)) => {
-                ("Service".into(), id.to_string(), "permission-service")
+                ("Service".into(), id.to_string(), Some("permission-service"))
             }
         };
         let mut items = Vec::new();
-        if grant.subject != Subject::Public {
-            items.push(permission_choice(0, format!("{label} {detail}"), Some(true), true));
+        if grant.subject != Subject::Public
+            && !(grant.subject == Subject::SessionParticipants && self.is_session_shared())
+        {
+            let title = if detail.is_empty() { label.clone() } else { format!("{label} {detail}") };
+            items.push(permission_choice(0, title, Some(true), true));
         }
         items.extend([
             permission_choice(1, "Change account…".into(), None, false),
@@ -702,6 +745,8 @@ impl Browser {
                 grant.permissions.contains(&Permission::ManagePermissions),
             ),
         ]);
+        self.add_participants_choice(&mut items, Some(&grant.subject));
+        let volume = self.volume.id;
         let entry = self.selected;
         let target = grant.subject.clone();
         let popup = self.popup(
@@ -710,13 +755,23 @@ impl Browser {
             disabled,
             &items,
             move |choice, this, cx| {
-                if !this.permission_edit_allowed(entry) || !this.has_permission_subject(&target) {
+                if this.volume.id != volume
+                    || !this.permission_edit_allowed(entry)
+                    || !this.has_permission_subject(&target)
+                {
                     return;
                 }
                 match choice {
                     1 | 2 => this.begin_grant_editor(Some(target.clone()), choice == 2, cx),
-                    3 if this.replace_grant_subject(Some(&target), Subject::Public, cx) => {
-                        this.close_grant_editor(cx);
+                    3 | 4 => {
+                        let subject = if choice == 3 {
+                            Subject::Public
+                        } else {
+                            Subject::SessionParticipants
+                        };
+                        if this.replace_grant_subject(Some(&target), subject, cx) {
+                            this.close_grant_editor(cx);
+                        }
                     }
                     _ => {}
                 }
@@ -724,7 +779,7 @@ impl Browser {
             cx,
         );
         popup.update(cx, |control, cx| {
-            control.set_popup_context(Some(icon), &detail, cx);
+            control.set_popup_context(icon, &detail, cx);
         });
         popup
     }
@@ -826,6 +881,9 @@ impl Browser {
         subject: Subject,
         cx: &mut Context<Self>,
     ) -> bool {
+        if subject == Subject::SessionParticipants && !self.is_session_shared() {
+            return false;
+        }
         let EntryAcl::Replace(acl) = &mut self.permissions else {
             return false;
         };
@@ -869,19 +927,22 @@ impl Browser {
     ) -> Entity<controls::Control> {
         let entry = self.selected;
         let target = self.editing_grant.clone();
+        let volume = self.volume.id;
         let public_disabled = target.as_ref().is_some_and(|subject| matches!(&self.permissions, EntryAcl::Replace(acl) if acl.grants.iter().any(|grant| &grant.subject == subject && grant.permissions.contains(&Permission::ManagePermissions))));
-        let items = [
+        let mut items = vec![
             permission_choice(1, "Account".into(), Some(!self.grant_service), false),
             permission_choice(2, "Service".into(), Some(self.grant_service), false),
             permission_choice(3, "Everyone".into(), Some(false), public_disabled),
         ];
+        self.add_participants_choice(&mut items, None);
         let kind = self.popup(
             "grant-kind",
             if self.grant_service { "Service" } else { "Account" },
             disabled,
             &items,
             move |kind, this, cx| {
-                if !this.permission_edit_allowed(entry)
+                if this.volume.id != volume
+                    || !this.permission_edit_allowed(entry)
                     || !this.adding_grant
                     || this.editing_grant != target
                 {
@@ -899,8 +960,12 @@ impl Browser {
                         });
                         this.did_change_draft(cx);
                     }
-                    3 if this.replace_grant_subject(target.as_ref(), Subject::Public, cx) => {
-                        this.close_grant_editor(cx);
+                    3 | 4 => {
+                        let subject =
+                            if kind == 3 { Subject::Public } else { Subject::SessionParticipants };
+                        if this.replace_grant_subject(target.as_ref(), subject, cx) {
+                            this.close_grant_editor(cx);
+                        }
                     }
                     _ => {}
                 }

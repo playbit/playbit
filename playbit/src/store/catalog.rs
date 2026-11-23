@@ -220,6 +220,59 @@ pub struct MetadataPolicy {
     pub(crate) permissions: Acl,
     pub(crate) provisioned_versions: BTreeSet<String>,
 }
+/// Runtime ACL context for an authenticated principal. The shared binding is
+/// never decoded from a request or a stored permission grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DataActor {
+    principal: Principal,
+    shared: Option<Id>,
+}
+impl DataActor {
+    /// The caller has verified possession of this session's invitation and
+    /// its registered identity. Bind that admission to its actual Shared volume.
+    pub fn session_participant(account: Id, session: &Session, volume: &Volume) -> Result<Self> {
+        session.validate_shared_volume()?;
+        if session.shared_volume != Some(volume.id)
+            || session.creator != volume.owner
+            || volume.personal
+            || !volume.share_key_with_service
+        {
+            return Err(Error::AccessDenied("session participant Shared volume binding"));
+        }
+        Ok(Self { principal: Principal::Human(account), shared: Some(volume.id) })
+    }
+    pub fn for_session(account: Id, session: &Session, volume: &Volume) -> Result<Self> {
+        if session.shared_volume == Some(volume.id) {
+            Self::session_participant(account, session, volume)
+        } else {
+            Ok(account.into())
+        }
+    }
+    pub fn principal(self) -> Principal {
+        self.principal
+    }
+    pub(crate) fn human(self) -> Result<Id> {
+        match self.principal {
+            Principal::Human(account) => Ok(account),
+            Principal::Service(_) => Err(Error::AccessDenied("operation requires a human account")),
+        }
+    }
+    pub(crate) fn permits(self, volume: Id, acl: &Acl, permission: Permission) -> bool {
+        acl.checked().is_ok_and(|acl| {
+            acl.permits_in_session(Some(self.principal), self.shared == Some(volume), permission)
+        })
+    }
+}
+impl From<Id> for DataActor {
+    fn from(account: Id) -> Self {
+        Principal::Human(account).into()
+    }
+}
+impl From<Principal> for DataActor {
+    fn from(principal: Principal) -> Self {
+        Self { principal, shared: None }
+    }
+}
 /// Reserved runtime principal for the managed Playbit database replica.
 pub const PLAYBIT_REPLICA_PRINCIPAL: Principal = Principal::Service(Id([0x50; 16]));
 pub type ReplicaRoot = Option<(u8, [u8; 32])>;
@@ -233,6 +286,7 @@ pub struct DurableRevision {
 pub enum ReplicaReader {
     Service,
     Participant(Id),
+    SessionParticipant(DataActor),
 }
 
 impl MetadataPolicy {
@@ -273,9 +327,10 @@ impl MetadataPolicy {
         }
         Ok(())
     }
-    pub fn authorize(&self, account: Id, permission: Permission) -> Result<()> {
-        if account == self.volume.owner
-            || self.permissions.permits(Some(Principal::Human(account)), permission)
+    pub fn authorize(&self, actor: impl Into<DataActor>, permission: Permission) -> Result<()> {
+        let actor = actor.into();
+        if actor.principal == Principal::Human(self.volume.owner)
+            || actor.permits(self.volume.id, &self.permissions, permission)
         {
             Ok(())
         } else {
@@ -326,7 +381,18 @@ impl MetadataPolicy {
             validate_version(version)?;
             let mut key = PROVISION_PREFIX.to_vec();
             key.extend_from_slice(version.as_bytes());
-            tx.put(&key, b"true")?;
+            // Replication distinguishes an ACL-only delta from a new build grant.
+            // Retain the source clock on an existing canonical marker.
+            let mut marker = [0; 4];
+            tx.visit_value(&key, |_, value| -> Result<()> {
+                if value.len() == marker.len() {
+                    value.read_exact_at(0, &mut marker)?;
+                }
+                Ok(())
+            })?;
+            if &marker != b"true" {
+                tx.put(&key, b"true")?;
+            }
         }
         Self::validate_pending(tx, materialized_bytes)
     }
@@ -436,10 +502,12 @@ impl DatabasePolicy {
         };
         Ok(Self { volume, database, entry, permissions })
     }
-    pub fn authorize(&self, principal: Principal, permission: Permission) -> Result<()> {
+    pub fn authorize(&self, actor: impl Into<DataActor>, permission: Permission) -> Result<()> {
+        let actor = actor.into();
+        let principal = actor.principal;
         if self.entry.is_none() {
             return match principal {
-                Principal::Human(account) => self.volume.authorize(account, permission),
+                Principal::Human(_) => self.volume.authorize(actor, permission),
                 _ if permission == Permission::Read
                     && self.volume.volume.share_key_with_service =>
                 {
@@ -455,7 +523,7 @@ impl DatabasePolicy {
                 && principal == PLAYBIT_REPLICA_PRINCIPAL
                 && permission == Permission::Read
                 && self.volume.volume.share_key_with_service)
-            || acl.permits(Some(principal), permission)
+            || actor.permits(self.volume.volume.id, acl, permission)
         {
             Ok(())
         } else {
@@ -464,6 +532,10 @@ impl DatabasePolicy {
     }
     pub fn authorize_reader(&self, reader: ReplicaReader) -> Result<()> {
         match reader {
+            ReplicaReader::SessionParticipant(actor) => {
+                actor.human()?;
+                self.authorize(actor, Permission::Read)
+            }
             ReplicaReader::Participant(account) => {
                 self.authorize(Principal::Human(account), Permission::Read)
             }
@@ -475,11 +547,12 @@ impl DatabasePolicy {
     }
     /// Admit known-entry editing metadata. The result grants content/history
     /// only when Read itself succeeds; Write and Append admit controls alone.
-    pub fn metadata_readable(&self, account: Id) -> Result<bool> {
+    pub fn metadata_readable(&self, actor: impl Into<DataActor>) -> Result<bool> {
+        let actor = actor.into();
         if self.entry.is_none() {
             return Err(Error::InvalidInput("entry metadata requires an entry policy"));
         }
-        admit_entry_metadata(|permission| self.authorize(Principal::Human(account), permission))
+        admit_entry_metadata(|permission| self.authorize(actor, permission))
     }
     pub fn ordinary_protocol(&self) -> Result<()> {
         if let Some(entry) = &self.entry
@@ -497,6 +570,13 @@ impl DatabasePolicy {
         delta: &kvdb::sync::Delta<'_>,
         writer: Option<Id>,
     ) -> Result<Option<Id>> {
+        self.validate_source_as(delta, writer.map(Into::into))
+    }
+    pub fn validate_source_as(
+        &self,
+        delta: &kvdb::sync::Delta<'_>,
+        writer: Option<DataActor>,
+    ) -> Result<Option<Id>> {
         self.ordinary_protocol()?;
         // Full anti-entropy reports target-only keys with remote Missing.
         // This contains no source assertion; LWW preserves the target fact.
@@ -505,10 +585,10 @@ impl DatabasePolicy {
         }
 
         let append = if let Some(writer) = writer {
-            match self.authorize(Principal::Human(writer), Permission::Write) {
+            match self.authorize(writer, Permission::Write) {
                 Ok(()) => false,
                 Err(Error::AccessDenied(_)) => {
-                    self.authorize(Principal::Human(writer), Permission::Append)?;
+                    self.authorize(writer, Permission::Append)?;
                     true
                 }
                 Err(error) => return Err(error),
@@ -527,13 +607,18 @@ impl DatabasePolicy {
                     _ => return Err(Error::AccessDenied("volume policy origin or deletion")),
                 };
                 validate_metadata_entry(&self.volume.volume, delta.key, Some(value))?;
-                if writer.is_some_and(|account| account != self.volume.volume.owner) {
+                if writer.is_some_and(|actor| {
+                    actor.principal != Principal::Human(self.volume.volume.owner)
+                }) {
                     return Err(Error::AccessDenied("entry changes need pinned index admission"));
                 }
                 Ok(None)
             }
             DatabaseId::Revocations => {
-                if writer.is_some_and(|account| account != self.volume.volume.owner) || append {
+                if writer.is_some_and(|actor| {
+                    actor.principal != Principal::Human(self.volume.volume.owner)
+                }) || append
+                {
                     return Err(Error::AccessDenied("revocation store owner"));
                 }
                 Id::parse(
@@ -552,7 +637,9 @@ impl DatabasePolicy {
                 }
                 Ok(None)
             }
-            DatabaseId::Entry(_) => self.validate_entry_source(delta, writer, append),
+            DatabaseId::Entry(_) => {
+                self.validate_entry_source(delta, writer.map(DataActor::human).transpose()?, append)
+            }
         }
     }
 
@@ -581,11 +668,18 @@ impl DatabasePolicy {
         delta: &kvdb::sync::SyncDelta<'_>,
         writer: Option<Id>,
     ) -> Result<Option<Id>> {
+        self.validate_sync_source_as(delta, writer.map(Into::into))
+    }
+    pub fn validate_sync_source_as(
+        &self,
+        delta: &kvdb::sync::SyncDelta<'_>,
+        writer: Option<DataActor>,
+    ) -> Result<Option<Id>> {
         if matches!(delta.remote, kvdb::sync::SyncEntState::Missing) {
             return Ok(None);
         }
         crate::store::volume_index::with_sync_delta_bounded(delta, 4 * 1024 * 1024, |source| {
-            self.validate_source(source, writer)
+            self.validate_source_as(source, writer)
         })
     }
 }

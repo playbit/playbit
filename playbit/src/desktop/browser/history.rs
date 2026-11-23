@@ -113,7 +113,12 @@ impl Browser {
         }
         let Some(entry) = self.selected else { return false };
         let address = EntryAddress { volume: self.volume.id, entry };
-        match self.send.enqueue(Request::EntryRevisions { address, after, limit: PAGE_ROWS }) {
+        match self.send.enqueue(Request::EntryRevisions {
+            session: self.request_session(),
+            address,
+            after,
+            limit: PAGE_ROWS,
+        }) {
             Ok(admission) => {
                 self.history.pending = Some(Pending {
                     admission,

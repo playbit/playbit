@@ -294,6 +294,7 @@ impl SignIn {
             .child(self.agreement_edges(window, cx))
             .child(Scrollbars::overlay(&self.agreement.scrollbars))
             .child(reached_end)
+            .children(self.render_feedback())
     }
     fn agreement_edges(&self, window: &Window, cx: &Context<Self>) -> gpui::AnyElement {
         let handle = self.agreement.scrollbars.read(cx).handle();

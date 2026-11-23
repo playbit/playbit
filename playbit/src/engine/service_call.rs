@@ -43,6 +43,9 @@ pub enum ToolScope {
     Account,
     Session(String),
     Volume(crate::store::Id),
+    /// Browse with the account ACL, retaining a legacy Root session for AP reads.
+    /// A Shared participant must select its session explicitly.
+    BrowserVolume(crate::store::Id),
 }
 #[cfg(all(not(target_os = "ios"), feature = "process"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

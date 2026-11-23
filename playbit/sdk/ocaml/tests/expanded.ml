@@ -21,9 +21,9 @@ let next_event kind =
     | _ -> failwith "unexpected event kind"
 let identity n = String.init 48 (fun i -> Char.chr (n + i))
 let message_bytes = String.init 130 (fun i -> Char.chr ((i * 17) land 255))
-let released_canvas :
-    Buffer.t -> int32 -> width:int -> height:int -> continuous:bool -> View.item list -> unit =
-    View.canvas
+type canvas = Buffer.t -> int32 -> width:int -> height:int -> continuous:bool -> View.item list -> unit
+let released_canvas : canvas = View.canvas
+let released_viewport_canvas : canvas = View.viewport_canvas
 let () =
     assert_invalid (fun () -> ignore (Input.frame (Bytes.make 4 '\000')));
     assert_invalid (fun () -> ignore (Input.pointer (Bytes.create 15)));
@@ -49,15 +49,37 @@ let () =
     View.column_end view;
     submit (View.finish view);
     let menu = View.create () in
-    let child () = View.viewport_canvas menu 0l ~width:321 ~height:217 ~continuous:false [] in
+    let child () = View.canvas_with_options ~extent:View.Viewport menu 0l ~width:321 ~height:217 ~continuous:false [] in
     assert_invalid (fun () -> View.context_menu menu [] child);
     assert_invalid (fun () -> View.context_menu menu [0l, "Invalid"] child);
     if View.finish menu <> "PBV1" then failwith "invalid menu changed scene";
     View.context_menu menu [0x80000001l, "Réessayer"; 0x7fffffffl, "Quit"] child;
     submit (View.finish menu);
     let viewport = View.create () in
-    View.viewport_canvas viewport 19l ~width:640 ~height:479 ~continuous:true [];
+    released_viewport_canvas viewport 19l ~width:640 ~height:479 ~continuous:true [];
     submit (View.finish viewport);
+    let window = View.create () in
+    assert_invalid (fun () -> View.window_size_constraints ~min_width:64.25 ~max_width:64. window);
+    assert_invalid (fun () -> View.window_size_constraints ~min_height:(float_of_int max_window_canvas_edge +. 2.) window);
+    assert_invalid (fun () -> View.window_size_constraints ~min_height:0.5 ~max_width:0.75 ~aspect_ratio:2. window);
+    assert_invalid (fun () -> View.window_size_constraints ~min_width:0.75 ~max_height:0.25 ~aspect_ratio:2. window);
+    assert_invalid (fun () -> View.window_size_constraints ~max_height:1e-100 window);
+    assert_invalid (fun () -> View.window_size_constraints ~min_width:(-0.5) window);
+    assert_invalid (fun () -> View.window_size_constraints ~aspect_ratio:Float.nan window);
+    assert_invalid (fun () -> View.window_style window WindowStyle.(theme_bright lor theme_dark));
+    assert_invalid (fun () -> View.theme window [ThemeColor.text, 0l; ThemeColor.text, 1l]);
+    assert_invalid (fun () -> View.canvas_with_options ~extent:View.Viewport window 19l
+        ~width:15360 ~height:9000 ~continuous:false []);
+    assert_invalid (fun () -> View.canvas_with_options ~extent:View.Window window 19l
+        ~width:(max_window_canvas_edge + 1) ~height:1 ~continuous:false []);
+    View.window_style window WindowStyle.(titlebar lor closable lor transparent_titlebar lor hide_session_button);
+    View.window_size_constraints ~min_width:320.25 ~min_height:0.5 ~max_width:(-0.)
+      ~max_height:180.140625 ~aspect_ratio:(16. /. 9.) window;
+    View.theme window [ThemeColor.window_background, 0x132d41ffl];
+    View.canvas_with_options ~extent:View.Window ~clear_color:0xa1b2c3d4l
+      window 19l ~width:15360 ~height:9000 ~continuous:false
+      [View.Rect {x=15359;y=8999;width=1;height=1;color=0xffffffffl}];
+    submit (View.finish window);
     (* Reuse one buffer to exercise aggregate admission at 32 MiB without
        serializing or allocating a 32 MiB scene in the managed-Wasm heap. *)
     let shared = Bytes.make (512 * 512 * 4) '\000' in
@@ -91,6 +113,17 @@ let () =
     let operation = Data.resolve volume "pixel-plays" in
     if Session.identity () <> identity 0 then failwith "local identity fields";
     assert_host_error Error.internal Session.identity;
+    let info = Option.get (Session.info ()) in
+    if info.internal_id <> String.make 32 'c' || info.key_secret <> Some "session-seed-v1!"
+       || Session.code info <> Some "FFUk4yL7S6oHXq7rrK6a48" then failwith "session invitation";
+    let zero = Option.get (Session.info ()) in
+    if Session.code zero <> Some (String.make 22 '1') then failwith "all-zero invitation";
+    let seedless = Option.get (Session.info ()) in
+    if seedless.internal_id <> info.internal_id || seedless.key_secret <> None
+       || Session.code seedless <> None then failwith "session without an invitation";
+    if Session.info () <> None then failwith "missing session";
+    assert_host_error Error.unsupported Session.info;
+    assert_host_error Error.internal Session.info;
     let members = Session.presence () in
     if members <> List.init 17 identity then failwith "presence tuples after capacity retry";
     if Session.presence () <> [] then failwith "empty presence";

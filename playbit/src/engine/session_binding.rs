@@ -103,6 +103,16 @@ impl Binding {
             context,
         ))
     }
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn bind_session_info(
+        &self,
+        host: &mut super::in_process_host::InProcessHost,
+    ) -> HostResult<()> {
+        let reference = crate::store::SessionReference::retained(&self.store, &self.session.id)
+            .map_err(crate::runtime::store_bridge::error)?;
+        host.session_key_secret = Some(reference.key_secret());
+        Ok(())
+    }
     /// Return a new context only when consent or volume labels changed. The
     /// root/build admission remains current even when no notification was seen.
     pub(crate) fn refresh(&mut self) -> HostResult<Option<Vec<AvailableVolume>>> {

@@ -20,6 +20,7 @@ struct Probe {
     on: *const u8,
     off_len: u32,
     on_len: u32,
+    view_bytes_limit: u32,
     initialized: u32,
     turns: u32,
     destroyed: u32,
@@ -36,6 +37,7 @@ impl Probe {
             on: on.as_ptr(),
             off_len: off.len() as u32,
             on_len: on.len() as u32,
+            view_bytes_limit: LocalHost.view_bytes_limit(),
             initialized: 0,
             turns: 0,
             destroyed: 0,
@@ -122,6 +124,10 @@ fn c_and_rust_agree_on_every_exchanged_record_layout() {
         align_of::<abi::Identity>(),
         offset_of!(abi::Identity, flags),
         offset_of!(abi::Identity, reserved),
+        size_of::<playbit_api::abi::session::SessionInfo>(),
+        align_of::<playbit_api::abi::session::SessionInfo>(),
+        offset_of!(playbit_api::abi::session::SessionInfo, internal_id),
+        offset_of!(playbit_api::abi::session::SessionInfo, key_secret),
         size_of::<abi::App>(),
         align_of::<abi::App>(),
         offset_of!(abi::App, user_data),
@@ -191,6 +197,8 @@ fn failed_init_or_turn_halts_without_retry_and_destroys_once() {
     }
 }
 
+const PROBE_LOG_BYTES: usize = 64 * 1024 + 1;
+
 unsafe extern "C" fn rust_init(
     raw: *mut abi::Context,
     data: *mut c_void,
@@ -209,13 +217,7 @@ unsafe extern "C" fn rust_init(
     .join()
     .unwrap();
     assert_eq!(rejected, HostError::Conflict as i64);
-    // Host rejection must panic before any message is retained.
-    assert!(
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            context.log(&"x".repeat(playbit_api::abi::syscall::MAX_CALL_BYTES + 1));
-        }))
-        .is_err()
-    );
+    context.log(&"x".repeat(PROBE_LOG_BYTES));
     context.log("Rust SDK initialized");
     assert_ne!(context.identity().unwrap().generation, 0);
     assert_eq!(context.wake_after(0), Err(HostError::InvalidArgument));
@@ -265,7 +267,7 @@ fn rust_sdk_calls_the_same_c_symbols_without_request_encoding() {
         unsafe { NativeInstance::new(context(30), Box::new(LocalHost), callbacks).unwrap() };
     let frame = app.pump().unwrap();
     assert!(!checked(&frame));
-    assert_eq!(frame.logs(), ["Rust SDK initialized"]);
+    assert_eq!(frame.logs(), ["x".repeat(PROBE_LOG_BYTES), "Rust SDK initialized".to_owned()]);
     assert_eq!(probe.turns, 1);
     drop(app);
     assert_eq!(probe.destroyed, 1);

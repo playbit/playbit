@@ -1,6 +1,7 @@
 //! Owned resources retain cleanup instructions, never a callback context pointer.
-//! The application drains cleanup on its next callback; instance teardown owns
-//! the final fallback. An implicit File drop always discards private contents.
+//! The application drains cleanup at callback boundaries and before deadline
+//! polls. Instance teardown owns the final fallback. An implicit File drop
+//! always discards private contents.
 extern crate alloc;
 use super::{
     Completion, Context, Error, FileCloseResult, FileHandle, FileListEntry, FileListHandle,

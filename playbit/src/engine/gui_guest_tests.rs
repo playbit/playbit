@@ -14,7 +14,7 @@ fn construct(
     package: Package,
     wake: Arc<dyn Fn() + Send + Sync>,
 ) -> Result<Guest> {
-    Guest::prepare(profile, admission, package, wake, None)?.instantiate()
+    Guest::prepare(profile, admission, package, wake, None.into())?.instantiate()
 }
 
 #[test]
@@ -23,7 +23,7 @@ fn native_host_supports_scorekeepers_full_automatic_volume_requirement() {
     let manifest = crate::package::Manifest::read(&source).unwrap();
     let full = playbit_api::abi::data::AUTOMATIC_VOLUMES_FEATURE;
     assert!(manifest.required_host_features.iter().any(|feature| feature == full));
-    assert!(crate::engine::guest_features().contains(&full));
+    assert!(crate::engine::GuestRenderer::Embedded.features().contains(&full));
 }
 
 #[test]
@@ -106,6 +106,106 @@ fn signed_todo_with_session_volume_requirement_runs_in_process_host() {
     }
 }
 
+// Install an authenticated full cut using the normal receiver and adoption path.
+fn receive_test_volume(
+    owner: &crate::store::LocalStore,
+    store: &crate::store::LocalStore,
+    target_directory: &Path,
+    volume: Id,
+    access: &crate::store::Access,
+) {
+    use crate::store::DatabaseId;
+    let mut stage = store.prepare_received_volume(volume).unwrap();
+    let mut after = None;
+    loop {
+        let page = owner.replication_database_page(volume, after).unwrap();
+        for database in page.databases {
+            owner
+                .with_replica(volume, database, |source| {
+                    stage.with_database(database, |target| {
+                        if database == DatabaseId::Index {
+                            crate::store::merge_index_replica(
+                                target_directory,
+                                source,
+                                target,
+                                kvdb::Lww,
+                                |_| Ok(()),
+                            )
+                        } else {
+                            crate::store::merge_replica(
+                                target_directory,
+                                source,
+                                target,
+                                kvdb::Lww,
+                                |_| Ok(()),
+                            )
+                        }
+                    })
+                })
+                .unwrap();
+            stage.finish_database(database).unwrap();
+        }
+        let Some(next) = page.next else { break };
+        after = Some(next);
+    }
+    use crate::store::volume_index::namespace::{receipt, source::cut};
+    let accepted = stage
+        .with_database(DatabaseId::Index, |index| cut::accepted(&index.begin_read()?))
+        .unwrap();
+    stage
+        .with_database(DatabaseId::Index, |index| receipt::retain_fixture(index, None, &accepted))
+        .unwrap();
+    stage.qualify_authority();
+    store.adopt_received_volume(access, &stage).unwrap();
+}
+
+#[test]
+fn bare_legacy_root_browser_keeps_the_granted_session_for_data_operations() {
+    use crate::engine::service_call::ToolScope;
+    use crate::release_channel::ReleaseChannel;
+    use crate::store::{
+        Access, BuildSelector, LocalStore,
+        volume_index::{EntryAddress, EntryKind},
+    };
+
+    let source = tempfile::tempdir().unwrap();
+    let owner = LocalStore::open(source.path()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open(directory.path()).unwrap();
+    let guest = &engine.services.store;
+    let volume = owner.create_volume("Root", true).unwrap().id;
+    let account = Access::owner(owner.account().id);
+    let build = crate::identifier::encode(&[17; 32]);
+    owner.grant_volume(&account, volume, guest.account().id, true).unwrap();
+    owner.provision_version(&account, volume, &build).unwrap();
+    let entry = owner.create_database(&account, volume, "scores", EntryKind::KvDb {}).unwrap();
+    let address = EntryAddress { volume, entry: entry.id };
+    owner.kv_put(&account, address, b"score", b"1").unwrap();
+    let app = crate::package::AppIdentity { publisher: owner.account().id, app_id: "game".into() };
+    let session = owner
+        .create_session(&app, BuildSelector::Exact { build_id: build.clone() }, &build, volume)
+        .unwrap();
+    guest
+        .import_invitation_link(
+            &owner.invitation(&session.id, ReleaseChannel::Public).unwrap(),
+            &owner.session_envelope(&session.id).unwrap(),
+            ReleaseChannel::Public,
+        )
+        .unwrap();
+    let selected = Access::session_version(guest.account().id, &session.id, &build);
+    receive_test_volume(&owner, guest, directory.path(), volume, &selected);
+
+    let (tool, _client) = UnixStream::pair().unwrap();
+    let handle = engine.tool_contexts.open(guest, ToolScope::BrowserVolume(volume), &tool).unwrap();
+    let binding = engine.tool_contexts.authorize(handle, &tool).unwrap();
+    assert_eq!(binding.session.as_ref().unwrap().id, session.id);
+    let access = binding.access();
+    assert_eq!(guest.kv_read(&access, address, b"score", 0, 1, None).unwrap().bytes, b"1");
+    guest.kv_put(&access, address, b"score", b"2").unwrap();
+    assert_eq!(guest.kv_read(&access, address, b"score", 0, 1, None).unwrap().bytes, b"2");
+    engine.tool_contexts.close(handle, &tool).unwrap();
+}
+
 #[test]
 fn read_only_shared_recipient_starts_without_world_file_backing() {
     // A real TODO guest must start from a second account's Shared read grant.
@@ -116,7 +216,8 @@ fn read_only_shared_recipient_starts_without_world_file_backing() {
         HostResult,
         files::{Action, Call, Output},
     };
-    use crate::store::{Access, BuildSelector, DatabaseId, LocalStore, SessionCreation};
+    use crate::store::object_contract::{Acl, Grant, Permission, Subject};
+    use crate::store::{Access, BuildSelector, LocalStore, SessionCreation};
     use playbit_api::abi::{files::FILE_WRITE, syscall::Error};
 
     fn file_request(
@@ -174,7 +275,16 @@ fn read_only_shared_recipient_starts_without_world_file_backing() {
     let mut engine = Engine::open(directory.path()).unwrap();
     let store = engine.services.store.clone();
     owner
-        .grant_volume(&Access::owner(owner.account().id), shared, store.account().id, false)
+        .set_permissions(
+            &Access::owner(owner.account().id),
+            shared,
+            Acl {
+                grants: vec![Grant {
+                    subject: Subject::SessionParticipants,
+                    permissions: vec![Permission::Read],
+                }],
+            },
+        )
         .unwrap();
     store
         .import_invitation_link(
@@ -185,50 +295,66 @@ fn read_only_shared_recipient_starts_without_world_file_backing() {
         .unwrap();
     // Substitute the normal authenticated full-cut receipt. Only Shared data
     // is transferred; no World credentials or unrelated app scopes are added.
-    let mut stage = store.prepare_received_volume(shared).unwrap();
-    let mut after = None;
-    loop {
-        let page = owner.replication_database_page(shared, after).unwrap();
-        for database in page.databases {
-            owner
-                .with_replica(shared, database, |source| {
-                    stage.with_database(database, |target| {
-                        if database == DatabaseId::Index {
-                            crate::store::merge_index_replica(
-                                directory.path(),
-                                source,
-                                target,
-                                kvdb::Lww,
-                                |_| Ok(()),
-                            )
-                        } else {
-                            crate::store::merge_replica(
-                                directory.path(),
-                                source,
-                                target,
-                                kvdb::Lww,
-                                |_| Ok(()),
-                            )
-                        }
-                    })
-                })
-                .unwrap();
-            stage.finish_database(database).unwrap();
-        }
-        let Some(next) = page.next else { break };
-        after = Some(next);
-    }
-    use crate::store::volume_index::namespace::{receipt, source::cut};
-    let accepted = stage
-        .with_database(DatabaseId::Index, |index| cut::accepted(&index.begin_read()?))
-        .unwrap();
-    stage
-        .with_database(DatabaseId::Index, |index| receipt::retain_fixture(index, None, &accepted))
-        .unwrap();
-    stage.qualify_authority();
     let access = Access::session_version(store.account().id, &session.id, &build);
-    store.adopt_received_volume(&access, &stage).unwrap();
-    drop(stage);
+    receive_test_volume(&owner, &store, directory.path(), shared, &access);
+    // The Applications browser explicitly selects this retained session.
+    let selected = || Some(Box::new(crate::identifier::decode(&session.id).unwrap()));
+    let directory_request = |session| Request::DirectoryEntries {
+        volume: shared,
+        session,
+        target: crate::store::volume_index::DirectoryTarget::Root,
+        cut: None,
+        after: None,
+        limit: 32,
+    };
+    let Reply::DirectoryEntries {
+        listing: crate::store::volume_index::DirectoryListing::Page { entries, .. },
+        ..
+    } = engine.dispatch_reply(directory_request(selected())).unwrap()
+    else {
+        panic!("directory page")
+    };
+    assert!(!entries.is_empty());
+    assert!(matches!(
+        engine
+            .dispatch_reply(Request::VolumeDetails { volume: shared, session: selected() })
+            .unwrap(),
+        Reply::VolumeDetails { .. }
+    ));
+    let Reply::EntryDetails { details, .. } = engine
+        .dispatch_reply(Request::EntryDetails {
+            volume: shared,
+            entry: entries[0].id,
+            session: selected(),
+        })
+        .unwrap()
+    else {
+        panic!("selected entry")
+    };
+    assert!(details.readable && !details.writable);
+    assert!(engine.dispatch_reply(directory_request(None)).is_err());
+    let (tool, _tool_client) = UnixStream::pair().unwrap();
+    let bare = engine
+        .tool_contexts
+        .open(&store, crate::engine::service_call::ToolScope::BrowserVolume(shared), &tool)
+        .unwrap();
+    let binding = engine.tool_contexts.authorize(bare, &tool).unwrap();
+    assert!(binding.session.is_none());
+    assert!(store.volume_details(&binding.access(), shared).is_err());
+    engine.tool_contexts.close(bare, &tool).unwrap();
+
+    assert!(
+        engine
+            .dispatch_reply(Request::CreateDatabase {
+                volume: shared,
+                session: selected(),
+                name: "extra".into(),
+                kind: Box::new(crate::store::volume_index::EntryKind::KvDb {}),
+            })
+            .is_err(),
+        "directory visibility preserves the owner's read-only grant"
+    );
+
     let builds = directory.path().join(crate::paths::BUILDS);
     std::fs::create_dir_all(&builds).unwrap();
     std::fs::write(builds.join(&build), package.to_bytes().unwrap()).unwrap();
@@ -384,8 +510,9 @@ fn package_requirements_reach_both_native_context_paths_before_guest_execution()
             .unwrap();
     let mut queue = crate::engine::admission::AdmissionQueue::new(listener, &engine).unwrap();
     let prepared = std::thread::scope(|scope| {
-        let task = scope
-            .spawn(|| Guest::prepare(directory.path(), admission, package, Arc::new(|| {}), None));
+        let task = scope.spawn(|| {
+            Guest::prepare(directory.path(), admission, package, Arc::new(|| {}), None.into())
+        });
         let deadline = Instant::now() + Duration::from_secs(10);
         while !task.is_finished() {
             assert!(Instant::now() < deadline, "package context preparation must finish");
@@ -393,6 +520,12 @@ fn package_requirements_reach_both_native_context_paths_before_guest_execution()
         }
         task.join().unwrap().unwrap()
     });
+    assert!(
+        prepared.host.session_key_secret
+            == Some(
+                engine.services.store.session_seed(&prepared.admission.instance.session).unwrap()
+            )
+    );
     let failure = prepared.instantiate().err().unwrap();
     assert!(failure.to_string().contains("Unsupported"), "{failure}");
 }
@@ -425,9 +558,14 @@ fn ipc_compilation_hands_off_the_selected_metering_mode() {
         let mut queue = crate::engine::admission::AdmissionQueue::new(listener, &engine).unwrap();
         let prepared = std::thread::scope(|scope| {
             let task = scope.spawn(|| {
-                let mut prepared =
-                    Guest::prepare(directory.path(), admission, package, Arc::new(|| {}), limit)
-                        .unwrap();
+                let mut prepared = Guest::prepare(
+                    directory.path(),
+                    admission,
+                    package,
+                    Arc::new(|| {}),
+                    limit.into(),
+                )
+                .unwrap();
                 prepared.load_compiled().unwrap();
                 prepared
             });
@@ -1203,6 +1341,11 @@ fn claim_binding_and_exact_package_are_required_before_guest_execution() {
     let mut wrong_instance = admission.clone();
     wrong_instance.context.instance = Id::generate().unwrap();
     assert!(construct(directory.path(), wrong_instance, package.clone(), Arc::new(|| {})).is_err());
+    let mut wrong_reference = admission.clone();
+    wrong_reference.session_reference = crate::store::SessionReference::new([9; 16]).unwrap();
+    assert!(
+        construct(directory.path(), wrong_reference, package.clone(), Arc::new(|| {})).is_err()
+    );
     let mut wrong_generation = admission.clone();
     wrong_generation.context.owner_generation += 1;
     assert!(
@@ -1368,7 +1511,7 @@ fn create_serviced(
     engine: &mut Engine,
 ) -> Guest {
     let prepared = std::thread::scope(|scope| {
-        let task = scope.spawn(|| Guest::prepare(profile, admission, package, wake, None));
+        let task = scope.spawn(|| Guest::prepare(profile, admission, package, wake, None.into()));
         let deadline = Instant::now() + Duration::from_secs(10);
         while !task.is_finished() {
             assert!(Instant::now() < deadline, "File root preparation must finish");
@@ -1485,8 +1628,9 @@ fn explicitly_requested_cli_mount_fails_if_path_disappears_before_admission() {
             .unwrap();
     let mut queue = crate::engine::admission::AdmissionQueue::new(listener, &engine).unwrap();
     let result = std::thread::scope(|scope| {
-        let task = scope
-            .spawn(|| Guest::prepare(directory.path(), admission, package, Arc::new(|| {}), None));
+        let task = scope.spawn(|| {
+            Guest::prepare(directory.path(), admission, package, Arc::new(|| {}), None.into())
+        });
         let deadline = Instant::now() + Duration::from_secs(10);
         while !task.is_finished() {
             assert!(Instant::now() < deadline, "missing CLI root must terminate admission");

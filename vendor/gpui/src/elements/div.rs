@@ -127,6 +127,10 @@ impl Interactivity {
         button: MouseButton,
         listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     ) {
+        #[cfg(target_os = "macos")]
+        if button == MouseButton::Left && self.hitbox_behavior == HitboxBehavior::Normal {
+            self.hitbox_behavior = HitboxBehavior::ExcludeWindowDrag;
+        }
         self.mouse_down_listeners.push(Box::new(move |event, phase, hitbox, window, cx| {
             if phase == DispatchPhase::Bubble && event.button == button && hitbox.is_hovered(window)
             {
@@ -1752,7 +1756,17 @@ impl Interactivity {
                         style.overflow_mask(bounds, window.rem_size()),
                         |window| {
                             let hitbox = if self.should_insert_hitbox(&style, window, cx) {
-                                Some(window.insert_hitbox(bounds, self.hitbox_behavior))
+                                let behavior = self.hitbox_behavior;
+                                #[cfg(target_os = "macos")]
+                                let behavior = if behavior == HitboxBehavior::Normal
+                                    && (self.tracked_focus_handle.is_some()
+                                        || !self.click_listeners.is_empty())
+                                {
+                                    HitboxBehavior::ExcludeWindowDrag
+                                } else {
+                                    behavior
+                                };
+                                Some(window.insert_hitbox(bounds, behavior))
                             } else {
                                 None
                             };

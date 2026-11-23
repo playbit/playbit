@@ -31,16 +31,25 @@ let fit ~density ~max_zoom (area : box) ~w ~h =
     let sample = sampling 1 in
     let sw = div_up w sample and sh = div_up h sample in
     let axis source limit zoom =
-      let minimum = source * zoom in
-      let start = max 1 (int_of_float (float (minimum - 1) /. density)) in
-      let rec aligned length =
-        if length > limit then None
+      (* Alignment can add a few clear texels. Bound that padding by the
+         display scale so even a wall-sized window keeps a small source bitmap. *)
+      let max_texels = source + int_of_float (ceil density) in
+      let rec first_length target lo hi =
+        if lo = hi then lo
         else
-          let pixels = device density length in
-          if pixels >= minimum && pixels mod zoom = 0 then Some (length, pixels / zoom)
-          else aligned (length + 1)
+          let mid = lo + (hi - lo) / 2 in
+          if device density mid < target then first_length target (mid + 1) hi
+          else first_length target lo mid
       in
-      aligned start
+      let rec aligned texels =
+        if texels > max_texels then None
+        else
+          let target = texels * zoom in
+          let length = first_length target 1 limit in
+          if device density length = target then Some (length, texels)
+          else aligned (texels + 1)
+      in
+      aligned source
     in
     let rec choose zoom =
       match axis sw area.w zoom, axis sh area.h zoom with

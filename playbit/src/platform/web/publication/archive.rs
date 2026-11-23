@@ -178,7 +178,7 @@ pub extern "C" fn pb_volume_archive_plan(length: usize) -> i32 {
                         &current,
                         &stage.accepted_index,
                         &policy,
-                        host.account,
+                        host.actor(&stage.volume),
                         *entry,
                     )
                     .map_err(store_error)?)
@@ -260,7 +260,7 @@ pub extern "C" fn pb_volume_archive_commit(length: usize) -> i32 {
         if cut.bytes > available(&stage.volume.index)? {
             return Err(Error::LimitExceeded);
         }
-        reconcile_sources(&stage, host.account, &cut.entries)?;
+        reconcile_sources(&stage, host.actor(&stage.volume), &cut.entries)?;
         let mut tx = stage.volume.index.begin_write(unsafe { now() } as u64).map_err(map_error)?;
         tx.local_indexes().put(&key(cut.generation), bytes).map_err(map_error)?;
         for entry in &stage.archive.borrow().quarantine {
@@ -276,13 +276,13 @@ pub extern "C" fn pb_volume_archive_commit(length: usize) -> i32 {
 
 // Both inputs are detached and fenced by the same qualified AP source cut.
 // Admitted local facts survive beside rejected ones, including Append births.
-fn reconcile_sources(stage: &Preparation, account: Id, entries: &[EntryId]) -> Result<()> {
+fn reconcile_sources(stage: &Preparation, actor: DataActor, entries: &[EntryId]) -> Result<()> {
     use kvdb::sync::{Resolution, SyncDelta, SyncReceiver, SyncSender, SyncStatus};
     let policy = MetadataPolicy::read(&stage.accepted_index).map_err(store_error)?;
     let accepted = IndexSnapshot::new(stage.accepted_index.begin_read().map_err(map_error)?);
     let failure = RefCell::new(None);
     let resolver = |delta: &SyncDelta<'_>| match source_resolution(
-        &accepted, &policy, account, entries, delta,
+        &accepted, &policy, actor, entries, delta,
     ) {
         Ok(resolution) => Ok(resolution),
         Err(error) => {
@@ -342,7 +342,7 @@ fn reconcile_sources(stage: &Preparation, account: Id, entries: &[EntryId]) -> R
 fn source_resolution(
     accepted: &IndexSnapshot<'_, OpfsStorage>,
     policy: &MetadataPolicy,
-    account: Id,
+    actor: DataActor,
     entries: &[EntryId],
     delta: &kvdb::sync::SyncDelta<'_>,
 ) -> crate::store::Result<kvdb::sync::Resolution> {
@@ -354,12 +354,7 @@ fn source_resolution(
     {
         let proposed = SyncDelta { key: delta.key, local: delta.remote, remote: delta.local };
         match volume_index::with_sync_delta(&proposed, |change| {
-            accepted.authorize_source(
-                policy.volume(),
-                policy.default_permissions(),
-                account,
-                change,
-            )
+            accepted.authorize_source(policy.volume(), policy.default_permissions(), actor, change)
         }) {
             Ok(()) => {}
             Err(crate::store::Error::AccessDenied(_)) => return Ok(Resolution::UseRemote),

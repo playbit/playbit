@@ -147,12 +147,22 @@ fn save_next(cx: &mut App) {
     cx.spawn(async move |cx| {
         let result = task.await;
         let _ = cx.update(|cx| {
+            let windowless_quit =
+                result.is_err() && cx.global::<UiZoom>().quit_after_save && cx.windows().is_empty();
             let zoom = cx.global_mut::<UiZoom>();
             zoom.saving = false;
             if let Err(error) = result {
-                zoom.pending.get_or_insert(scale);
                 zoom.quit_after_save = false;
-                report_save_failure(&error, cx);
+                if windowless_quit {
+                    // The last window closed during the save. Let the next Quit
+                    // pass the zoom guard and run the normal data-drain guards.
+                    zoom.pending = None;
+                    crate::diagnostic!("Cannot save UI zoom before quitting: {error}");
+                    cx.quit();
+                } else {
+                    zoom.pending.get_or_insert(scale);
+                    report_save_failure(&error, cx);
+                }
                 return;
             }
             if zoom.pending.is_some() {
@@ -168,14 +178,25 @@ fn save_next(cx: &mut App) {
 fn report_save_failure(error: &str, _cx: &mut App) {
     crate::diagnostic!("Cannot save UI zoom: {error}");
     #[cfg(all(target_os = "macos", feature = "local-store"))]
-    super::alert::show(
-        super::alert::Kind::Recoverable,
-        &format!("Couldn’t save UI zoom. Try changing zoom again or retry quitting. {error}"),
-        _cx,
-    );
+    {
+        let details =
+            format!("Couldn’t save UI zoom. Try changing zoom again or retry quitting. {error}");
+        let kind = super::alert::Kind::Recoverable;
+        // During deferred Quit, AppKit can drop its main window designation
+        // while Sign In is still on screen and available for a retry.
+        let window = _cx.active_window().or_else(|| {
+            let windows = _cx.window_stack().unwrap_or_else(|| _cx.windows());
+            windows.first().copied()
+        });
+        if let Some(window) = window {
+            super::alert::show_in_window(kind, &details, window, _cx);
+        } else {
+            super::alert::show(kind, &details, _cx);
+        }
+    }
 }
 
-/// Retry termination once the last admitted preference has durably committed.
+/// Defer termination while saving the latest preference. A windowless failure can finish Quit.
 #[cfg(target_os = "macos")]
 pub fn defer_quit(cx: &mut App) -> bool {
     if !cx.has_global::<UiZoom>() {
@@ -272,6 +293,112 @@ mod tests {
             let zoom = cx.global::<UiZoom>();
             assert!(!zoom.saving && zoom.pending.is_none());
             assert_eq!(factor(cx), 1.);
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn failed_zoom_save_allows_windowless_quit_and_retains_a_visible_retry(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[cfg(feature = "connected-engine")]
+        let window = cx.update(|cx| {
+            use super::super::sign_in;
+            use std::rc::Rc;
+            sign_in::open(
+                crate::release_channel::ReleaseChannel::Public,
+                false,
+                Rc::new(|_, _| Ok(())),
+                Rc::new(|_| {}),
+                cx,
+            )
+            .expect("Sign In opens before the first guest or library window")
+            .0
+        });
+        #[cfg(not(feature = "connected-engine"))]
+        let window = cx.add_window(|_, _| gpui::EmptyView);
+        window.update(cx, |_, window, _| window.activate_window()).expect("active zoom target");
+        gpui::VisualTestContext::from_window(window.into(), cx).deactivate_window();
+        assert!(cx.update(|cx| cx.active_window().is_none()));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let saves = attempts.clone();
+        cx.update(|cx| {
+            configure(
+                UI_ZOOM_ONE,
+                Arc::new(move |_| {
+                    saves.fetch_add(1, Ordering::Relaxed);
+                    Err("read-only test profile".into())
+                }),
+                cx,
+            );
+            change(cx, 1);
+            change(cx, 1);
+            // The test platform has no AppKit termination delegate.
+            cx.global_mut::<UiZoom>().quit_after_save = true;
+        });
+        cx.run_until_parked();
+        #[cfg(feature = "connected-engine")]
+        window
+            .update(cx, |sign_in, window, _| {
+                assert!(
+                    sign_in.flow.error.is_empty(),
+                    "the preference save does not change sign-in flow"
+                );
+                assert!(window.accessibility_nodes_for_test().any(|(_, node)| {
+                    node.value() == Some("Zoom wasn’t saved. Retry zoom or Quit.")
+                        && node.live() == Some(gpui::accesskit::Live::Polite)
+                }));
+            })
+            .expect("Sign In stays open for retry");
+        #[cfg(feature = "connected-engine")]
+        {
+            window
+                .update(cx, |sign_in, _, cx| {
+                    sign_in.flow.step = super::super::sign_in::flow::Step::Agreement;
+                    cx.notify();
+                })
+                .expect("Sign In opens the agreement");
+            cx.run_until_parked();
+            window
+                .update(cx, |_, window, _| {
+                    let bounds = |name: &str| {
+                        window
+                            .accessibility_nodes_for_test()
+                            .find(|(_, node)| {
+                                node.label() == Some(name) || node.value() == Some(name)
+                            })
+                            .and_then(|(_, node)| node.bounds())
+                            .expect("rendered control bounds")
+                    };
+                    assert!(
+                        bounds("Zoom wasn’t saved. Retry zoom or Quit.").y1
+                            <= bounds("Decline & Quit").y0
+                    );
+                })
+                .expect("agreement controls remain available");
+        }
+        cx.update(|cx| {
+            let zoom = cx.global::<UiZoom>();
+            assert_eq!(zoom.pending, Some(UI_ZOOM_ONE + 2 * STEP));
+            assert!(!zoom.saving && !zoom.quit_after_save);
+            // Retry with one more change queued while the write is in flight.
+            save_next(cx);
+            change(cx, 1);
+            cx.global_mut::<UiZoom>().quit_after_save = true;
+        });
+        window.update(cx, |_, window, _| window.remove_window()).expect("window is still open");
+        cx.run_until_parked();
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        cx.update(|cx| {
+            assert!(cx.windows().is_empty());
+            let zoom = cx.global::<UiZoom>();
+            assert!(!zoom.saving && !zoom.quit_after_save && zoom.pending.is_none());
+            assert!(
+                !defer_quit(cx),
+                "the next application Quit continues through the drain guards"
+            );
         });
     }
 

@@ -2,7 +2,6 @@
 use super::*;
 use crate::store::{
     catalog::PLAYBIT_REPLICA_PRINCIPAL,
-    object_contract::Principal,
     volume_index::{DatabaseProtocol, IndexSnapshot},
 };
 
@@ -80,8 +79,8 @@ fn page(host: &Host, request: Request, protocol: DatabaseProtocol, upload: bool)
                 permission,
             )
         };
-        if authorize(Principal::Human(host.account), Permission::Read).is_ok()
-            && authorize(PLAYBIT_REPLICA_PRINCIPAL, Permission::Read).is_ok()
+        if authorize(host.actor(&volume), Permission::Read).is_ok()
+            && authorize(PLAYBIT_REPLICA_PRINCIPAL.into(), Permission::Read).is_ok()
         {
             if upload
                 && (!snapshot.backing_ready(entry.id).map_err(store_error)?
@@ -90,11 +89,11 @@ fn page(host: &Host, request: Request, protocol: DatabaseProtocol, upload: bool)
                 continue;
             }
             if upload {
-                let writable = match authorize(Principal::Human(host.account), Permission::Write) {
+                let writable = match authorize(host.actor(&volume), Permission::Write) {
                     Err(crate::store::Error::AccessDenied(_))
                         if protocol == DatabaseProtocol::Kvdb =>
                     {
-                        authorize(Principal::Human(host.account), Permission::Append)
+                        authorize(host.actor(&volume), Permission::Append)
                     }
                     result => result,
                 };

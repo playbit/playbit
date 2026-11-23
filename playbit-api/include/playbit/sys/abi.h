@@ -260,7 +260,9 @@ static inline PBSysResult pb_random_fill(PBContext* context, uint8_t* bytes, uin
 
 enum { PB_INPUT_POINTER = 1, PB_INPUT_KEYBOARD = 2, PB_INPUT_TOUCH = 4 };
 // SurfaceChanged: target=0, payload=16 bytes in this order, little-endian.
-// Whole logical units exclude host chrome/padding; zero means no visible area.
+// Width and height are whole logical units. The default excludes host chrome
+// and padding. A root canvas with Window extent receives the full drawable
+// window. Zero dimensions mean no visible area.
 // pixel_scale is finite positive IEEE 754 binary32, physical pixels/logical unit.
 // inputs contains only PB_INPUT_* bits. Hosts notify initially and on change.
 typedef struct PBSurface {
@@ -296,6 +298,40 @@ typedef struct PBIdentity {
     uint32_t flags; // bit 0: service, bit 1: session present; other bits zero
     uint32_t reserved;
 } PBIdentity;
+
+enum { PB_SESSION_HAS_KEY_SECRET = 1, PB_SESSION_CODE_CHARS = 22 };
+typedef struct PBSessionInfo {
+    uint32_t size;
+    uint32_t written;
+    uint32_t flags;
+    uint32_t reserved;
+    uint8_t  internal_id[32]; // The same public session ID as PBIdentity.session_id.
+    uint8_t  key_secret[16];  // Invitation seed when PB_SESSION_HAS_KEY_SECRET is set.
+} PBSessionInfo;
+
+// Format a successfully read session's invitation. The caller lends 23 writable chars.
+// Returns 22 and a NUL-terminated code, or 0 and an empty string without a key secret.
+static inline uint32_t pb_session_code(
+    const PBSessionInfo* info, char output[PB_SESSION_CODE_CHARS + 1]) {
+    if (info->written < 64 || !(info->flags & PB_SESSION_HAS_KEY_SECRET)) {
+        output[0] = '\0';
+        return 0;
+    }
+    static const char alphabet[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    uint8_t digits[PB_SESSION_CODE_CHARS] = {0};
+    for (uint32_t i = 0; i < sizeof(info->key_secret); i++) {
+        uint32_t carry = info->key_secret[i];
+        for (uint32_t j = PB_SESSION_CODE_CHARS; j > 0; j--) {
+            uint32_t value = digits[j - 1] * 256u + carry;
+            digits[j - 1] = (uint8_t)(value % 58);
+            carry = value / 58;
+        }
+    }
+    for (uint32_t i = 0; i < PB_SESSION_CODE_CHARS; i++)
+        output[i] = alphabet[digits[i]];
+    output[PB_SESSION_CODE_CHARS] = '\0';
+    return PB_SESSION_CODE_CHARS;
+}
 
 // All callbacks execute on the owning thread. Context is borrowed during init
 // and turn only: never free it or use it after instance destruction. Calls from
@@ -1054,6 +1090,22 @@ static inline PBSysResult pb_event_poll(
         0,
         0);
 }
+// Wait for one event using the same outputs and size probe as pb_event_poll.
+// deadline_ns is in pb_clock_read's monotonic nanoseconds. Zero polls immediately.
+// UINT64_MAX waits indefinitely. A queued event takes precedence, including at
+// the deadline. An empty queue at expiry returns PB_WOULD_BLOCK.
+static inline PBSysResult pb_event_poll_deadline(
+    PBContext* context, PBEvent* event, uint8_t* data, uint32_t capacity, uint64_t deadline_ns) {
+    return pb_syscall_invoke(
+        context,
+        0x15,
+        (uint64_t)(uintptr_t)event,
+        (uint64_t)(uintptr_t)data,
+        (uint64_t)capacity,
+        deadline_ns,
+        0,
+        0);
+}
 static inline PBSysResult pb_identity(PBContext* context, PBIdentity* identity) {
     return pb_syscall_invoke(context, 0x5, (uint64_t)(uintptr_t)identity, 0, 0, 0, 0, 0);
 }
@@ -1129,6 +1181,11 @@ static inline PBSysResult pb_object_query_take(
 // This is local and does not wait for AP. Use pb_identity for the 32-byte session ID.
 static inline PBSysResult pb_session(PBContext* context) {
     return pb_syscall_invoke(context,19,0,0,0,0,0,0);
+}
+// Read the current session locally. Outside a session the result is PB_NOT_FOUND.
+// Initialize the output with PB_RECORD_INIT(PBSessionInfo).
+static inline PBSysResult pb_session_info(PBContext* context, PBSessionInfo* output) {
+    return pb_syscall_invoke(context, 0x163, (uint64_t)(uintptr_t)output, 0, 0, 0, 0, 0);
 }
 // Open an ephemeral named channel. Persistent data belongs in the root volume.
 // Channel handles share the operation handle's generation/slot layout.

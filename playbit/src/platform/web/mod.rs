@@ -32,12 +32,13 @@ mod storage;
 mod transfers;
 mod work;
 use crate::store::{
-    DatabaseId, EntryId, Id,
-    object_contract::{Schema, Value},
+    DataActor, MetadataPolicy, PersonalVolumeGrant, PersonalVolumeSelection, Session,
+    Volume as VolumeRecord,
+    object_contract::{Acl, Permission},
 };
 use crate::store::{
-    MetadataPolicy, PersonalVolumeGrant, PersonalVolumeSelection, Session, Volume as VolumeRecord,
-    object_contract::{Acl, Permission},
+    DatabaseId, EntryId, Id,
+    object_contract::{Schema, Value},
 };
 use kvdb::{
     CreateOptions, Db, Lww, SyncSender,
@@ -99,6 +100,7 @@ struct Volume {
     revocations: Rc<Database>,
 }
 struct Host {
+    session_actor: DataActor,
     installation: Id,
     account: Id,
     session: RefCell<Session>,
@@ -151,12 +153,14 @@ static LAST_ERROR: Mutex<String> = Mutex::new(String::new());
 
 impl Host {
     fn open(bootstrap: Bootstrap) -> Result<Self> {
-        bootstrap.session.validate_shared_volume().map_err(store_error)?;
         if bootstrap.installation == Id::from_bytes([0; 16])
             || bootstrap.session.replica_volume() != bootstrap.root.id
         {
             return Err(Error::InvalidArgument);
         }
+        let session_actor =
+            DataActor::for_session(bootstrap.account, &bootstrap.session, &bootstrap.root)
+                .map_err(store_error)?;
         let root = Volume::open(
             bootstrap.root.clone(),
             bootstrap.root_key,
@@ -172,7 +176,8 @@ impl Host {
                 .has(&crate::store::catalog::VOLUME_KEY)
                 .map_err(map_error)?
             {
-                MetadataPolicy::new(root.record.clone(), initializer.permissions.clone())
+                let shared = bootstrap.session.shared_volume == Some(root.id);
+                MetadataPolicy::new(root.record.clone(), initializer.volume_permissions(shared))
                     .map_err(map_error)?
                     .write(&root.index, unsafe { now() } as u64)
                     .map_err(map_error)?;
@@ -182,6 +187,7 @@ impl Host {
         let root = Rc::new(root);
         let volume_objects = BTreeMap::from([(root.id, root.clone())]);
         Ok(Self {
+            session_actor,
             installation: bootstrap.installation,
             account: bootstrap.account,
             session: RefCell::new(bootstrap.session),
@@ -200,6 +206,16 @@ impl Host {
         })
     }
 
+    /// The opened invitation fixes the session identity. Build adoption may
+    /// change its executable, while admission and revocation are rechecked on use.
+    fn actor(&self, volume: &Volume) -> DataActor {
+        if self.session.borrow().shared_volume == Some(volume.id) {
+            self.session_actor
+        } else {
+            self.account.into()
+        }
+    }
+
     fn authorize(
         &self,
         volume: &Volume,
@@ -216,7 +232,7 @@ impl Host {
         authority::check(self, volume, Some(entry))?;
         let policy = crate::store::DatabasePolicy::read(&volume.index, DatabaseId::Entry(entry))
             .map_err(store_error)?;
-        let readable = policy.metadata_readable(self.account).map_err(store_error)?;
+        let readable = policy.metadata_readable(self.actor(volume)).map_err(store_error)?;
         self.admit_volume(volume, if readable { Permission::Read } else { Permission::Write })?;
         Ok(readable)
     }
@@ -236,13 +252,13 @@ impl Host {
                 .authorize(
                     policy.volume(),
                     policy.default_permissions(),
-                    crate::store::object_contract::Principal::Human(self.account),
+                    self.actor(volume),
                     entry,
                     permission,
                 )
                 .map_err(store_error)?;
         } else {
-            policy.authorize(self.account, permission).map_err(map_error)?;
+            policy.authorize(self.actor(volume), permission).map_err(map_error)?;
         }
         Ok(policy)
     }
@@ -344,7 +360,7 @@ impl Host {
             root.admit(self.account, candidate, volume.id).map_err(map_error)?;
         }
         self.check_participant(&volumes[0], &volumes)?;
-        root.authorize(self.account, Permission::Read).map_err(map_error)?;
+        root.authorize(self.actor(&volumes[0]), Permission::Read).map_err(map_error)?;
         visit(&root)?;
         drop(root);
         {

@@ -71,6 +71,7 @@ mod tests {
             state: Mutex::new(state),
             owner: std::thread::current().id(),
             active: AtomicBool::new(true),
+            poll_yielder: Default::default(),
         });
         let raw = (&*context as *const Context).cast_mut().cast();
         let mut storage = [0xaaaaaaaaaaaaaaaa_u64; 4];
@@ -111,6 +112,7 @@ mod tests {
             state: Mutex::new(state),
             owner: std::thread::current().id(),
             active: AtomicBool::new(true),
+            poll_yielder: Default::default(),
         });
         let call = |opcode: Opcode, [a, b, c, d, e, f]: [u64; 6]| {
             let raw = (&*context as *const Context).cast_mut().cast();

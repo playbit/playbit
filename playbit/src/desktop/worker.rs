@@ -596,6 +596,7 @@ mod tests {
             }
         });
         let request = Request::BloblogCreate {
+            session: None,
             volume: crate::store::Id::from_bytes([1; 16]),
             name: "Untitled".into(),
         };
@@ -731,14 +732,14 @@ mod tests {
                     let request: Request =
                         rkyv::api::low::from_bytes::<Request, rkyv::rancor::Error>(&bytes).unwrap();
                     let reply = match request {
-                        Request::PayloadSize { volume, entry } => {
+                        Request::PayloadSize { volume, entry, .. } => {
                             assert!(size);
                             assert_eq!((volume, entry), (address.volume, Some(address.entry)));
                             held = Some(socket);
                             started.send(()).unwrap();
                             continue;
                         }
-                        Request::DuplicateEntry { address: source } => {
+                        Request::DuplicateEntry { address: source, .. } => {
                             assert!(!size);
                             assert_eq!(source, address);
                             held = Some(socket);
@@ -811,7 +812,11 @@ mod tests {
             let (send, requests, _) = worker_queue::channel();
             let gate = send.gate();
             send.send(if size {
-                Request::PayloadSize { volume: address.volume, entry: Some(address.entry) }
+                Request::PayloadSize {
+                    session: None,
+                    volume: address.volume,
+                    entry: Some(address.entry),
+                }
             } else {
                 Request::DuplicateEntry { address }
             })

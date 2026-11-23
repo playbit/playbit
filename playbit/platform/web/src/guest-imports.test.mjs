@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { bindOperations, operationSupported } from "./guest-imports.ts";
+import { bindOperations, operationSupported, supportsDeadline } from "./guest-imports.ts";
 
 test('authority admission follows canonical slots and known handlers, before effects', () => {
     let admitted = 0, called = 0;
@@ -15,6 +15,24 @@ test('authority admission follows canonical slots and known handlers, before eff
     assert.equal(admitted, 0);
     assert.equal(imports.pb_syscall(0x144, 0n, 0n, 0n, 0n, 0n, 0n), -2n);
     assert.equal(admitted, 1); assert.equal(called, 0);
+});
+
+for (const deadline of [false, true]) test(`deadline scalar slots are checked before opt-in and authority (declared=${deadline})`, {skip:deadline && !supportsDeadline()}, async () => {
+    const module = new WebAssembly.Module(Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0));
+    let admissions = 0, calls = 0;
+    const imports = bindOperations(module, {
+        admitOperation(opcode) { admissions++; assert.equal(opcode, 0x15); return 0; },
+        pb_event_poll_deadline(...args) { calls++; assert.deepEqual(args, [32, 64, 8, 0xffffffffffffffffn]); return -6; },
+    }, deadline);
+    const invoke = deadline ? WebAssembly.promising(imports.pb_syscall) : imports.pb_syscall;
+    const slots = [32n, 64n, 8n, -1n, 0n, 0n];
+    for (const slot of [0, 1, 2]) assert.equal(await invoke(0x15, ...slots.with(slot, 0x100000000n)), -3n);
+    for (const slot of [4, 5]) assert.equal(await invoke(0x15, ...slots.with(slot, 1n)), -3n);
+    assert.equal(admissions, 0);
+    assert.equal(calls, 0);
+    assert.equal(await invoke(0x15, ...slots), deadline ? -6n : -7n);
+    assert.equal(admissions, Number(deadline));
+    assert.equal(calls, Number(deadline));
 });
 
 test("async data entries preserve full handle bits and reject noncanonical slots before callbacks", () => {

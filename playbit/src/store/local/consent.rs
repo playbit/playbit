@@ -19,7 +19,8 @@ impl LocalStore {
         if current.begin_read()?.root_hash()?.is_some() {
             // Do not let a stale incoming ACL undo a local denial that arrived
             // during the transfer. Provisioning alone may be stale locally.
-            MetadataPolicy::read(&current)?.authorize(access.account, Permission::Read)?;
+            let policy = MetadataPolicy::read(&current)?;
+            policy.authorize(self.data_actor(access, policy.volume())?, Permission::Read)?;
         }
         // Reconcile edits made since receive began into the detached result,
         // then validate the exact policy that will be installed while locked.
@@ -262,7 +263,8 @@ impl LocalStore {
         self.check_participant(candidate.replica_volume(), self.account.id)?;
         self.check_dependency_authority(self.account.id, candidate.replica_volume())?;
         policy.admit(self.account.id, candidate, candidate.replica_volume())?;
-        policy.authorize(self.account.id, Permission::Read)
+        let access = Access::session(self.account.id, &candidate.id);
+        policy.authorize(self.data_actor(&access, policy.volume())?, Permission::Read)
     }
 
     /// Called only after authoritative AP resolution and candidate validation.

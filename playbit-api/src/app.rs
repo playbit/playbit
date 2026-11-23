@@ -219,10 +219,12 @@ mod tests {
         deferred_event: Option<HostEvent>,
         frames: Vec<(usize, Vec<u8>)>,
         error: Option<Error>,
+        session_info: Option<crate::abi::session::SessionInfo>,
         event_error: Option<Error>,
         trace_batches: Vec<(u64, u64, Vec<u8>)>,
         trace_error: Option<Error>,
         clock: u64,
+        poll_deadline: Option<u64>,
     }
 
     impl ViewHost {
@@ -252,6 +254,38 @@ mod tests {
     }
 
     struct Counter(usize);
+
+    #[test]
+    fn session_info_distinguishes_absence_seedless_and_an_all_zero_seed() {
+        use crate::abi::session::{HAS_KEY_SECRET, SessionInfo};
+        let read = |record, error| {
+            let mut host = ViewHost { session_info: record, error, ..Default::default() };
+            let mut state = ContextState::default();
+            // SAFETY: the fixture owns the host during the synchronous callback.
+            let (mut context, _) = unsafe { Context::from_raw((&raw mut host).cast(), &mut state) }
+                .expect("fixture context");
+            context.session_info()
+        };
+        assert!(matches!(read(None, None), Ok(None)));
+        assert!(matches!(read(None, Some(Error::Unsupported)), Err(Error::Unsupported)));
+        let mut record = SessionInfo {
+            internal_id: [99; 32],
+            written: 64,
+            flags: 1 << 31,
+            ..SessionInfo::default()
+        };
+        let seedless = read(Some(record), None).expect("session info").expect("session");
+        assert_eq!(seedless.internal_id, [99; 32]);
+        assert!(seedless.key_secret.is_none() && seedless.code().is_none());
+        record.flags |= HAS_KEY_SECRET;
+        let zero = read(Some(record), None).expect("session info").expect("zero seed");
+        assert_eq!(zero.code().as_deref(), Some("1111111111111111111111"));
+        record.key_secret = *b"session-seed-v1!";
+        let seeded = read(Some(record), None).expect("session info").expect("seeded session");
+        assert_eq!(seeded.code().as_deref(), Some("FFUk4yL7S6oHXq7rrK6a48"));
+        record.written = 48;
+        assert!(matches!(read(Some(record), None), Err(Error::Internal)));
+    }
 
     impl Drop for Counter {
         fn drop(&mut self) {
@@ -300,6 +334,23 @@ mod tests {
     ) -> i64 {
         assert!(!context.is_null());
         match operation {
+            code if code == Opcode::SessionInfo as u32 => {
+                // SAFETY: the mock callback lends the live host and one initialized record.
+                let (host, output) = unsafe {
+                    (
+                        &*context.cast::<ViewHost>(),
+                        &mut *(a as usize as *mut crate::abi::session::SessionInfo),
+                    )
+                };
+                assert_eq!([b, c, d, e, f], [0; 5]);
+                assert_eq!((output.size, output.written), (64, 0));
+                if let Some(error) = host.error {
+                    return error as i64;
+                }
+                let Some(record) = host.session_info else { return Error::NotFound as i64 };
+                *output = record;
+                0
+            }
             code if code == Opcode::ClockRead as u32 => {
                 // SAFETY: the fixture owns the live context.
                 let host = unsafe { &mut *context.cast::<ViewHost>() };
@@ -319,9 +370,17 @@ mod tests {
                 assert_eq!([b, c, d, e, f], [0; 5]);
                 0
             }
-            code if code == Opcode::EventPoll as u32 => {
+            code if code == Opcode::EventPoll as u32
+                || code == Opcode::EventPollDeadline as u32 =>
+            {
                 // SAFETY: callback fixtures lend a live ViewHost for the whole turn.
                 let host = unsafe { &mut *context.cast::<ViewHost>() };
+                assert_eq!([e, f], [0; 2]);
+                if code == Opcode::EventPollDeadline as u32 {
+                    host.poll_deadline = Some(d);
+                } else {
+                    assert_eq!(d, 0);
+                }
                 let Some(event) = host.events.front() else {
                     return host.event_error.unwrap_or(Error::WouldBlock) as i64;
                 };
@@ -408,6 +467,57 @@ mod tests {
         host.push(EventKind::VolumesChanged, 0, &42u64.to_le_bytes());
 
         host
+    }
+
+    #[test]
+    fn deadline_poll_preserves_clock_width_and_distinguishes_timeout_probe_and_empty_event() {
+        use crate::abi::syscall::{EventKind, OPTIONAL_EVENT_KIND_BIT};
+        use crate::context::PollError;
+
+        let mut host = ViewHost { clock: 1 << 44, ..ViewHost::default() };
+        host.push(EventKind::Started, 0, &[]);
+        let mut state = ContextState::default();
+        // SAFETY: the fixture owns the mock host and outputs across all synchronous polls.
+        let (mut context, _) =
+            unsafe { Context::from_raw((&mut host as *mut ViewHost).cast(), &mut state) }
+                .expect("initial snapshot");
+        let deadline = context.clock_read() + 50_000;
+        assert_eq!(deadline, (1 << 44) + 50_001);
+        assert_eq!(context.raw_events().next().expect("startup event").kind, EventKind::Started);
+        let mut bytes = [0; 8];
+        assert_eq!(
+            context.poll_event_deadline(deadline, &mut bytes),
+            Err(PollError::Host(Error::WouldBlock))
+        );
+        assert_eq!(host.poll_deadline, Some(deadline));
+
+        host.push_raw(OPTIONAL_EVENT_KIND_BIT | 999, 0, &[]);
+        host.push(EventKind::TraceConfig, 0, &7u64.to_le_bytes());
+        host.push(EventKind::DataChanged, 0, b"payload");
+        host.push(EventKind::Click, 1, &[]);
+        assert_eq!(
+            context.poll_event_deadline(u64::MAX, &mut []),
+            Err(PollError::BufferTooSmall(8))
+        );
+        assert_eq!(host.poll_deadline, Some(u64::MAX));
+        let event = context.poll_event_deadline(0, &mut bytes).expect("queued event");
+        assert_eq!((event.kind, event.data), (EventKind::DataChanged, b"payload".as_slice()));
+        assert!(context.trace_enabled());
+        let event = context.poll_event_deadline(0, &mut []).expect("empty event payload");
+        assert_eq!((event.target, event.kind), (1, EventKind::Click));
+
+        host.push_raw(999, 0, &[]);
+        host.push(EventKind::Click, 2, &[]);
+        assert_eq!(
+            context.poll_event_deadline(0, &mut bytes),
+            Err(PollError::Host(Error::Unsupported))
+        );
+        assert_eq!(context.event_status(), Err(Error::Unsupported));
+        assert_eq!(
+            context.poll_event_deadline(0, &mut bytes),
+            Err(PollError::Host(Error::Unsupported))
+        );
+        assert_eq!(host.events.len(), 1);
     }
 
     fn changed_event(text: &str) -> crate::ui::TextEvent<'_> {
@@ -563,11 +673,18 @@ mod tests {
     fn assert_canvas_snapshot(view: &mut ViewEncoder) {
         use crate::abi::syscall::{FrameInput, KeyInput, PointerInput};
         use crate::ui::CanvasEvent;
+        // A guest can use its own motion type with the released CanvasFrames parameter.
+        struct Motion;
+        impl From<Motion> for CanvasFrames {
+            fn from(_: Motion) -> Self {
+                Self::Continuous
+            }
+        }
         let pointer = PointerInput { x: 10, y: 20, phase: 1, buttons: 1 };
         let key = KeyInput { key: 1, pressed: true };
         let frame = FrameInput { elapsed_us: 16_667 };
         assert_eq!(
-            view.canvas(5, 100, 100, CanvasFrames::Continuous, &[]).events().collect::<Vec<_>>(),
+            view.canvas(5, 100, 100, Motion.into(), &[]).events().collect::<Vec<_>>(),
             [
                 CanvasEvent::Pointer(pointer),
                 CanvasEvent::Key(key),
@@ -883,6 +1000,10 @@ mod tests {
                     assert_eq!(events[0].kind, EventKind::ObjectCreationReady);
                     assert_eq!(events[0].data, &[7; 8]);
                     assert_eq!(context.event_status(), Err(Error::Unsupported));
+                    assert_eq!(
+                        context.poll_event_deadline(u64::MAX, &mut []),
+                        Err(crate::context::PollError::Host(Error::Unsupported))
+                    );
                 }),
                 context: ContextState::default(),
                 files: Default::default(),
@@ -895,6 +1016,7 @@ mod tests {
                 },
                 Error::Unsupported as i32
             );
+            assert_eq!(host.poll_deadline, None, "a terminal callback cannot park");
             assert_eq!(host.events.len(), 1, "no later event is admitted");
             // SAFETY: a terminal snapshot never polls the live host again.
             assert!(matches!(

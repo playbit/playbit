@@ -85,7 +85,7 @@ fn snapshot(view: &ViewNode) -> Snapshot {
     let mut pending = vec![view];
     while let Some(node) = pending.pop() {
         match node {
-            ViewNode::Theme { theme, child } => {
+            ViewNode::Theme { theme, child, .. } => {
                 result.theme = Some(theme.clone());
                 pending.push(child);
             }

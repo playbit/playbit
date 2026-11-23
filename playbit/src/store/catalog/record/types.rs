@@ -79,6 +79,7 @@ impl Codec for Subject {
         match self {
             Self::Public => unit(out, 1),
             Self::Principal(id) => payload(out, 2, id),
+            Self::SessionParticipants => unit(out, 3),
         }
     }
     fn read(value: View<'_>, mode: Mode) -> Result<Self> {
@@ -89,6 +90,10 @@ impl Codec for Subject {
                 Ok(Self::Public)
             }
             2 => Ok(Self::Principal(body.fields(mode, &[1])?.required(1, mode)?)),
+            3 => {
+                body.fields(mode, &[])?;
+                Ok(Self::SessionParticipants)
+            }
             _ => Err(unknown()),
         }
     }

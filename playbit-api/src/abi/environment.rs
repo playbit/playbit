@@ -55,7 +55,8 @@ pub unsafe fn pb_host_limit(context: *mut Context, limit: u32) -> i64 {
     }
 }
 
-/// Available app viewport in whole logical units, excluding host chrome/padding.
+/// Available area in whole logical units. The default excludes host chrome and
+/// padding. A root canvas with Window extent receives the full drawable window.
 /// Scale is physical pixels per logical unit. Zero dimensions mean no visible area.
 /// SurfaceChanged events (target zero) contain these four little-endian words;
 /// pixel_scale uses IEEE 754 binary32 bits. Input bits describe supported delivery.

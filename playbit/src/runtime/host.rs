@@ -309,6 +309,12 @@ pub trait Host {
         generation::allocate()
     }
 
+    /// Invitation seed for this instance's admitted session, captured before guest turns.
+    /// Embedders with only a public session identity may leave the seed unavailable.
+    fn session_key_secret(&self) -> HostResult<Option<[u8; 16]>> {
+        Ok(None)
+    }
+
     fn supported_operations(&self) -> &[Opcode];
     /// Presentation features are admitted independently of syscall identities.
     fn supported_features(&self) -> &[&str] {

@@ -24,6 +24,16 @@ pub(crate) struct Synchronization {
     _timing: crate::trace::Interval,
 }
 
+#[cfg(all(feature = "test-support", feature = "app-host"))]
+impl crate::engine::Engine {
+    /// Let real-AP tests interleave local first use after the owner and listener passes.
+    pub fn sync_at_first_session_for_test(&self) -> bool {
+        self.synchronization
+            .as_ref()
+            .is_some_and(|sync| matches!(sync.phase, Phase::Sessions) && sync.next == 0)
+    }
+}
+
 impl Synchronization {
     pub(in crate::engine) fn new(
         store: &LocalStore,
@@ -70,12 +80,20 @@ impl Synchronization {
         let result = remote.connection.as_ref().ok_or_else(|| "AP disconnected".into()).and_then(
             |connection| remote.sync_registrations(store, connection, self.scope.selected()),
         );
-        if let Err(error) = result {
-            self.retain_error(Err(error));
-            self.next = self.volumes.len();
-            if self.scope.provider() {
-                self.phase = Phase::Finish;
-                return Ok(());
+        match result {
+            Ok(deferred) if !deferred.is_empty() => {
+                self.volumes.retain(|volume| !deferred.contains(volume));
+                self.total = self.volumes.len();
+                self.retain_error(Err(wire::SharedServiceUpgradeRequired.into()));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.retain_error(Err(error));
+                self.next = self.volumes.len();
+                if self.scope.provider() {
+                    self.phase = Phase::Finish;
+                    return Ok(());
+                }
             }
         }
         self.phase = Phase::Owned;
@@ -92,8 +110,11 @@ impl Synchronization {
                 .volume(volume)
                 .map_err(Into::into)
                 .and_then(|descriptor| remote.sync_owned_volume(store, descriptor));
+            let deferred = result
+                .as_ref()
+                .is_err_and(|error| error.is::<wire::SharedServiceUpgradeRequired>());
             self.retain_error(result);
-            if let Some(live) = &remote.live {
+            if !deferred && let Some(live) = &remote.live {
                 self.retain_error(
                     remote.runtime.block_on(live.publisher().account_volume_ready(volume)),
                 );

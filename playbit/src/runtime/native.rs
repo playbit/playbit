@@ -8,8 +8,8 @@
 use super::{Frame, RuntimeError, instance::State, syscall::*};
 use playbit_api::abi::operations as abi;
 use std::{
+    cell::Cell,
     ffi::c_void,
-    marker::PhantomData,
     rc::Rc,
     sync::{
         Mutex,
@@ -27,6 +27,7 @@ mod bloblog;
 mod bloblog_tests;
 mod calls;
 mod data;
+mod deadline;
 mod dispatch;
 mod environment;
 mod files;
@@ -43,6 +44,7 @@ struct Context {
     state: Mutex<State>,
     owner: ThreadId,
     active: AtomicBool,
+    poll_yielder: Cell<*const deadline::PollYielder>,
 }
 struct ActiveTurn<'a>(&'a AtomicBool);
 impl Drop for ActiveTurn<'_> {
@@ -51,13 +53,34 @@ impl Drop for ActiveTurn<'_> {
     }
 }
 
-pub struct NativeInstance {
-    context: Box<Context>,
+struct Callbacks {
     app: abi::App,
-    app_state: *mut c_void,
-    initialized: bool,
-    // Construction, execution and destruction belong to the same host thread.
-    _owner: PhantomData<Rc<()>>,
+    state: Cell<*mut c_void>,
+    initialized: Cell<bool>,
+}
+impl Callbacks {
+    fn turn(&self, context: &Context) -> i32 {
+        let raw = std::ptr::from_ref(context).cast_mut().cast();
+        if !self.initialized.replace(true) {
+            // The native guest owns its state between init and destroy. Preserve even
+            // the partial state transferred by an init that reports an error.
+            let mut state = std::ptr::null_mut();
+            let status = unsafe {
+                self.app.init.expect("validated native init")(raw, self.app.user_data, &mut state)
+            };
+            self.state.set(state);
+            if status != 0 || !context.active.load(Ordering::Acquire) {
+                return status;
+            }
+        }
+        // SAFETY: all callbacks run serially on their constructing OS thread.
+        unsafe { self.app.turn.expect("validated native turn")(raw, self.state.get()) }
+    }
+}
+pub struct NativeInstance {
+    context: Rc<Context>,
+    callbacks: Rc<Callbacks>,
+    deadline_turn: Option<deadline::Turn>,
 }
 impl NativeInstance {
     /// Bind a native app to the same checked authority as a Wasm instance.
@@ -76,20 +99,24 @@ impl NativeInstance {
                 "native app requires init, turn and destroy callbacks".into(),
             ));
         }
-        Ok(Self {
-            context: Box::new(Context {
-                state: Mutex::new(State::new(context, host)?),
-                owner: std::thread::current().id(),
-                active: AtomicBool::new(false),
-            }),
+        let deadline_enabled = context.required_capabilities.contains("event.poll.deadline");
+        let context = Rc::new(Context {
+            state: Mutex::new(State::new(context, host)?),
+            owner: std::thread::current().id(),
+            active: AtomicBool::new(false),
+            poll_yielder: Cell::new(std::ptr::null()),
+        });
+        let callbacks = Rc::new(Callbacks {
             app,
-            app_state: std::ptr::null_mut(),
-            initialized: false,
-            _owner: PhantomData,
-        })
-    }
-    fn context_ptr(&self) -> *mut abi::Context {
-        (&*self.context as *const Context).cast_mut().cast()
+            state: Cell::new(std::ptr::null_mut()),
+            initialized: Cell::new(false),
+        });
+        let deadline_turn = if deadline_enabled {
+            Some(deadline::Turn::new(context.clone(), callbacks.clone())?)
+        } else {
+            None
+        };
+        Ok(Self { context, callbacks, deadline_turn })
     }
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.context.state.lock().expect("native instance state is not poisoned")
@@ -98,28 +125,23 @@ impl NativeInstance {
     /// across callbacks. Failure halts this generation; it never retries input.
     pub fn pump(&mut self) -> Result<Frame, RuntimeError> {
         let _timing = crate::trace::Span::new("runtime.native_turn");
-        self.state().begin_turn(Instant::now())?;
-        assert!(!self.context.active.swap(true, Ordering::AcqRel), "native turn reentry");
-        let _active = ActiveTurn(&self.context.active);
-        let context = self.context_ptr();
-        if !self.initialized {
-            self.initialized = true;
-            // SAFETY: new validated the table and the caller owns its lifetime.
-            let status = unsafe {
-                self.app.init.expect("validated native init")(
-                    context,
-                    self.app.user_data,
-                    &mut self.app_state,
-                )
-            };
-            if status != 0 {
-                self.state().halt();
-                return Err(RuntimeError::NativeApp(status));
+        let now = Instant::now();
+        {
+            let mut state = self.state();
+            state.begin_turn(now)?;
+            if !self.context.poll_yielder.get().is_null()
+                && state.work.draining
+                && !state.has_ready_work(now)
+            {
+                return Ok(state.finish_frame());
             }
         }
-        // SAFETY: init transferred app_state ownership, valid until destroy.
-        let status =
-            unsafe { self.app.turn.expect("validated native turn")(context, self.app_state) };
+        assert!(!self.context.active.swap(true, Ordering::AcqRel), "native turn reentry");
+        let _active = ActiveTurn(&self.context.active);
+        let status = match &mut self.deadline_turn {
+            Some(turn) => turn.advance(),
+            None => self.callbacks.turn(&self.context),
+        };
         if status != 0 {
             self.state().halt();
             return Err(RuntimeError::NativeApp(status));
@@ -214,11 +236,16 @@ impl Drop for NativeInstance {
     fn drop(&mut self) {
         self.context.active.store(false, Ordering::Release);
         self.state().halt();
-        if self.initialized {
+        if let Some(turn) = &mut self.deadline_turn {
+            turn.retire();
+        }
+        if self.callbacks.initialized.get() {
             // SAFETY: the callback contract transfers even failed init state;
             // this is the only destruction call and the context is inactive.
             unsafe {
-                self.app.destroy.expect("validated native destroy")(self.app_state);
+                self.callbacks.app.destroy.expect("validated native destroy")(
+                    self.callbacks.state.get(),
+                );
             }
         }
     }

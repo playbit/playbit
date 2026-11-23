@@ -770,15 +770,17 @@ fn update_surface(current: &mut Option<Surface>, event: Event<'_>) -> Result<(),
 }
 ```
 
-Width and height are whole logical units available to app content, excluding
-host chrome and padding. `pixel_scale` is physical pixels per logical unit and
+Width and height are whole logical units available to app content. The default
+viewport excludes host chrome and padding. A root canvas with
+`CanvasExtent::Window` receives the full drawable window dimensions.
+`pixel_scale` is physical pixels per logical unit and
 must be finite and positive. Zero dimensions mean no visible area. `inputs`
 contains only `Surface::POINTER`, `KEYBOARD` and `TOUCH` bits. The C `PBSurface`
 layout is four little-endian words: width, height, IEEE 754 binary32 scale bits,
 input bits. Copy/decode bytes rather than casting potentially unaligned event
 storage to a struct pointer.
 
-The shared Mac renderer measures the padded viewport after layout, independent
+The shared Mac renderer measures the selected extent after layout, independent
 of scroll content, and retains only its last admitted surface. Failed admission
 leaves it unsent for a later eligible layout. Recovery and app replacement reset
 the remembered value. Existing input queue bounds and error behavior apply.

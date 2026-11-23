@@ -12,7 +12,7 @@ const PLAN_BYTES: usize = 2 * 1024 * 1024;
 
 pub(super) fn qualify(
     stage: &Preparation,
-    account: Id,
+    actor: DataActor,
     confirmed: bool,
 ) -> crate::store::Result<()> {
     let accepted = stage.accepted_index.begin_read()?;
@@ -28,7 +28,7 @@ pub(super) fn qualify(
     for row in confirmed {
         insert(&mut rows, &mut retained, row)?;
     }
-    exclude(stage, account, &mut rows, &mut retained)?;
+    exclude(stage, actor, &mut rows, &mut retained)?;
     let rows = rows.into_values().collect::<Vec<_>>();
     let current = stage.volume.index.begin_read()?;
     let before = Ledger::load_read(&current)?;
@@ -80,7 +80,7 @@ fn insert(
 
 fn exclude(
     stage: &Preparation,
-    account: Id,
+    actor: DataActor,
     rows: &mut BTreeMap<EntryId, Observation>,
     retained: &mut usize,
 ) -> crate::store::Result<()> {
@@ -104,7 +104,7 @@ fn exclude(
         if stage.entry_scope.is_some_and(|scope| scope.0 != entry) {
             continue;
         }
-        exclude_entry(stage, account, &local, &policy, entry, &mut scan, |row| {
+        exclude_entry(stage, actor, &local, &policy, entry, &mut scan, |row| {
             insert(rows, retained, row)?;
             Ok(*retained)
         })?;
@@ -114,7 +114,7 @@ fn exclude(
 
 fn exclude_entry(
     stage: &Preparation,
-    account: Id,
+    actor: DataActor,
     local: &kvdb::ReadTxn<'_, OpfsStorage>,
     policy: &MetadataPolicy,
     entry: EntryId,
@@ -131,7 +131,7 @@ fn exclude_entry(
         local,
         &stage.accepted_index,
         policy,
-        account,
+        actor,
         entry,
         scan,
         |key, clock, bytes, scan| {

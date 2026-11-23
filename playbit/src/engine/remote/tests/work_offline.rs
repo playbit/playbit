@@ -41,7 +41,12 @@ fn offline_startup_retains_enrollment_and_local_work_without_connection_attempts
     fs::write(&source, b"offline bytes").unwrap();
     let created = diagnostic(
         &mut engine,
-        Request::FileCreate { volume: volume.id, name: "retained.txt".into(), path: source },
+        Request::FileCreate {
+            session: None,
+            volume: volume.id,
+            name: "retained.txt".into(),
+            path: source,
+        },
     );
     let Reply::Diagnostic(created) = created else { panic!("created file") };
     let crate::engine::reply::DiagnosticReply::FileCreated { address, .. } = created else {

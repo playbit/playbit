@@ -290,7 +290,7 @@ function element(node: SceneNode): HTMLElement {
         updateControl(button, node); return button;
     }
     if (node.kind === "canvas") {
-        const canvas = document.createElement("canvas"); canvas.width = node.width; canvas.height = node.height;
+        const canvas = document.createElement("canvas");
         if (node.id === 0) {
             canvas.setAttribute("aria-hidden", "true"); drawCanvas(canvas, node); return canvas;
         }
@@ -299,8 +299,8 @@ function element(node: SceneNode): HTMLElement {
         const pointer = (event: PointerEvent, phase: number) => {
             if (phase === 1) { canvas.setPointerCapture(event.pointerId); canvas.focus(); }
             const rect = canvas.getBoundingClientRect();
-            const x = Math.round(Math.max(0, Math.min(node.width, (event.clientX - rect.left) * node.width / rect.width)));
-            const y = Math.round(Math.max(0, Math.min(node.height, (event.clientY - rect.top) * node.height / rect.height)));
+            const x = Math.round(Math.max(0, Math.min(canvas.width, (event.clientX - rect.left) * canvas.width / rect.width)));
+            const y = Math.round(Math.max(0, Math.min(canvas.height, (event.clientY - rect.top) * canvas.height / rect.height)));
             input(11, node.id, words(x, y, phase, phase < 2 ? event.buttons & 1 : 0)).catch(() => {});
         };
         canvas.onpointerdown = event => pointer(event, 1); canvas.onpointermove = event => { if (event.buttons & 1) pointer(event, 0); };

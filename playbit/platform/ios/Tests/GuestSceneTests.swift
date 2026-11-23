@@ -9,6 +9,7 @@ import Foundation
             let canvas = SceneFixture(kind: 7)
             canvas.fields.id = 9; canvas.fields.width = 320; canvas.fields.height = 200
             canvas.fields.frames = 1
+            canvas.fields.has_clear_color = 1; canvas.fields.clear_color = 0x22334480
             canvas.items = [
                 CanvasItemFixture(SceneCanvasItem(x: 1, y: 2, width: 30, height: 40, color: 0x11223344)),
                 CanvasItemFixture(SceneCanvasItem(kind: 1, x: 4, y: 8, width: 100, height: 20,
@@ -27,7 +28,7 @@ import Foundation
         precondition(scene.children[1].items[0] == .rect(GuestScene.Rect(x: 1, y: 2, width: 30, height: 40, color: 0x11223344)))
         precondition(scene.children[1].items[1] == .text(GuestScene.Rect(x: 4, y: 8, width: 100, height: 20,
             color: 0x55667788), fontSize: 14, bold: true, text: "Trace é path"))
-        precondition(scene.children[1].frames == 1)
+        precondition(scene.children[1].frames == 1 && scene.children[1].clearColor == 0x22334480)
         precondition(scene.children[1].items[2] == .pixels(GuestScene.Rect(x: 2, y: 3, width: 8, height: 4, color: 0),
             width: 2, height: 1, rgba: Data([255, 0, 0, 255, 0, 255, 0, 128])))
         precondition(scene.children[1].width == 320 && scene.children[1].height == 200)
@@ -45,7 +46,7 @@ import Foundation
         catch { }
         let staticCanvas = SceneFixture(kind: 7)
         let copiedStatic = try GuestScene.read(staticCanvas.pointer)
-        precondition(copiedStatic.frames == 0)
+        precondition(copiedStatic.frames == 0 && copiedStatic.clearColor == nil)
         print("GuestSceneTests: typed fields, copied text/pixel lifetimes, embedded NUL, frame policy and malformed spans passed")
     }
 }

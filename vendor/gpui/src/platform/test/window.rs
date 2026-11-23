@@ -49,7 +49,7 @@ impl HasWindowHandle for TestWindow {
     fn window_handle(
         &self,
     ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
-        unimplemented!("Test Windows are not backed by a real platform window")
+        Err(raw_window_handle::HandleError::Unavailable)
     }
 }
 
@@ -253,6 +253,14 @@ impl PlatformWindow for TestWindow {
     fn set_app_id(&mut self, _app_id: &str) {}
 
     fn set_background_appearance(&self, _background: WindowBackgroundAppearance) {}
+
+    #[cfg(target_os = "macos")]
+    fn set_macos_window_style(&self, _style: crate::MacWindowStyle) {}
+
+    #[cfg(target_os = "macos")]
+    fn titlebar_height(&self) -> Pixels {
+        crate::px(28.)
+    }
 
     fn set_edited(&mut self, edited: bool) {
         self.0.lock().edited = edited;

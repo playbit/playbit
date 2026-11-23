@@ -11,9 +11,15 @@ Start with one guest turn, not the test suite:
    Portable [`instance`](instance.rs) state owns one indexed capability table per guest thread,
    authority and bounded queues; the VM adapter separately owns its limiter
    and optional fuel. Engines are unmetered by default. An explicit positive
-   local launch budget enables metering and resets before each `pb_main` call;
-   exhaustion traps and halts that generation. `pump` calls `pb_main`; guest operations enter
-   through the scalar syscall import in `wasm/operations`. There is no WASI or ambient I/O.
+   local launch budget resets on entry to `pb_main` and on resumption of a
+   suspended deadline poll. Fuel exhaustion halts that generation.
+   A package that declares `event.poll.deadline` can return control to the
+   scheduler from inside its syscall and resume the same guest stack. The
+   scheduler publishes the submitted scene and waits for input, a completion,
+   or the earliest finite deadline. Each waiting instance has one continuation.
+   Wasmtime manages its own fiber, native callbacks use a 1 MiB guard-paged
+   stack on the owner thread, and browser guests use WebAssembly JSPI.
+   Legacy guests continue to run synchronous turns.
 3. The [`Host` trait](host.rs) is the typed, VM-independent boundary to
    storage and asynchronous host operations. Its production implementation is in
    [`engine`](../engine/host.rs).

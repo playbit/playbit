@@ -19,7 +19,7 @@ use crate::runtime::{Frame, RuntimeError};
 pub(in crate::runtime) struct WasmState {
     pub(in crate::runtime) app: State,
     pub(super) fuel_limit: Option<std::num::NonZeroU64>,
-    limits: super::limits::GuestLimits,
+    pub(super) limits: super::limits::GuestLimits,
 }
 
 impl WasmState {
@@ -34,8 +34,30 @@ impl WasmState {
     }
 }
 
+/// The direct path stores the app inline. A suspendable store uses an owner-thread
+/// key so Wasmtime can hold its Send future while the host remains thread-affine.
+pub(super) trait StoreData: 'static {
+    fn fuel_limit(&self) -> Option<std::num::NonZeroU64>;
+    fn with_app<R>(&mut self, f: impl FnOnce(&mut State) -> R) -> R;
+}
+
+impl StoreData for WasmState {
+    fn fuel_limit(&self) -> Option<std::num::NonZeroU64> {
+        self.fuel_limit
+    }
+    #[inline]
+    fn with_app<R>(&mut self, f: impl FnOnce(&mut State) -> R) -> R {
+        f(&mut self.app)
+    }
+}
+
+pub(in crate::runtime) enum GuestStore {
+    Direct(Store<WasmState>),
+    Deadline(super::deadline::DeadlineGuest),
+}
+
 pub struct GuestInstance {
-    pub(in crate::runtime) store: Store<WasmState>,
+    pub(in crate::runtime) store: GuestStore,
     pub(in crate::runtime) instance: Instance,
 }
 
@@ -140,6 +162,11 @@ impl PreparedGuest {
     ) -> Result<GuestInstance, RuntimeError> {
         let _timing = crate::trace::Span::new("runtime.instantiate");
         let state = WasmState::new(context, host, self.runtime.fuel_limit)?;
+        if state.app.supported.contains(&abi::Opcode::EventPollDeadline) {
+            let (guest, instance) =
+                super::deadline::DeadlineGuest::instantiate(self.instance.module(), state)?;
+            return Ok(GuestInstance { store: GuestStore::Deadline(guest), instance });
+        }
         let mut store = Store::new(&self.runtime.engine, state);
         store.limiter(|state| &mut state.limits);
         if let Some(limit) = self.runtime.fuel_limit {
@@ -149,17 +176,29 @@ impl PreparedGuest {
             .instance
             .instantiate(&mut store)
             .map_err(|error| RuntimeError::Instantiation(error.to_string()))?;
-        Ok(GuestInstance { store, instance })
+        Ok(GuestInstance { store: GuestStore::Direct(store), instance })
     }
 }
 
 impl GuestInstance {
+    fn read_state<T>(&self, f: impl FnOnce(&State) -> T) -> T {
+        match &self.store {
+            GuestStore::Direct(store) => f(&store.data().app),
+            GuestStore::Deadline(guest) => f(&guest.state.borrow()),
+        }
+    }
+    fn update_state<T>(&mut self, f: impl FnOnce(&mut State) -> T) -> T {
+        match &mut self.store {
+            GuestStore::Direct(store) => f(&mut store.data_mut().app),
+            GuestStore::Deadline(guest) => f(&mut guest.state.borrow_mut()),
+        }
+    }
     pub fn generation(&self) -> u64 {
-        self.store.data().app.generation()
+        self.read_state(|state| state.generation())
     }
 
     pub fn volume_handle(&self, id: Id) -> Option<VolumeHandle> {
-        self.store.data().app.volume_handle(id)
+        self.read_state(|state| state.volume_handle(id))
     }
 
     /// Change only the available-volume ceiling on the VM's owning thread.
@@ -167,34 +206,34 @@ impl GuestInstance {
     /// slots are never reassigned, even when that same volume is granted again.
     /// The caller schedules DataChanged after successful adoption.
     pub fn replace_volumes(&mut self, volumes: Vec<AvailableVolume>) -> HostResult<bool> {
-        self.store.data_mut().app.replace_volumes(volumes)
+        self.update_state(|state| state.replace_volumes(volumes))
     }
 
     pub fn queue_event(&mut self, generation: u64, event: Event) -> HostResult<()> {
-        self.store.data_mut().app.queue_event(generation, event)
+        self.update_state(|state| state.queue_event(generation, event))
     }
 
     /// Signal local result readiness on the serialized runtime worker. Only a
     /// current pending token can produce an event; neither token nor result is
     /// exposed. Repeated notifications are coalesced while the event is queued.
     pub fn notify_data(&mut self, generation: u64, token: u64) -> HostResult<()> {
-        self.store.data_mut().app.notify_data(generation, token)
+        self.update_state(|state| state.notify_data(generation, token))
     }
 
     pub fn notify_creation(&mut self, generation: u64, token: u64) -> HostResult<()> {
-        self.store.data_mut().app.notify_creation(generation, token)
+        self.update_state(|state| state.notify_creation(generation, token))
     }
 
     pub fn notify_file_copy(&mut self, generation: u64, token: u64) -> HostResult<()> {
-        self.store.data_mut().app.notify_file_copy(generation, token)
+        self.update_state(|state| state.notify_file_copy(generation, token))
     }
 
     pub fn notify_file_selection(&mut self, generation: u64, token: u64) -> HostResult<()> {
-        self.store.data_mut().app.notify_file_selection(generation, token)
+        self.update_state(|state| state.notify_file_selection(generation, token))
     }
 
     pub fn notify_update(&mut self, generation: u64, update: PendingUpdate) -> HostResult<()> {
-        self.store.data_mut().app.notify_update(generation, update)
+        self.update_state(|state| state.notify_update(generation, update))
     }
 
     pub fn set_participants(
@@ -202,32 +241,38 @@ impl GuestInstance {
         generation: u64,
         participants: Vec<Participant>,
     ) -> HostResult<()> {
-        self.store.data_mut().app.set_participants(generation, participants)
+        self.update_state(|state| state.set_participants(generation, participants))
     }
 
     pub fn pending_update(&self) -> Option<PendingUpdate> {
-        self.store.data().app.pending_update()
+        self.read_state(|state| state.pending_update())
     }
     pub fn deferred_update(&self) -> Option<u64> {
-        self.store.data().app.deferred_update()
+        self.read_state(|state| state.deferred_update())
     }
 
     /// Runs one cooperative turn. Guests drain EventPoll and return when it
     /// reports WouldBlock. An explicit fuel limit traps and halts on exhaustion.
     pub fn pump(&mut self) -> Result<Frame, RuntimeError> {
         let _timing = crate::trace::Span::new("runtime.pump");
-        if let Some(limit) = self.store.data().fuel_limit {
-            self.store
-                .set_fuel(limit.get())
-                .map_err(|error| RuntimeError::Engine(error.to_string()))?;
-        }
-        let main = self
-            .instance
-            .get_typed_func::<(), ()>(&mut self.store, abi::MAIN_EXPORT)
-            .map_err(|error| RuntimeError::InvalidMainSignature(error.to_string()))?;
-        self.store.data_mut().app.begin_turn(Instant::now())?;
-        if let Err(error) = main.call(&mut self.store, ()) {
-            self.store.data_mut().app.halt();
+        self.update_state(|state| state.begin_turn(Instant::now()))?;
+        let result = match &mut self.store {
+            GuestStore::Direct(store) => {
+                if let Some(limit) = store.data().fuel_limit {
+                    store
+                        .set_fuel(limit.get())
+                        .map_err(|error| RuntimeError::Engine(error.to_string()))?;
+                }
+                let main = self
+                    .instance
+                    .get_typed_func::<(), ()>(&mut *store, abi::MAIN_EXPORT)
+                    .map_err(|error| RuntimeError::InvalidMainSignature(error.to_string()))?;
+                main.call(store, ())
+            }
+            GuestStore::Deadline(guest) => guest.advance(),
+        };
+        if let Err(error) = result {
+            self.update_state(State::halt);
             // A trap is terminal for this generation. No host can accidentally
             // resume partially executed Wasm by pumping it or queuing new input.
             crate::diagnostic!(
@@ -238,39 +283,39 @@ impl GuestInstance {
                 return Err(RuntimeError::FuelExhausted);
             }
             // Keep the final diagnostic, including Rust panic details, without a completed frame.
-            let mut report = self.store.data_mut().app.logs.pop().unwrap_or_default();
+            let mut report = self.update_state(|state| state.logs.pop()).unwrap_or_default();
             if !report.is_empty() {
                 report.push('\n');
             }
             write!(report, "{error:#}").expect("writing to a String cannot fail");
             return Err(RuntimeError::GuestTrap(report));
         }
-        Ok(self.store.data_mut().app.finish_frame())
+        Ok(self.update_state(State::finish_frame))
     }
 
     /// A turn is needed only for queued events or an expired wake deadline.
     /// Querying readiness does not consume events or advance the deadline.
     pub fn has_ready_work(&self, now: Instant) -> bool {
-        self.store.data().app.has_ready_work(now)
+        self.read_state(|state| state.has_ready_work(now))
     }
     pub fn deactivate(&mut self) {
-        self.store.data_mut().app.deactivate();
+        self.update_state(|state| state.deactivate());
     }
     pub fn drain_pending(&self) -> bool {
-        self.store.data().app.drain_pending()
+        self.read_state(|state| state.drain_pending())
     }
     pub fn drain_failed(&self) -> bool {
-        self.store.data().app.drain_failed()
+        self.read_state(|state| state.drain_failed())
     }
 
     /// Hosts check this on their serialized worker without running idle Wasm.
     /// This deadline belongs only to this guest generation and is not durable.
     pub fn wake_due(&self, now: Instant) -> bool {
-        self.store.data().app.wake_due(now)
+        self.read_state(|state| state.wake_due(now))
     }
 
     pub fn wake_after(&self, now: Instant) -> Option<Duration> {
-        self.store.data().app.wake_after(now)
+        self.read_state(|state| state.wake_after(now))
     }
 
     /// Called by ManagedGuest after checking the accepted scene's reference.
@@ -279,7 +324,7 @@ impl GuestInstance {
         generation: u64,
         file: playbit_api::ui::FileReference,
     ) -> HostResult<(u64, [u8; 32])> {
-        self.store.data_mut().app.file_descriptor(generation, file)
+        self.update_state(|state| state.file_descriptor(generation, file))
     }
 
     /// Called by ManagedGuest after checking the accepted scene's reference.
@@ -289,6 +334,37 @@ impl GuestInstance {
         file: playbit_api::ui::FileReference,
         max_bytes: usize,
     ) -> HostResult<([u8; 32], Vec<u8>)> {
-        self.store.data_mut().app.read_file(generation, file, max_bytes)
+        self.update_state(|state| state.read_file(generation, file, max_bytes))
+    }
+}
+
+// Low-level ABI fixtures call arbitrary exports of a direct store to inspect
+// individual memory effects. Production callers enter exclusively through pump.
+#[cfg(any(test, feature = "test-support"))]
+impl std::ops::Deref for GuestStore {
+    type Target = Store<WasmState>;
+    fn deref(&self) -> &Self::Target {
+        let Self::Direct(store) = self else { panic!("ABI fixture requires a direct store") };
+        store
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+impl std::ops::DerefMut for GuestStore {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let Self::Direct(store) = self else { panic!("ABI fixture requires a direct store") };
+        store
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+impl wasmtime::AsContext for GuestStore {
+    type Data = WasmState;
+    fn as_context(&self) -> wasmtime::StoreContext<'_, Self::Data> {
+        (**self).as_context()
+    }
+}
+#[cfg(any(test, feature = "test-support"))]
+impl wasmtime::AsContextMut for GuestStore {
+    fn as_context_mut(&mut self) -> wasmtime::StoreContextMut<'_, Self::Data> {
+        (**self).as_context_mut()
     }
 }

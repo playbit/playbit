@@ -309,14 +309,43 @@ impl State {
     }
 
     pub(in crate::runtime) fn wake_due(&self, now: Instant) -> bool {
-        !self.halted && self.wake_deadline.is_some_and(|deadline| deadline <= now)
+        !self.halted
+            && (self.wake_deadline.is_some_and(|deadline| deadline <= now)
+                || self.poll_deadline.is_some_and(|deadline| {
+                    deadline != u64::MAX && deadline <= crate::trace::clock_ns()
+                }))
     }
 
     pub(in crate::runtime) fn wake_after(&self, now: Instant) -> Option<Duration> {
         if self.halted {
             return None;
         }
-        self.wake_deadline.map(|deadline| deadline.saturating_duration_since(now))
+        let wake = self.wake_deadline.map(|deadline| deadline.saturating_duration_since(now));
+        let poll = self.poll_deadline.filter(|deadline| *deadline != u64::MAX).map(|deadline| {
+            Duration::from_nanos(deadline.saturating_sub(crate::trace::clock_ns()))
+        });
+        wake.into_iter().chain(poll).min()
+    }
+
+    /// Check after structural output admission, before consuming an event.
+    /// A ready event wins even if the absolute deadline elapsed between pumps.
+    pub(in crate::runtime) fn arm_poll_deadline(&mut self, deadline: u64) -> HostResult<bool> {
+        crate::runtime::syscall::require_supported(self, Opcode::EventPollDeadline)?;
+        self.poll_deadline = None;
+        queue_due_wake(self, Instant::now());
+        #[cfg(all(feature = "native-audio", target_vendor = "apple"))]
+        crate::runtime::syscall::audio::pump(self);
+        if self.trace_config_pending || !self.events.is_empty() {
+            return Ok(false);
+        }
+        if self.work.draining {
+            return Err(HostError::Conflict);
+        }
+        if deadline != u64::MAX && deadline <= crate::trace::clock_ns() {
+            return Err(HostError::WouldBlock);
+        }
+        self.poll_deadline = Some(deadline);
+        Ok(true)
     }
 
     pub(in crate::runtime) fn file_descriptor(
@@ -429,6 +458,7 @@ impl State {
             crate::runtime::syscall::audio::cancel_open(self);
         }
         self.halted = true;
+        self.poll_deadline = None;
         self.wake_deadline = None;
         self.work.active = None;
         self.work.failed |= self.work.draining;
@@ -442,6 +472,7 @@ impl State {
         }
         crate::runtime::syscall::channels::deactivate(self);
         self.work.deactivate();
+        self.poll_deadline = None;
         self.volume_watch = None;
         self.wake_deadline = None;
         self.events.retain(|event| {

@@ -8,15 +8,17 @@
 use std::collections::BTreeSet;
 
 use playbit_api::ui::{
-    ButtonStyle, CONTROL_DISABLED, CheckState, FileReference, LIST_HAS_CHILDREN, LIST_INACTIVE,
-    LIST_SELECTED, MAX_IMAGE_BYTES, MAX_SEGMENTS, MENU_ACTION, MENU_CHECKABLE, MENU_CHECKED,
-    MENU_DESTRUCTIVE, MENU_SEPARATOR, MENU_SUBMENU, MIN_SEGMENTS, MenuIcon, TEXT_FIELD_MULTILINE,
-    TEXT_FIELD_READ_ONLY, TextStyle, Theme, ThemeColor, VIEW_AUTOCOMPLETE_FIELD, VIEW_BUTTON,
-    VIEW_CANVAS, VIEW_CHECKBOX, VIEW_COLUMN_END, VIEW_COLUMN_START, VIEW_CONTEXT_MENU_END,
-    VIEW_CONTEXT_MENU_START, VIEW_FILE_IMAGE, VIEW_IMAGE_DESCRIPTION, VIEW_JPEG_IMAGE,
-    VIEW_LIST_END, VIEW_LIST_ROW, VIEW_LIST_START, VIEW_MAGIC, VIEW_POPUP_BUTTON, VIEW_RADIO,
-    VIEW_ROW_END, VIEW_ROW_START, VIEW_SCROLL_END, VIEW_SCROLL_START, VIEW_SEGMENTED_CONTROL,
-    VIEW_TEXT, VIEW_TEXT_FIELD, VIEW_THEME, image_size_valid, segment_ids_valid,
+    ButtonStyle, CONTROL_DISABLED, CanvasExtent, CanvasFrames, CanvasOptions, CheckState, Color,
+    FileReference, LIST_HAS_CHILDREN, LIST_INACTIVE, LIST_SELECTED, MAX_IMAGE_BYTES, MAX_SEGMENTS,
+    MENU_ACTION, MENU_CHECKABLE, MENU_CHECKED, MENU_DESTRUCTIVE, MENU_SEPARATOR, MENU_SUBMENU,
+    MIN_SEGMENTS, MenuIcon, TEXT_FIELD_MULTILINE, TEXT_FIELD_READ_ONLY, TextStyle, Theme,
+    ThemeColor, VIEW_AUTOCOMPLETE_FIELD, VIEW_BUTTON, VIEW_CANVAS, VIEW_CHECKBOX, VIEW_COLUMN_END,
+    VIEW_COLUMN_START, VIEW_CONTEXT_MENU_END, VIEW_CONTEXT_MENU_START, VIEW_FILE_IMAGE,
+    VIEW_IMAGE_DESCRIPTION, VIEW_JPEG_IMAGE, VIEW_LIST_END, VIEW_LIST_ROW, VIEW_LIST_START,
+    VIEW_MAGIC, VIEW_POPUP_BUTTON, VIEW_RADIO, VIEW_ROW_END, VIEW_ROW_START, VIEW_SCROLL_END,
+    VIEW_SCROLL_START, VIEW_SEGMENTED_CONTROL, VIEW_TEXT, VIEW_TEXT_FIELD, VIEW_THEME,
+    VIEW_WINDOW_SIZE_CONSTRAINTS, VIEW_WINDOW_STYLE, WindowSizeConstraints, WindowStyle,
+    image_size_valid, segment_ids_valid,
 };
 
 const MAX_VIEW_DEPTH: usize = 32;
@@ -46,6 +48,9 @@ pub enum CanvasItem {
 pub enum ViewNode {
     Theme {
         theme: Theme,
+        window_background_specified: bool,
+        window_style: Option<WindowStyle>,
+        window_size_constraints: Option<WindowSizeConstraints>,
         child: Box<ViewNode>,
     },
     Scroll {
@@ -75,8 +80,9 @@ pub enum ViewNode {
         id: u32,
         width: u32,
         height: u32,
-        frames: playbit_api::ui::CanvasFrames,
-        viewport: bool,
+        frames: CanvasFrames,
+        extent: CanvasExtent,
+        clear_color: Option<Color>,
         items: Vec<CanvasItem>,
     },
     FileImage {
@@ -203,6 +209,8 @@ pub fn decode_view(bytes: &[u8]) -> Result<ViewNode, ()> {
         node_count: 0,
         theme: Theme::light(),
         theme_seen: false,
+        window_style: None,
+        window_size_constraints: None,
         theme_roles: [false; ThemeColor::COUNT],
         canvas_items: 0,
         canvas_text_bytes: 0,
@@ -226,7 +234,13 @@ pub fn decode_view(bytes: &[u8]) -> Result<ViewNode, ()> {
         return Err(());
     }
     assert_eq!(position, bytes.len());
-    let view = ViewNode::Theme { theme: decoder.theme, child: Box::new(decoder.root.ok_or(())?) };
+    let view = ViewNode::Theme {
+        theme: decoder.theme,
+        window_background_specified: decoder.theme_roles[ThemeColor::WindowBackground as usize],
+        window_style: decoder.window_style,
+        window_size_constraints: decoder.window_size_constraints,
+        child: Box::new(decoder.root.ok_or(())?),
+    };
     validate_view_ids(&view)?;
     assert_eq!(view_records(&view, 0) + usize::from(decoder.theme_seen), decoder.node_count);
     Ok(view)
@@ -238,6 +252,8 @@ struct ViewDecoder {
     node_count: usize,
     theme: Theme,
     theme_seen: bool,
+    window_style: Option<WindowStyle>,
+    window_size_constraints: Option<WindowSizeConstraints>,
     theme_roles: [bool; ThemeColor::COUNT],
     canvas_items: usize,
     canvas_text_bytes: usize,
@@ -256,6 +272,11 @@ impl ViewDecoder {
         assert!(self.containers.len() <= MAX_VIEW_DEPTH);
         assert!(self.node_count <= MAX_VIEW_NODES);
         match kind {
+            VIEW_WINDOW_STYLE | VIEW_WINDOW_SIZE_CONSTRAINTS
+                if id == 0 && self.root.is_none() && self.containers.is_empty() =>
+            {
+                self.decode_window_metadata(kind, payload)
+            }
             VIEW_THEME
                 if id == 0
                     && !self.theme_seen
@@ -298,6 +319,37 @@ impl ViewDecoder {
             _ => Err(()),
         }
     }
+    // fuzz: decode_view
+    fn decode_window_metadata(&mut self, kind: u8, payload: &[u8]) -> Result<(), ()> {
+        match kind {
+            VIEW_WINDOW_STYLE if self.window_style.is_none() => {
+                let bits = u32::from_le_bytes(payload.try_into().map_err(|_| ())?);
+                self.window_style = Some(WindowStyle::from_bits(bits).ok_or(())?);
+            }
+            VIEW_WINDOW_SIZE_CONSTRAINTS if self.window_size_constraints.is_none() => {
+                let (words, []) = payload.as_chunks::<4>() else {
+                    return Err(());
+                };
+                let &[min_width, min_height, max_width, max_height, ratio] = words else {
+                    return Err(());
+                };
+                let constraints = WindowSizeConstraints {
+                    min_width: f32::from_le_bytes(min_width),
+                    min_height: f32::from_le_bytes(min_height),
+                    max_width: f32::from_le_bytes(max_width),
+                    max_height: f32::from_le_bytes(max_height),
+                    aspect_ratio: f32::from_le_bytes(ratio),
+                };
+                if !constraints.is_valid() {
+                    return Err(());
+                }
+                self.window_size_constraints = Some(constraints);
+            }
+            _ => return Err(()),
+        }
+        Ok(())
+    }
+
     // fuzz: decode_view
     fn decode_theme(&mut self, payload: &[u8]) -> Result<(), ()> {
         if !payload.len().is_multiple_of(5) {
@@ -431,34 +483,23 @@ impl ViewDecoder {
     }
     // fuzz: decode_view
     fn decode_canvas(&mut self, id: u32, payload: &[u8]) -> Result<(), ()> {
-        use playbit_api::ui::{CANVAS_FLAG_CONTINUOUS, CANVAS_FLAG_VIEWPORT, CanvasFrames};
         let mut reader = playbit_api::abi::syscall::Reader::new(payload).map_err(|_| ())?;
         let width = reader.u32().map_err(|_| ())?;
         let height = reader.u32().map_err(|_| ())?;
         let flags = reader.u32().map_err(|_| ())?;
-        if flags & !(CANVAS_FLAG_CONTINUOUS | CANVAS_FLAG_VIEWPORT) != 0 {
-            return Err(());
-        }
-        let frames = if flags & CANVAS_FLAG_CONTINUOUS != 0 {
-            CanvasFrames::Continuous
-        } else {
-            CanvasFrames::Static
-        };
-        let viewport = flags & CANVAS_FLAG_VIEWPORT != 0;
-        if viewport
+        let count = reader
+            .count((playbit_api::ui::MAX_CANVAS_ITEMS - self.canvas_items) as u32)
+            .map_err(|_| ())?;
+        let CanvasOptions { frames, extent, clear_color } =
+            decode_canvas_options(flags, &mut reader)?;
+        if extent != CanvasExtent::Inline
             && (id == 0 && frames == CanvasFrames::Continuous
                 || self.containers.iter().any(|entry| entry.0 != VIEW_CONTEXT_MENU_START))
         {
             return Err(());
         }
-        let count = reader
-            .count((playbit_api::ui::MAX_CANVAS_ITEMS - self.canvas_items) as u32)
-            .map_err(|_| ())?;
-        if width == 0
-            || height == 0
-            || width > playbit_api::ui::MAX_CANVAS_EDGE
-            || height > playbit_api::ui::MAX_CANVAS_EDGE
-        {
+        let edges = 1..=extent.max_edge();
+        if !edges.contains(&width) || !edges.contains(&height) {
             return Err(());
         }
         let mut items = Vec::with_capacity(count as usize);
@@ -478,8 +519,8 @@ impl ViewDecoder {
         }
         reader.finish().map_err(|_| ())?;
         self.canvas_items += items.len();
-        let canvas = ViewNode::Canvas { id, width, height, frames, viewport, items };
-        if viewport {
+        let canvas = ViewNode::Canvas { id, width, height, frames, extent, clear_color, items };
+        if extent != CanvasExtent::Inline {
             push_view_node(&mut self.containers, &mut self.root, canvas)?;
         } else {
             push_child(&mut self.containers, canvas)?;
@@ -812,12 +853,43 @@ impl ViewDecoder {
     }
 }
 
+// fuzz: decode_view
+fn decode_canvas_options(
+    flags: u32,
+    reader: &mut playbit_api::abi::syscall::Reader<'_>,
+) -> Result<CanvasOptions, ()> {
+    use playbit_api::ui::{
+        CANVAS_FLAG_CLEAR, CANVAS_FLAG_CONTINUOUS, CANVAS_FLAG_VIEWPORT, CANVAS_FLAG_WINDOW,
+    };
+    let extent = match flags & !(CANVAS_FLAG_CONTINUOUS | CANVAS_FLAG_CLEAR) {
+        0 => CanvasExtent::Inline,
+        CANVAS_FLAG_VIEWPORT => CanvasExtent::Viewport,
+        CANVAS_FLAG_WINDOW => CanvasExtent::Window,
+        _ => return Err(()),
+    };
+    let frames = if flags & CANVAS_FLAG_CONTINUOUS != 0 {
+        CanvasFrames::Continuous
+    } else {
+        CanvasFrames::Static
+    };
+    let clear_color = if flags & CANVAS_FLAG_CLEAR != 0 {
+        Some(Color(reader.u32().map_err(|_| ())?))
+    } else {
+        None
+    };
+    Ok(CanvasOptions { frames, extent, clear_color })
+}
+
 // Recount the resulting tree independently in wire records: container ends,
 // image descriptions and nested menu/suggestion entries also consume budget.
 fn view_records(view: &ViewNode, depth: usize) -> usize {
     assert!(depth <= MAX_VIEW_DEPTH + 1); // Includes the implicit Theme wrapper.
     let count = match view {
-        ViewNode::Theme { child, .. } => view_records(child, depth + 1),
+        ViewNode::Theme { child, window_style, window_size_constraints, .. } => {
+            usize::from(window_style.is_some())
+                + usize::from(window_size_constraints.is_some())
+                + view_records(child, depth + 1)
+        }
         ViewNode::Scroll { child, .. } => 2 + view_records(child, depth + 1),
         ViewNode::Column(children) | ViewNode::Row(children) | ViewNode::List(children) => {
             2 + children.iter().map(|child| view_records(child, depth + 1)).sum::<usize>()
@@ -1233,18 +1305,43 @@ mod tests {
     }
 
     #[test]
-    fn viewport_canvas_requires_root_placement_and_keeps_frame_opt_in() {
-        for frames in [CanvasFrames::Static, CanvasFrames::Continuous] {
+    fn root_canvas_extent_clear_and_frame_mode_round_trip() {
+        for (extent, clear_color, frames) in [
+            (CanvasExtent::Viewport, None, CanvasFrames::Static),
+            (CanvasExtent::Viewport, None, CanvasFrames::Continuous),
+            (CanvasExtent::Viewport, Some(Color(0)), CanvasFrames::Continuous),
+            (CanvasExtent::Window, Some(Color(0x923456ff)), CanvasFrames::Static),
+            (CanvasExtent::Window, None, CanvasFrames::Continuous),
+        ] {
             let mut state = playbit_api::context::ContextState::default();
             let mut encoder = state.view();
-            encoder.viewport_canvas(7, 16, 16, frames, &[]);
+            encoder.canvas_with_options(
+                7,
+                16,
+                16,
+                CanvasOptions { frames, extent, clear_color },
+                &[],
+            );
             let bytes = encoder.finish();
+            if extent == CanvasExtent::Viewport && clear_color.is_none() {
+                let mut viewport = state.view();
+                viewport.viewport_canvas(7, 16, 16, frames, &[]);
+                assert_eq!(viewport.finish(), bytes);
+            }
             let view = decode_view(&bytes).unwrap();
             let ViewNode::Theme { child, .. } = &view else { panic!("theme") };
-            assert!(matches!(
-                child.as_ref(),
-                ViewNode::Canvas { viewport: true, frames: actual, .. } if *actual == frames
-            ));
+            assert_eq!(
+                **child,
+                ViewNode::Canvas {
+                    id: 7,
+                    width: 16,
+                    height: 16,
+                    extent,
+                    clear_color,
+                    frames,
+                    items: vec![],
+                }
+            );
             let event = Event {
                 kind: playbit_api::abi::syscall::EventKind::Frame,
                 target: 7,
@@ -1260,7 +1357,156 @@ mod tests {
             nested.extend_from_slice(&bytes[4..]);
             nested.extend_from_slice(&[VIEW_COLUMN_END, 0, 0, 0, 0, 0, 0, 0, 0]);
             assert!(decode_view(&nested).is_err());
+            let mut both_extents = bytes.clone();
+            // PBV1 + command header + width/height.
+            both_extents[21] |=
+                (playbit_api::ui::CANVAS_FLAG_WINDOW | playbit_api::ui::CANVAS_FLAG_VIEWPORT) as u8;
+            assert!(decode_view(&both_extents).is_err());
+            let mut wrong_clear_length = bytes;
+            wrong_clear_length[21] ^= playbit_api::ui::CANVAS_FLAG_CLEAR as u8;
+            assert!(decode_view(&wrong_clear_length).is_err());
         }
+    }
+
+    #[test]
+    fn window_canvas_accepts_large_logical_geometry_and_checks_pointer_bounds() {
+        use playbit_api::abi::syscall::{EventKind, PointerInput};
+        let (width, height) = (5500, 3000);
+        let edge = CanvasRect {
+            x: width - 1,
+            y: height - 1,
+            width: 1,
+            height: 1,
+            color: Color(0x336699ff),
+        };
+        let mut state = playbit_api::context::ContextState::default();
+        let mut encoder = state.view();
+        encoder.canvas_with_options(
+            7,
+            width,
+            height,
+            CanvasOptions { extent: CanvasExtent::Window, ..Default::default() },
+            &[CanvasItem::Rect(edge)],
+        );
+        let bytes = encoder.finish();
+        let scene = decode_view(&bytes).unwrap();
+        let ViewNode::Theme { child, .. } = &scene else { panic!("theme") };
+        let ViewNode::Canvas { items, .. } = child.as_ref() else { panic!("canvas") };
+        assert_eq!(items, &[super::CanvasItem::Rect(edge)]);
+        for (x, y, accepted) in
+            [(width, height, true), (width + 1, height, false), (width, height + 1, false)]
+        {
+            let data = PointerInput { x, y, phase: 1, buttons: 1 }.encode().to_vec();
+            let event = Event { kind: EventKind::Pointer, target: 7, data };
+            assert_eq!(crate::runtime::syscall::validate_input(&scene, &event).is_ok(), accepted);
+        }
+        // Width follows the command header. Verify the exact logical bound.
+        let mut widest = bytes.clone();
+        for (edge, accepted) in [
+            (playbit_api::ui::MAX_WINDOW_CANVAS_EDGE, true),
+            (playbit_api::ui::MAX_WINDOW_CANVAS_EDGE + 1, false),
+        ] {
+            widest[13..17].copy_from_slice(&edge.to_le_bytes());
+            assert_eq!(decode_view(&widest).is_ok(), accepted);
+        }
+        let mut viewport = bytes;
+        viewport[21] = playbit_api::ui::CANVAS_FLAG_VIEWPORT as u8;
+        assert!(decode_view(&viewport).is_err());
+    }
+
+    #[test]
+    fn window_style_is_explicit_validated_scene_metadata() {
+        let style = WindowStyle::STANDARD
+            | WindowStyle::HIDDEN_TITLE
+            | WindowStyle::THEME_DARK
+            | WindowStyle::HIDE_SESSION_BUTTON;
+        let mut state = playbit_api::context::ContextState::default();
+        let mut encoder = state.view();
+        encoder.window_style(style);
+        encoder.theme(&[]);
+        encoder.column_start();
+        encoder.column_end();
+        let bytes = encoder.finish();
+        assert!(
+            matches!(decode_view(&bytes), Ok(ViewNode::Theme {window_style: Some(actual), ..}) if actual == style)
+        );
+        // A style command has a 9-byte header and four little-endian flag bytes.
+        let mut duplicate = bytes.clone();
+        duplicate.splice(17..17, bytes[4..17].iter().copied());
+        assert!(decode_view(&duplicate).is_err());
+        let mut after_root = bytes.clone();
+        after_root[4..].rotate_left(13);
+        assert!(decode_view(&after_root).is_err());
+        for flags in [WindowStyle::THEME_BRIGHT.bits() | WindowStyle::THEME_DARK.bits(), 1 << 10] {
+            let mut invalid = bytes.clone();
+            invalid[13..17].copy_from_slice(&flags.to_le_bytes());
+            assert!(decode_view(&invalid).is_err());
+        }
+        let mut encoder = state.view();
+        encoder.theme(&[]);
+        encoder.window_style(WindowStyle::NONE);
+        encoder.column_start();
+        encoder.column_end();
+        assert!(matches!(
+            decode_view(&encoder.finish()),
+            Ok(ViewNode::Theme { window_style: Some(WindowStyle::NONE), .. })
+        ));
+    }
+
+    #[test]
+    fn window_size_constraints_validate_the_whole_scene_request() {
+        // Round-trip fractional dp at a fixed aspect and reject malformed size and ratio words.
+        let fixed = WindowSizeConstraints {
+            min_width: 640.5,
+            min_height: 360.25,
+            max_width: 640.5,
+            max_height: 360.25,
+            aspect_ratio: 640.5 / 360.25,
+        };
+        let mut state = playbit_api::context::ContextState::default();
+        let mut encoder = state.view();
+        encoder.window_style(WindowStyle::STANDARD);
+        encoder.window_size_constraints(fixed);
+        encoder.column_start();
+        encoder.column_end();
+        let bytes = encoder.finish();
+        assert!(matches!(decode_view(&bytes), Ok(ViewNode::Theme {
+            window_size_constraints: Some(actual), .. }) if actual == fixed));
+        let start = 4 + 9 + 4;
+        let payload = start + 9;
+        let root = payload + 20;
+        for (offset, word) in [
+            (start + 1, 1),
+            (start + 5, 19),
+            (start + 5, 21),
+            (payload, 641f32.to_bits()),
+            (payload, f32::NAN.to_bits()),
+            (payload + 4, 361f32.to_bits()),
+            (payload + 4, (-0.5f32).to_bits()),
+            (payload + 8, (playbit_api::ui::MAX_WINDOW_CANVAS_EDGE as f32).next_up().to_bits()),
+            (payload + 12, f32::INFINITY.to_bits()),
+            (payload + 16, 1f32.to_bits()),
+            (payload + 16, f32::INFINITY.to_bits()),
+            (payload + 16, f32::NAN.to_bits()),
+            (payload + 16, (-1f32).to_bits()),
+        ] {
+            let mut invalid = bytes.clone();
+            invalid[offset..offset + 4].copy_from_slice(&word.to_le_bytes());
+            assert!(decode_view(&invalid).is_err());
+        }
+        let mut duplicate = bytes.clone();
+        duplicate.splice(root..root, bytes[start..root].iter().copied());
+        assert!(decode_view(&duplicate).is_err());
+        let mut inside_root = bytes.clone();
+        inside_root[start..root + 9].rotate_left(root - start);
+        assert!(decode_view(&inside_root).is_err());
+        let mut encoder = state.view();
+        encoder.column_start();
+        encoder.column_end();
+        assert!(matches!(
+            decode_view(&encoder.finish()),
+            Ok(ViewNode::Theme { window_size_constraints: None, .. })
+        ));
     }
 
     #[test]
@@ -1493,6 +1739,9 @@ mod tests {
             view,
             ViewNode::Theme {
                 theme: Theme::light(),
+                window_background_specified: false,
+                window_style: None,
+                window_size_constraints: None,
                 child: Box::new(ViewNode::Column(vec![
                     ViewNode::Text { style: TextStyle::Title, text: "Recipes".to_owned() },
                     ViewNode::TextField {

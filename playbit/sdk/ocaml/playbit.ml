@@ -5,6 +5,8 @@ exception Host_error of int32
 external log_raw : string -> int64 = "caml_pb_log"
 external submit_raw : string -> int64 = "caml_pb_view_submit"
 external poll_raw : bytes -> bytes -> int64 = "caml_pb_event_poll"
+external poll_deadline_raw : int64 -> bytes -> bytes -> int64 =
+  "caml_pb_event_poll_deadline"
 external host_limit_raw : int32 -> int64 = "caml_pb_host_limit"
 external host_platform_raw : unit -> int64 = "caml_pb_host_platform"
 external quit_raw : bool -> int64 = "caml_pb_quit_on_last_window"
@@ -42,9 +44,9 @@ let header = Bytes.create event_bytes
 let payload = ref (Bytes.create 128)
 let unsupported_event = ref false
 
-let rec poll () =
+let rec poll_with poll_one =
   if !unsupported_event then raise (Host_error (Int32.of_int Error.unsupported));
-  let result = poll_raw header !payload in
+  let result = poll_one header !payload in
   if Int64.compare result (Int64.of_int Error.would_block) = 0 then None
   else (
     check result;
@@ -53,7 +55,7 @@ let rec poll () =
     let result =
       if length > Bytes.length !payload then (
         payload := Bytes.create length;
-        let retry = poll_raw header !payload in
+        let retry = poll_one header !payload in
         check retry;
         if Int64.compare retry result <> 0 then
           failwith "Playbit event changed during capacity retry";
@@ -80,7 +82,7 @@ let rec poll () =
         failwith "Playbit trace configuration is malformed";
       (* This SDK has no tracing producer. Consume the host's callback snapshot
          without making applications handle an internal configuration event. *)
-      poll ())
+      poll_with poll_one)
     else
       Some
         {
@@ -89,6 +91,9 @@ let rec poll () =
           target;
           data = Bytes.sub !payload 0 (Int64.to_int result);
         })
+
+let poll () = poll_with poll_raw
+let poll_deadline deadline_ns = poll_with (poll_deadline_raw deadline_ns)
 
 module Input = struct
   type pointer = { x : int; y : int; phase : int; buttons : int }
@@ -184,6 +189,54 @@ module View = struct
   let row_start out = command out view_row_start 0l ""
   let row_end out = command out view_row_end 0l ""
 
+  let theme out overrides =
+    let seen = ref 0 in
+    List.iter (fun (role, _) ->
+      if role < 0 || role >= ThemeColor.count || !seen land (1 lsl role) <> 0 then
+        invalid_arg "Playbit theme color role";
+      seen := !seen lor (1 lsl role)
+    ) overrides;
+    command_header out view_theme 0l (5 * List.length overrides);
+    List.iter (fun (role, color) ->
+      Buffer.add_char out (Char.chr role);
+      word out color
+    ) overrides
+
+  let window_style out style =
+    let appearance = WindowStyle.(theme_bright lor theme_dark) in
+    if style land lnot WindowStyle.mask <> 0 || style land appearance = appearance then
+      invalid_arg "Playbit window style";
+    command_header out view_window_style 0l 4;
+    uint out style
+
+  let window_size_constraints ?(min_width=0.) ?(min_height=0.) ?(max_width=0.)
+      ?(max_height=0.) ?(aspect_ratio=0.) out =
+    (* Validate at wire precision. Underflow must not clear a requested limit. *)
+    let binary32 x = Int32.float_of_bits (Int32.bits_of_float x) in
+    let field x =
+      if x = 0. then 0.
+      else
+        let value = binary32 x in
+        if not (Float.is_finite value && value > 0.) then
+          invalid_arg "Playbit window constraint value";
+        value
+    in
+    let w_min = field min_width and h_min = field min_height in
+    let w_max = field max_width and h_max = field max_height in
+    let ratio = field aspect_ratio in
+    let edge_limit = float_of_int max_window_canvas_edge in
+    let largest edge = if edge = 0. then edge_limit else edge in
+    let valid_axis lower upper = lower <= largest upper && upper <= edge_limit in
+    if not (valid_axis w_min w_max && valid_axis h_min h_max) then
+      invalid_arg "Playbit window size bounds";
+    if ratio > 0. &&
+        ((w_min > 0. && ratio < binary32 (w_min /. largest h_max))
+         || (h_min > 0. && ratio > binary32 (largest w_max /. h_min))) then
+      invalid_arg "Playbit window aspect ratio";
+    command_header out view_window_size_constraints 0l 20;
+    List.iter (fun value -> word out (Int32.bits_of_float value))
+      [w_min; h_min; w_max; h_max; ratio]
+
   let text out style text =
     command out view_text 0l (String.make 1 (Char.chr style) ^ text)
 
@@ -257,7 +310,7 @@ module View = struct
         | Pixels (_, w, h, bytes) ->
             pixel_bytes := !pixel_bytes + Bytes.length bytes;
             if
-              w < 1 || h < 1 || w > 4096 || h > 4096
+              w < 1 || h < 1 || w > max_canvas_edge || h > max_canvas_edge
               || w > max_canvas_pixel_bytes / 4 / h
               || Bytes.length bytes <> w * h * 4
               || !pixel_bytes > max_canvas_pixel_bytes
@@ -277,29 +330,34 @@ module View = struct
         List.iter (uint out) [ w; h; Bytes.length bytes ];
         Buffer.add_bytes out bytes
 
-  let write_canvas out id ~width ~height ~continuous ~viewport items =
+  type canvas_extent = Inline | Viewport | Window
+
+  let canvas_with_options ?clear_color ~extent out id ~width ~height ~continuous items =
+    let max_edge = if extent = Window then max_window_canvas_edge else max_canvas_edge in
     if
-      width < 1 || height < 1 || width > max_canvas_edge
-      || height > max_canvas_edge
+      width < 1 || height < 1 || width > max_edge || height > max_edge
       || (id = 0l && continuous)
       || List.length items > max_canvas_items
     then invalid_arg "Playbit canvas dimensions";
     (* Validate and measure first, then write directly into the scene. A separate
        pixel-sized payload Buffer and Buffer.contents copy exceed small heaps. *)
-    let length = canvas_payload_length width height items in
+    let length = canvas_payload_length width height items + (if Option.is_some clear_color then 4 else 0) in
     command_header out view_canvas id length;
     let flags =
       (if continuous then canvas_flag_continuous else 0)
-      lor (if viewport then canvas_flag_viewport else 0)
+      lor (match extent with Inline -> 0 | Viewport -> canvas_flag_viewport | Window -> canvas_flag_window)
+      lor (if Option.is_some clear_color then canvas_flag_clear else 0)
     in
     List.iter (uint out) [ width; height; flags; List.length items ];
+    Option.iter (word out) clear_color;
     List.iter (canvas_item out) items
 
   let canvas out id ~width ~height ~continuous items =
-    write_canvas out id ~width ~height ~continuous ~viewport:false items
+    canvas_with_options ~extent:Inline out id ~width ~height ~continuous items
 
   let viewport_canvas out id ~width ~height ~continuous items =
-    write_canvas out id ~width ~height ~continuous ~viewport:true items
+    canvas_with_options ~extent:Viewport out id ~width ~height ~continuous items
+
 end
 
 (* Private borrowed-call transport. It never exposes pointers to applications.
@@ -363,6 +421,38 @@ module Session = struct
   type channel = int64
   type operation = int64
   type completion = Pending | Ready
+  type info = { internal_id : string; key_secret : string option }
+
+  let info () =
+    let open Borrowed in
+    let packet = create 64 in
+    word packet 0 64;
+    let result = invoke Opcode.session_info packet [pointer 0] in
+    if result = Int64.of_int Error.not_found then None
+    else (
+      check result;
+      record packet 0 64;
+      let flags_and_reserved = get_wide packet 8 in
+      let has_secret = Int64.logand flags_and_reserved 1L <> 0L in
+      let secret = get packet 48 16 |> Bytes.unsafe_to_string in
+      if result <> 0L || Int64.shift_right_logical flags_and_reserved 32 <> 0L
+         || ((not has_secret) && secret <> String.make 16 '\000')
+      then raise (Host_error (Int32.of_int Error.internal));
+      Some { internal_id = get packet 16 32 |> Bytes.unsafe_to_string;
+             key_secret = if has_secret then Some secret else None })
+
+  let code info =
+    Option.map (fun secret ->
+        let alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" in
+        let digits = Bytes.make 22 '\000' in
+        String.iter (fun byte ->
+            let carry = ref (Char.code byte) in
+            for i = Bytes.length digits - 1 downto 0 do
+              let value = Bytes.get_uint8 digits i * 256 + !carry in
+              Bytes.set_uint8 digits i (value mod 58);
+              carry := value / 58
+            done) secret;
+        String.init 22 (fun i -> alphabet.[Bytes.get_uint8 digits i])) info.key_secret
 
   let identity () =
     let open Borrowed in

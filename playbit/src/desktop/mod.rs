@@ -11,6 +11,7 @@ mod drafts;
 mod entry;
 mod feedback;
 pub use entry::app_main;
+pub(crate) use feedback::show_error_feedback;
 mod file_document;
 #[cfg(target_os = "macos")]
 pub mod file_provider;

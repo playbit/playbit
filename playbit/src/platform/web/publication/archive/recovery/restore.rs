@@ -39,10 +39,10 @@ fn source(host: &Host, volume: &Volume, retained: &Database, request: &Begin) ->
     let current = IndexSnapshot::new(volume.index.begin_read().map_err(map_error)?);
     let archived = IndexSnapshot::new(retained.begin_read().map_err(map_error)?);
     authorize_read(host, volume, &policy, &current, &archived, request.entry)?;
-    match policy.authorize(host.account, Permission::Write) {
+    match policy.authorize(host.actor(volume), Permission::Write) {
         Ok(()) => {}
         Err(crate::store::Error::AccessDenied(_)) => {
-            policy.authorize(host.account, Permission::Append).map_err(store_error)?;
+            policy.authorize(host.actor(volume), Permission::Append).map_err(store_error)?;
         }
         Err(error) => return Err(store_error(error)),
     }
@@ -54,7 +54,7 @@ fn source(host: &Host, volume: &Volume, retained: &Database, request: &Begin) ->
         Err(error) => return Err(store_error(error)),
     };
     if matches!(permissions, EntryAcl::Replace(_)) {
-        policy.authorize(host.account, Permission::ManagePermissions).map_err(store_error)?;
+        policy.authorize(host.actor(volume), Permission::ManagePermissions).map_err(store_error)?;
         if policy.volume().owner != host.account {
             return Err(Error::AccessDenied);
         }
@@ -67,7 +67,7 @@ fn source(host: &Host, volume: &Volume, retained: &Database, request: &Begin) ->
     let mut info = archived.source_entry(request.entry).map_err(store_error)?.info;
     if info.protocol == Some(DatabaseProtocol::BlobLog) {
         // Check again on every preparation/publication turn, as for log upload.
-        policy.authorize(host.account, Permission::Write).map_err(store_error)?;
+        policy.authorize(host.actor(volume), Permission::Write).map_err(store_error)?;
     }
     if !matches!(info.kind, EntryKind::Blob { .. } | EntryKind::Directory {})
         && (!archived.source_backing_ready(request.entry).map_err(store_error)?

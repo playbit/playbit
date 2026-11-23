@@ -486,6 +486,7 @@ fn entry_loading_delay_restarts_for_selection_and_cancels_when_metadata_arrives(
         assert!(browser.detail_loading.visible, "an old reply cannot finish the current load");
         browser.failed(
             Failure::for_request(&Request::EntryDetails {
+                session: None,
                 volume: volume(1).id,
                 entry: entry(3).id,
             })
@@ -495,7 +496,8 @@ fn entry_loading_delay_restarts_for_selection_and_cancels_when_metadata_arrives(
         );
         assert!(!browser.detail_loading.visible);
         assert!(browser.detail_loading.timer.is_none());
-        let request = Request::EntryDetails { volume: volume(1).id, entry: entry(3).id };
+        let request =
+            Request::EntryDetails { session: None, volume: volume(1).id, entry: entry(3).id };
         let waiting = "access denied: entry authority requires authenticated catch-up";
         browser.failed(Failure::for_request(&request).unwrap(), waiting, cx);
         assert!(browser.permission_refresh.entry);
@@ -619,7 +621,8 @@ fn creating_an_entry_selects_its_committed_id_and_names_that_same_entry(
             next: Some(entry(7).id),
         });
         while requests.try_recv().is_ok() {}
-        let deleting = Request::RemoveEntry { volume: volume(1).id, entry: entry(5).id };
+        let deleting =
+            Request::RemoveEntry { session: None, volume: volume(1).id, entry: entry(5).id };
         browser.files.pending = files::Pending::for_request(&deleting);
         assert!(browser.entry_is_hidden(entry(5).id));
         browser.create_entry_in(None, EntryKind::KvDb {}, cx);
@@ -680,9 +683,13 @@ fn append_log_creation_matches_its_protocol_and_releases_only_its_own_action(
         browser.create_append_log_in(None, cx);
         browser.create_append_log_in(None, cx);
         browser.create_entry_in(None, EntryKind::KvDb {}, cx);
-        let request = Request::BloblogCreate { volume: volume(1).id, name: "Untitled 2".into() };
+        let request = Request::BloblogCreate {
+            session: None,
+            volume: volume(1).id,
+            name: "Untitled 2".into(),
+        };
         assert!(matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest {
-            request: Request::BloblogCreate { volume: got, name }, ..
+            request: Request::BloblogCreate { volume: got, name, .. }, ..
         }) if got == volume(1).id && name == "Untitled 2"));
         assert!(requests.try_recv().is_err());
         let mut committed = entry(9);
@@ -691,6 +698,7 @@ fn append_log_creation_matches_its_protocol_and_releases_only_its_own_action(
         assert!(browser.selected.is_none(), "an ordinary KV store is not the requested log");
         browser.failed(
             Failure::for_request(&Request::CreateDatabase {
+                session: None,
                 volume: volume(1).id,
                 name: "Untitled 2".into(),
                 kind: Box::new(EntryKind::KvDb {}),
@@ -741,7 +749,7 @@ fn default_creation_retries_stop_at_the_bound_and_after_losing_authority(
 
         let last = format!("Untitled {}", crate::store::volume_index::namespace::MAX_ENTRIES + 1);
         browser.creating_name = Some(last.clone());
-        let request = Request::BloblogCreate { volume: volume(1).id, name: last };
+        let request = Request::BloblogCreate { session: None, volume: volume(1).id, name: last };
         browser.failed(creation_collision(&request), "entry name already exists", cx);
         assert!(browser.creating_entry.is_none());
         assert!(requests.try_recv().is_err());
@@ -760,6 +768,7 @@ fn default_creation_retries_stop_at_the_bound_and_after_losing_authority(
 #[test]
 fn creation_collision_requires_an_exact_rejected_reply() {
     let request = Request::CreateDatabase {
+        session: None,
         volume: volume(1).id,
         name: "Untitled".into(),
         kind: Box::new(EntryKind::KvDb {}),
@@ -887,6 +896,7 @@ fn failed_entry_creation_and_rename_release_only_the_matching_action(
         creation_authority(browser);
         browser.create_entry_in(None, EntryKind::KvDb {}, cx);
         let create = Request::CreateDatabase {
+            session: None,
             volume: volume(1).id,
             name: "Untitled".into(),
             kind: Box::new(EntryKind::KvDb {}),
@@ -900,12 +910,14 @@ fn failed_entry_creation_and_rename_release_only_the_matching_action(
         while requests.try_recv().is_ok() {}
         browser.commit_rename(entry(1).id, "Notes", cx);
         let rename = Request::RenameEntryComponent {
+            session: None,
             volume: volume(1).id,
             entry: entry(1).id,
             name: "Notes".into(),
         };
         browser.failed(
             Failure::for_request(&Request::RenameEntryComponent {
+                session: None,
                 volume: volume(2).id,
                 entry: entry(1).id,
                 name: "Notes".into(),
@@ -1652,7 +1664,7 @@ fn retained_history_checks_selection_cursor_and_current_read_before_display(
         let history_request = || loop {
             match requests.try_recv().unwrap() {
                 Message::Request(queued) if matches!(queued.request, Request::EntryRevisions { .. }) => break queued,
-                Message::Request(queued) => assert!(matches!(queued.request, Request::EntryDetails { volume: got_volume, entry: got_entry } if got_volume == volume(1).id && [entry(1).id, entry(2).id].contains(&got_entry))),
+                Message::Request(queued) => assert!(matches!(queued.request, Request::EntryDetails { volume: got_volume, entry: got_entry, .. } if got_volume == volume(1).id && [entry(1).id, entry(2).id].contains(&got_entry))),
                 Message::Data(data) => key_load(data),
                 _ => panic!("unexpected history request companion"),
             }
@@ -1666,7 +1678,7 @@ fn retained_history_checks_selection_cursor_and_current_read_before_display(
         let first = history_request();
         let admission = first.credit.as_ref().map(|credit| credit.admission());
         assert!(browser.history_response_matches(admission));
-        assert!(matches!(first.request, Request::EntryRevisions { address: got, after: None, limit: 64 } if got == address));
+        assert!(matches!(first.request, Request::EntryRevisions { address: got, after: None, limit: 64, .. } if got == address));
         browser.receive(
             Reply::EntryRevisions {
                 address,
@@ -1911,13 +1923,13 @@ fn file_operations_follow_their_full_address_and_release_failed_actions(
             "replacement.txt",
             "/private/tmp/replace.txt".into(),
         );
-        let request = Request::FileCreate {
+        let request = Request::FileCreate { session: None,
             volume: volume(1).id,
             name: "replacement.txt".into(),
             path: "/private/tmp/replace.txt".into(),
         };
         browser.failed(
-            Failure::for_request(&Request::FileCreate {
+            Failure::for_request(&Request::FileCreate { session: None,
                 volume: wrong.volume,
                 name: "replacement.txt".into(),
                 path: "/private/tmp/replace.txt".into(),
@@ -2122,7 +2134,7 @@ fn field_drafts_survive_replication_and_inflight_save(cx: &mut gpui::TestAppCont
         browser.save_field(field, Some(vec![Value::Text("Later draft".into())]), cx);
         assert!(browser.records.drafts[&field].submitted.is_some());
         let Message::Request(queued) = requests.try_recv().unwrap() else { panic!() };
-        assert!(matches!(&queued.request, Request::EditObject { database: got, object, fields }
+        assert!(matches!(&queued.request, Request::EditObject { database: got, object, fields, .. }
             if *got == database && *object == Id::from_bytes([4; 16])
                 && *fields == BTreeMap::from([(field, Some(vec![Value::Text("Later draft".into())]))])));
         record_receipt(browser, queued, Err("Permission changed"), cx);
@@ -2380,7 +2392,7 @@ fn file_picker_uses_full_stable_address_and_preserves_draft_after_target_denial(
         while requests.try_recv().is_ok() {}
         browser.picker_entry(blob.id);
         assert!(matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest {
-            request: Request::EntryDetails { volume: got, entry: got_entry }, ..
+            request: Request::EntryDetails { volume: got, entry: got_entry, .. }, ..
         }) if got == volume(2).id && got_entry == blob.id));
         let mut details = details(5, EntryAcl::Inherit);
         details.entry = blob.clone();
@@ -2391,7 +2403,8 @@ fn file_picker_uses_full_stable_address_and_preserves_draft_after_target_denial(
         assert_eq!(browser.records.values.as_ref().unwrap().values, expected);
         browser.start_picker();
         browser.picker_volume(volume(2).id);
-        let request = Request::Entries { volume: volume(2).id, after: None, limit: 64 };
+        let request =
+            Request::Entries { session: None, volume: volume(2).id, after: None, limit: 64 };
         browser.failed(Failure::for_request(&request).unwrap(), "target read denied", cx);
         assert_eq!(browser.records.values.as_ref().unwrap().values, expected);
         assert!(browser.records.values.as_ref().unwrap().dirty);
@@ -2471,7 +2484,7 @@ fn reference_navigation_retains_local_drafts_and_cross_volume_object_identity(
         browser.receive(Reply::EntryDetails { volume: volume(2).id, details }, cx);
         assert_eq!(browser.records.selected, Some(Id::from_bytes([8;16])));
         assert!(std::iter::from_fn(|| requests.try_recv().ok()).any(|message| matches!(message, Message::Request(QueuedRequest {
-            request: Request::ReadObject { database, object }, ..
+            request: Request::ReadObject { database, object, .. }, ..
         }) if database.volume == volume(2).id && database.entry == entry(9).id && object == Id::from_bytes([8;16]))));
     });
 }

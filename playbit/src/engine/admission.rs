@@ -1531,7 +1531,7 @@ mod tests {
         let bar = store.resolve_entry(&access, volume.id, "foo/bar").unwrap();
         fixture.engine.remote = None;
         for (entry, name) in [(bar.id, "bar2"), (file.id, "Sample.bin")] {
-            assert!(matches!(fixture.exchange(Request::RenameEntryComponent {
+            assert!(matches!(fixture.exchange(Request::RenameEntryComponent { session: None,
                 volume: volume.id, entry, name: name.into(),
             }), Reply::EntryChanged { volume: got_volume, entry: got_entry }
                 if got_volume == volume.id && got_entry == entry));
@@ -1546,6 +1546,7 @@ mod tests {
         assert_eq!(store.read_blob_entry(&access, volume.id, file.id).unwrap(), b"contents");
         assert!(matches!(
             fixture.exchange(Request::RenameEntryComponent {
+                session: None,
                 volume: volume.id,
                 entry: file.id,
                 name: "invalid/path.bin".into(),
@@ -1554,6 +1555,7 @@ mod tests {
         ));
         assert!(matches!(
             fixture.exchange(Request::RenameEntry {
+                session: None,
                 volume: volume.id,
                 entry: file.id,
                 name: "moved/explicit.bin".into(),
@@ -1693,7 +1695,11 @@ mod tests {
             .unwrap();
         let source = EntryAddress { volume: volume.id, entry: original.id };
         assert!(matches!(
-            fixture.exchange(Request::Schema { database: source, schema: schema.clone() }),
+            fixture.exchange(Request::Schema {
+                session: None,
+                database: source,
+                schema: schema.clone()
+            }),
             Reply::Schema { ok: true, .. }
         ));
         let record = store
@@ -1708,7 +1714,11 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            fixture.exchange(Request::RemoveEntry { volume: volume.id, entry: original.id }),
+            fixture.exchange(Request::RemoveEntry {
+                session: None,
+                volume: volume.id,
+                entry: original.id
+            }),
             Reply::EntryChanged { .. }
         ));
         let reply = fixture.exchange(Request::RecoverEntry {
@@ -2580,7 +2590,7 @@ mod tests {
             fixture.engine.completion.drain().unwrap();
             let (server, _client) = UnixStream::pair().unwrap();
             let index = fixture.inject(server);
-            let request = Request::PayloadSize { volume: volume.id, entry };
+            let request = Request::PayloadSize { session: None, volume: volume.id, entry };
             fixture.queue.pending[index].state = State::Ready {
                 body: encode_request(&request).unwrap(),
                 route: Route { op: Op::PayloadSize },
@@ -2679,7 +2689,7 @@ mod tests {
             bundle::Task::start(
                 &fixture.engine,
                 usize::MAX,
-                Request::PayloadSize { volume: volume.id, entry: None },
+                Request::PayloadSize { session: None, volume: volume.id, entry: None },
             )
             .unwrap(),
         );
@@ -2765,7 +2775,11 @@ mod tests {
             volume,
             entry,
             bytes,
-        }) = fixture.exchange(Request::PayloadSize { volume: root.id, entry: Some(original.id) })
+        }) = fixture.exchange(Request::PayloadSize {
+            session: None,
+            volume: root.id,
+            entry: Some(original.id),
+        })
         else {
             panic!("local size completes while the remote transfer is held");
         };

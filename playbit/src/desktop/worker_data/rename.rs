@@ -28,6 +28,7 @@ impl RenameSource {
 
 pub(super) fn execute(
     profile: &Path,
+    session: Option<[u8; 32]>,
     call: &DataCall,
     source: &RenameSource,
 ) -> Result<key_value::Root, DataFailure> {
@@ -40,6 +41,7 @@ pub(super) fn execute(
             entry: EntryId::from_bytes(*entry_id)?,
         };
         let request = Request::KvRename {
+            session: session.map(Box::new),
             mutation: Box::new(crate::engine::KvRenameMutation {
                 address,
                 old_key: source.old_key.clone(),

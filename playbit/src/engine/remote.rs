@@ -461,6 +461,7 @@ impl Remote {
         store: &LocalStore,
         selected: Option<&[Id]>,
         unavailable_sessions: Option<&BTreeSet<String>>,
+        account_dependencies_deferred: bool,
     ) -> Result<()> {
         let Some(live) = &self.live else {
             return Ok(());
@@ -509,10 +510,9 @@ impl Remote {
         self.runtime.block_on(async {
             let fenced = live.publisher().fence(&volumes).await?;
             live.checkpoint(&fenced).await?;
-            if self.scope.read().provider() {
-                // This owner initializes one domain. Recovered account intent
-                // for unrelated volumes remains dependency-gated and durable;
-                // it cannot require admitting every other volume to this owner.
+            if self.scope.read().provider() || account_dependencies_deferred {
+                // Selected work can finish while independent account records
+                // wait in the durable outbox for their own volume dependencies.
                 live.account_receive_fence().await
             } else {
                 live.account_fence().await
@@ -1640,7 +1640,7 @@ impl Remote {
             // that initialization before subscribing; no participant input waits.
             if store.pending_operations()?.iter().any(|operation|
                 matches!(&operation.operation, PendingKind::RegisterSession { session, .. } if session.id == id)) {
-                let publication = self.prepare_publication(store);
+                let publication = self.prepare_publication(store, Some(session.replica_volume()));
                 // Publication can rearm this same watch. This attempt owns its
                 // outcome, including failure; do not schedule a hot retry loop.
                 self.selection_watches.insert(id.into());
@@ -1745,7 +1745,7 @@ impl Remote {
     ) -> Result<()> {
         self.progress.set(Some(TransferProgress::Finishing), &self.completion);
         let result = volumes
-            .and_then(|_| self.live_fence(store, None, Some(unavailable_sessions)))
+            .and_then(|_| self.live_fence(store, None, Some(unavailable_sessions), false))
             .and_then(|_| self.refresh_availability(store));
         match &result {
             Ok(()) => self.private_peer_waiting = false,
@@ -2222,14 +2222,38 @@ impl Remote {
     /// Publication needs registered app identities and current owner-granted
     /// service policy. It must not depend on another session's private peer.
     #[cfg(feature = "app-host")]
-    pub(crate) fn prepare_publication(&mut self, store: &Arc<LocalStore>) -> Result<()> {
+    pub(crate) fn prepare_publication(
+        &mut self,
+        store: &Arc<LocalStore>,
+        target: Option<Id>,
+    ) -> Result<()> {
         self.connect(store)?;
         self.ensure_live(store)?;
         self.consume_publisher_failures()?;
         let account = self.begin_account_sync(store)?;
         self.finish_account_sync(store, account)?;
-        self.sync_owned(store, None)?;
-        self.live_fence(store, None, None)?;
+        let connection = self.connection.as_ref().ok_or("AP disconnected")?;
+        let mut deferred = self.sync_registrations(store, connection, None)?;
+        // An older service may still publish a build or a grant on another volume.
+        // Fence the supported replicas. Keep account records that depend on a
+        // deferred Shared volume in their durable outbox until it can be admitted.
+        let owners = self.sync_registered_owners(store, None, &mut deferred);
+        if target.is_some_and(|id| deferred.contains(&id)) {
+            return Err(wire::SharedServiceUpgradeRequired.into());
+        }
+        owners?;
+        let supported = if deferred.is_empty() {
+            None
+        } else {
+            Some(
+                remote_volumes(store)?
+                    .into_iter()
+                    .map(|volume| volume.id)
+                    .filter(|id| !deferred.contains(id))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        self.live_fence(store, supported.as_deref(), None, !deferred.is_empty())?;
         self.refresh_availability(store)
     }
     pub(crate) fn needs_initialization(&self) -> bool {
@@ -2283,7 +2307,7 @@ impl Remote {
                         crate::store::Error::AccessDenied("bloblog preparation scope").into()
                     );
                 }
-                self.sync_owned(store, Some(&volumes))?;
+                self.sync_owned(store, &volumes)?;
                 if let Some(session) = &request.session {
                     self.sync_session(store, session)?;
                 }
@@ -2311,7 +2335,7 @@ impl Remote {
             let result = (|| -> Result<()> {
                 let descriptor = store.volume(*volume)?;
                 if descriptor.owner == store.account().id {
-                    self.sync_owned(store, Some(std::slice::from_ref(volume)))
+                    self.sync_owned(store, std::slice::from_ref(volume))
                 } else if self.has_live_volume(store, *volume)? {
                     Ok(())
                 } else {
@@ -2358,9 +2382,18 @@ impl Remote {
         }
         first_error.map_or(Ok(()), Err)
     }
-    fn sync_owned(&mut self, store: &Arc<LocalStore>, selected: Option<&[Id]>) -> Result<()> {
+    fn sync_owned(&mut self, store: &Arc<LocalStore>, selected: &[Id]) -> Result<()> {
         let connection = self.connection.as_ref().ok_or("AP disconnected")?.clone();
-        self.sync_registrations(store, &connection, selected)?;
+        let mut deferred = self.sync_registrations(store, &connection, Some(selected))?;
+        self.sync_registered_owners(store, Some(selected), &mut deferred)?;
+        if deferred.is_empty() { Ok(()) } else { Err(wire::SharedServiceUpgradeRequired.into()) }
+    }
+    fn sync_registered_owners(
+        &mut self,
+        store: &Arc<LocalStore>,
+        selected: Option<&[Id]>,
+        deferred: &mut BTreeSet<Id>,
+    ) -> Result<()> {
         // Owners initialize service replicas before invitation admission is possible.
         // One volume's bootstrap failure must not prevent the others from being tried.
         let mut first_error = None;
@@ -2368,28 +2401,36 @@ impl Remote {
             .into_iter()
             .filter(|v| {
                 v.owner == store.account().id
-                    && v.share_key_with_service
                     && selected.is_none_or(|ids| ids.contains(&v.id))
+                    && !deferred.contains(&v.id)
                     && self.scope.read().admits(v.id)
             })
             .collect();
+        let mut ready = Vec::with_capacity(volumes.len());
         let total = volumes.len();
         for (index, volume) in volumes.into_iter().enumerate() {
+            let id = volume.id;
             self.progress.set(
                 Some(TransferProgress::Volumes { current: index + 1, total }),
                 &self.completion,
             );
-            if let Err(error) = self.sync_owned_volume(store, volume) {
+            if volume.share_key_with_service
+                && let Err(error) = self.sync_owned_volume(store, volume)
+            {
+                if error.is::<wire::SharedServiceUpgradeRequired>() {
+                    // Local first use can materialize Shared after the registration pass.
+                    deferred.insert(id);
+                    continue;
+                }
                 initialization::retain_error(&mut first_error, error);
             }
+            ready.push(id);
         }
+        // Bootstrap hosted replicas before private account dependencies compete
+        // for publisher slots. Signal only the owners in the checked snapshot.
         if let Some(live) = &self.live {
-            for volume in remote_volumes(store)?.into_iter().filter(|volume| {
-                volume.owner == store.account().id
-                    && selected.is_none_or(|ids| ids.contains(&volume.id))
-                    && self.scope.read().admits(volume.id)
-            }) {
-                self.runtime.block_on(live.publisher().account_volume_ready(volume.id))?;
+            for id in ready {
+                self.runtime.block_on(live.publisher().account_volume_ready(id))?;
             }
         }
         first_error.map_or(Ok(()), Err)
@@ -2425,13 +2466,24 @@ impl Remote {
         store: &LocalStore,
         connection: &ApConnection,
         selected: Option<&[Id]>,
-    ) -> Result<()> {
+    ) -> Result<BTreeSet<Id>> {
         // Signed build admission precedes registration of its session.
         // Replay retained operations without reallocating their identities.
         for session in store.sessions()? {
             store.publish_automatic_session(&session.id)?;
         }
-        self.publish_registrations(store, connection, store.pending_operations()?, selected)
+        // An old AP may still replicate ordinary volumes and Root sessions.
+        // Their common registration pass leaves incompatible Shared work pending;
+        // the scoped owner/session pass reports the upgrade on that volume.
+        let mut deferred = BTreeSet::new();
+        self.publish_registrations(
+            store,
+            connection,
+            store.pending_operations()?,
+            selected,
+            Some(&mut deferred),
+        )?;
+        Ok(deferred)
     }
     /// A local first use can promote a session after the full-sync registration
     /// cut. Its ordinary record and pending registration commit together. Finish
@@ -2456,6 +2508,17 @@ impl Remote {
                 build = Some(registered.resolved_build_id.clone());
             }
         }
+        if session.is_none()
+            && pending.iter().any(|op| {
+                matches!(&op.operation,
+            PendingKind::RegisterSession { session, .. } if session.shared_volume == Some(volume))
+            })
+        {
+            self.runtime.block_on(wire::require_features(
+                self.connection.as_ref().ok_or("AP disconnected")?,
+                crate::network::ap::service::SHARED_REGISTRATION_FEATURES,
+            ))?;
+        }
         // Sessions sharing World are independent registrations. A failure in
         // another session must not hold this admission or owner-only file work.
         pending.retain(|op| match &op.operation {
@@ -2478,6 +2541,7 @@ impl Remote {
             self.connection.as_ref().ok_or("AP disconnected")?,
             pending,
             Some(selected),
+            None,
         )
     }
     fn publish_registrations(
@@ -2486,6 +2550,7 @@ impl Remote {
         connection: &ApConnection,
         mut pending: Vec<crate::store::PendingOperation>,
         selected: Option<&[Id]>,
+        mut deferred: Option<&mut BTreeSet<Id>>,
     ) -> Result<()> {
         pending.sort_by_key(|op| match op.operation {
             PendingKind::RegisterVolume { .. } => 0,
@@ -2509,8 +2574,16 @@ impl Remote {
             }
             let known = matches!(&op.operation, PendingKind::UploadBuild { build_id, .. }
                 if store.build_uploaded(build_id)?);
-            if !known {
-                self.publish_registration(connection, op)?;
+            if !known && let Err(error) = self.publish_registration(connection, op) {
+                if error.is::<wire::SharedServiceUpgradeRequired>()
+                    && let Some(deferred) = deferred.as_deref_mut()
+                    && let PendingKind::RegisterSession { session, .. } = &op.operation
+                    && let Some(volume) = session.shared_volume
+                {
+                    deferred.insert(volume);
+                    continue;
+                }
+                return Err(error);
             }
             store.acknowledge_pending(op)?;
         }
@@ -2870,8 +2943,8 @@ impl Remote {
         if self.connection.as_ref().is_none_or(|connection| connection.is_closed()) {
             return Ok(());
         }
-        self.sync_owned(store, Some(volumes))?;
-        self.live_fence(store, Some(volumes), None)
+        self.sync_owned(store, volumes)?;
+        self.live_fence(store, Some(volumes), None, false)
     }
     #[cfg(feature = "file-provider")]
     pub(crate) fn flush_provider(
@@ -2926,7 +2999,7 @@ impl Remote {
         let account = self.begin_account_sync(store)?;
         self.finish_account_sync(store, account)?;
         self.sync_session(store, session)?;
-        self.live_fence(store, Some(&[session.replica_volume()]), None)
+        self.live_fence(store, Some(&[session.replica_volume()]), None, false)
     }
 
     fn sync_session(&mut self, store: &Arc<LocalStore>, session: &Session) -> Result<()> {
@@ -2936,15 +3009,25 @@ impl Remote {
         {
             return Ok(());
         }
-        if let Err(error) = self.admit(store, session)
-            && !waiting_peer(error.as_ref())
-        {
-            return Err(error);
+        let root = store.volume(session.replica_volume())?;
+        let private_root = !root.share_key_with_service;
+        if let Err(error) = self.admit(store, session) {
+            if !waiting_peer(error.as_ref()) {
+                return Err(error);
+            }
+            // First use can materialize Shared after the owned-volume pass.
+            // Seed it with owner authority before retrying session admission.
+            if session.shared_volume.is_some() {
+                if root.owner != store.account().id || private_root {
+                    return Err(error);
+                }
+                self.sync_owned_volume(store, root)?;
+                self.admit(store, session)?;
+            }
         }
         if store.authority_refresh_required(session.replica_volume())? {
             self.pull_bound_volume(store, session, session.replica_volume())?;
         }
-        let private_root = !store.volume(session.replica_volume())?.share_key_with_service;
         let mut prepared = self.prepare_session_root(store, session)?;
         if prepared.is_none() && !private_root {
             self.runtime.block_on(
@@ -3034,10 +3117,7 @@ impl Remote {
         let connection = self.connection.as_ref().ok_or("AP disconnected")?;
         let mut first_error = None;
         for session in store.sessions()? {
-            if (store.is_local_session(&session.id)? && session.shared_volume.is_none())
-                || (session.shared_volume.is_some()
-                    && !store.shared_session_initialized(&session.id)?)
-            {
+            if session.shared_volume.is_some() || store.is_local_session(&session.id)? {
                 continue;
             }
             if self
@@ -3057,13 +3137,6 @@ impl Remote {
                     crate::store::object_contract::Permission::Read,
                 )
                 .is_err()
-                || store
-                    .authorize_replication(
-                        &access,
-                        session.replica_volume(),
-                        crate::store::object_contract::Permission::Read,
-                    )
-                    .is_err()
             {
                 continue;
             }
@@ -3228,11 +3301,11 @@ impl Remote {
             self.ensure_live(store)?;
             let account = self.begin_account_sync(store)?;
             self.finish_account_sync(store, account)?;
-            self.sync_owned(store, Some(&[candidate.replica_volume()]))?;
+            self.sync_owned(store, &[candidate.replica_volume()])?;
             // A local session waiting for recovered World could not publish
             // before the owner bootstrap. Register that same session now.
             store.publish_automatic_session(id)?;
-            self.live_fence(store, Some(&[candidate.replica_volume()]), None)?;
+            self.live_fence(store, Some(&[candidate.replica_volume()]), None, false)?;
         }
         self.check_cancellation()?;
         let resolution = self.resolve_session(store, id)?;
@@ -3262,7 +3335,7 @@ impl Remote {
             }
             if store.session(&session.id)?.resolved_build_id == session.resolved_build_id {
                 self.sync_session(store, session)?;
-                self.live_fence(store, Some(&[session.replica_volume()]), None)?;
+                self.live_fence(store, Some(&[session.replica_volume()]), None, false)?;
             } else {
                 // Candidate data may be prepared, but candidate live authority
                 // starts only after actual adoption and personal-volume consent.
@@ -3315,7 +3388,7 @@ impl Remote {
                 }
                 Err(error)
                     if error.to_string().contains("waiting for an authorized peer")
-                        && session.is_some() => {}
+                        && session.is_some_and(|s| s.shared_volume.is_none()) => {}
                 Err(error) => return Err(error.into()),
             }
         }
@@ -3554,7 +3627,8 @@ impl Remote {
             for database in page.databases {
                 let readable = stage.with_database(DatabaseId::Index, |index| {
                     let policy = DatabasePolicy::read_source(index, database)?;
-                    policy.authorize_reader(ReplicaReader::Participant(store.account().id))
+                    let actor = store.data_actor(access, policy.volume.volume())?;
+                    policy.authorize_reader(ReplicaReader::SessionParticipant(actor))
                 });
                 if matches!(readable, Err(crate::store::Error::AccessDenied(_))) {
                     continue;
@@ -3856,7 +3930,7 @@ impl Remote {
                         Err(crate::store::Error::AccessDenied("entry permission")) => continue,
                         Err(error)
                             if error.to_string().contains("waiting for an authorized peer")
-                                && session.is_some() =>
+                                && session.is_some_and(|s| s.shared_volume.is_none()) =>
                         {
                             service = false
                         }
@@ -5622,7 +5696,7 @@ mod tests {
         );
         assert!(
             remote
-                .live_fence(&store, None, None)
+                .live_fence(&store, None, None, false)
                 .unwrap_err()
                 .to_string()
                 .contains("required live replica needs recovery")

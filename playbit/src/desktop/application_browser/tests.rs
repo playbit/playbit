@@ -113,6 +113,58 @@ fn unavailable_shared_row_cannot_open_or_send_an_action(cx: &mut gpui::TestAppCo
     assert!(requests.try_recv().is_err());
 }
 
+#[gpui::test]
+fn ready_shared_browser_keeps_session_only_on_the_selected_route(cx: &mut gpui::TestAppContext) {
+    let (host, _window, requests) = scope(cx);
+    host.update(cx, |host, cx| {
+        let session = &mut host.applications.catalog[0];
+        let id = crate::identifier::decode(&session.id).expect("retained session ID");
+        let shared_id =
+            session.app.volume_id(Role::Session, Some(id), None, None).expect("Shared slot ID");
+        session.shared_volume = Some(shared_id);
+        let mut volume = host.scoped_volumes[0].clone();
+        volume.id = shared_id;
+        volume.share_key_with_service = true;
+        host.scoped_volumes.push(volume.clone());
+        let session = session.id.clone();
+        assert!(host.select_application_target(Target::Session(session.clone()), cx));
+        host.applications.slots_session = Some(session);
+        host.applications.session_slots = vec![AutomaticVolumeSlot {
+            role: Role::Session,
+            volume: shared_id,
+            overridden: false,
+            state: AutomaticVolumeState::Ready,
+        }];
+        while requests.try_recv().is_ok() {}
+        assert!(host.select_application_target(
+            Target::Scope { role: Role::Session, volume: shared_id, session: true },
+            cx
+        ));
+        let inspect = |expected| {
+            let mut reads = (false, false);
+            while let Ok(Message::Request(queued)) = requests.try_recv() {
+                match queued.request {
+                    Request::DirectoryEntries { volume, session, .. } if volume == shared_id => {
+                        assert_eq!(session.as_deref().copied(), expected);
+                        reads.0 = true;
+                    }
+                    Request::VolumeDetails { volume, session } if volume == shared_id => {
+                        assert_eq!(session.as_deref().copied(), expected);
+                        reads.1 = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(reads, (true, true));
+        };
+        inspect(Some(id));
+        let scoped = host.browser.clone().expect("Shared browser");
+        assert!(host.select_volume(volume, cx));
+        assert_ne!(host.browser.as_ref().expect("volume browser").entity_id(), scoped.entity_id());
+        inspect(None);
+    });
+}
+
 fn right_edges(visual: &mut gpui::VisualTestContext) -> [f64; 2] {
     visual.update(|window, _| {
         ["Keyboard", "User"].map(|label| {

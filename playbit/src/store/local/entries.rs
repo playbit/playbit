@@ -2,7 +2,6 @@
 use super::*;
 use crate::store::{
     EntryId,
-    object_contract::Principal,
     volume_index::{
         self, DatabaseProtocol, DirectoryListing, DirectoryTarget, EntryDetails, EntryInfo,
         EntryKind, EntryPage, IndexSnapshot, VolumeEntry,
@@ -30,7 +29,7 @@ impl LocalStore {
         snapshot.authorize_namespace(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             entry.id,
             Permission::Read,
         )?;
@@ -107,7 +106,7 @@ impl LocalStore {
         snapshot.authorize(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             entry,
             Permission::Read,
         )?;
@@ -139,8 +138,9 @@ impl LocalStore {
         if catalog_directory {
             snapshot.project_directory_details(&mut record)?;
         }
-        let (volume, defaults, principal) =
-            (policy.volume(), policy.default_permissions(), Principal::Human(access.account));
+        let volume = policy.volume();
+        let defaults = policy.default_permissions();
+        let principal = self.data_actor(access, volume)?;
         let permits = |permission| {
             if !current {
                 return Ok(false);
@@ -371,7 +371,7 @@ impl LocalStore {
                 &snapshot,
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 entry,
                 Permission::Write,
             )?;
@@ -425,7 +425,7 @@ impl LocalStore {
         IndexSnapshot::cached(&db, &self.file_namespace_cache)?.authorize_namespace(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             entry,
             Permission::Write,
         )?;
@@ -500,7 +500,7 @@ impl LocalStore {
             &snapshot,
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             entry,
             Permission::Write,
         )?;
@@ -556,7 +556,7 @@ impl LocalStore {
                 snapshot.authorize(
                     policy.volume(),
                     policy.default_permissions(),
-                    Principal::Human(access.account),
+                    self.data_actor(access, policy.volume())?,
                     entry,
                     Permission::ManagePermissions,
                 )?;

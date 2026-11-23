@@ -17,7 +17,10 @@ struct Probe {
     changes: usize,
     clicks: usize,
     fail: bool,
+    #[cfg(target_os = "macos")]
+    window_constraints: Option<(bool, std::result::Result<(), playbit_api::abi::syscall::Error>)>,
     identity: Option<abi::Identity>,
+    session_info: Option<playbit_api::context::SessionInfo>,
     volumes: Vec<playbit_api::abi::data::Volume>,
 }
 unsafe extern "C" fn init(
@@ -38,6 +41,7 @@ unsafe extern "C" fn turn(raw: *mut abi::Context, data: *mut c_void) -> i32 {
     let (mut context, mut scene) = unsafe { Context::from_raw(raw, &mut probe.context).unwrap() };
     context.attach_files(&probe.files).unwrap();
     probe.identity = Some(context.identity().unwrap());
+    probe.session_info = context.session_info().unwrap();
     let mut records = [playbit_api::abi::data::Volume::default(); 8];
     let mut tags = [playbit_api::abi::data::Range::default(); 8];
     let mut bytes = [0; 1024];
@@ -195,6 +199,53 @@ fn attach_after_reopening_profile_through_symlink() {
     apps.detach(generation).unwrap();
     assert_eq!(probe.destroyed, 1);
 }
+#[cfg(target_os = "macos")]
+#[test]
+fn native_window_constraint_discovery_matches_scene_admission() {
+    use crate::engine::GuestRenderer;
+    use playbit_api::ui::{WINDOW_SIZE_CONSTRAINTS_FEATURE, WindowSizeConstraints};
+
+    unsafe extern "C" fn submit_constraints(raw: *mut abi::Context, data: *mut c_void) -> i32 {
+        // SAFETY: Apps lends the fixture and its context for this callback.
+        let probe = unsafe { &mut *data.cast::<Probe>() };
+        let (mut context, mut view) =
+            unsafe { Context::from_raw(raw, &mut probe.context).unwrap() };
+        let mut names = [playbit_api::abi::data::Range::default(); 256];
+        let mut bytes = [0; 8192];
+        let advertised = context
+            .capabilities(&mut names, &mut bytes)
+            .unwrap()
+            .names()
+            .any(|name| name == WINDOW_SIZE_CONSTRAINTS_FEATURE);
+        view.window_size_constraints(WindowSizeConstraints {
+            min_width: 320.5,
+            ..Default::default()
+        });
+        view.column_start();
+        view.column_end();
+        probe.window_constraints = Some((advertised, view.submit(&mut context)));
+        0
+    }
+
+    let path = tempfile::tempdir().unwrap();
+    let services = Services::open(path.path(), || {}).unwrap();
+    let root = services.store.create_volume("Root", false).unwrap().id;
+    for (mut apps, supported) in [
+        (Apps::new(Arc::new(|| {})), false),
+        (Apps::with_renderer(Arc::new(|| {}), GuestRenderer::AppKit), true),
+    ] {
+        let mut probe = Probe::default();
+        let app = App { turn: Some(submit_constraints), ..table(&mut probe) };
+        // SAFETY: the probe remains in place until detach releases its callbacks.
+        let generation = unsafe { apps.attach(&services, root, app).unwrap() };
+        apps.advance(generation, |frame| assert_eq!(frame.view().is_some(), supported)).unwrap();
+        let status =
+            if supported { Ok(()) } else { Err(playbit_api::abi::syscall::Error::Unsupported) };
+        assert_eq!(probe.window_constraints, Some((supported, status)));
+        apps.detach(generation).unwrap();
+    }
+}
+
 #[test]
 fn capacity_generations_scene_validation_and_shutdown() {
     // Real store roots bind authority; capacity rejection invokes no foreign code.
@@ -366,6 +417,9 @@ fn session_identity_consent_and_generation_follow_retained_authority() {
         super::super::session_context::decode_session_id(&session.id).unwrap()
     );
     assert_eq!(identity.flags, 2);
+    let info = probe.session_info.as_ref().unwrap();
+    assert_eq!(info.internal_id, identity.session_id);
+    assert!(info.key_secret == Some(connected.services.store.session_seed(&session.id).unwrap()));
     assert_ne!(identity.instance_id, *session.root_volume.as_bytes());
     assert_ne!(identity.instance_id, [0; 16]);
     assert_eq!(probe.volumes.len(), 2);

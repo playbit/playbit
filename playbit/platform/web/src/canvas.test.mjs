@@ -16,7 +16,8 @@ test("Canvas mode is required and canonical; static input keeps pointer and key 
         assert.throws(() => validateInput(controls, 13, 18, words(16667)), /unavailable/);
         assert.throws(() => validateInput(controls, 13, 17, words(100001)), /Invalid input/);
     }
-    for (const mode of [2, 0xffffffff]) assert.throws(() => decodeScene(canvas(mode)), /Canvas/);
+    assert.throws(() => decodeScene(canvas(8)), /Truncated Canvas clear color/);
+    for (const mode of [2, 4, 0xffffffff]) assert.throws(() => decodeScene(canvas(mode)), /Canvas/);
     const missing = new Uint8Array([...new TextEncoder().encode("PBV1"), ...command(1, 0), ...command(22, 17, words(320, 240, 0)), ...command(4, 0)]);
     assert.throws(() => decodeScene(missing), /canvas/);
 });
@@ -94,9 +95,14 @@ test("rectangle and text fills preserve Display P3 SDK colors", () => {
         assert.equal(kind, "2d"); assert.deepEqual(options, { colorSpace: "display-p3" });
         return context;
     } };
-    drawCanvas(canvas, { kind: "canvas", id: 0, width: 16, height: 16, frames: 0, items: [
+    const colored = new Uint8Array([...new TextEncoder().encode("PBV1"), ...command(1, 0),
+        ...command(22, 0, words(16, 16, 8, 0, 0x0000ff80)), ...command(4, 0)]);
+    const surface = decodeScene(colored).root.children[0];
+    assert.equal(surface.clearColor, 0x0000ff80);
+    drawCanvas(canvas, { ...surface, items: [
         { kind: "rect", x: 0, y: 0, width: 16, height: 16, color: 0xff0000ff },
         { kind: "text", x: 0, y: 0, width: 16, height: 16, color: 0x00ff0080, fontSize: 12, bold: false, text: "A" },
     ] });
-    assert.deepEqual(fills, [["rect", "color(display-p3 1 0 0 / 1)"], ["text", `color(display-p3 0 1 0 / ${128 / 255})`]]);
+    assert.deepEqual([canvas.width, canvas.height], [16, 16]);
+    assert.deepEqual(fills, [["rect", `color(display-p3 0 0 1 / ${128 / 255})`], ["rect", "color(display-p3 1 0 0 / 1)"], ["text", `color(display-p3 0 1 0 / ${128 / 255})`]]);
 });

@@ -11,6 +11,15 @@ const OPERATIONS: &[(&str, &[(&str, &str)])] = &[
     ("pb_log", &[("text", "*const u8"), ("length", "u32")]),
     ("pb_view_submit", &[("scene", "*const u8"), ("length", "u32")]),
     ("pb_event_poll", &[("event", "*mut Event"), ("data", "*mut u8"), ("capacity", "u32")]),
+    (
+        "pb_event_poll_deadline",
+        &[
+            ("event", "*mut Event"),
+            ("data", "*mut u8"),
+            ("capacity", "u32"),
+            ("deadline_ns", "u64"),
+        ],
+    ),
     ("pb_host_limit", &[("limit", "u32")]),
     ("pb_host_platform", &[]),
     ("pb_quit_on_last_window", &[("intent", "u32")]),
@@ -58,6 +67,9 @@ fn integer(expr: &Expr, constants: &BTreeMap<String, i64>) -> Result<i64> {
             .copied()
             .ok_or_else(|| "unknown constant".into()),
         Expr::Paren(p) => integer(&p.expr, constants),
+        Expr::Field(f) if matches!(&f.member, syn::Member::Unnamed(i) if i.index == 0) => {
+            integer(&f.base, constants)
+        }
         Expr::Binary(b) => {
             let a = integer(&b.left, constants)?;
             let c = integer(&b.right, constants)?;
@@ -65,6 +77,8 @@ fn integer(expr: &Expr, constants: &BTreeMap<String, i64>) -> Result<i64> {
                 syn::BinOp::Mul(_) => Ok(a * c),
                 syn::BinOp::Add(_) => Ok(a + c),
                 syn::BinOp::Sub(_) => Ok(a - c),
+                syn::BinOp::Shl(_) => Ok(a << c),
+                syn::BinOp::BitOr(_) => Ok(a | c),
                 _ => Err("unsupported constant expression".into()),
             }
         }
@@ -98,6 +112,9 @@ fn enums(
                 writeln!(ml, "    let {} = {n}", snake(&v.ident.to_string()))?;
                 next = n + 1;
             }
+            if name == "ThemeColor" {
+                writeln!(ml, "    let count = {next}")?;
+            }
             writeln!(ml, "end\n")?;
         }
     }
@@ -115,10 +132,55 @@ fn snake(s: &str) -> String {
     out
 }
 
+// Preserve the Rust module's flag names and its composite STANDARD value.
+fn window_style_flags(
+    ui: &syn::File,
+    ml: &mut String,
+    values: &mut BTreeMap<String, i64>,
+) -> Result<()> {
+    writeln!(ml, "module WindowStyle = struct")?;
+    let mut mask = 0;
+    let mut flags = BTreeMap::new();
+    for item in &ui.items {
+        let Item::Impl(block) = item else { continue };
+        if !matches!(&*block.self_ty, Type::Path(p) if p.path.is_ident("WindowStyle")) {
+            continue;
+        }
+        for item in &block.items {
+            let syn::ImplItem::Const(flag) = item else { continue };
+            let Expr::Call(call) = &flag.expr else {
+                return Err("expected WindowStyle value".into());
+            };
+            if !matches!(&*call.func, Expr::Path(p) if p.path.is_ident("Self"))
+                || call.args.len() != 1
+            {
+                return Err("unsupported WindowStyle constructor".into());
+            }
+            let bits = integer(&call.args[0], &flags)?;
+            mask |= bits;
+            flags.insert(flag.ident.to_string(), bits);
+            values.insert(format!("WindowStyle::{}", flag.ident), bits);
+            writeln!(ml, "    let {} = {bits}", flag.ident.to_string().to_lowercase())?;
+        }
+    }
+    if flags.is_empty() {
+        return Err("missing WindowStyle flags".into());
+    }
+    writeln!(ml, "    let mask = {mask}\nend\n")?;
+    Ok(())
+}
+
 fn lower(expr: &Expr, params: &BTreeMap<String, String>) -> Result<String> {
     match expr {
         Expr::Lit(l) if matches!(&l.lit, syn::Lit::Int(i) if i.base10_digits()=="0") => {
             Ok("(i64.const 0)".into())
+        }
+        Expr::Path(p) => {
+            let name = p.path.get_ident().ok_or("qualified parameter")?.to_string();
+            if params.get(&name).is_none_or(|ty| ty != "u64") {
+                return Err("expected a full-width slot parameter".into());
+            }
+            Ok(format!("(local.get ${name})"))
         }
         Expr::Cast(c) if type_name(&c.ty)? == "u64" => {
             let inner = if let Expr::Cast(pointer) = &*c.expr {
@@ -204,7 +266,14 @@ fn generate_call(
     writeln!(
         wat,
         "    (func (export \"{name}\") {} (result i64)",
-        order.iter().map(|(n, _)| format!("(param ${n} i32)")).collect::<Vec<_>>().join(" ")
+        order
+            .iter()
+            .map(|(n, ty)| {
+                let width = if ty == "u64" { "i64" } else { "i32" };
+                format!("(param ${n} {width})")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     )?;
     writeln!(wat, "        (call $syscall (i32.const {opcode})")?;
     for slot in &slots.elems {
@@ -233,7 +302,8 @@ fn run() -> Result<()> {
     let mut values = BTreeMap::new();
     enums(&syscall, &["Opcode", "Error", "EventKind"], &mut ml, &mut values)?;
     enums(&env, &["HostLimit", "HostPlatform"], &mut ml, &mut values)?;
-    enums(&ui, &["TextStyle", "ButtonStyle"], &mut ml, &mut values)?;
+    enums(&ui, &["TextStyle", "ButtonStyle", "ThemeColor"], &mut ml, &mut values)?;
+    window_style_flags(&ui, &mut ml, &mut values)?;
     for item in syscall.items.iter().chain(&ui.items) {
         if let Item::Const(c) = item {
             let name = c.ident.to_string();
@@ -251,13 +321,18 @@ fn run() -> Result<()> {
                 "VIEW_ROW_END",
                 "VIEW_CANVAS",
                 "VIEW_THEME",
+                "VIEW_WINDOW_STYLE",
+                "VIEW_WINDOW_SIZE_CONSTRAINTS",
                 "VIEW_POPUP_BUTTON",
                 "VIEW_CONTEXT_MENU_START",
                 "VIEW_CONTEXT_MENU_END",
                 "MENU_ACTION",
                 "CANVAS_FLAG_CONTINUOUS",
                 "CANVAS_FLAG_VIEWPORT",
+                "CANVAS_FLAG_WINDOW",
+                "CANVAS_FLAG_CLEAR",
                 "MAX_CANVAS_EDGE",
+                "MAX_WINDOW_CANVAS_EDGE",
                 "MAX_CANVAS_ITEMS",
                 "MAX_CANVAS_TEXT_BYTES",
                 "MAX_CANVAS_PIXEL_BYTES",

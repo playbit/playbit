@@ -151,6 +151,7 @@ entry permissions in addition to volume rights.
 | `0x003` | `ui.submit` | `pb_view_submit` | `u8* scene, length:u32` |
 | `0x004` | `event.poll` | `pb_event_poll` | `PBEvent* event, u8* data, capacity:u32` |
 | `0x005` | `identity.read` | `pb_identity` | `PBIdentity* output` |
+| `0x163` | `session.info` | `pb_session_info` | `PBSessionInfo* output` |
 | `0x006` | `startup.read` | `pb_startup_arguments` | `PBArguments* output` |
 | `0x007` | `volume.list` | `pb_volumes` | `PBVolumes* output` |
 | `0x009` | `update.defer` | `pb_update_defer` | `generation:u64` |
@@ -160,10 +161,27 @@ entry permissions in addition to volume rights.
 | `0x00d` | `host.limit` | `pb_host_limit` | `kind:u32` |
 | `0x00e` | `lifecycle.quit-on-last-window` | `pb_quit_on_last_window` | `intent:u32` |
 | `0x012` | `volume.observe` | `pb_volumes_observe` | `revision:u64` |
+| `0x015` | `event.poll.deadline` | `pb_event_poll_deadline` | `PBEvent* event, u8* data, capacity:u32, deadline_ns:u64` |
 
 - **capabilities** returns supported registry names, not opcode/name pairs.
   `PBCapabilities` holds name ranges and UTF-8 bytes, with capacities of at most
   256 names and 32 KiB. Discovery is advisory; an operation can still fail.
+- **session.info** returns local metadata for the guest's current session.
+  Initialize the output with `PB_RECORD_INIT(PBSessionInfo)`. The v1 record
+  occupies 64 bytes. Its four little-endian 32-bit fields are `size`, `written`,
+  `flags` and `reserved`. The 32-byte `internal_id` at offset 16 matches the
+  public ID in `PBIdentity`. When flag `PB_SESSION_HAS_KEY_SECRET` (bit 0) is
+  set, the 16 bytes of `key_secret` at offset 48 hold the invitation seed.
+  Encode it as a big-endian integer in Bitcoin base58, left-padded with `1`
+  to 22 characters, to form the code in `/s#CODE`. The all-zero seed is valid.
+  C guests can call `pb_session_code(&info, output)` with a
+  `char output[PB_SESSION_CODE_CHARS + 1]` buffer. It writes a NUL-terminated
+  string and returns its length, zero when the session lacks a key secret.
+  With no key secret, the host clears bit 0 and zeroes those 16 bytes. V1
+  hosts clear all other flag bits. Readers ignore unknown output flags to
+  permit future extensions. The `reserved` field must be zero. Success returns zero, and
+  `NotFound` means this context has no session. Hosts without this operation
+  return `Unsupported`.
 - **log** appends raw UTF-8 diagnostic text. Each turn admits at most 256 entries
   and 64 KiB of text; empty messages still consume an entry.
 - **ui.submit** replaces the accepted UI with one complete semantic scene,
@@ -176,6 +194,19 @@ entry permissions in addition to volume rights.
   Otherwise it consumes exactly one event.
   `WouldBlock` means the queue is empty. Capacity is at most 265,220 bytes, and the
   caller-sized event output is required even for a size probe.
+- **event.poll.deadline** uses the same event record, size probe and result. It
+  waits until an event is available or the absolute deadline from `pb_clock_read`
+  is reached. A queued event wins, even at an expired deadline. An empty queue
+  at expiry returns `WouldBlock`. A deadline of zero polls immediately and
+  `UINT64_MAX` waits indefinitely. Finite deadlines are in monotonic nanoseconds.
+  Declare `event.poll.deadline` in the package's `required_host_features` to
+  select an execution mode that supports waiting. Capability discovery reflects
+  this choice. An instance without the capability returns `Unsupported`, even
+  for a zero deadline. Guest code can keep timers ordered by expiry, poll with
+  the earliest deadline, and run all due timers after each return. Submitting
+  a scene before waiting makes it available for presentation during the wait.
+  On native instance destruction, a suspended poll returns `Closed` so the
+  callback can release resources and return to its caller.
 - **identity.read** returns the host-verified generation, account, device and
   instance IDs, plus a 32-byte session ID when present. `flags` bit 0 means
   service identity, bit 1 means session present; reserved members are zero.
@@ -235,6 +266,8 @@ platform-local until committed; Submit is the separate plain-UTF-8 submission
 (up to 262,144 bytes). See the [text event codec](src/abi/text.rs). `SurfaceChanged` has target zero and a
 16-byte payload: logical width and height (`u32`), finite positive pixel scale
 (`f32`) and input bits (`u32`: pointer=1, keyboard=2, touch=4).
+Dimensions describe the padded content viewport by default. A root canvas
+using `ui.canvas.window.v1` receives the full drawable window dimensions.
 `VolumesChanged` has target zero and an eight-byte `revision:u64` payload.
 See the [event codecs](src/abi/syscall.rs) for Pointer, Key and Frame payloads.
 

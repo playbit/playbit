@@ -24,10 +24,10 @@ impl<'db> ScopedSnapshot<'db> {
         source: &'db Database,
         database: DatabaseId,
         policy: &DatabasePolicy,
-        account: Id,
+        actor: impl Into<DataActor>,
         version: Option<&str>,
     ) -> Result<Self> {
-        Self::capture(source, database, policy, account, version, true)
+        Self::capture(source, database, policy, actor, version, true)
     }
 
     /// Reconciliation preserves raw source clocks and LWW. Detached received
@@ -36,24 +36,25 @@ impl<'db> ScopedSnapshot<'db> {
         source: &'db Database,
         database: DatabaseId,
         policy: &DatabasePolicy,
-        account: Id,
+        actor: impl Into<DataActor>,
         version: Option<&str>,
     ) -> Result<Self> {
-        Self::capture(source, database, policy, account, version, false)
+        Self::capture(source, database, policy, actor, version, false)
     }
 
     fn capture(
         source: &'db Database,
         database: DatabaseId,
         policy: &DatabasePolicy,
-        account: Id,
+        actor: impl Into<DataActor>,
         version: Option<&str>,
         qualified: bool,
     ) -> Result<Self> {
         let DatabaseId::Entry(entry) = policy.database else {
             return Err(Error::InvalidInput("selected entry policy required"));
         };
-        let readable = policy.metadata_readable(account)?;
+        let actor = actor.into();
+        let readable = policy.metadata_readable(actor)?;
         let snapshot = source.begin_read()?;
         let current = if qualified && database == DatabaseId::Index {
             Some(
@@ -83,7 +84,7 @@ impl<'db> ScopedSnapshot<'db> {
                 prefixes.extend(entry_policy_keys(version)?);
                 prefixes
             }
-            DatabaseId::Revocations => vec![account.to_string().into_bytes()],
+            DatabaseId::Revocations => vec![actor.human()?.to_string().into_bytes()],
             DatabaseId::Entry(_) => {
                 return Err(Error::InvalidInput("entry backings use ordinary snapshots"));
             }
@@ -107,8 +108,10 @@ impl<'db> ScopedSnapshot<'db> {
         source: &'db Database,
         policy: &MetadataPolicy,
         entry: EntryId,
-        account: Id,
+        actor: impl Into<DataActor>,
     ) -> Result<Self> {
+        let actor = actor.into();
+        let account = actor.human()?;
         let snapshot = source.begin_read()?;
         let current = volume_index::IndexSnapshot::new(source.begin_read()?);
         let receipt = current.permission_publication(account, entry)?;
@@ -116,22 +119,23 @@ impl<'db> ScopedSnapshot<'db> {
             current.authorize_source_writer(
                 policy.volume(),
                 policy.default_permissions(),
-                account,
+                actor,
                 entry,
             )?;
         }
         let policy = DatabasePolicy::reserved(policy.clone(), DatabaseId::Index)?;
         policy.authorize_reader(ReplicaReader::Service)?;
         let permissions = current.permissions_for_edit(entry)?;
-        let principal = Some(crate::store::object_contract::Principal::Human(account));
         let effective = permissions.effective(policy.volume.default_permissions());
         let manages = account == policy.volume.volume().owner
-            || effective.permits(principal, Permission::ManagePermissions);
+            || actor.permits(policy.volume.volume().id, effective, Permission::ManagePermissions);
         let inherited_owner =
             matches!(permissions, EntryAcl::Inherit) && account == policy.volume.volume().owner;
-        let mut prefixes = if inherited_owner || effective.permits(principal, Permission::Write) {
+        let mut prefixes = if inherited_owner
+            || actor.permits(policy.volume.volume().id, effective, Permission::Write)
+        {
             volume_index::entry_source_prefixes(entry, false)
-        } else if effective.permits(principal, Permission::Append)
+        } else if actor.permits(policy.volume.volume().id, effective, Permission::Append)
             && !current.source_header(entry)?.deleted
         {
             vec![volume_index::birth_source_key(entry).to_vec()]

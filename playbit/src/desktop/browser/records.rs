@@ -72,6 +72,7 @@ impl Browser {
         let Some(database) = self.database_address() else { return };
         if let Some(type_id) = self.records.type_id {
             self.submit(Request::Objects {
+                session: self.request_session(),
                 database,
                 type_id,
                 after: self.records.after,
@@ -79,7 +80,7 @@ impl Browser {
             });
         }
         if let Some(object) = self.records.selected {
-            self.submit(Request::ReadObject { database, object });
+            self.submit(Request::ReadObject { session: self.request_session(), database, object });
         }
     }
 
@@ -121,7 +122,7 @@ impl Browser {
             self.restore_record_draft(id, cx);
         }
         if let Some(database) = self.database_address() {
-            self.submit(Request::ReadObject { database, object });
+            self.submit(Request::ReadObject { session: self.request_session(), database, object });
         }
         self.start_detail_loading(cx);
         cx.notify();
@@ -434,7 +435,12 @@ impl Browser {
         {
             return;
         }
-        if self.submit(Request::CreateObject { database, type_id, fields }) {
+        if self.submit(Request::CreateObject {
+            session: self.request_session(),
+            database,
+            type_id,
+            fields,
+        }) {
             self.records.selected = None;
             self.records.draft_id = None;
             self.records.object = None;
@@ -521,7 +527,11 @@ impl Browser {
             disabled,
             move |this, _| {
                 if let Some(database) = this.database_address() {
-                    this.submit(Request::RemoveObject { database, object: id });
+                    this.submit(Request::RemoveObject {
+                        session: this.request_session(),
+                        database,
+                        object: id,
+                    });
                 }
             },
             cx,

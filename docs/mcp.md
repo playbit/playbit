@@ -1,8 +1,9 @@
 # Playbit MCP
 
 `playbit-mcp` is a local stdio MCP server packaged with Playbit.app. It exposes
-one tool, `playbit`, for managing apps, sessions and authorized data
-through the same local engine as `pb`.
+`playbit` for managing apps, sessions and authorized data, and `playbit_gui`
+for canvas input and screenshots from running app windows. Both use the same
+local profile and instance ownership checks as `pb`.
 
 ## Connect
 
@@ -34,7 +35,7 @@ Provisioned distribution builds expose `saved-account` and
 email and account-key fields without signing in. Eligible native forms request this
 once to fill untouched fields; opening a retained local account needs no Keychain lookup.
 
-## Call the tool
+## Call the tools
 
 An MCP client normally handles initialization and JSON-RPC framing. For a raw
 stdio client, send one UTF-8 JSON object per line, for example:
@@ -46,7 +47,7 @@ stdio client, send one UTF-8 JSON object per line, for example:
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"playbit","arguments":{"op":"status"}}}
 ```
 
-Successful tool results contain JSON encoded in `result.content[0].text`.
+The `playbit` tool returns JSON encoded in `result.content[0].text`.
 Operation errors set `result.isError`; protocol errors use JSON-RPC `error`.
 Diagnostics go to stderr. Input is limited to 4 MiB per line, excluding LF or
 CRLF. Oversized or invalid UTF-8 input closes the connection.
@@ -93,9 +94,9 @@ device. Ordinary sessions retain their supported invitations and synchronization
 `prepare-session` prepares metadata and asynchronous bootstrap; it does not
 execute a guest. Open the session with `pb session join SESSION --detach` to
 return after launch; omit `--detach` to follow guest logs in the terminal.
-GUI inspection, input and logs go through `pb frame`, `pb input` and `pb logs`; pass
-`--instance ID` when multiple instances are running. Find IDs with
-`pb session instances SESSION`.
+`pb frame` reads the validated scene and `pb logs` reads guest logs. Use
+`playbit_gui` or the corresponding CLI commands below to drive a canvas and
+inspect its rendered window.
 
 Use `update-session {session,bundle}` to advance an exact development session
 owned by its creator. App followers advance through publication; unrelated exact
@@ -120,6 +121,53 @@ code notifications use AP push without registering the local session or sharing
 its data. `wait-changes` returns a cursor; pass it as `after` on the next call to
 wait without polling. Inspect current state after waking, including
 `transfer-status` for bootstrap failures.
+
+## Drive and capture a running window
+
+Call `playbit_gui` with the session join code or invitation link. It also accepts
+the retained session ID returned by the engine. `instance-list` returns IDs of
+live GUI owners. Supply an explicit instance when several windows run the same
+session. Use the target canvas ID from the app's UI or its validated scene.
+
+Each line below shows arguments for one `playbit_gui` call. Here, canvas 1 is
+the game board and the movement keys overlap until each is released.
+
+```jsonl
+{"op":"instance-list","session":"SESSION"}
+{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"key":"up","pressed":true}
+{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"key":"right","pressed":true}
+{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"key":"right","pressed":false}
+{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"key":"up","pressed":false}
+{"op":"pointer-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"phase":"down","x":120,"y":80}
+{"op":"pointer-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"phase":"move","x":140,"y":90,"button":"primary"}
+{"op":"pointer-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"phase":"up","x":140,"y":90}
+{"op":"screenshot","session":"SESSION","instance":"PLAYER_ONE"}
+{"op":"screenshot","session":"SESSION","instance":"PLAYER_TWO"}
+```
+
+Coordinates are logical units local to the canvas. The window owner clamps them
+to the target canvas's current width and height when it handles the input.
+The keys are `left`, `right`, `up`, `down`, and `space`.
+A pointer down defaults to the primary button. For a
+drag, specify `primary` on move. Up and cancel clear the button. An accepted
+input has entered the app queue. Observe the result before acting on it.
+
+Screenshot returns the selected window as an MCP `image/png` image, followed
+by text identifying the instance, owner generation and encoded size. The PNG
+limit is 2 MiB. For the CLI examples below, replace `JOIN_CODE` with the
+22-character join code or an invitation link for the selected environment.
+If you have the engine’s 32-byte session ID, use `playbit_gui` directly or get
+the join code from `pb session list`. The instance and canvas IDs work in both tools.
+
+```sh
+pb session instances JOIN_CODE
+pb input JOIN_CODE key 1 up down --instance PLAYER_TWO
+pb input JOIN_CODE key 1 up up --instance PLAYER_TWO
+pb input JOIN_CODE pointer 1 down 120 80 --instance PLAYER_TWO
+pb input JOIN_CODE pointer 1 up 120 80 --instance PLAYER_TWO
+pb screenshot JOIN_CODE player-one.png --instance PLAYER_ONE
+pb screenshot JOIN_CODE player-two.png --instance PLAYER_TWO
+```
 
 ## Data operations
 

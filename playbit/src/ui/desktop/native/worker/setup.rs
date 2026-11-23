@@ -56,7 +56,6 @@ impl Setup {
             #[cfg(all(feature = "native-audio", target_os = "macos"))]
             audio_instance: None,
             generation: 0,
-            #[cfg(feature = "desktop")]
             session: None,
             #[cfg(all(target_os = "macos", feature = "process"))]
             startup: None,

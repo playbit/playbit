@@ -6,10 +6,10 @@ use super::{
 use crate::{
     runtime::ViewNode,
     ui::desktop::{
-        UI_FONT_FAMILY,
-        canvas::{canvas_frame_target, canvas_id, canvas_step, is_viewport_canvas},
+        UI_FONT_FAMILY, alert,
+        canvas::{canvas_extent, canvas_frame_target, canvas_id, canvas_step},
         scene::{Input, InputAck, Scene},
-        text_accessibility_node, text_editor,
+        text_accessibility_node, text_editor, visual_bell,
     },
 };
 use gpui::{
@@ -18,7 +18,7 @@ use gpui::{
 };
 use playbit_api::{
     abi::syscall::EventKind,
-    ui::{Theme, ThemeColor},
+    ui::{CanvasExtent, Theme, ThemeColor, WindowSizeConstraints, WindowStyle},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -29,8 +29,12 @@ use std::{
 };
 gpui::actions!(playbit_native, [Quit, CloseWindow, ToggleLog]);
 #[cfg(feature = "desktop")]
+gpui::actions!(playbit_native, [CopySessionLink]);
+#[cfg(feature = "desktop")]
 #[cfg(all(target_os = "macos", feature = "desktop"))]
 mod session_link;
+
+const LOG_DRAWER_HEIGHT: f32 = 140.;
 
 pub(crate) struct AppWindow {
     handle: Option<Handle>,
@@ -46,6 +50,9 @@ pub(crate) struct AppWindow {
     #[cfg(feature = "connected-engine")]
     retry: Option<Entity<crate::ui::desktop::controls::Control>>,
     connection_id: Entity<()>,
+    error_id: Entity<()>,
+    feedback_id: Entity<()>,
+    feedback: Option<(String, gpui::Task<()>)>,
     closing_id: Entity<()>,
     closing: bool,
     stopped: bool,
@@ -79,6 +86,39 @@ pub(crate) struct AppWindow {
     logs: VecDeque<(String, Entity<()>)>,
     log_bytes: usize,
 }
+/// Window metadata precedes the semantic root in the validated scene.
+struct Presentation<'a> {
+    style: Option<WindowStyle>,
+    size_constraints: WindowSizeConstraints,
+    theme: &'a Theme,
+    background: Option<gpui::Rgba>,
+}
+
+fn presentation(view: Option<&ViewNode>) -> Presentation<'_> {
+    const DEFAULT: Theme = Theme::light();
+    match view {
+        Some(ViewNode::Theme {
+            theme,
+            window_style,
+            window_size_constraints,
+            window_background_specified,
+            ..
+        }) => Presentation {
+            style: *window_style,
+            size_constraints: window_size_constraints.unwrap_or_default(),
+            theme,
+            background: window_background_specified
+                .then(|| rgba(theme.color(ThemeColor::WindowBackground).0)),
+        },
+        _ => Presentation {
+            style: None,
+            size_constraints: Default::default(),
+            theme: &DEFAULT,
+            background: None,
+        },
+    }
+}
+
 impl AppWindow {
     fn new(handle: Option<Handle>, view: Option<ViewNode>, cx: &mut Context<Self>) -> Self {
         let weak = cx.weak_entity();
@@ -102,6 +142,9 @@ impl AppWindow {
             #[cfg(feature = "connected-engine")]
             retry: None,
             connection_id: cx.new(|_| ()),
+            error_id: cx.new(|_| ()),
+            feedback_id: cx.new(|_| ()),
+            feedback: None,
             closing_id: cx.new(|_| ()),
             closing: false,
             stopped: false,
@@ -169,6 +212,7 @@ impl AppWindow {
         self.last_frame = None;
         self.view = None;
         self.error.clear();
+        self.feedback = None;
         if let Some(view) = view {
             self.apply(view, InputAck::default(), cx);
         }
@@ -189,11 +233,60 @@ impl AppWindow {
         true
     }
     fn fail(&mut self, error: String, cx: &mut Context<Self>) {
-        crate::ui::desktop::alert::show(crate::ui::desktop::alert::Kind::Recoverable, &error, cx);
-        self.error = error;
+        alert::record_in_window(alert::Kind::Recoverable, &error, cx);
+        self.set_error(error, cx);
         self.frame_pending = false;
         self.scene.invalidate_drafts(cx);
         cx.notify();
+    }
+    fn set_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.logs(vec![error], cx);
+        // A late startup or restore failure cannot replace instructions for
+        // recovering a retired window. Its cause still reaches the Log.
+        if !self.stopped || self.error.is_empty() {
+            self.error =
+                "This app couldn’t complete an action. See Window → Show Log for details.".into();
+        }
+        self.feedback = None;
+    }
+    fn report_action(&mut self, kind: alert::Kind, details: &str, cx: &mut Context<Self>) {
+        let (_, body) = alert::message(kind, details, &crate::engine::profile_path());
+        self.show_feedback(&body, details, cx);
+        alert::record_in_window(kind, details, cx);
+    }
+    pub(crate) fn show_feedback(&mut self, body: &str, details: &str, cx: &mut Context<Self>) {
+        self.logs(vec![details.into()], cx);
+        let dismiss = cx.spawn(async move |owner, cx| {
+            cx.background_executor().timer(visual_bell::DURATION).await;
+            let _ = owner.update(cx, |owner, cx| {
+                owner.feedback = None;
+                cx.notify();
+            });
+        });
+        self.feedback = Some((visual_bell::message(body), dismiss));
+        cx.notify();
+    }
+    fn window_presentation(&self) -> Presentation<'_> {
+        let mut current = presentation(self.view.as_ref());
+        if self.handle.is_some()
+            && (self.log_open
+                || !self.error.is_empty()
+                || (self.stopped && self.feedback.is_some()))
+        {
+            // Host diagnostics need room even when a guest fixes its window at a tiny
+            // size. Live guests keep their titlebar, close policy and canvas layout.
+            if self.stopped {
+                current = presentation(None);
+            } else if let Some(style) = current.style {
+                current.style = Some(style | WindowStyle::RESIZABLE);
+            }
+            current.size_constraints = WindowSizeConstraints {
+                min_width: 480.,
+                min_height: 180. + if self.log_open { LOG_DRAWER_HEIGHT } else { 0. },
+                ..Default::default()
+            };
+        }
+        current
     }
     fn set_audio_visible(&mut self, active: bool) {
         #[cfg(all(feature = "native-audio", target_os = "macos"))]
@@ -210,6 +303,7 @@ impl AppWindow {
         #[cfg(all(target_os = "macos", feature = "desktop"))]
         self.cancel_session_link();
         self.held_keys = 0;
+        self.feedback = None;
         self.stopped = true;
         self.set_audio_visible(false);
         self.scene.set_active(false, self.view.as_ref(), cx);
@@ -241,6 +335,9 @@ impl AppWindow {
             self.cancel_session_link();
             self.held_keys = 0;
             self.closing = true;
+            if self.handle.is_none() {
+                self.error.clear();
+            }
             self.set_audio_visible(false);
             self.scene.set_active(false, self.view.as_ref(), cx);
             if let Some(handle) = &self.handle {
@@ -256,6 +353,13 @@ impl AppWindow {
             #[cfg(all(target_os = "macos", feature = "desktop"))]
             self.cancel_session_link();
             return true;
+        }
+        if self
+            .window_presentation()
+            .style
+            .is_some_and(|style| !style.contains(WindowStyle::CLOSABLE))
+        {
+            return false;
         }
         if !self.quit_on_last_window {
             if !self.release_keys() || !self.scene.release_canvas_pointer() {
@@ -395,21 +499,21 @@ fn game_key(key: &str) -> Option<u32> {
         _ => None,
     }
 }
-fn text(text: String, entity: &Entity<()>) -> gpui::Div {
+fn text(text: String, entity: &Entity<()>, live: bool) -> gpui::Div {
     let id = text_editor::accessibility_text_ids(entity.entity_id()).0;
     div().relative().child(text.clone()).child(
         gpui::canvas(
             move |bounds, window, _| {
-                window.insert_accessibility_node(
-                    id,
-                    text_accessibility_node(&text, false, bounds),
-                    false,
-                    None,
-                );
+                let mut node = text_accessibility_node(&text, false, bounds);
+                if live {
+                    node.set_live(gpui::accesskit::Live::Polite);
+                }
+                window.insert_accessibility_node(id, node, false, None);
             },
             |_, _, _, _| {},
         )
         .absolute()
+        .inset_0()
         .size_full(),
     )
 }
@@ -493,7 +597,7 @@ impl AppWindow {
                             .and_then(|handle| handle.startup.as_deref())
                             .is_some_and(|(_, current)| *current == context)
                     {
-                        view.error = format!("Could not confirm startup: {error}");
+                        view.set_error(format!("Could not confirm startup: {error}"), cx);
                         cx.notify();
                     }
                 });
@@ -520,22 +624,35 @@ impl Render for AppWindow {
         self.observe_startup(window, cx);
 
         self.schedule_frame(window, cx);
-        let theme = Theme::light();
+        let presentation = self.window_presentation();
+        #[cfg(feature = "desktop")]
+        let style = presentation.style;
+        let text_color = rgba(presentation.theme.color(ThemeColor::Text).0);
+        let extent = self.view.as_ref().map_or(CanvasExtent::Inline, canvas_extent);
+        let whole_window = extent == CanvasExtent::Window;
+        #[cfg(feature = "desktop")]
+        let session_bar = self.session_link.is_some() && style.is_none() && !whole_window;
+        #[cfg(not(feature = "desktop"))]
+        let session_bar = false;
+        let chrome =
+            native_style(presentation, whole_window, session_bar, super::super::zoom::factor(cx));
+        let background = chrome.background;
+        window.set_macos_window_style(chrome);
         let mut observe_surface = false;
-        let right_inset = 0.;
-        let viewport_canvas = !self.closing && self.view.as_ref().is_some_and(is_viewport_canvas);
+        let padding = if whole_window { 0. } else { super::super::surface::CONTENT_PADDING };
+        let viewport_canvas = !self.closing && extent != CanvasExtent::Inline;
         let mut content = div()
             .id("native-app-content")
             .relative()
-            .rounded_b(super::super::zoom::length(16.))
+            .when(!whole_window, |content| content.rounded_b(super::super::zoom::length(16.)))
             .flex_1()
             .min_h(px(0.))
-            .p_4()
+            .p(super::super::zoom::length(padding))
             .when(!viewport_canvas, |element| {
                 element.overflow_scroll().track_scroll(&self.scrollbars.read(cx).handle())
             });
         if self.closing {
-            content = content.child(text("Closing…".into(), &self.closing_id));
+            content = content.child(text("Closing…".into(), &self.closing_id, false));
         } else {
             let scene = self.scene.render(self.view.as_ref(), window, cx);
             content = if viewport_canvas {
@@ -555,12 +672,15 @@ impl Render for AppWindow {
         }
         let mut root = div()
             .size_full()
+            .relative()
             .track_focus(&self.focus)
             .flex()
             .flex_col()
             .font_family(UI_FONT_FAMILY)
-            .text_color(rgba(theme.color(ThemeColor::Text).0))
-            .bg(rgba(theme.color(ThemeColor::WindowBackground).0))
+            .text_color(text_color)
+            // AppKit paints the same backing color under our Metal layer and
+            // the titlebar. A translucent root would composite the color twice.
+            .when(background.a == 1., |root| root.bg(background))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, window, _| {
@@ -630,8 +750,29 @@ impl Render for AppWindow {
                 }
             }));
         #[cfg(all(target_os = "macos", feature = "desktop"))]
-        if let Some(titlebar) = self.session_titlebar(window, cx) {
-            root = root.child(titlebar);
+        {
+            if session_bar && let Some(titlebar) = self.session_titlebar(window, cx) {
+                root = root.child(titlebar);
+            }
+            if self.session_link.is_some() && !self.closing && !self.stopped {
+                root = root.on_action(cx.listener(|this, _: &CopySessionLink, _, cx| {
+                    this.copy_current_session_link(cx);
+                    cx.stop_propagation();
+                }));
+            }
+        }
+        if chrome.full_size_content && chrome.transparent_titlebar && !session_bar {
+            // GPUI subtracts press handlers from this strip. A display-only
+            // canvas leaves it draggable, even when drawing beneath the titlebar.
+            root = root.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .h(window.macos_titlebar_height())
+                    .window_control_area(gpui::WindowControlArea::DragBehindControls),
+            );
         }
         root = root.child(
             div()
@@ -640,12 +781,55 @@ impl Render for AppWindow {
                 .min_h(px(0.))
                 .flex()
                 .child(content)
-                .when(observe_surface, |v| v.child(self.scene.surface_observer(right_inset)))
+                .when(observe_surface, |v| v.child(self.scene.surface_observer(extent)))
                 .when(!viewport_canvas, |element| {
                     element
                         .child(crate::ui::desktop::scrollbar::Scrollbars::overlay(&self.scrollbars))
                 }),
         );
+        root = root.children(self.accessories(whole_window));
+        #[cfg(feature = "desktop")]
+        if style.is_some_and(|style| style.contains(WindowStyle::HIDE_SESSION_BUTTON)) {
+            self.hide_session_button(window, cx);
+        } else if !session_bar && let Some(button) = self.session_button(cx) {
+            let mut top = super::super::zoom::pixels(window, 4.);
+            if chrome.full_size_content && !chrome.transparent_titlebar {
+                top += window.macos_titlebar_height();
+            }
+            root = root.child(button.top(top));
+        }
+        if let Some((body, _)) = &self.feedback {
+            root = root.child(visual_bell::render(
+                "sign-in-warning",
+                text(body.clone(), &self.feedback_id, true),
+            ));
+        }
+        root
+    }
+}
+
+impl AppWindow {
+    fn accessories(&self, whole_window: bool) -> Option<gpui::Div> {
+        if self.error.is_empty() && self.connection.is_empty() && !self.log_open {
+            return None;
+        }
+        // Keep host messages legible over the canvas without moving its surface.
+        let mut accessories = div().flex_none().flex().flex_col().when(whole_window, |bar| {
+            let theme = Theme::light();
+            bar.absolute()
+                .bottom_0()
+                .w_full()
+                .occlude()
+                .bg(rgba(theme.color(ThemeColor::WindowBackground).0))
+                .text_color(rgba(theme.color(ThemeColor::Text).0))
+        });
+        if !self.error.is_empty() {
+            accessories = accessories.child(div().px_4().py_2().child(text(
+                self.error.clone(),
+                &self.error_id,
+                true,
+            )));
+        }
         if !self.connection.is_empty() {
             let footer = div()
                 .px_4()
@@ -654,30 +838,76 @@ impl Render for AppWindow {
                 .items_center()
                 .gap_2()
                 .text_size(super::super::zoom::length(11.))
-                .child(text(self.connection.clone(), &self.connection_id));
+                .child(text(self.connection.clone(), &self.connection_id, false));
             #[cfg(feature = "connected-engine")]
             let footer = footer.children(self.retry.clone());
-            root = root.child(footer);
+            accessories = accessories.child(footer);
         }
         if self.log_open {
-            root = root.child(
+            accessories = accessories.child(
                 div()
                     .id("native-app-logs")
-                    .h(super::super::zoom::length(140.))
+                    .h(super::super::zoom::length(LOG_DRAWER_HEIGHT))
                     .overflow_y_scroll()
                     .border_t_1()
                     .border_color(rgba(0x00000028))
                     .bg(rgba(0xf6f6f6ff))
+                    .text_color(rgba(Theme::light().color(ThemeColor::Text).0))
                     .p_3()
                     .text_size(super::super::zoom::length(11.))
                     .when(self.logs.is_empty(), |drawer| {
-                        drawer.child(text("No log messages yet".into(), &self.log_empty_id))
+                        drawer.child(text("No log messages yet".into(), &self.log_empty_id, false))
                     })
-                    .children(self.logs.iter().map(|(line, id)| text(line.clone(), id))),
+                    .children(self.logs.iter().map(|(line, id)| text(line.clone(), id, false))),
             );
         }
 
-        root
+        Some(accessories)
+    }
+}
+
+fn native_style(
+    presentation: Presentation<'_>,
+    whole_window: bool,
+    session_bar: bool,
+    zoom: f32,
+) -> gpui::MacWindowStyle {
+    let Presentation { style, size_constraints, background, .. } = presentation;
+    // Preserve a positive guest bound through zoom, including subnormal f32 values.
+    let scaled = |edge: f32| f64::from(edge) * f64::from(zoom);
+    let default_chrome = style.is_none();
+    let style = style.unwrap_or(WindowStyle::STANDARD);
+    let titled = style.contains(WindowStyle::TITLEBAR);
+    let transparent =
+        session_bar || whole_window || style.contains(WindowStyle::TRANSPARENT_TITLEBAR);
+    let full_size_content =
+        titled && (transparent || style.contains(WindowStyle::FULLSIZE_CONTENT));
+    // AppKit can show the window backing behind a standard titlebar without
+    // extending the guest's coordinates into it.
+    let tinted_titlebar = !full_size_content && background.is_some();
+    gpui::MacWindowStyle {
+        titled,
+        size_constraints: gpui::MacWindowSizeConstraints {
+            min: size(scaled(size_constraints.min_width), scaled(size_constraints.min_height)),
+            max: size(scaled(size_constraints.max_width), scaled(size_constraints.max_height)),
+            aspect_ratio: size_constraints.aspect_ratio,
+        },
+        closable: style.contains(WindowStyle::CLOSABLE),
+        minimizable: style.contains(WindowStyle::MINIMIZABLE),
+        resizable: style.contains(WindowStyle::RESIZABLE),
+        transparent_titlebar: titled && (transparent || tinted_titlebar),
+        hidden_title: session_bar || style.contains(WindowStyle::HIDDEN_TITLE),
+        full_size_content,
+        traffic_light_position: session_bar.then(|| gpui::point(px(9.), px(9.))),
+        appearance: if default_chrome || style.contains(WindowStyle::THEME_BRIGHT) {
+            Some(gpui::WindowAppearance::Light)
+        } else if style.contains(WindowStyle::THEME_DARK) {
+            Some(gpui::WindowAppearance::Dark)
+        } else {
+            None
+        },
+        background: background
+            .unwrap_or_else(|| rgba(Theme::light().color(ThemeColor::WindowBackground).0)),
     }
 }
 
@@ -736,6 +966,8 @@ pub(super) fn install_menus(cx: &mut App) {
             name: "Window".into(),
             items: vec![
                 MenuItem::action("Close", CloseWindow),
+                #[cfg(feature = "desktop")]
+                MenuItem::action("Copy Session Link", CopySessionLink),
                 MenuItem::action("Show Log", ToggleLog),
             ],
         },
@@ -769,6 +1001,8 @@ fn update_log_menu(log_open: bool) {
 }
 
 pub(super) fn deactivate(windows: &Windows, cx: &mut App) {
+    #[cfg(feature = "process")]
+    windows.quitting.set(true);
     // Hidden owners retain an input channel too. Close it at this same AppKit
     // boundary, before a control exchange can admit another root of work.
     for owner in windows.owners.values() {
@@ -815,7 +1049,14 @@ fn show(
     cx: &mut App,
 ) -> Result<gpui::WindowHandle<AppWindow>, String> {
     let _timing = crate::trace::Span::new("ui.native.open_window");
-    let bounds = Bounds::centered(None, size(px(640.), px(560.)), cx);
+    // Before admission a slow foreground launch has only its recovery message.
+    let dimensions = if entity.read(cx).handle.is_none() && !entity.read(cx).error.is_empty() {
+        let scale = super::super::zoom::factor(cx);
+        size(px(420. * scale), px(108. * scale))
+    } else {
+        size(px(640.), px(560.))
+    };
+    let bounds = Bounds::centered(None, dimensions, cx);
     #[cfg(all(target_os = "macos", feature = "desktop"))]
     let custom_titlebar = entity.read(cx).session_link.is_some();
     #[cfg(not(all(target_os = "macos", feature = "desktop")))]
@@ -824,6 +1065,12 @@ fn show(
         WindowOptions {
             focus: focus_window,
             window_bounds: Some(WindowBounds::Windowed(bounds)),
+            frame_autosave_name: entity
+                .read(cx)
+                .handle
+                .as_ref()
+                .and_then(|handle| handle.session)
+                .map(|session| crate::identifier::encode(&session)),
             titlebar: Some(gpui::TitlebarOptions {
                 title: Some(title.into()),
                 appears_transparent: custom_titlebar,
@@ -873,6 +1120,8 @@ struct OwnedWindow {
 pub(super) struct Windows {
     owners: BTreeMap<u64, OwnedWindow>,
     retained: Rc<Cell<usize>>,
+    #[cfg(feature = "process")]
+    quitting: Cell<bool>,
     #[cfg(all(target_os = "macos", feature = "process"))]
     pending_show: Option<(u64, u64)>,
 }
@@ -912,7 +1161,9 @@ fn restore_window(owner: &mut OwnedWindow, presentation: Option<u64>, cx: &mut A
             owner.window = window;
             owner.visible.set(true);
             owner.entity.update(cx, |this, cx| {
-                this.error.clear();
+                if this.handle.is_some() {
+                    this.error.clear();
+                }
                 this.scene.set_active(!this.stopped, this.view.as_ref(), cx);
                 this.scene.reset_surface();
                 this.frame_callback = false;
@@ -921,7 +1172,7 @@ fn restore_window(owner: &mut OwnedWindow, presentation: Option<u64>, cx: &mut A
             });
         }
         Err(error) => owner.entity.update(cx, |this, cx| {
-            this.error = error.clone();
+            this.set_error(error.clone(), cx);
             #[cfg(all(target_os = "macos", feature = "process"))]
             this.report_startup(crate::engine::session_instance::StartupPhase::Failed, cx);
             crate::diagnostic!("Cannot restore app window: {error}");
@@ -980,6 +1231,35 @@ fn bind_window(
         .expect("new or reconstructed window is live");
     OwnedWindow { window, entity, title, visible, quit_on_last_window, completed: false }
 }
+#[cfg(feature = "process")]
+fn report_startup_delay(windows: &mut Windows, foreground: bool, cx: &mut App) {
+    if windows.quitting.get() {
+        return;
+    }
+    let kind = alert::Kind::RecoverySlow;
+    let details = "App owner startup has not completed after 10 seconds";
+    if !foreground || !windows.owners.is_empty() || !cx.windows().is_empty() {
+        alert::show(kind, details, cx);
+        return;
+    }
+    let (title, guidance) = alert::message(kind, details, &crate::engine::profile_path());
+    let entity = cx.new(|cx| {
+        let mut this = AppWindow::new(None, None, cx);
+        this.error = guidance;
+        this
+    });
+    // Opened installs the real window before removing setup generation zero.
+    // Closed(0) also retires this surface if the user cancels startup.
+    match show(title.into(), entity, true, cx) {
+        Ok(window) => {
+            let owner = bind_window(window, true, windows.retained.clone(), title.into(), cx);
+            windows.owners.insert(0, owner);
+        }
+        Err(error) => crate::diagnostic!("Cannot open startup status: {error}"),
+    }
+    alert::record_in_window(kind, details, cx);
+}
+
 pub(super) fn receive(
     outputs: async_channel::Receiver<Output>,
     acknowledged: Rc<Cell<bool>>,
@@ -1006,16 +1286,13 @@ pub(super) fn receive(
                 && !windows.borrow().owners.contains_key(generation)
             {
                 let active = active.clone();
+                let windows = windows.clone();
                 let delay = crate::engine::restart::NOTICE_AFTER.saturating_sub(started.elapsed());
                 startup_notice = Some(cx.spawn(async move |cx| {
-                    gpui::Timer::after(delay).await;
+                    cx.background_executor().timer(delay).await;
                     if active.load(std::sync::atomic::Ordering::Acquire) {
                         let _ = cx.update(|cx| {
-                            crate::ui::desktop::alert::show(
-                                crate::ui::desktop::alert::Kind::RecoverySlow,
-                                "App owner startup has not completed after 10 seconds",
-                                cx,
-                            )
+                            report_startup_delay(&mut windows.borrow_mut(), focus_window, cx);
                         });
                     }
                 }));
@@ -1146,6 +1423,29 @@ fn deliver(
         Output::ShowRequested { .. } => {
             unreachable!("Show is routed with the retained owner registry")
         }
+        #[cfg(all(feature = "process", target_os = "macos"))]
+        Output::Screenshot { instance, owner_generation, capture } => {
+            let number = windows.values().find_map(|owner| {
+                let app = owner.entity.read(cx);
+                let (_, context) = app.handle.as_ref()?.startup.as_deref()?;
+                if context.instance != instance
+                    || context.owner_generation != owner_generation
+                    || !owner.visible.get()
+                    || app.closing
+                {
+                    return None;
+                }
+                owner
+                    .window
+                    .update(cx, |_, window, _| super::screenshot::window_number(window))
+                    .ok()
+                    .flatten()
+            });
+            match number {
+                Some(number) => capture.start(number, cx.background_executor().clone()),
+                None => capture.complete(Err("The selected instance has no open window".into())),
+            }
+        }
         Output::Opened {
             replaces, handle, errors, title, view, logs, quit_on_last_window, ..
         } => {
@@ -1193,7 +1493,9 @@ fn deliver(
                                             .as_ref()
                                             .is_some_and(|handle| handle.generation == generation)
                                     {
-                                        this.fail(error.into(), cx);
+                                        // Admission failed before the guest saw this input.
+                                        // Keep its current scene, drafts and frame clock live.
+                                        this.report_action(alert::Kind::InputRejected, error, cx);
                                     }
                                 })
                             });
@@ -1314,9 +1616,13 @@ fn deliver(
                     if let Some(handle) = &this.handle {
                         handle.close();
                     }
-                    this.error = crate::engine::service_events::StopReason::ContextUnavailable
-                        .message()
-                        .into();
+                    let (_, guidance) = alert::message(
+                        alert::Kind::AppContextUnavailable,
+                        crate::engine::service_events::StopReason::ContextUnavailable.message(),
+                        &crate::engine::profile_path(),
+                    );
+                    this.logs(vec![guidance.clone()], cx);
+                    this.error = guidance;
                     cx.notify();
                     close
                 });
@@ -1327,7 +1633,7 @@ fn deliver(
                         let _ = owner.window.update(cx, |_, window, _| window.remove_window());
                     }
                 } else {
-                    crate::ui::desktop::alert::show(
+                    alert::record_in_window(
                         crate::ui::desktop::alert::Kind::AppContextUnavailable,
                         crate::engine::service_events::StopReason::ContextUnavailable.message(),
                         cx,
@@ -1347,12 +1653,12 @@ fn deliver(
                     }
                     let delay =
                         crate::engine::restart::NOTICE_AFTER.saturating_sub(started.elapsed());
-                    this.recovery_notice = Some(cx.spawn(async move |_, cx| {
+                    this.recovery_notice = Some(cx.spawn(async move |owner, cx| {
                         gpui::Timer::after(delay).await;
                         if active.load(std::sync::atomic::Ordering::Acquire) {
-                            let _ = cx.update(|cx| {
-                                crate::ui::desktop::alert::show(
-                                    crate::ui::desktop::alert::Kind::RecoverySlow,
+                            let _ = owner.update(cx, |owner, cx| {
+                                owner.report_action(
+                                    alert::Kind::RecoverySlow,
                                     "App reconstruction has not completed after 10 seconds",
                                     cx,
                                 )
@@ -1375,9 +1681,14 @@ pub(super) fn show_failure(
     let _ = focus_window;
     for window in cx.windows() {
         if let Some(window) = window.downcast::<AppWindow>() {
-            let _ = window.update(cx, |this, _, cx| {
+            let _ = window.update(cx, |this, window, cx| {
                 this.stop_inputs(cx);
-                this.error = error.details.clone();
+                if this.handle.is_none() {
+                    window.set_window_title("Playbit");
+                    this.error = "The app couldn’t open.".into();
+                } else {
+                    this.error = "This app needs to be reopened from your library.".into();
+                }
                 cx.notify();
             });
         }
@@ -1390,17 +1701,247 @@ pub(super) fn show_failure(
 mod tests {
     use super::*;
 
+    #[cfg(feature = "process")]
+    #[gpui::test]
+    fn slow_foreground_startup_keeps_one_accessible_status_until_the_guest_opens(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::sync::atomic::AtomicBool;
+        cx.text_system()
+            .add_fonts(vec![std::borrow::Cow::Borrowed(super::super::super::UI_FONT_DATA)])
+            .unwrap();
+        let (send, output) = async_channel::bounded(2);
+        let windows = Rc::new(RefCell::new(Windows::default()));
+        cx.update(|cx| {
+            report_startup_delay(&mut windows.borrow_mut(), false, cx);
+            assert!(cx.windows().is_empty(), "background startup stays windowless");
+            receive(output, Rc::new(Cell::new(false)), windows.clone(), true, cx);
+        });
+        send.try_send(Output::Recovering {
+            generation: 0,
+            active: Arc::new(AtomicBool::new(true)),
+            started: Instant::now(),
+        })
+        .unwrap();
+        cx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+        cx.executor().advance_clock(crate::engine::restart::NOTICE_AFTER);
+        cx.run_until_parked();
+        let status = windows.borrow().owners[&0].window;
+        cx.update(|cx| reopen(&mut windows.borrow_mut(), cx));
+        cx.run_until_parked();
+        status
+            .update(cx, |this, window, _| {
+                assert!(this.error.contains("#1003"));
+                assert!(window.accessibility_nodes_for_test().any(|(_, node)| {
+                    node.value() == Some(this.error.as_str())
+                        && node.live() == Some(gpui::accesskit::Live::Polite)
+                }));
+            })
+            .unwrap();
+        let (handle, _inputs) = Handle::fixture(1);
+        send.try_send(Output::Opened {
+            replaces: None,
+            handle,
+            errors: async_channel::bounded(1).1,
+            title: "Recovered app".into(),
+            view: None,
+            logs: vec![],
+            quit_on_last_window: true,
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.update(|cx| {
+            let windows = windows.borrow();
+            assert_eq!(windows.owners.len(), 1);
+            assert!(cx.windows() == [windows.owners[&1].window.into()]);
+            assert!(!cx.windows().contains(&status.into()));
+        });
+    }
+
+    #[gpui::test]
+    fn guest_action_failure_is_visible_with_log_closed_and_input_remains_live(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::ui::desktop::zoom;
+        cx.text_system()
+            .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(
+                "../../../../assets/InterVariable.ttf"
+            ))])
+            .unwrap();
+        let (handle, inputs) = Handle::fixture(1);
+        let guest = cx.add_window(|_, cx| AppWindow::new(Some(handle), None, cx));
+        let other = cx.add_window(|_, cx| AppWindow::new(None, None, cx));
+        let mut visual = gpui::VisualTestContext::from_window(guest.into(), cx);
+        guest.update(cx, |_, window, _| window.activate_window()).unwrap();
+        cx.update(|cx| {
+            zoom::configure(
+                crate::store::profile::UI_ZOOM_ONE,
+                Arc::new(|_| Err("read-only fixture".into())),
+                cx,
+            );
+            zoom::change(cx, 1);
+        });
+        cx.run_until_parked();
+        assert!(visual.debug_bounds("visual-bell").is_some());
+        guest
+            .update(cx, |this, window, cx| {
+                assert!(!this.log_open);
+                let bell = text_editor::accessibility_text_ids(this.feedback_id.entity_id()).0;
+                assert!(window.accessibility_nodes_for_test().any(|(id, node)| {
+                    id == bell
+                        && node.live() == Some(gpui::accesskit::Live::Polite)
+                        && node.value().is_some_and(|text| text.contains("Retry zoom or Quit"))
+                }));
+                assert!(this.feedback.as_ref().unwrap().0.contains("Retry zoom or Quit"));
+                assert!(this.logs.back().unwrap().0.contains("read-only fixture"));
+                assert!(this.error.is_empty());
+                this.click(1, cx);
+            })
+            .unwrap();
+        assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::Click);
+        other.read_with(cx, |other, _| assert!(other.feedback.is_none())).unwrap();
+        cx.executor().advance_clock(visual_bell::DURATION);
+        cx.run_until_parked();
+        assert!(visual.debug_bounds("visual-bell").is_none());
+
+        guest.update(cx, |this, _, cx| this.fail("scene error".into(), cx)).unwrap();
+        cx.run_until_parked();
+        guest
+            .update(cx, |this, window, _| {
+                assert!(this.feedback.is_none());
+                assert!(!this.stopped);
+                let diagnostic = native_style(this.window_presentation(), false, false, 1.);
+                assert_eq!(diagnostic.size_constraints.min, size(480., 180.));
+                assert!(diagnostic.resizable);
+                assert_eq!(this.logs.iter().filter(|(line, _)| line == "scene error").count(), 1);
+                // The accessibility tree belongs to the current frame, including cached subtrees.
+                let row = text_editor::accessibility_text_ids(this.error_id.entity_id()).0;
+                let bell = text_editor::accessibility_text_ids(this.feedback_id.entity_id()).0;
+                assert!(window.accessibility_nodes_for_test().any(|(id, node)| {
+                    id == row
+                        && node.live() == Some(gpui::accesskit::Live::Polite)
+                        && node.value().is_some_and(|text| text.contains("Show Log"))
+                }));
+                assert!(!window.accessibility_nodes_for_test().any(|(id, _)| id == bell));
+            })
+            .unwrap();
+        other.read_with(cx, |other, _| assert!(other.feedback.is_none())).unwrap();
+    }
+
+    #[test]
+    fn explicit_default_window_background_tints_dark_titlebar() {
+        let mut guest = playbit_api::context::ContextState::default();
+        let role = ThemeColor::WindowBackground;
+        let color = Theme::light().color(role);
+        let dark = WindowStyle::STANDARD | WindowStyle::THEME_DARK;
+        for (style, specify_color, tinted) in [
+            (dark, false, false),
+            (dark, true, true),
+            (dark | WindowStyle::FULLSIZE_CONTENT, true, false),
+        ] {
+            let mut encoder = guest.view();
+            encoder.window_style(style);
+            if specify_color {
+                encoder.theme(&[playbit_api::ui::ThemeOverride { role, color }]);
+            }
+            encoder.column_start();
+            encoder.column_end();
+            let view = crate::runtime::decode_view(&encoder.finish()).unwrap();
+            let presentation = presentation(Some(&view));
+            assert_eq!(presentation.theme, &Theme::light());
+            let chrome = native_style(presentation, false, false, 1.);
+            assert_eq!(chrome.background, rgba(color.0));
+            assert_eq!(chrome.appearance, Some(gpui::WindowAppearance::Dark));
+            assert_eq!(chrome.transparent_titlebar, tinted);
+        }
+    }
+
+    #[test]
+    fn window_limits_scale_with_ui_zoom_while_the_ratio_stays_constant() {
+        // Pass the guest policy through scene decoding and native style selection.
+        let mut guest = playbit_api::context::ContextState::default();
+        let mut encoder = guest.view();
+        encoder.window_size_constraints(WindowSizeConstraints {
+            min_width: 320.5,
+            min_height: 0.5,
+            max_height: 450.25,
+            aspect_ratio: 1.5,
+            ..Default::default()
+        });
+        encoder.column_start();
+        encoder.column_end();
+        let view = crate::runtime::decode_view(&encoder.finish()).unwrap();
+        let limits = native_style(presentation(Some(&view)), false, false, 1.25).size_constraints;
+        assert_eq!(limits.min, size(400.625, 0.625));
+        assert_eq!(limits.max, size(0., 562.8125));
+        assert_eq!(limits.aspect_ratio, 1.5);
+    }
+
+    #[gpui::test]
+    fn styled_titlebar_drags_only_behind_guest_controls(cx: &mut gpui::TestAppContext) {
+        cx.text_system()
+            .add_fonts(vec![std::borrow::Cow::Borrowed(crate::ui::desktop::UI_FONT_DATA)])
+            .unwrap();
+        let scene = |child| ViewNode::Theme {
+            theme: Theme::light(),
+            window_background_specified: false,
+            window_size_constraints: None,
+            window_style: Some(WindowStyle::STANDARD | WindowStyle::TRANSPARENT_TITLEBAR),
+            child: Box::new(child),
+        };
+        let button = ViewNode::Button {
+            id: 1,
+            label: "Play".into(),
+            style: playbit_api::ui::ButtonStyle::Default,
+            disabled: false,
+        };
+        let window = cx.add_window(|_, cx| {
+            AppWindow::new(None, Some(scene(ViewNode::Column(vec![button]))), cx)
+        });
+        let at = |x, y| gpui::point(px(x), px(y));
+        assert!(cx.window_can_drag_at(window.into(), at(300., 22.)));
+        assert!(!cx.window_can_drag_at(window.into(), at(25., 22.)));
+        assert!(!cx.window_can_drag_at(window.into(), at(300., 65.)));
+        for (extent, id) in
+            [(CanvasExtent::Viewport, 1), (CanvasExtent::Window, 1), (CanvasExtent::Window, 0)]
+        {
+            window
+                .update(cx, |this, _, cx| {
+                    let canvas = ViewNode::Canvas {
+                        id,
+                        width: 500,
+                        height: 200,
+                        frames: playbit_api::ui::CanvasFrames::Static,
+                        clear_color: None,
+                        extent,
+                        items: Vec::new(),
+                    };
+                    assert!(this.apply(scene(canvas), InputAck::default(), cx));
+                })
+                .unwrap();
+            cx.run_until_parked();
+            assert_eq!(
+                cx.window_can_drag_at(window.into(), at(300., 8.)),
+                extent == CanvasExtent::Viewport || id == 0
+            );
+            assert_eq!(cx.window_can_drag_at(window.into(), at(300., 22.)), id == 0);
+            assert!(!cx.window_can_drag_at(window.into(), at(300., 65.)));
+        }
+    }
+
     #[gpui::test]
     fn viewport_canvas_clips_the_previous_scene_during_resize(cx: &mut gpui::TestAppContext) {
         use crate::runtime::{CanvasItem, MenuEntry};
         use playbit_api::ui::{CanvasFrames, CanvasRect, Color};
         cx.set_auto_hide_scrollbars(false);
-        let canvas = |viewport| ViewNode::Canvas {
+        let canvas = |extent| ViewNode::Canvas {
             id: 1,
             width: 600,
             height: 500,
             frames: CanvasFrames::Static,
-            viewport,
+            extent,
+            clear_color: None,
             items: vec![CanvasItem::Rect(CanvasRect {
                 x: 0,
                 y: 0,
@@ -1411,6 +1952,9 @@ mod tests {
         };
         let with_menu = |child| ViewNode::Theme {
             theme: Theme::light(),
+            window_background_specified: false,
+            window_style: None,
+            window_size_constraints: None,
             child: Box::new(ViewNode::ContextMenu {
                 items: vec![MenuEntry::Action {
                     id: 2,
@@ -1423,9 +1967,10 @@ mod tests {
                 child: Box::new(child),
             }),
         };
-        for viewport in [false, true] {
+        for extent in [CanvasExtent::Inline, CanvasExtent::Viewport, CanvasExtent::Window] {
+            let viewport = extent != CanvasExtent::Inline;
             let window =
-                cx.add_window(|_, cx| AppWindow::new(None, Some(with_menu(canvas(viewport))), cx));
+                cx.add_window(|_, cx| AppWindow::new(None, Some(with_menu(canvas(extent))), cx));
             let visual = gpui::VisualTestContext::from_window(window.into(), cx);
             visual.simulate_resize(gpui::size(px(640.), px(540.)));
             cx.run_until_parked();
@@ -1462,15 +2007,30 @@ mod tests {
         let (first, first_inputs) = Handle::fixture(10);
         let (other, other_inputs) = Handle::fixture(20);
         let (errors, first_errors) = async_channel::bounded(1);
-        for (handle, errors) in
-            [(first.clone(), first_errors), (other.clone(), async_channel::bounded(1).1)]
-        {
+        let mut state = playbit_api::context::ContextState::default();
+        let mut encoder = state.view();
+        encoder.window_style(WindowStyle::TITLEBAR | WindowStyle::FULLSIZE_CONTENT);
+        encoder.window_size_constraints(WindowSizeConstraints {
+            min_width: 240.,
+            max_width: 240.,
+            min_height: 8.,
+            max_height: 8.,
+            aspect_ratio: 30.,
+        });
+        encoder.column_start();
+        encoder.text(playbit_api::ui::TextStyle::Body, "Last frame");
+        encoder.column_end();
+        let fixed = crate::runtime::decode_view(&encoder.finish()).unwrap();
+        for (handle, errors, view) in [
+            (first.clone(), first_errors, Some(fixed.clone())),
+            (other.clone(), async_channel::bounded(1).1, None),
+        ] {
             send.try_send(Output::Opened {
                 replaces: None,
                 handle,
                 errors,
                 title: "Fixture".into(),
-                view: None,
+                view,
                 logs: vec![],
                 quit_on_last_window: false,
             })
@@ -1478,6 +2038,42 @@ mod tests {
         }
         cx.run_until_parked();
         assert_eq!(windows.borrow().retained.get(), 2);
+        let first_window = windows.borrow().owners[&10].window;
+        first_window.update(cx, |this, window, _| window.focus(&this.focus)).unwrap();
+        cx.dispatch_action(first_window.into(), ToggleLog);
+        first_window
+            .update(cx, |this, _, cx| {
+                assert!(this.log_open);
+                let style = native_style(this.window_presentation(), false, false, 1.);
+                assert_eq!(
+                    style.size_constraints.min,
+                    size(480., 180. + f64::from(LOG_DRAWER_HEIGHT))
+                );
+                assert_eq!(style.size_constraints.aspect_ratio, 0.);
+                assert!(style.resizable && style.full_size_content);
+                assert!(!style.closable && !this.close(cx));
+            })
+            .unwrap();
+        cx.dispatch_action(first_window.into(), ToggleLog);
+        errors.try_send("Input could not be queued. Try the action again.").unwrap();
+        cx.run_until_parked();
+        first_window
+            .update(cx, |this, _, _| {
+                assert!(this.error.is_empty(), "admission failure leaves the frame clock live");
+                let style = native_style(this.window_presentation(), false, false, 1.);
+                assert!(!style.resizable);
+                assert_eq!(style.size_constraints.max.height, 8.);
+                assert_eq!(style.size_constraints.aspect_ratio, 30.);
+                assert!(this.logs.back().unwrap().0.contains("could not be queued"));
+            })
+            .unwrap();
+        assert_eq!(
+            cx.update(crate::ui::desktop::alert::take_presented),
+            vec![(
+                crate::ui::desktop::alert::Kind::InputRejected,
+                "Input could not be queued. Try the action again.".into()
+            )],
+        );
         send.try_send(Output::ContextUnavailable(10)).unwrap();
         cx.run_until_parked();
         assert_eq!(
@@ -1485,13 +2081,24 @@ mod tests {
             1,
             "retired owner no longer keeps the process alive"
         );
-        let first_window = windows.borrow().owners[&10].window;
         first_window
             .update(cx, |this, _, _| {
                 assert!(this.stopped);
                 assert!(this.recovery_notice.is_none());
             })
             .unwrap();
+        let minimum = first_window
+            .read_with(cx, |this, _| {
+                let chrome = native_style(this.window_presentation(), false, false, 1.);
+                assert!(chrome.resizable && chrome.closable);
+                assert_eq!(chrome.size_constraints.max, size(0., 0.));
+                assert_eq!(chrome.size_constraints.aspect_ratio, 0.);
+                let min = chrome.size_constraints.min;
+                size(px(min.width as f32), px(min.height as f32))
+            })
+            .unwrap();
+        cx.simulate_window_resize(first_window.into(), minimum);
+        cx.run_until_parked();
         assert!(first_inputs.is_closed());
         let other_window = windows.borrow().owners[&20].window;
         other_window.update(cx, |this, _, _| assert!(!this.stopped)).unwrap();
@@ -1531,13 +2138,35 @@ mod tests {
         .unwrap();
         cx.run_until_parked();
         first_window
-            .update(cx, |this, _, _| {
-                assert!(this.view.is_none(), "retired generation cannot adopt late data");
+            .update(cx, |this, window, _| {
+                assert_eq!(this.view.as_ref(), Some(&fixed), "retain the last admitted scene");
                 assert!(
                     this.recovery_notice.is_none(),
                     "retired generation cannot restart its timer"
                 );
-                assert!(this.error.contains("data context is no longer available"));
+                assert!(this.error.contains("reopen the session from your library"));
+                assert!(this.error.contains("Earlier accepted changes may have been saved"));
+                assert_eq!(this.logs.back().unwrap().0, this.error);
+                let footer = text_editor::accessibility_text_ids(this.error_id.entity_id()).0;
+                assert!(window.accessibility_nodes_for_test().any(|(id, node)| {
+                    id == footer
+                        && node.bounds().is_some_and(|bounds| {
+                            bounds.y0 >= 0.
+                                && bounds.y1 > bounds.y0
+                                && bounds.y1 <= minimum.height.to_f64()
+                        })
+                        && node.live() == Some(gpui::accesskit::Live::Polite)
+                        && node.value() == Some(this.error.as_str())
+                }));
+            })
+            .unwrap();
+        cx.update(|cx| {
+            restore_window(windows.borrow_mut().owners.get_mut(&10).unwrap(), None, cx);
+        });
+        first_window
+            .read_with(cx, |this, _| {
+                assert!(this.error.contains("Earlier accepted changes may have been saved"));
+                assert!(this.logs.back().unwrap().0.contains("stopping or has failed"));
             })
             .unwrap();
         assert_eq!(windows.borrow().retained.get(), 1);
@@ -1847,6 +2476,63 @@ mod tests {
     }
 
     #[gpui::test]
+    fn switching_canvas_extent_updates_surface_and_pointer_origin(cx: &mut gpui::TestAppContext) {
+        use crate::ui::desktop::zoom;
+        use playbit_api::abi::{environment::Surface, syscall::PointerInput};
+        cx.update(|cx| {
+            zoom::install(cx);
+            zoom::set_scale(20_000, cx).unwrap();
+        });
+        let canvas = |extent, (width, height)| ViewNode::Canvas {
+            id: 1,
+            width,
+            height,
+            frames: playbit_api::ui::CanvasFrames::Static,
+            extent,
+            clear_color: Some(playbit_api::ui::Color(0x224488ff)),
+            items: vec![],
+        };
+        let (handle, inputs) = Handle::fixture(1);
+        let window = cx.add_window(|_, cx| {
+            AppWindow::new(Some(handle), Some(canvas(CanvasExtent::Viewport, (640, 480))), cx)
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        // The fixture stands in for the guest worker, including releasing its input credit.
+        while inputs.try_recv().is_ok() {}
+        // At 200% the last point falls in a partial logical unit on both axes.
+        visual.simulate_resize(size(px(639.), px(479.)));
+        for (extent, expected, position, local) in [
+            (CanvasExtent::Viewport, (287, 207), (36., 36.), (2, 2)),
+            (CanvasExtent::Window, (320, 240), (638.5, 478.5), (319, 239)),
+            (CanvasExtent::Viewport, (287, 207), (36., 36.), (2, 2)),
+        ] {
+            window
+                .update(cx, |this, _, cx| {
+                    assert!(this.apply(canvas(extent, expected), InputAck::default(), cx));
+                })
+                .unwrap();
+            cx.run_until_parked();
+            let mut geometry = None;
+            while let Ok(message) = inputs.try_recv() {
+                if message.input.kind == EventKind::SurfaceChanged {
+                    geometry = Some(Surface::decode(&message.input.data).unwrap());
+                }
+            }
+            let surface = geometry.unwrap();
+            assert_eq!((surface.width, surface.height), expected);
+            let point = gpui::point(px(position.0), px(position.1));
+            visual.simulate_mouse_down(point, gpui::MouseButton::Left, Default::default());
+            let press = inputs.try_recv().unwrap().input;
+            assert_eq!(press.kind, EventKind::Pointer);
+            let pointer = PointerInput::decode(&press.data).unwrap();
+            assert_eq!((pointer.x, pointer.y), local);
+            visual.simulate_mouse_up(point, gpui::MouseButton::Left, Default::default());
+            assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::Pointer);
+        }
+    }
+
+    #[gpui::test]
     fn canvas_pointer_focus_loss_and_window_close_release_only_accepted_gestures(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -1856,7 +2542,8 @@ mod tests {
             width: 32,
             height: 32,
             frames: playbit_api::ui::CanvasFrames::Continuous,
-            viewport: false,
+            extent: CanvasExtent::Inline,
+            clear_color: None,
             items: vec![],
         };
         let window = cx.update(|cx| {
@@ -1914,7 +2601,8 @@ mod tests {
             width: 32,
             height: 32,
             frames: playbit_api::ui::CanvasFrames::Continuous,
-            viewport: false,
+            extent: CanvasExtent::Inline,
+            clear_color: None,
             items: vec![],
         };
         let (first, first_input) = Handle::fixture(1);
@@ -2369,7 +3057,8 @@ mod tests {
             width: 32,
             height: 32,
             frames,
-            viewport: false,
+            extent: CanvasExtent::Inline,
+            clear_color: None,
             items: vec![],
         };
         assert!(

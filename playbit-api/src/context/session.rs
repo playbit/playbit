@@ -11,6 +11,19 @@ pub struct Session {
     pub id: [u8; 32],
     generation: u32,
 }
+
+/// Metadata for the current session. Anyone with its key secret can use the invitation.
+pub struct SessionInfo {
+    pub internal_id: [u8; 32],
+    pub key_secret: Option<[u8; 16]>,
+}
+
+impl SessionInfo {
+    /// The fixed-width base58 invitation code for a session URL fragment.
+    pub fn code(&self) -> Option<String> {
+        self.key_secret.as_ref().map(invocation::session_code)
+    }
+}
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct Channel(pub u64);
@@ -22,6 +35,26 @@ pub struct ChannelMessage<'a> {
     pub data: &'a [u8],
 }
 impl Context<'_> {
+    /// Read the current session's metadata, or None outside a session.
+    pub fn session_info(&mut self) -> Result<Option<SessionInfo>, Error> {
+        let mut record = invocation::SessionInfo::default();
+        // SAFETY: the initialized record is exclusively borrowed until the call returns.
+        let result = unsafe { invocation::pb_session_info(self.raw.as_ptr(), &mut record) };
+        if result == Error::NotFound as i64 {
+            return Ok(None);
+        }
+        status(result)?;
+        let has_secret = record.flags & invocation::HAS_KEY_SECRET != 0;
+        if !(64..=record.size).contains(&record.written)
+            || record.size != size_of::<invocation::SessionInfo>() as u32
+            || record.reserved != 0
+            || (!has_secret && record.key_secret != [0; 16])
+        {
+            return Err(Error::Internal);
+        }
+        let key_secret = has_secret.then_some(record.key_secret);
+        Ok(Some(SessionInfo { internal_id: record.internal_id, key_secret }))
+    }
     pub fn session(&mut self) -> Result<Session, Error> {
         let identity = self.identity()?;
         // SAFETY: the operation has no pointer arguments and borrows this callback.

@@ -2,10 +2,7 @@
 //! verifies the recorded file seal before attaching its read-only index slot.
 use super::*;
 mod restore;
-use crate::store::{
-    object_contract::Principal,
-    volume_index::{RecoveryCursor, RejectedEntry, RejectedEntryPage},
-};
+use crate::store::volume_index::{RecoveryCursor, RejectedEntry, RejectedEntryPage};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -97,13 +94,13 @@ fn authorize_read(
         snapshot.authorize_retained_read(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(host.account),
+            host.actor(volume),
             entry,
         )
     };
     match authorize(current) {
         Err(crate::store::Error::NotFound(_)) => {
-            policy.authorize(host.account, Permission::Read).map_err(store_error)?;
+            policy.authorize(host.actor(volume), Permission::Read).map_err(store_error)?;
             authorize(retained).map_err(store_error)
         }
         result => result.map_err(store_error),

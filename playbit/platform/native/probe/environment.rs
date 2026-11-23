@@ -10,12 +10,14 @@ unsafe extern "C" {
         seed: u8,
         participant_count: u32,
         capability_count: u32,
+        deadline_count: u32,
     ) -> i32;
     fn probe_environment_layout(index: u32) -> u64;
 }
 struct Fixture {
     seed: u8,
     participant_count: u32,
+    require_deadline: bool,
     calls: u32,
 }
 unsafe extern "C" fn init(_: *mut abi::Context, user: *mut c_void, state: *mut *mut c_void) -> i32 {
@@ -30,7 +32,9 @@ unsafe extern "C" fn turn(raw: *mut abi::Context, state: *mut c_void) -> i32 {
     let fixture = unsafe { &mut *state.cast::<Fixture>() };
     let expected: Vec<_> = playbit_api::abi::syscall::REGISTRY
         .iter()
-        .filter(|(op, _)| op.is_core())
+        .filter(|(op, _)| {
+            op.is_core() && (*op != Opcode::EventPollDeadline || fixture.require_deadline)
+        })
         .map(|(_, name)| *name)
         .collect();
     // SAFETY: the C probe borrows this live context and stack-owned outputs.
@@ -41,6 +45,7 @@ unsafe extern "C" fn turn(raw: *mut abi::Context, state: *mut c_void) -> i32 {
                 fixture.seed,
                 fixture.participant_count,
                 u32::try_from(expected.len()).unwrap(),
+                u32::from(fixture.require_deadline),
             )
         },
         0
@@ -80,6 +85,9 @@ unsafe extern "C" fn turn(raw: *mut abi::Context, state: *mut c_void) -> i32 {
 unsafe fn app(fixture: &mut Fixture) -> NativeInstance {
     let seed = fixture.seed;
     let mut ctx = context(seed);
+    if fixture.require_deadline {
+        ctx.required_capabilities.insert(Opcode::EventPollDeadline.capability().into());
+    }
     ctx.startup_arguments =
         BTreeMap::from([("empty".into(), "".into()), ("mode".into(), "小".into())]);
     ctx.participants.push(playbit::runtime::syscall::Participant {
@@ -135,8 +143,8 @@ fn c_and_rust_metadata_layouts_match() {
 fn c_and_rust_read_isolated_contexts_and_presence_updates() {
     // Two instances carry different assets/participants; retiring one presence
     // list must not change the other, including a rejected stale update.
-    let mut a = Fixture { seed: 10, participant_count: 1, calls: 0 };
-    let mut b = Fixture { seed: 30, participant_count: 1, calls: 0 };
+    let mut a = Fixture { seed: 10, participant_count: 1, require_deadline: false, calls: 0 };
+    let mut b = Fixture { seed: 30, participant_count: 1, require_deadline: true, calls: 0 };
     let mut first = unsafe { app(&mut a) };
     let mut second = unsafe { app(&mut b) };
     first.pump().unwrap();
@@ -152,7 +160,7 @@ fn c_and_rust_read_isolated_contexts_and_presence_updates() {
 #[ignore = "operator CPU diagnostic, excluding rendering and OS launch"]
 fn environment_read_cpu_timing() {
     // Reuse one host instance; each turn exercises both languages and failures.
-    let mut fixture = Fixture { seed: 10, participant_count: 1, calls: 0 };
+    let mut fixture = Fixture { seed: 10, participant_count: 1, require_deadline: false, calls: 0 };
     let mut instance = unsafe { app(&mut fixture) };
     let mut samples = Vec::with_capacity(1000);
     for _ in 0..1000 {

@@ -19,6 +19,7 @@ struct Budget {
 pub struct Credit {
     budget: Arc<Budget>,
     bytes: usize,
+    pub(super) browser_session: Option<[u8; 32]>,
     admission: u64,
     pub(super) read_cancelled: Option<Arc<AtomicBool>>,
 }
@@ -117,7 +118,7 @@ impl Drop for SenderState {
     }
 }
 #[derive(Clone)]
-pub struct RequestSender(Arc<SenderState>);
+pub struct RequestSender(Arc<SenderState>, pub(super) Option<[u8; 32]>);
 
 // Count capacities, not logical lengths. Only requests with an actual GUI
 // caller belong here; adding a new one requires its memory accounting.
@@ -208,7 +209,8 @@ fn retained_bytes(request: &Request) -> Option<usize> {
         | Request::SaveRecovery => 0,
         _ => return None,
     };
-    heap.checked_add(std::mem::size_of::<QueuedRequest>())
+    let session = request.selected_shared_volume().map_or(0, |(_, id)| std::mem::size_of_val(id));
+    heap.checked_add(session)?.checked_add(std::mem::size_of::<QueuedRequest>())
 }
 
 fn permissions_heap(permissions: &crate::store::object_contract::EntryAcl) -> Option<usize> {
@@ -274,17 +276,23 @@ pub fn channel()
     let (send, receive) = async_channel::bounded(MAX_REQUESTS + 1);
     let (errors, error_receive) = async_channel::bounded(1);
     (
-        RequestSender(Arc::new(SenderState {
-            send,
-            errors,
-            budget: Arc::new(Budget::default()),
-            gate: Arc::new(Gate::default()),
-        })),
+        RequestSender(
+            Arc::new(SenderState {
+                send,
+                errors,
+                budget: Arc::new(Budget::default()),
+                gate: Arc::new(Gate::default()),
+            }),
+            None,
+        ),
         receive,
         error_receive,
     )
 }
 impl RequestSender {
+    pub(super) fn for_browser(&self, session: Option<[u8; 32]>) -> Self {
+        Self(self.0.clone(), session)
+    }
     pub fn gate(&self) -> Arc<Gate> {
         self.0.gate.clone()
     }
@@ -326,7 +334,7 @@ impl RequestSender {
     ) -> Result<SizeRead, &'static str> {
         let cancelled = Arc::new(AtomicBool::new(false));
         let admission = self.enqueue_with_cancellation(
-            Request::PayloadSize { volume, entry },
+            Request::PayloadSize { session: self.1.map(Box::new), volume, entry },
             Some(cancelled.clone()),
         )?;
         Ok(SizeRead { admission, cancelled, wake: self.0.send.clone() })
@@ -369,7 +377,13 @@ impl RequestSender {
                     .ok_or("This KV rename exceeds the app window's limits")?,
                 None => bytes,
             };
-            let credit = self.reserve(bytes)?;
+            // The selected ID can coexist in the tool request and its wire frame.
+            let session_bytes = self.1.map_or(0, |_| 2 * crate::identifier::MAX_TEXT);
+            let credit = self.reserve(
+                bytes
+                    .checked_add(session_bytes)
+                    .ok_or("KV session exceeds the app window's limits")?,
+            )?;
             self.0
                 .send
                 .try_send(Message::Data(super::worker_data::QueuedData {
@@ -429,7 +443,13 @@ impl RequestSender {
         }
         let admission = budget.next_admission.fetch_add(1, Ordering::Relaxed);
         assert!(admission < u64::MAX, "management admission identity must not wrap");
-        Ok(Credit { budget: budget.clone(), bytes, admission, read_cancelled: None })
+        Ok(Credit {
+            budget: budget.clone(),
+            bytes,
+            browser_session: self.1,
+            admission,
+            read_cancelled: None,
+        })
     }
     pub(super) fn enqueue(&self, request: Request) -> Result<u64, &'static str> {
         self.enqueue_with_cancellation(request, None)
@@ -474,6 +494,7 @@ mod tests {
         let (send, receive, _) = channel();
         let volume = crate::store::Id::from_bytes([1; 16]);
         send.send(Request::DirectoryEntries {
+            session: None,
             volume,
             target: crate::store::volume_index::DirectoryTarget::Root,
             cut: None,
@@ -481,7 +502,7 @@ mod tests {
             limit: 32,
         })
         .unwrap();
-        send.send(Request::VolumeDetails { volume }).unwrap();
+        send.send(Request::VolumeDetails { session: None, volume }).unwrap();
         assert_eq!(send.0.budget.count.load(Ordering::Acquire), 2);
         for _ in 0..2 {
             let Message::Request(queued) = receive.try_recv().unwrap() else {
@@ -690,6 +711,7 @@ mod tests {
         // Even a heap-free inherited ACL retains the credit-bearing queue item.
         let (send, receive, _) = channel();
         let request = Request::EntryPermissions {
+            session: None,
             volume: crate::store::Id::from_bytes([1; 16]),
             entry: crate::store::EntryId::from_bytes([1; 15]).unwrap(),
             permissions: crate::store::object_contract::EntryAcl::Inherit,
@@ -718,6 +740,7 @@ mod tests {
             + grants.capacity() * std::mem::size_of::<Grant>()
             + grants[0].permissions.capacity() * std::mem::size_of::<Permission>();
         send.send(Request::EntryPermissions {
+            session: None,
             volume: crate::store::Id::from_bytes([1; 16]),
             entry: crate::store::EntryId::from_bytes([1; 15]).unwrap(),
             permissions: EntryAcl::Inherit,

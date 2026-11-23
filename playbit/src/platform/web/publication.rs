@@ -212,7 +212,9 @@ impl Preparation {
                     let policy =
                         DatabasePolicy::read_source(index, database).map_err(store_error)?;
                     policy
-                        .authorize_reader(ReplicaReader::Participant(host.account))
+                        .authorize_reader(ReplicaReader::SessionParticipant(
+                            host.actor(&self.volume),
+                        ))
                         .map_err(store_error)?;
                 }
                 Err(crate::store::Error::NotFound(_)) => {}
@@ -246,7 +248,9 @@ impl Preparation {
         if !empty_bootstrap && let Some((entry, _)) = self.entry_scope {
             match DatabasePolicy::read_source(index, DatabaseId::Entry(entry)) {
                 Ok(selected) => {
-                    let readable = selected.metadata_readable(host.account).map_err(store_error)?;
+                    let readable = selected
+                        .metadata_readable(host.actor(&self.volume))
+                        .map_err(store_error)?;
                     if !readable {
                         if matches!(database, DatabaseId::Entry(_)) {
                             return Err(Error::AccessDenied);
@@ -261,7 +265,7 @@ impl Preparation {
             }
         } else if !empty_bootstrap {
             policy
-                .authorize_reader(ReplicaReader::Participant(host.account))
+                .authorize_reader(ReplicaReader::SessionParticipant(host.actor(&self.volume)))
                 .map_err(store_error)?;
         }
         policy.authorize_reader(ReplicaReader::Service).map_err(store_error)?;
@@ -292,7 +296,10 @@ impl Preparation {
         }
         let policy = self.policy(host, DatabaseId::Index)?;
         if self.entry_scope.is_none() {
-            policy.volume.authorize(host.account, Permission::Read).map_err(store_error)?;
+            policy
+                .volume
+                .authorize(host.actor(&self.volume), Permission::Read)
+                .map_err(store_error)?;
         }
         if self.volume.id == self.session.replica_volume() {
             for volume in host.volumes.borrow().iter() {
@@ -529,7 +536,9 @@ pub extern "C" fn pb_volume_local_backing(length: usize) -> i32 {
         {
             return Err(Error::Unavailable);
         }
-        policy.authorize_reader(ReplicaReader::Participant(host.account)).map_err(store_error)?;
+        policy
+            .authorize_reader(ReplicaReader::SessionParticipant(host.actor(&stage.volume)))
+            .map_err(store_error)?;
         let named = stage.named.borrow();
         if named.as_ref().is_none_or(|named| named.address.database != DatabaseId::Entry(entry)) {
             return Err(Error::InvalidArgument);
@@ -582,7 +591,9 @@ pub extern "C" fn pb_volume_catalog_page(length: usize) -> i32 {
             } else if !entry.deleted {
                 let policy = DatabasePolicy::read_source(index, DatabaseId::Entry(entry.id))
                     .map_err(store_error)?;
-                if policy.authorize_reader(ReplicaReader::Participant(host.account)).is_ok()
+                if policy
+                    .authorize_reader(ReplicaReader::SessionParticipant(host.actor(&stage.volume)))
+                    .is_ok()
                     && policy.authorize_reader(ReplicaReader::Service).is_ok()
                 {
                     backings.push((entry.id, protocol));
@@ -747,12 +758,12 @@ pub extern "C" fn pb_volume_qualify(length: usize) -> i32 {
             if stage.namespace_receipt.borrow().as_ref() != Some(&receipt) {
                 return Err(Error::AccessDenied);
             }
-            namespace::qualify(&stage, host.account, true).map_err(store_error)?;
+            namespace::qualify(&stage, host.actor(&stage.volume), true).map_err(store_error)?;
         } else {
             if stage.namespace_receipt.borrow().is_some() {
                 return Err(Error::AccessDenied);
             }
-            namespace::qualify(&stage, host.account, false).map_err(store_error)?;
+            namespace::qualify(&stage, host.actor(&stage.volume), false).map_err(store_error)?;
         }
         stage.authority_qualified.set(true);
         stage.validated.set(false);
@@ -945,12 +956,12 @@ pub extern "C" fn pb_volume_rejected_page(length: usize) -> i32 {
             if stage.entry_scope.is_some_and(|(selected, _)| selected != entry.id) {
                 continue;
             }
-            if backings::rejected(&stage, host.account, entry.id)?
+            if backings::rejected(&stage, host.actor(&stage.volume), entry.id)?
                 || volume_index::rejected_sources(
                     &current,
                     &stage.accepted_index,
                     &policy,
-                    host.account,
+                    host.actor(&stage.volume),
                     entry.id,
                 )
                 .map_err(store_error)?
@@ -1016,7 +1027,12 @@ fn catalog_entry(
                 } else if !copy_local && !info.deleted {
                     let policy = DatabasePolicy::read_source(index, DatabaseId::Entry(entry))
                         .map_err(store_error)?;
-                    if policy.authorize_reader(ReplicaReader::Participant(host.account)).is_ok() {
+                    if policy
+                        .authorize_reader(ReplicaReader::SessionParticipant(
+                            host.actor(&stage.volume),
+                        ))
+                        .is_ok()
+                    {
                         stage.policy(host, DatabaseId::Entry(entry))?;
                         backings.push((entry, protocol));
                     }

@@ -41,6 +41,17 @@ impl<'a> DataContext<'a> {
     ) -> Result<Self> {
         Self::open_scope(ToolScope::Volume(volume), call)
     }
+    #[cfg(feature = "desktop")]
+    pub(crate) fn open_browser(
+        volume: crate::store::Id,
+        session: Option<[u8; 32]>,
+        call: &'a dyn Fn(Request) -> Result<Reply>,
+    ) -> Result<Self> {
+        let scope = session.map_or(ToolScope::BrowserVolume(volume), |id| {
+            ToolScope::Session(crate::identifier::encode(&id))
+        });
+        Self::open_scope(scope, call)
+    }
     fn open_scope(scope: ToolScope, call: &'a dyn Fn(Request) -> Result<Reply>) -> Result<Self> {
         let Reply::ToolContext { context: context @ Context::Tool { .. } } =
             call(Request::ToolContextOpen { scope })?

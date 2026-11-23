@@ -333,7 +333,11 @@ fn typed_metadata_and_event_reads_borrow_without_consuming_state() {
 fn named_presentation_features_participate_in_admission_and_discovery() {
     // A feature name is independent of opcodes; required unknown features fail
     // before instance creation, while discovery includes admitted feature names.
-    use playbit_api::ui::{CANVAS_PIXELS_FEATURE, CANVAS_VIEWPORT_FEATURE, CanvasFrames};
+    use playbit_api::ui::{
+        CANVAS_CLEAR_FEATURE, CANVAS_PIXELS_FEATURE, CANVAS_VIEWPORT_FEATURE,
+        CANVAS_WINDOW_FEATURE, CanvasExtent, CanvasOptions, Color, WINDOW_SIZE_CONSTRAINTS_FEATURE,
+        WINDOW_STYLE_FEATURE, WindowSizeConstraints, WindowStyle,
+    };
     struct Features(&'static [&'static str]);
     impl Host for Features {
         fn supported_operations(&self) -> &[Opcode] {
@@ -345,14 +349,27 @@ fn named_presentation_features_participate_in_admission_and_discovery() {
     }
     let (baseline, _, _) = fixture();
     let mut context = baseline.context.clone();
-    let features = &[CANVAS_PIXELS_FEATURE, CANVAS_VIEWPORT_FEATURE];
+    let features = &[
+        CANVAS_CLEAR_FEATURE,
+        CANVAS_PIXELS_FEATURE,
+        CANVAS_VIEWPORT_FEATURE,
+        CANVAS_WINDOW_FEATURE,
+        WINDOW_STYLE_FEATURE,
+        WINDOW_SIZE_CONSTRAINTS_FEATURE,
+    ];
     context.required_capabilities.extend(features.iter().copied().map(str::to_owned));
     let mut admitted = State::new(context.clone(), Box::new(Features(features))).unwrap();
     let names = environment::capabilities(&admitted).unwrap();
     assert!(features.iter().all(|feature| names.iter().any(|name| name == feature)));
     let mut view_state = playbit_api::context::ContextState::default();
     let mut view = view_state.view();
-    view.viewport_canvas(0, 240, 160, CanvasFrames::Static, &[]);
+    view.canvas_with_options(
+        0,
+        240,
+        160,
+        CanvasOptions { extent: CanvasExtent::Viewport, ..Default::default() },
+        &[],
+    );
     let scene = view.finish();
     assert_eq!(control::view_submit(&mut admitted, &scene), Ok(()));
 
@@ -363,6 +380,40 @@ fn named_presentation_features_participate_in_admission_and_discovery() {
     ));
     let mut ordinary = State::new(baseline.context.clone(), Box::new(pixels_only)).unwrap();
     assert_eq!(control::view_submit(&mut ordinary, &scene), Err(HostError::Unsupported));
+
+    // Each feature is checked even when it was omitted from the manifest.
+    let mut view = view_state.view();
+    view.column_start();
+    view.column_end();
+    let previous = view.finish();
+    let mut view = view_state.view();
+    view.window_style(WindowStyle::STANDARD);
+    view.window_size_constraints(WindowSizeConstraints { min_width: 240.5, ..Default::default() });
+    view.canvas_with_options(
+        0,
+        240,
+        160,
+        CanvasOptions {
+            extent: CanvasExtent::Window,
+            clear_color: Some(Color(0)),
+            ..Default::default()
+        },
+        &[],
+    );
+    let styled = view.finish();
+    assert_eq!(control::view_submit(&mut admitted, &styled), Ok(()));
+    for supported in [
+        &[CANVAS_WINDOW_FEATURE, CANVAS_CLEAR_FEATURE, WINDOW_SIZE_CONSTRAINTS_FEATURE][..],
+        &[WINDOW_STYLE_FEATURE, CANVAS_CLEAR_FEATURE, WINDOW_SIZE_CONSTRAINTS_FEATURE],
+        &[WINDOW_STYLE_FEATURE, CANVAS_WINDOW_FEATURE, WINDOW_SIZE_CONSTRAINTS_FEATURE],
+        &[WINDOW_STYLE_FEATURE, CANVAS_WINDOW_FEATURE, CANVAS_CLEAR_FEATURE],
+    ] {
+        let mut partial =
+            State::new(baseline.context.clone(), Box::new(Features(supported))).unwrap();
+        assert_eq!(control::view_submit(&mut partial, &previous), Ok(()));
+        assert_eq!(control::view_submit(&mut partial, &styled), Err(HostError::Unsupported));
+        assert_eq!(partial.view_bytes.as_deref(), Some(previous.as_slice()));
+    }
 }
 
 #[path = "limit_tests.rs"]

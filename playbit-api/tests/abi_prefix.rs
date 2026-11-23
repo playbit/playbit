@@ -1038,3 +1038,16 @@ const _: () = prefix::<abi::bloblog::Blob>(
         ("length", "u32", 16, 4),
     ],
 );
+
+const _: () = prefix::<abi::session::SessionInfo>(
+    64,
+    4,
+    &[
+        ("size", "u32", 0, 4),
+        ("written", "u32", 4, 4),
+        ("flags", "u32", 8, 4),
+        ("reserved", "u32", 12, 4),
+        ("internal_id", "[u8; 32]", 16, 32),
+        ("key_secret", "[u8; 16]", 48, 16),
+    ],
+);

@@ -20,6 +20,7 @@ fn native_bloblog_admits_caller_strides_and_rejects_unknown_semantics_before_app
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const Context).cast_mut().cast();
     let volume = playbit_api::abi::data::VolumeHandle::new(volume.generation, volume.slot);
@@ -116,6 +117,7 @@ fn native_bloblog_owns_inputs_and_short_take_never_repeats_append() {
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const Context).cast_mut().cast();
     let mut sdk_state = playbit_api::context::ContextState::default();
@@ -192,6 +194,7 @@ fn native_bloblog_rejects_bad_inputs_and_authority_without_copying_output() {
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const Context).cast_mut().cast();
     let mut sdk_state = playbit_api::context::ContextState::default();

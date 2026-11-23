@@ -10,7 +10,7 @@ pub extern "C" fn probe_base() -> u32 {
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn probe_layout(index: u32) -> u32 {
-    const LAYOUT: [u32; 684] = [
+    const LAYOUT: [u32; 699] = [
     size_of::<playbit_api::abi::data::EntryHandle>() as u32,
     align_of::<playbit_api::abi::data::EntryHandle>() as u32,
     5,
@@ -695,6 +695,21 @@ pub extern "C" fn probe_layout(index: u32) -> u32 {
     <playbit_api::abi::bloblog::Blob as Record>::FIELDS[2].width,
     core::mem::offset_of!(playbit_api::abi::bloblog::Blob, length) as u32,
     <playbit_api::abi::bloblog::Blob as Record>::FIELDS[3].width,
+    size_of::<playbit_api::abi::session::SessionInfo>() as u32,
+    align_of::<playbit_api::abi::session::SessionInfo>() as u32,
+    6,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, size) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[0].width,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, written) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[1].width,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, flags) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[2].width,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, reserved) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[3].width,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, internal_id) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[4].width,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, key_secret) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[5].width,
 ];
     LAYOUT.get(index as usize).copied().unwrap_or(u32::MAX)
 }
@@ -720,8 +735,19 @@ pub unsafe extern "C" fn probe_imports() -> u32 {
     {
         return 3;
     }
+    if unsafe {
+        operations::pb_event_poll_deadline(
+            ctx, (base + 128) as _, (base + 256) as _, 0x80000003, 0x8877665544332204,
+        )
+    } != -7
+    {
+        return 114;
+    }
     if unsafe { operations::pb_identity(ctx, (base + 128) as _) } != -7 {
         return 4;
+    }
+    if unsafe { playbit_api::abi::session::pb_session_info(ctx, (base + 128) as _) } != -7 {
+        return 0x163;
     }
     if unsafe { operations::pb_wake_after(ctx, 0x80000000u32 + 1) } != -7 {
         return 5;

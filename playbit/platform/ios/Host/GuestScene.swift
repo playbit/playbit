@@ -23,6 +23,7 @@ struct GuestScene: Equatable {
     var width: UInt32
     var height: UInt32
     var frames: UInt32
+    var clearColor: UInt32?
     var items: [CanvasItem]
 
     // All borrowed spans are copied before EngineHost releases the reply.
@@ -61,6 +62,7 @@ struct GuestScene: Equatable {
             disabled: node.disabled != 0, multiline: node.multiline != 0, readOnly: node.read_only != 0,
             text: String(decoding: UnsafeBufferPointer(start: node.text, count: node.text_len), as: UTF8.self),
             placeholder: String(decoding: UnsafeBufferPointer(start: node.placeholder, count: node.placeholder_len), as: UTF8.self),
-            children: children, width: node.width, height: node.height, frames: node.frames, items: items)
+            children: children, width: node.width, height: node.height, frames: node.frames,
+            clearColor: node.has_clear_color != 0 ? node.clear_color : nil, items: items)
     }
 }

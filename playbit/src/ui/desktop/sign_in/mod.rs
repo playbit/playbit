@@ -4,7 +4,7 @@ mod agreement;
 pub mod flow;
 mod progress;
 pub mod validation;
-use super::{controls, scrollbar::Scrollbars, text_editor::TextEditor, zoom};
+use super::{controls, scrollbar::Scrollbars, text_editor::TextEditor, visual_bell, zoom};
 use crate::release_channel::ReleaseChannel;
 use flow::{Flow, Reply, Step, Ticket, Work};
 use gpui::{App, Context, Entity, Focusable, Window, WindowHandle, div, prelude::*, px};
@@ -18,6 +18,7 @@ pub type Dispatch = Rc<dyn Fn(Work, &mut App) -> Result<(), String>>;
 pub type Complete = Rc<dyn Fn(&mut App)>;
 pub type SelectChannel =
     Rc<dyn Fn(crate::release_channel::ReleaseChannel, &mut App) -> Result<(), String>>;
+const FEEDBACK_TEXT: usize = 4;
 pub struct SignIn {
     pub flow: Flow,
     email: Entity<TextEditor>,
@@ -47,6 +48,7 @@ pub struct SignIn {
     focus_step: Option<Step>,
     focus_error: bool,
     finished: bool,
+    feedback: Option<(String, gpui::Task<()>)>,
     text_ids: [Entity<()>; 8],
 }
 fn theme() -> Theme {
@@ -101,6 +103,7 @@ pub fn open(
             ..Default::default()
         },
         |window, cx| {
+            super::appearance::set_light_panel(window);
             zoom::apply(window, cx);
             window.on_window_should_close(cx, |_, _| false);
             view
@@ -318,6 +321,7 @@ impl SignIn {
             focus_step: None,
             focus_error: false,
             finished: false,
+            feedback: None,
             text_ids: std::array::from_fn(|_| cx.new(|_| ())),
         }
     }
@@ -328,7 +332,7 @@ impl SignIn {
             gpui::canvas(
                 move |bounds, window, _| {
                     let mut node = super::text_accessibility_node(&text, index == 0, bounds);
-                    if index == 1 {
+                    if index == 1 || index == FEEDBACK_TEXT {
                         node.set_live(gpui::accesskit::Live::Polite);
                     }
                     window.insert_accessibility_node(id, node, false, None);
@@ -338,6 +342,21 @@ impl SignIn {
             .absolute()
             .size_full(),
         )
+    }
+    pub(crate) fn show_feedback(&mut self, message: &str, cx: &mut Context<Self>) {
+        let dismiss = cx.spawn(async move |view, cx| {
+            cx.background_executor().timer(visual_bell::DURATION).await;
+            let _ = view.update(cx, |view, cx| {
+                view.feedback = None;
+                cx.notify();
+            });
+        });
+        self.feedback = Some((visual_bell::message(message), dismiss));
+        cx.notify();
+    }
+    fn render_feedback(&self) -> Option<gpui::Div> {
+        let (message, _) = self.feedback.as_ref()?;
+        Some(visual_bell::render("sign-in-warning", self.text(FEEDBACK_TEXT, message.clone())))
     }
     fn send(&mut self, work: Option<Work>, cx: &mut Context<Self>) {
         let work = work
@@ -879,7 +898,10 @@ impl Render for SignIn {
                     .top((size.height - sp(360.)) / 2.)
                     .w(sp(400.))
                     .h(sp(360.))
-                    .child(
+                    .child(if let Some(bell) = self.render_feedback() {
+                        // Use the logo's space so every form action stays available.
+                        bell.top(sp(46.)).bottom(gpui::Length::Auto).into_any_element()
+                    } else {
                         // The 4× export includes the shadows around the optical frame.
                         gpui::img(
                             artwork()[2 + usize::from(self.flow.field_error.is_some())].clone(),
@@ -888,8 +910,9 @@ impl Render for SignIn {
                         .left(sp(176.))
                         .top(sp(34.))
                         .w(sp(48.))
-                        .h(sp(40.)),
-                    )
+                        .h(sp(40.))
+                        .into_any_element()
+                    })
                     .child(
                         div()
                             .absolute()

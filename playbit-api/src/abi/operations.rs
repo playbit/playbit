@@ -116,6 +116,29 @@ pub unsafe fn pb_event_poll(
     }
 }
 
+/// Poll one event, waiting until the absolute monotonic deadline in nanoseconds.
+/// Zero polls immediately and `u64::MAX` waits indefinitely. An empty queue at
+/// the deadline returns `WouldBlock`; a queued event takes precedence.
+/// # Safety
+/// Context and both exclusive output spans must remain valid until this call returns.
+#[inline]
+pub unsafe fn pb_event_poll_deadline(
+    context: *mut Context,
+    event: *mut Event,
+    data: *mut u8,
+    capacity: u32,
+    deadline_ns: u64,
+) -> i64 {
+    // SAFETY: the caller lends disjoint, valid outputs for the entire poll.
+    unsafe {
+        super::invocation::invoke(
+            context,
+            super::syscall::Opcode::EventPollDeadline as u32,
+            [event as usize as u64, data as usize as u64, capacity as u64, deadline_ns, 0, 0],
+        )
+    }
+}
+
 /// # Safety
 /// Context and all pointers obey the borrowed operation contract in playbit/sys/abi.h.
 #[inline]

@@ -596,7 +596,7 @@ impl ArchivedReply {
             Q::DuplicateEntry { address } => {
                 matches!(self, Self::Diagnostic(reply) if matches!(reply.as_ref(), ArchivedDiagnosticReply::EntryDuplicated { source, .. } if matches_address(source, address)))
             }
-            Q::PayloadSize { volume, entry } => {
+            Q::PayloadSize { volume, entry, .. } => {
                 matches!(self, Self::Diagnostic(reply) if matches!(reply.as_ref(), ArchivedDiagnosticReply::PayloadSize { volume: found, entry: got, .. }
                     if found.0 == *volume.as_bytes()
                     && got.as_ref().map(|id| id.as_bytes()) == entry.as_ref().map(|id| id.as_bytes())))
@@ -816,15 +816,15 @@ impl ArchivedReply {
                     && cut_requested.as_ref().as_ref().map(|value| value.to_native()) == *cut
                     && cursor.as_ref().as_ref().map(|id| *id.as_bytes()) == after.map(|id| *id.as_bytes()))
             }
-            Q::VolumeDetails { volume } => {
+            Q::VolumeDetails { volume, .. } => {
                 matches!(self, Self::VolumeDetails { details }
                     if details.volume.id.0 == *volume.as_bytes())
             }
-            Q::EntryDetails { volume, entry } => {
+            Q::EntryDetails { volume, entry, .. } => {
                 matches!(self, Self::EntryDetails { volume: got, details }
                     if got.0 == *volume.as_bytes() && details.entry.id.as_bytes() == entry.as_bytes())
             }
-            Q::KvRename { mutation } => {
+            Q::KvRename { mutation, .. } => {
                 let super::KvRenameMutation { address, old_key, new_key, .. } = mutation.as_ref();
                 matches!(self, Self::KvRenamed { receipt }
                     if matches_address(&receipt.address, address)
@@ -850,7 +850,7 @@ impl ArchivedReply {
                 matches!(self, Self::VolumeEntry { volume: got, .. } if got.0 == *volume.as_bytes())
             }
             Q::CreateDatabaseIn { volume, parent, name, .. }
-            | Q::BloblogCreateIn { volume, parent, name } => {
+            | Q::BloblogCreateIn { volume, parent, name, .. } => {
                 matches!(self, Self::VolumeEntry { volume: got, entry }
                     if got.0 == *volume.as_bytes()
                     && entry.info.namespace.parent.as_ref().is_some_and(|got| got.as_bytes() == parent.as_bytes())
@@ -858,7 +858,7 @@ impl ArchivedReply {
             }
             Q::RenameEntry { volume, entry, .. }
             | Q::RenameEntryComponent { volume, entry, .. }
-            | Q::RemoveEntry { volume, entry } => {
+            | Q::RemoveEntry { volume, entry, .. } => {
                 matches!(self, Self::EntryChanged { volume: got_volume, entry: got_entry }
                     if got_volume.0 == *volume.as_bytes() && got_entry.as_bytes() == entry.as_bytes())
             }
@@ -957,11 +957,11 @@ impl ArchivedReply {
                 if matches_address(got, database)),
             Q::CreateObject { database, type_id, .. } => matches!(self, Self::ObjectCreated(result)
                 if matches_address(&result.database, database) && result.object.type_id.0 == *type_id.as_bytes()),
-            Q::ReadObject { database, object } | Q::EditObject { database, object, .. } => {
+            Q::ReadObject { database, object, .. } | Q::EditObject { database, object, .. } => {
                 matches!(self, Self::Object(result) if matches_address(&result.database, database)
                     && result.object.object_id.0 == *object.as_bytes())
             }
-            Q::RemoveObject { database, object } => matches!(self,
+            Q::RemoveObject { database, object, .. } => matches!(self,
                 Self::ObjectRemoved { database: got, object: id } if matches_address(got, database)
                     && id.0 == *object.as_bytes()),
             Q::Objects { database, type_id, after, .. } => matches!(self, Self::Objects(result)
@@ -1102,6 +1102,7 @@ mod tests {
             (
                 Reply::VolumeEntry { volume, entry: database },
                 Request::CreateDatabaseIn {
+                    session: None,
                     volume,
                     parent,
                     name: "Settings".into(),
@@ -1110,7 +1111,7 @@ mod tests {
             ),
             (
                 Reply::VolumeEntry { volume, entry: log },
-                Request::BloblogCreateIn { volume, parent, name: "Events".into() },
+                Request::BloblogCreateIn { session: None, volume, parent, name: "Events".into() },
             ),
             (
                 Reply::Diagnostic(DiagnosticReply::FileCreatedIn {
@@ -1120,6 +1121,7 @@ mod tests {
                     entry: blob,
                 }),
                 Request::FileCreateIn {
+                    session: None,
                     volume,
                     parent,
                     name: "Image".into(),
@@ -1168,8 +1170,12 @@ mod tests {
         };
         let bytes = codec::encode(&reply, codec::MAX_ARCHIVE).unwrap();
         let archived = codec::access::<ArchivedReply>(&bytes).unwrap();
-        assert!(archived.matches_request(&crate::engine::Request::VolumeDetails { volume }));
+        assert!(
+            archived
+                .matches_request(&crate::engine::Request::VolumeDetails { session: None, volume })
+        );
         assert!(!archived.matches_request(&crate::engine::Request::VolumeDetails {
+            session: None,
             volume: Id::from_bytes([3; 16]),
         }));
         let first = crate::store::EntryId::from_bytes([4; 15]).unwrap();
@@ -1179,14 +1185,18 @@ mod tests {
                 Reply::Diagnostic(DiagnosticReply::PayloadSize { volume, entry, bytes: 42 });
             let bytes = codec::encode(&reply, codec::MAX_ARCHIVE).unwrap();
             let archived = codec::access::<ArchivedReply>(&bytes).unwrap();
-            assert!(
-                archived.matches_request(&crate::engine::Request::PayloadSize { volume, entry })
-            );
+            assert!(archived.matches_request(&crate::engine::Request::PayloadSize {
+                session: None,
+                volume,
+                entry
+            }));
             assert!(!archived.matches_request(&crate::engine::Request::PayloadSize {
+                session: None,
                 volume,
                 entry: Some(other)
             }));
             assert!(!archived.matches_request(&crate::engine::Request::PayloadSize {
+                session: None,
                 volume: Id::from_bytes([3; 16]),
                 entry
             }));
@@ -1219,6 +1229,7 @@ mod tests {
             let bytes = codec::encode(&reply, codec::MAX_ARCHIVE).unwrap();
             let archived = codec::access::<ArchivedReply>(&bytes).unwrap();
             let request = |volume, target, cut, after| crate::engine::Request::DirectoryEntries {
+                session: None,
                 volume,
                 target,
                 cut,
@@ -1254,6 +1265,7 @@ mod tests {
         let bytes = codec::encode(&reply, codec::MAX_ARCHIVE).unwrap();
         let reply = codec::access::<ArchivedReply>(&bytes).unwrap();
         assert!(reply.matches_request(&crate::engine::Request::RenameEntryComponent {
+            session: None,
             volume,
             entry,
             name: "name".into(),
@@ -1263,6 +1275,7 @@ mod tests {
             (volume, crate::store::EntryId::from_bytes([4; 15]).unwrap()),
         ] {
             assert!(!reply.matches_request(&crate::engine::Request::RenameEntryComponent {
+                session: None,
                 volume,
                 entry,
                 name: "name".into(),
@@ -1482,10 +1495,11 @@ mod tests {
             )
             .unwrap();
         let database = crate::store::volume_index::EntryAddress { volume, entry: entry.id };
-        check(&mut engine, Request::Schema { database, schema: schema.clone() });
+        check(&mut engine, Request::Schema { session: None, database, schema: schema.clone() });
         check(
             &mut engine,
             Request::CreateObject {
+                session: None,
                 database,
                 type_id: Id::from_bytes([1; 16]),
                 fields: std::collections::BTreeMap::new(),
@@ -1493,11 +1507,18 @@ mod tests {
         );
         check(
             &mut engine,
-            Request::Objects { database, type_id: Id::from_bytes([1; 16]), after: None, limit: 64 },
+            Request::Objects {
+                session: None,
+                database,
+                type_id: Id::from_bytes([1; 16]),
+                after: None,
+                limit: 64,
+            },
         );
-        let Reply::VolumeEntry { .. } =
-            check(&mut engine, Request::BloblogCreate { volume, name: "edits".into() })
-        else {
+        let Reply::VolumeEntry { .. } = check(
+            &mut engine,
+            Request::BloblogCreate { session: None, volume, name: "edits".into() },
+        ) else {
             panic!("entry");
         };
         check(&mut engine, Request::CacheBudget { bytes: 1024 * 1024 });

@@ -1,6 +1,7 @@
 import { validId } from './identifier.ts';
 import { boundedGuest } from "./wasm-module.ts";
-import { bindOperations, validateEntryPoint } from "./guest-imports.ts";
+import { bindOperations, promisingMain, supportsDeadline, validateEntryPoint } from "./guest-imports.ts";
+import { GuestDeadline } from "./guest-deadline.ts";
 import type { GuestOperations } from "./guest-imports.ts";
 
 // AP's session selector as stored and as resolved; which id is present depends on kind.
@@ -11,7 +12,7 @@ export interface SessionResolution { revision: number; selector: SessionSelector
 export interface SessionDescriptor { id: string; selector: SessionSelector; resolved_build_id: string }
 export interface GuestExports extends WebAssembly.Exports { memory: WebAssembly.Memory; pb_main: () => void }
 // An instance prepareGuest has verified: one memory export and a nullary pb_main.
-export type GuestInstance = WebAssembly.Instance & { exports: GuestExports };
+export type GuestInstance = WebAssembly.Instance & { exports: GuestExports; deadline?: GuestDeadline };
 
 // Only AP ResolveSession can authorize a new runtime version. An app record
 // alone cannot change a session or its immutable identity.
@@ -29,12 +30,19 @@ export function resolvedSession<S extends SessionDescriptor>(current: S, resolut
 
 // Instantiation has no guest entry point side effects: boundedGuest rejects
 // implicit starts. The running instance is replaced only after these checks.
-export async function prepareGuest(wasm: Uint8Array, operations: GuestOperations): Promise<GuestInstance> {
+export async function prepareGuest(wasm: Uint8Array, operations: GuestOperations, deadline = false): Promise<GuestInstance> {
+    if (deadline && (!supportsDeadline() || !operations.pb_event_poll_deadline)) {
+        throw new Error("This browser cannot run apps requiring event.poll.deadline");
+    }
     const module = await WebAssembly.compile(boundedGuest(wasm));
-    const candidate = await WebAssembly.instantiate(module, { playbit: bindOperations(module, operations) });
+    const candidate = await WebAssembly.instantiate(module, { playbit: bindOperations(module, operations, deadline) });
     validateEntryPoint(candidate.exports.pb_main);
     if (!(candidate.exports.memory instanceof WebAssembly.Memory) || typeof candidate.exports.pb_main !== "function"
         || candidate.exports.pb_main.length !== 0 || candidate.exports.memory.buffer.byteLength > 16 * 1024 * 1024) throw new Error("This app cannot run on the web. Open it in Playbit");
     // The checks above establish exactly the shape GuestInstance names.
-    return candidate as GuestInstance;
+    const guest = candidate as GuestInstance;
+    if (deadline) {
+        guest.deadline = new GuestDeadline(promisingMain(guest.exports.pb_main));
+    }
+    return guest;
 }

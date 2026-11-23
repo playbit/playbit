@@ -77,6 +77,10 @@ pub(super) struct State {
 }
 
 impl State {
+    pub(super) fn sessions(&self) -> &[Session] {
+        &self.catalog
+    }
+
     pub(super) fn imported_apps(&self) -> &[crate::store::ImportedApp] {
         &self.imported
     }
@@ -207,6 +211,12 @@ impl Shell {
             return;
         }
         self.applications.catalog = sessions;
+        if let Some(browser) = &self.browser {
+            browser.update(cx, |browser, cx| {
+                browser.set_session_shared_volumes(self.applications.sessions());
+                cx.notify();
+            });
+        }
         self.applications.rebuild(&self.sessions, &self.recent_sessions);
         if let Some(session) = self
             .selected_session_id()

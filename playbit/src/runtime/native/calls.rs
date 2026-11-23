@@ -154,6 +154,22 @@ pub(super) unsafe extern "C" fn pb_identity(
     }
 }
 /// # Safety
+/// Context and writable session info obey playbit/sys/abi.h.
+pub(super) unsafe fn pb_session_info(
+    context: *mut abi::Context,
+    output: *mut playbit_api::abi::session::SessionInfo,
+) -> i64 {
+    // SAFETY: the native caller lends an initialized, writable output record.
+    unsafe {
+        with_context(context, |state| {
+            super::record::region(output, true)?;
+            playbit_api::abi::record::clear_native(output)?;
+            super::record::write(output, environment::session_info(state)?)?;
+            Ok(0)
+        })
+    }
+}
+/// # Safety
 /// Context must be a live callback borrow as specified in playbit/sys/abi.h.
 pub(super) unsafe extern "C" fn pb_wake_after(context: *mut abi::Context, delay_ms: u32) -> i64 {
     // SAFETY: this call borrows only the context, with no caller buffers.
@@ -215,6 +231,7 @@ mod tests {
             state: std::sync::Mutex::new(state),
             owner: std::thread::current().id(),
             active: std::sync::atomic::AtomicBool::new(true),
+            poll_yielder: Default::default(),
         };
         let raw = (&context as *const super::super::Context).cast_mut().cast();
         let mut sdk_state = playbit_api::context::ContextState::default();
@@ -264,6 +281,7 @@ mod tests {
             state: std::sync::Mutex::new(state),
             owner: std::thread::current().id(),
             active: std::sync::atomic::AtomicBool::new(true),
+            poll_yielder: Default::default(),
         };
         let raw = (&context as *const super::super::Context).cast_mut().cast();
         let mut sdk_state = playbit_api::context::ContextState::default();

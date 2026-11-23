@@ -161,7 +161,9 @@ unsafe fn dispatch_non_file(context: *mut abi::Context, opcode: Opcode, slots: [
             | Opcode::Log
             | Opcode::ViewSubmit
             | Opcode::EventPoll
+            | Opcode::EventPollDeadline
             | Opcode::Identity
+            | Opcode::SessionInfo
             | Opcode::WakeAfter
             | Opcode::UpdateDefer => platform_call(context, opcode, a, b, c, d, e),
             _ => unreachable!("File opcodes were dispatched separately"),
@@ -328,7 +330,11 @@ unsafe fn platform_call(
             Opcode::EventPoll => {
                 calls::pb_event_poll(context, a as usize as _, b as usize as _, c as u32)
             }
+            Opcode::EventPollDeadline => {
+                super::deadline::poll(context, a as usize as _, b as usize as _, c as u32, d)
+            }
             Opcode::Identity => calls::pb_identity(context, a as usize as _),
+            Opcode::SessionInfo => calls::pb_session_info(context, a as usize as _),
             Opcode::WakeAfter => calls::pb_wake_after(context, a as u32),
             Opcode::UpdateDefer => calls::pb_update_defer(context, a),
             _ => unreachable!("platform opcode group"),

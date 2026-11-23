@@ -103,7 +103,18 @@ pub extern "C" fn pb_package(slot: u32) -> i32 {
             .iter()
             .filter(|feature| !operations::supports(feature))
             .collect();
-        let result = serde_json::to_vec(&serde_json::json!({"app_id":package.app_id(),"name": package.name(), "build_id": package.id().map_err(map_error)?, "offset": executable.offset, "length": executable.length, "publisher": certificate.map(|c| c.publisher), "signer": certificate.map(|c| c.signer), "unsupported_host_features": unsupported})).map_err(map_error)?;
+        let result = serde_json::to_vec(&serde_json::json!({
+            "app_id": package.app_id(),
+            "name": package.name(),
+            "build_id": package.id().map_err(map_error)?,
+            "offset": executable.offset,
+            "length": executable.length,
+            "publisher": certificate.map(|c| c.publisher),
+            "signer": certificate.map(|c| c.signer),
+            "required_host_features": package.required_host_features(),
+            "unsupported_host_features": unsupported,
+        }))
+        .map_err(map_error)?;
         candidates.insert(slot, Candidate::Ready(Box::new(package)));
         Ok(Some(result))
     })();

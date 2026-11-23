@@ -17,6 +17,10 @@ let () =
   assert ((frame ~density:2. ~w:505 ~h:400).zoom = 1);
   assert ((frame ~density:2. ~w:506 ~h:400).zoom = 2);
   assert ((frame ~density:1. ~w:320 ~h:400).sample = 2);
+  let large = frame ~density:2. ~w:15360 ~h:9000 in
+  assert (large.box.w > 4096 && large.texels_w = 506 && large.texels_h = 294);
+  let fractional = frame ~density:2.75 ~w:16777216 ~h:16777216 in
+  assert (fractional.texels_w <= 509 && fractional.texels_h <= 297);
   List.iter (fun density ->
     for width = 200 to 1100 do
       ignore (frame ~density ~w:width ~h:512)

@@ -78,17 +78,22 @@ impl Browser {
             return false;
         }
         let details = self.details.as_ref().filter(|details| details.entry.id == id);
+        let account_owner = self.signed_in_account == Some(self.volume.owner);
+        let in_finder = self.finder_volume && account_owner;
         match action {
             RENAME | DELETE => details.is_none_or(|details| details.writable),
-            DUPLICATE => details.is_none_or(|details| {
-                details.readable
-                    && !details.schema_pending
-                    && (details.backing_ready
-                        || matches!(details.entry.info.kind, EntryKind::Directory {}))
-            }),
-            REVEAL => self.signed_in_account.is_some(),
+            DUPLICATE => {
+                (self.shared_session().is_none() || account_owner)
+                    && details.is_none_or(|details| {
+                        details.readable
+                            && !details.schema_pending
+                            && (details.backing_ready
+                                || matches!(details.entry.info.kind, EntryKind::Directory {}))
+                    })
+            }
+            REVEAL => in_finder,
             OPEN => {
-                self.signed_in_account.is_some()
+                in_finder
                     && self
                         .menu_entry(id)
                         .is_some_and(|entry| entry.kind == crate::store::EntryType::Blob)
@@ -222,7 +227,11 @@ impl Browser {
                     if !this.show_volume(cx) {
                         return;
                     }
-                    this.start_file(Request::RemoveEntry { volume, entry: id });
+                    this.start_file(Request::RemoveEntry {
+                        session: this.request_session(),
+                        volume,
+                        entry: id,
+                    });
                 }
                 cx.notify();
             });
@@ -253,6 +262,32 @@ mod tests {
                 .collect(),
             next: None,
         }
+    }
+
+    #[gpui::test]
+    fn shared_entry_menu_uses_the_actual_finder_and_copy_domains(cx: &mut gpui::TestAppContext) {
+        let (send, requests, _) = worker_queue::channel();
+        let shared = Volume { personal: false, share_key_with_service: true, ..volume(1) };
+        let owner = shared.owner;
+        let browser = cx.new(|cx| Browser::new(shared, send.for_browser(Some([1; 32])), cx));
+        browser.update(cx, |browser, cx| {
+            let mut catalog = page();
+            catalog.entries[0].kind = crate::store::EntryType::Blob;
+            catalog.entries[0].protocol = None;
+            let id = catalog.entries[0].id;
+            browser.fixture_catalog(catalog);
+            browser.set_account(Id::from_bytes([2; 16]), None);
+            for action in [OPEN, REVEAL, DUPLICATE] {
+                assert!(!browser.entry_action_enabled(id, action, cx));
+            }
+            browser.set_account(owner, None);
+            assert!(!browser.entry_action_enabled(id, OPEN, cx));
+            assert!(!browser.entry_action_enabled(id, REVEAL, cx));
+            assert!(browser.entry_action_enabled(id, DUPLICATE, cx));
+            while requests.try_recv().is_ok() {}
+            browser.entry_context_action(browser.volume.id, id, DUPLICATE, cx);
+            assert!(matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest { request: Request::DuplicateEntry { address }, .. }) if address.entry == id));
+        });
     }
 
     #[gpui::test]
@@ -335,7 +370,7 @@ mod tests {
         cx.simulate_prompt_answer("Delete");
         cx.run_until_parked();
         assert!(matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest {
-            request: Request::RemoveEntry { volume: got_volume, entry: got_entry }, ..
+            request: Request::RemoveEntry { volume: got_volume, entry: got_entry, .. }, ..
         }) if got_volume == volume(1).id && got_entry == entry(2).id));
         assert!(requests.try_recv().is_err());
         window
@@ -377,7 +412,8 @@ mod tests {
             this.fixture_namespace(original.entries.clone());
             this.selected = None;
             let original_catalog = this.catalog.clone();
-            let request = Request::RemoveEntry { volume: volume(1).id, entry: entry(1).id };
+            let request =
+                Request::RemoveEntry { session: None, volume: volume(1).id, entry: entry(1).id };
             this.start_file(request.clone());
             assert!(this.entry_is_hidden(entry(1).id));
             assert!(this.entry_is_hidden(entry(2).id));

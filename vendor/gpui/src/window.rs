@@ -518,6 +518,10 @@ pub(crate) struct HitTest {
 pub enum WindowControlArea {
     /// An area that allows dragging of the platform window.
     Drag,
+    /// An AppKit titlebar behind client content. Pointer controls painted
+    /// over this area keep their ordinary left-button input.
+    #[cfg(target_os = "macos")]
+    DragBehindControls,
     /// An area that allows closing of the platform window.
     Close,
     /// An area that allows maximizing of the platform window.
@@ -610,6 +614,10 @@ pub enum HitboxBehavior {
     /// Normal hitbox mouse behavior, doesn't affect mouse handling for other hitboxes.
     #[default]
     Normal,
+
+    /// Receives normal mouse events and excludes native window dragging.
+    #[cfg(target_os = "macos")]
+    ExcludeWindowDrag,
 
     /// All hitboxes behind this hitbox will be ignored and so will have `hitbox.is_hovered() ==
     /// false` and `hitbox.should_handle_scroll() == false`. Typically for elements this causes
@@ -830,19 +838,26 @@ impl Frame {
             log::error!("window control region limit exceeded");
             return vec![bounds];
         }
+        let behind_controls = self
+            .window_control_hitboxes
+            .iter()
+            .any(|(area, _)| *area == WindowControlArea::DragBehindControls);
         let mut draggable = Vec::new();
         for hitbox in &self.hitboxes {
             let rect = hitbox.bounds.intersect(&hitbox.content_mask.bounds).intersect(&bounds);
             if rect.size.width <= px(0.) || rect.size.height <= px(0.) {
                 continue;
             }
-            if self
-                .window_control_hitboxes
-                .iter()
-                .any(|(area, control)| *area == WindowControlArea::Drag && control.id == hitbox.id)
-            {
+            if self.window_control_hitboxes.iter().any(|(area, control)| {
+                matches!(area, WindowControlArea::Drag | WindowControlArea::DragBehindControls)
+                    && control.id == hitbox.id
+            }) {
                 draggable.push(rect);
-            } else if hitbox.behavior != HitboxBehavior::Normal {
+            } else if match hitbox.behavior {
+                HitboxBehavior::Normal => false,
+                HitboxBehavior::ExcludeWindowDrag => behind_controls,
+                HitboxBehavior::BlockMouse | HitboxBehavior::BlockMouseExceptScroll => true,
+            } {
                 draggable = subtract_drag_rect(draggable, rect);
             }
             if draggable.len() > MAX_REGIONS {
@@ -1094,6 +1109,8 @@ impl Window {
     ) -> Result<Self> {
         let WindowOptions {
             window_bounds,
+            #[cfg(target_os = "macos")]
+            frame_autosave_name,
             titlebar,
             focus,
             show,
@@ -1117,6 +1134,8 @@ impl Window {
             handle,
             WindowParams {
                 bounds,
+                #[cfg(target_os = "macos")]
+                frame_autosave_name,
                 titlebar,
                 kind,
                 is_movable,
@@ -2025,6 +2044,18 @@ impl Window {
     /// Updates the window's title at the platform level.
     pub fn set_window_title(&mut self, title: &str) {
         self.platform_window.set_title(title);
+    }
+
+    /// Apply decorations and appearance to this AppKit window.
+    #[cfg(target_os = "macos")]
+    pub fn set_macos_window_style(&self, style: crate::MacWindowStyle) {
+        self.platform_window.set_macos_window_style(style);
+    }
+
+    /// Height in points of the current system titlebar.
+    #[cfg(target_os = "macos")]
+    pub fn macos_titlebar_height(&self) -> Pixels {
+        self.platform_window.titlebar_height()
     }
 
     /// Sets the application identifier.

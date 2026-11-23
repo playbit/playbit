@@ -1,14 +1,19 @@
-//! Non-error feedback uses one single-line Visual Bell; errors use native dialogs.
+//! A single replaceable Visual Bell for nonblocking session-management feedback.
 use super::*;
-use crate::ui::desktop::zoom::length as ui;
-
-const MAX_MESSAGE_CHARS: usize = 256;
-const TRUNCATION_SUFFIX: &str = "...";
+use crate::ui::desktop::visual_bell;
 
 pub(super) struct Bell {
     message: String,
     icon: &'static str,
     _dismiss: gpui::Task<()>,
+}
+
+pub(crate) fn show_error_feedback(window: gpui::AnyWindowHandle, body: &str, cx: &mut App) {
+    if let Some(shell) = window.downcast::<Shell>() {
+        let _ = shell.update(cx, |host, _, cx| {
+            host.show_visual_bell(body, "sign-in-warning", cx);
+        });
+    }
 }
 
 impl Shell {
@@ -18,9 +23,9 @@ impl Shell {
         icon: &'static str,
         cx: &mut Context<Self>,
     ) {
-        let message = bell_message(message);
+        let message = visual_bell::message(message);
         let dismiss = cx.spawn(async move |host, cx| {
-            cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
+            cx.background_executor().timer(visual_bell::DURATION).await;
             let _ = host.update(cx, |host, cx| {
                 host.visual_bell = None;
                 cx.notify();
@@ -40,9 +45,10 @@ impl Shell {
             self.alerted_error.clear();
         } else if error != self.alerted_error {
             self.alerted_error = error.clone();
-            crate::ui::desktop::alert::show(
+            crate::ui::desktop::alert::show_in_window(
                 crate::ui::desktop::alert::Kind::Recoverable,
                 &error,
+                window.window_handle(),
                 cx,
             );
         }
@@ -52,9 +58,10 @@ impl Shell {
         if update != self.update_notice {
             if let Some((_, status)) = &update {
                 match status.kind {
-                    crate::engine::UpdateKind::Failed => crate::ui::desktop::alert::show(
+                    crate::engine::UpdateKind::Failed => crate::ui::desktop::alert::show_in_window(
                         crate::ui::desktop::alert::Kind::Recoverable,
                         &status.message,
+                        window.window_handle(),
                         cx,
                     ),
                     crate::engine::UpdateKind::Paused => {
@@ -70,66 +77,8 @@ impl Shell {
         let bell = self.visual_bell.as_ref()?;
         let message = bell.message.clone();
         let icon = bell.icon;
-        Some(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom(ui(16.))
-                .px(ui(16.))
-                .flex()
-                .justify_center()
-                .child(
-                    div()
-                        .id("visual-bell")
-                        .debug_selector(|| "visual-bell".into())
-                        .max_w_full()
-                        .min_w_0()
-                        .h(ui(28.))
-                        .px(ui(16.))
-                        .flex()
-                        .items_center()
-                        .gap(ui(10.))
-                        .rounded(ui(14.))
-                        .bg(gpui::rgba(0x000000a6))
-                        .text_color(gpui::white())
-                        .text_size(ui(14.))
-                        .child(
-                            gpui::svg()
-                                .path(icon)
-                                .size(ui(14.))
-                                .flex_none()
-                                .text_color(gpui::white()),
-                        )
-                        .child(
-                            self.host_text(HostText::VisualBell, message, cx)
-                                .debug_selector(|| "visual-bell-label".into())
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_overflow(gpui::TextOverflow::Truncate(
-                                    TRUNCATION_SUFFIX.into(),
-                                )),
-                        ),
-                ),
-        )
+        Some(visual_bell::render(icon, self.host_text(HostText::VisualBell, message, cx)))
     }
-}
-
-fn bell_message(message: &str) -> String {
-    let mut chars = message.chars();
-    let mut text: String = chars
-        .by_ref()
-        .take(MAX_MESSAGE_CHARS)
-        .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
-        .collect();
-    if chars.next().is_some() {
-        for _ in 0..TRUNCATION_SUFFIX.len() {
-            text.pop();
-        }
-        text.push_str(TRUNCATION_SUFFIX);
-    }
-    text
 }
 
 // Transfer errors belong to the transfer state, not the independently retained
@@ -148,11 +97,10 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn update_failures_use_dialogs_and_paused_status_uses_an_expiring_bell(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn update_failures_and_paused_status_use_expiring_bells(cx: &mut gpui::TestAppContext) {
         // Distinguish failed and canceled updates without changing session content layout.
         let (host, window, _) = test_support::host(cx);
+        window.update(cx, |_, window, _| window.activate_window()).unwrap();
         let id = crate::identifier::encode(&[0x01; 32]);
         host.update(cx, |host, cx| {
             host.sidebar_session = Some(id.clone());
@@ -190,6 +138,9 @@ mod tests {
         visual.simulate_resize(size(px(800.), px(560.)));
         visual.run_until_parked();
         let before = visual.debug_bounds("session-content").unwrap();
+        // Background results still belong to the window that owns the update.
+        visual.deactivate_window();
+        assert!(visual.update(|_, cx| cx.active_window().is_none()));
         host.update(&mut visual, |host, cx| {
             host.selected.as_mut().unwrap().update = Some(crate::engine::UpdateStatus {
                 kind: crate::engine::UpdateKind::Failed,
@@ -200,6 +151,7 @@ mod tests {
         });
         visual.run_until_parked();
         assert_eq!(before, visual.debug_bounds("session-content").unwrap());
+        assert!(visual.debug_bounds("visual-bell").is_some());
         assert_eq!(
             visual.update(|_, cx| crate::ui::desktop::alert::take_presented(cx)),
             vec![(
@@ -254,8 +206,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn recoverable_errors_use_dialogs_once_until_cleared(cx: &mut gpui::TestAppContext) {
-        // Render changing, repeated and recurring failures through the native alert owner.
+    fn recoverable_errors_report_once_until_cleared(cx: &mut gpui::TestAppContext) {
+        // Render changing, repeated and recurring failures through the feedback owner.
         let (host, _, requests) = test_support::host(cx);
         for (local, transfer, expected) in [
             (
@@ -301,17 +253,17 @@ mod tests {
     #[test]
     fn bell_messages_are_single_line_and_mark_admission_truncation() {
         // Preserve short Unicode text and exact boundaries while bounding multiline input.
-        assert_eq!(bell_message("Copied café 🌱"), "Copied café 🌱");
+        assert_eq!(visual_bell::message("Copied café 🌱"), "Copied café 🌱");
         assert_eq!(
-            bell_message("one\nline\r\nwith\ttabs\u{0085}and\u{2028}Unicode\u{2029}breaks"),
+            visual_bell::message("one\nline\r\nwith\ttabs\u{0085}and\u{2028}Unicode\u{2029}breaks"),
             "one line  with tabs and Unicode breaks"
         );
-        assert_eq!(bell_message(""), "");
-        let exact = "é".repeat(MAX_MESSAGE_CHARS);
-        assert_eq!(bell_message(&exact), exact);
-        assert_eq!(bell_message(&format!("{exact}x")), format!("{}...", "é".repeat(253)));
-        let long = bell_message(&"🌱".repeat(1000));
-        assert_eq!(long.chars().count(), MAX_MESSAGE_CHARS);
+        assert_eq!(visual_bell::message(""), "");
+        let exact = "é".repeat(visual_bell::MAX_MESSAGE_CHARS);
+        assert_eq!(visual_bell::message(&exact), exact);
+        assert_eq!(visual_bell::message(&format!("{exact}x")), format!("{}...", "é".repeat(253)));
+        let long = visual_bell::message(&"🌱".repeat(1000));
+        assert_eq!(long.chars().count(), visual_bell::MAX_MESSAGE_CHARS);
         assert!(long.ends_with("..."));
         assert!(long.len() <= 1024);
     }
@@ -336,7 +288,7 @@ mod tests {
             "First line\nSecond line\tUnicode\u{2028}separator".into(),
         ] {
             host.update(visual, |host, cx| host.show_visual_bell(&message, "menu-check", cx));
-            let expected = bell_message(&message);
+            let expected = visual_bell::message(&message);
             for width in [800., 180., 800.] {
                 visual.simulate_resize(size(px(width), px(120.)));
                 visual.run_until_parked();

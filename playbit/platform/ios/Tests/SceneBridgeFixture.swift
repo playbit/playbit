@@ -8,6 +8,7 @@ struct SceneNode {
     var children = 0
     var width: UInt32 = 0, height: UInt32 = 0, frames: UInt32 = 0
     var items = 0
+    var clear_color: UInt32 = 0, has_clear_color: UInt8 = 0
 }
 struct SceneCanvasItem {
     var kind: UInt32 = 0, x: UInt32 = 0, y: UInt32 = 0, width: UInt32 = 0, height: UInt32 = 0, color: UInt32 = 0, font_size: UInt32 = 0

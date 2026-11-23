@@ -1,6 +1,22 @@
 //! Shared local services and explicit session-instance data authority.
 #![deny(clippy::unwrap_used)]
 #[cfg(feature = "app-host")]
+mod session_id {
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        id: &Option<Box<[u8; 32]>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        crate::identifier::optional::serialize(&id.as_deref().copied(), serializer)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Box<[u8; 32]>>, D::Error> {
+        crate::identifier::optional::deserialize(deserializer).map(|id| id.map(Box::new))
+    }
+}
+#[cfg(feature = "app-host")]
 mod gauges;
 #[cfg(all(not(target_os = "ios"), feature = "process"))]
 mod idle;
@@ -350,11 +366,15 @@ pub enum Request {
         volume: Id,
     },
     Entries {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         after: Option<crate::store::EntryId>,
         limit: u32,
     },
     DirectoryEntries {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         target: crate::store::volume_index::DirectoryTarget,
         cut: Option<u64>,
@@ -362,13 +382,19 @@ pub enum Request {
         limit: u32,
     },
     VolumeDetails {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
     },
     EntryDetails {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         entry: crate::store::EntryId,
     },
     EntryRevisions {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         address: crate::store::volume_index::EntryAddress,
         after: Option<crate::store::volume_index::HistoryCursor>,
         limit: u32,
@@ -385,27 +411,37 @@ pub enum Request {
         limit: u32,
     },
     CreateDatabase {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         name: String,
         kind: Box<crate::store::volume_index::EntryKind>,
     },
     CreateDatabaseIn {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         parent: crate::store::EntryId,
         name: String,
         kind: Box<crate::store::volume_index::EntryKind>,
     },
     RenameEntry {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         entry: crate::store::EntryId,
         /// Destination path relative to the volume root, including explicit moves.
         name: String,
     },
     RemoveEntry {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         entry: crate::store::EntryId,
     },
     EntryPermissions {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         entry: crate::store::EntryId,
         permissions: crate::store::object_contract::EntryAcl,
@@ -414,10 +450,14 @@ pub enum Request {
         retained_permissions: Option<crate::store::object_contract::Acl>,
     },
     BloblogCreate {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         name: String,
     },
     BloblogCreateIn {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         parent: crate::store::EntryId,
         name: String,
@@ -432,12 +472,16 @@ pub enum Request {
         after: Option<ChangeToken>,
     },
     FileCreate {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         name: String,
         #[rkyv(with = ipc::codec::UnixPath)]
         path: PathBuf,
     },
     FileCreateIn {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         parent: crate::store::EntryId,
         name: String,
@@ -465,6 +509,8 @@ pub enum Request {
         volume: Id,
     },
     PayloadSize {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         entry: Option<crate::store::EntryId>,
     },
@@ -558,28 +604,40 @@ pub enum Request {
         declaration: Box<crate::store::RootInitialization>,
     },
     Schema {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         database: crate::store::volume_index::EntryAddress,
         schema: crate::store::object_contract::Schema,
     },
     CreateObject {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         database: crate::store::volume_index::EntryAddress,
         type_id: Id,
         fields: BTreeMap<Id, Option<Vec<crate::store::object_contract::Value>>>,
     },
     ReadObject {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         database: crate::store::volume_index::EntryAddress,
         object: Id,
     },
     EditObject {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         database: crate::store::volume_index::EntryAddress,
         object: Id,
         fields: BTreeMap<Id, Option<Vec<crate::store::object_contract::Value>>>,
     },
     RemoveObject {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         database: crate::store::volume_index::EntryAddress,
         object: Id,
     },
     Objects {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         database: crate::store::volume_index::EntryAddress,
         type_id: Id,
         after: Option<Id>,
@@ -677,12 +735,16 @@ pub enum Request {
     },
     /// Rename one component under the entry's current effective parent.
     RenameEntryComponent {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         volume: Id,
         entry: crate::store::EntryId,
         name: String,
     },
     /// Inspector mutation conditional on its complete original KV read cut.
     KvRename {
+        #[serde(default, with = "session_id", skip_serializing_if = "Option::is_none")]
+        session: Option<Box<[u8; 32]>>,
         mutation: Box<KvRenameMutation>,
     },
     /// Add explicit consent without replacing unrelated current grants.
@@ -748,24 +810,53 @@ pub struct UpdateStatus {
     pub message: String,
 }
 
-/// Named features shared by process-backed and embedded guests on this platform.
+/// Presentation owner selected at guest admission. A raw scene callback has no AppKit window.
 #[cfg(any(feature = "wasm-runtime", feature = "native-runtime"))]
-fn guest_features() -> &'static [&'static str] {
-    use playbit_api::{
-        abi::data::{AUTOMATIC_VOLUMES_FEATURE, SESSION_VOLUME_FEATURE},
-        ui,
-    };
-    if cfg!(target_os = "macos") {
-        &[
-            ui::CANVAS_PIXELS_FEATURE,
-            ui::CANVAS_VIEWPORT_FEATURE,
-            AUTOMATIC_VOLUMES_FEATURE,
-            SESSION_VOLUME_FEATURE,
-        ]
-    } else if cfg!(target_os = "ios") {
-        &[ui::CANVAS_PIXELS_FEATURE, AUTOMATIC_VOLUMES_FEATURE, SESSION_VOLUME_FEATURE]
-    } else {
-        &[AUTOMATIC_VOLUMES_FEATURE, SESSION_VOLUME_FEATURE]
+#[derive(Clone, Copy, Default)]
+pub enum GuestRenderer {
+    #[default]
+    Embedded,
+    #[cfg(target_os = "macos")]
+    AppKit,
+}
+
+#[cfg(any(feature = "wasm-runtime", feature = "native-runtime"))]
+impl GuestRenderer {
+    fn features(self) -> &'static [&'static str] {
+        use playbit_api::abi::data::{AUTOMATIC_VOLUMES_FEATURE, SESSION_VOLUME_FEATURE};
+        #[cfg(target_os = "macos")]
+        {
+            use playbit_api::ui;
+            const MAC: &[&str] = &[
+                // Only an AppKit presentation owner enforces native window constraints.
+                ui::WINDOW_SIZE_CONSTRAINTS_FEATURE,
+                ui::CANVAS_CLEAR_FEATURE,
+                ui::CANVAS_PIXELS_FEATURE,
+                ui::CANVAS_VIEWPORT_FEATURE,
+                ui::CANVAS_WINDOW_FEATURE,
+                ui::WINDOW_STYLE_FEATURE,
+                AUTOMATIC_VOLUMES_FEATURE,
+                SESSION_VOLUME_FEATURE,
+            ];
+            match self {
+                Self::Embedded => &MAC[1..],
+                Self::AppKit => MAC,
+            }
+        }
+        #[cfg(target_os = "ios")]
+        {
+            use playbit_api::ui;
+            &[
+                ui::CANVAS_CLEAR_FEATURE,
+                ui::CANVAS_PIXELS_FEATURE,
+                AUTOMATIC_VOLUMES_FEATURE,
+                SESSION_VOLUME_FEATURE,
+            ]
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+        {
+            &[AUTOMATIC_VOLUMES_FEATURE, SESSION_VOLUME_FEATURE]
+        }
     }
 }
 
@@ -850,10 +941,13 @@ pub(crate) mod tests {
             .unwrap();
         let token = engine.change_token();
         for _ in 0..3 {
-            engine.dispatch_reply(Request::VolumeDetails { volume }).unwrap();
-            engine.dispatch_reply(Request::Entries { volume, after: None, limit: 64 }).unwrap();
+            engine.dispatch_reply(Request::VolumeDetails { session: None, volume }).unwrap();
+            engine
+                .dispatch_reply(Request::Entries { session: None, volume, after: None, limit: 64 })
+                .unwrap();
             engine
                 .dispatch_reply(Request::DirectoryEntries {
+                    session: None,
                     volume,
                     target: crate::store::volume_index::DirectoryTarget::Root,
                     cut: None,
@@ -864,6 +958,7 @@ pub(crate) mod tests {
             assert!(
                 engine
                     .dispatch_reply(Request::DirectoryEntries {
+                        session: None,
                         volume,
                         target: crate::store::volume_index::DirectoryTarget::Root,
                         cut: None,
@@ -872,10 +967,13 @@ pub(crate) mod tests {
                     })
                     .is_err()
             );
-            engine.dispatch_reply(Request::EntryDetails { volume, entry: entry.id }).unwrap();
+            engine
+                .dispatch_reply(Request::EntryDetails { session: None, volume, entry: entry.id })
+                .unwrap();
             assert!(
                 engine
                     .dispatch_reply(Request::EntryDetails {
+                        session: None,
                         volume,
                         entry: crate::store::EntryId::from_bytes([7; 15]).unwrap(),
                     })
@@ -884,7 +982,12 @@ pub(crate) mod tests {
             assert_eq!(engine.change_token(), token);
         }
         engine
-            .dispatch_reply(Request::RenameEntry { volume, entry: entry.id, name: "work".into() })
+            .dispatch_reply(Request::RenameEntry {
+                session: None,
+                volume,
+                entry: entry.id,
+                name: "work".into(),
+            })
             .unwrap();
         assert_ne!(engine.change_token(), token);
     }

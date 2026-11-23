@@ -172,4 +172,9 @@ export const ABI = {
         fields: [[0, 4], [4, 4], [8, 4], [12, 4]],
         offsets: { size: 0, written: 4, data: 8, length: 12 },
     },
+    sessionInfo: {
+        minimum: 64, size: 64, alignment: 4,
+        fields: [[0, 4], [4, 4], [8, 4], [12, 4], [16, 32], [48, 16]],
+        offsets: { size: 0, written: 4, flags: 8, reserved: 12, internal_id: 16, key_secret: 48 },
+    },
 } as const satisfies Record<string, RecordLayout & { offsets: Readonly<Record<string, number>> }>;

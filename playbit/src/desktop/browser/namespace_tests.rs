@@ -366,6 +366,7 @@ fn scoped_creation_and_failure_keep_the_original_directory_identity(cx: &mut gpu
         }) if parent == entry(1).id && name == "Untitled 2"));
         browser.catalog.columns[1].name = "after".into();
         let wrong = Request::CreateDatabaseIn {
+            session: None,
             volume: volume(1).id,
             parent: entry(2).id,
             name: "Untitled 2".into(),

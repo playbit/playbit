@@ -52,10 +52,12 @@ impl Browser {
     pub(in crate::desktop::browser) fn refresh_picker(&mut self) {
         let Some(editor) = &self.records.values else { return };
         let Some(picker) = &editor.picker else { return };
+        let session =
+            self.shared_session().filter(|_| picker.volume == self.volume.id).map(Box::new);
         let request = if let Some(entry) = picker.entry {
-            Request::EntryDetails { volume: picker.volume, entry }
+            Request::EntryDetails { session, volume: picker.volume, entry }
         } else {
-            Request::Entries { volume: picker.volume, after: picker.after, limit: 64 }
+            Request::Entries { session, volume: picker.volume, after: picker.after, limit: 64 }
         };
         let submitted = self.submit(request);
         if let Some(picker) = self.records.values.as_mut().and_then(|editor| editor.picker.as_mut())
@@ -69,6 +71,7 @@ impl Browser {
         reply: &Reply,
         cx: &mut Context<Self>,
     ) -> bool {
+        let session = self.shared_session();
         let Some(editor) = &mut self.records.values else { return false };
         let Some(picker) = &mut editor.picker else { return false };
         match reply {
@@ -80,7 +83,7 @@ impl Browser {
             Reply::EntryDetails { volume, details }
                 if *volume == picker.volume && Some(details.entry.id) == picker.entry =>
             {
-                match editor.accept_target(details) {
+                match editor.accept_target(details, session.filter(|_| *volume == self.volume.id)) {
                     Ok(Some(request)) => {
                         let submitted = self.submit(request);
                         if let Some(picker) =
@@ -124,7 +127,7 @@ impl Browser {
             Request::Entries { volume, after, .. } => {
                 *volume == picker.volume && *after == picker.after
             }
-            Request::EntryDetails { volume, entry } => {
+            Request::EntryDetails { volume, entry, .. } => {
                 *volume == picker.volume && Some(*entry) == picker.entry
             }
             Request::Objects { database, after, .. } => {
@@ -234,7 +237,11 @@ impl Picker {
     }
 }
 impl Editor {
-    fn accept_target(&mut self, details: &EntryDetails) -> Result<Option<Request>, &'static str> {
+    fn accept_target(
+        &mut self,
+        details: &EntryDetails,
+        session: Option<[u8; 32]>,
+    ) -> Result<Option<Request>, &'static str> {
         let picker = self.picker.as_mut().ok_or("Select a target again.")?;
         picker.loading = false;
         if !details.readable || details.entry.deleted || !details.backing_ready {
@@ -255,6 +262,7 @@ impl Editor {
             {
                 picker.readable = true;
                 Ok(Some(Request::Objects {
+                    session: session.map(Box::new),
                     database: EntryAddress { volume: picker.volume, entry: details.entry.id },
                     type_id,
                     after: picker.object_after,

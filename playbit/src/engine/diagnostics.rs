@@ -31,8 +31,9 @@ pub(super) fn execute(
             copy(request, store)?
         }
         Request::Usage { volume } => DiagnosticReply::Usage(remote.usage(store, volume)?),
-        Request::PayloadSize { volume, entry } => {
-            payload_size(store, volume, entry, &std::sync::atomic::AtomicBool::new(false))?
+        request @ Request::PayloadSize { volume, entry, .. } => {
+            let access = request.management_access(store)?;
+            payload_size(store, &access, volume, entry, &std::sync::atomic::AtomicBool::new(false))?
         }
         _ => execute_file(request, store, &remote.blob_transport())?,
     })
@@ -40,11 +41,12 @@ pub(super) fn execute(
 
 pub(super) fn payload_size(
     store: &LocalStore,
+    access: &Access,
     volume: Id,
     entry: Option<crate::store::EntryId>,
     cancelled: &std::sync::atomic::AtomicBool,
 ) -> Result<DiagnosticReply> {
-    let bytes = store.payload_size(&Access::owner(store.account().id), volume, entry, cancelled)?;
+    let bytes = store.payload_size(access, volume, entry, cancelled)?;
     Ok(DiagnosticReply::PayloadSize { volume, entry, bytes })
 }
 
@@ -67,6 +69,7 @@ fn execute_file(
     store: &Arc<LocalStore>,
     blobs: &blob::BlobTransport,
 ) -> Result<DiagnosticReply> {
+    let access = request.management_access(store)?;
     Ok(match request {
         Request::RejectedEntries { volume, after, limit } => DiagnosticReply::RejectedEntries {
             volume,
@@ -90,29 +93,19 @@ fn execute_file(
             };
             DiagnosticReply::EntryRecovered { source: address, name, revision, rejected_cut, entry }
         }
-        Request::FileCreate { volume, name, path } => {
+        Request::FileCreate { volume, name, path, .. } => {
             let mut source = read_import(&path)?;
-            let entry = store.create_blob_from_reader(
-                &Access::owner(store.account().id),
-                volume,
-                &name,
-                &mut source,
-            )?;
+            let entry = store.create_blob_from_reader(&access, volume, &name, &mut source)?;
             DiagnosticReply::FileCreated {
                 address: crate::store::volume_index::EntryAddress { volume, entry: entry.id },
                 name,
                 entry,
             }
         }
-        Request::FileCreateIn { volume, parent, name, path } => {
+        Request::FileCreateIn { volume, parent, name, path, .. } => {
             let mut source = read_import(&path)?;
-            let entry = store.create_blob_from_reader_in(
-                &Access::owner(store.account().id),
-                volume,
-                parent,
-                &name,
-                &mut source,
-            )?;
+            let entry =
+                store.create_blob_from_reader_in(&access, volume, parent, &name, &mut source)?;
             DiagnosticReply::FileCreatedIn {
                 parent,
                 address: crate::store::volume_index::EntryAddress { volume, entry: entry.id },

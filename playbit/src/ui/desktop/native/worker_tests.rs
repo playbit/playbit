@@ -656,7 +656,6 @@ fn admission_is_bounded_and_close_keeps_the_accepted_queue() {
     let handle = Handle {
         #[cfg(all(feature = "native-audio", target_os = "macos"))]
         audio_instance: None,
-        #[cfg(feature = "desktop")]
         session: None,
         generation: 1,
         #[cfg(all(target_os = "macos", feature = "process"))]
@@ -699,6 +698,25 @@ fn admission_is_bounded_and_close_keeps_the_accepted_queue() {
     }
     assert!(receive.is_closed());
     assert!(receive.is_empty());
+}
+
+#[test]
+fn display_callback_after_owner_retirement_does_not_report_a_failed_action() {
+    // The worker retires its receiver before the GUI has adopted Recovering.
+    let (mut handle, inputs) = Handle::fixture(1);
+    let (errors, notices) = async_channel::bounded(1);
+    handle.errors = errors;
+    inputs.close();
+    let frame = Input {
+        kind: EventKind::Frame,
+        target: 1,
+        data: 16667u32.to_le_bytes().to_vec(),
+        revision: None,
+    };
+    assert!(!handle.send(frame, None));
+    assert!(notices.is_empty());
+    assert!(!handle.send(submit("User action"), None));
+    assert_eq!(notices.try_recv().unwrap(), ADMISSION_ERROR);
 }
 
 #[test]
@@ -828,7 +846,12 @@ fn failed_input_invalidates_already_queued_effects_without_replay() {
         advance(
             &mut apps,
             slot,
-            Some(Message { pending: PendingInput::new(&slot.handle.pending), input, epoch: 0 }),
+            Some(Message {
+                pending: PendingInput::new(&slot.handle.pending),
+                input,
+                epoch: 0,
+                source: InputSource::Window,
+            }),
             &output,
         );
         assert!(matches!(receive.try_recv().unwrap(), Output::Frame { result: Err(_), .. }));
@@ -851,6 +874,7 @@ fn failed_input_invalidates_already_queued_effects_without_replay() {
             pending: PendingInput::new(&slot.handle.pending),
             input: submit("Explicit retry"),
             epoch: slot.handle.epoch(),
+            source: InputSource::Window,
         }),
         &output,
     );
@@ -1071,6 +1095,57 @@ fn setup_acknowledges_drafts_and_rejects_stale_actions() {
 mod frame_input_tests;
 #[cfg(feature = "process")]
 #[test]
+fn tool_pointer_release_uses_the_target_canvas_size_at_execution() {
+    use crate::runtime::syscall::{HostError, validate_input};
+    use playbit_api::abi::syscall::PointerInput;
+    let (handle, queue) = Handle::fixture(7);
+    let canvas = |id, width, height| ViewNode::Canvas {
+        id,
+        width,
+        height,
+        frames: playbit_api::ui::CanvasFrames::Static,
+        extent: playbit_api::ui::CanvasExtent::Inline,
+        clear_color: None,
+        items: vec![],
+    };
+    let scene = |width, height| {
+        ViewNode::Row(vec![canvas(1, 300, 200), ViewNode::Column(vec![canvas(7, width, height)])])
+    };
+    let press = PointerInput { x: 90, y: 50, phase: 1, buttons: 1 };
+    let release = PointerInput { phase: 2, buttons: 0, ..press };
+    let input = |target, pointer: PointerInput| Input {
+        kind: EventKind::Pointer,
+        target,
+        data: pointer.encode().into(),
+        revision: None,
+    };
+    let execute = |scene: &ViewNode| {
+        let message = queue.try_recv().unwrap();
+        message.source.event(message.input, || Some(scene))
+    };
+    let old = scene(100, 60);
+    assert!(handle.send_tool_input(input(7, press)));
+    let event = execute(&old);
+    assert_eq!(PointerInput::decode(&event.data).unwrap(), press);
+    validate_input(&old, &event).unwrap();
+    assert!(handle.send_tool_input(input(7, release)));
+    let current = scene(64, 32);
+    let event = execute(&current);
+    assert_eq!(
+        PointerInput::decode(&event.data).unwrap(),
+        PointerInput { x: 64, y: 32, ..release }
+    );
+    validate_input(&current, &event).unwrap();
+    assert!(handle.send(input(7, release), None));
+    let physical = execute(&current);
+    assert_eq!(PointerInput::decode(&physical.data).unwrap(), release);
+    assert_eq!(validate_input(&current, &physical), Err(HostError::InvalidArgument));
+    assert!(handle.send_tool_input(input(8, release)));
+    assert_eq!(validate_input(&current, &execute(&current)), Err(HostError::InvalidArgument));
+}
+
+#[cfg(feature = "process")]
+#[test]
 fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
     use super::super::control::Server;
     use crate::{
@@ -1088,7 +1163,6 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
     let handle = Handle {
         #[cfg(all(feature = "native-audio", target_os = "macos"))]
         audio_instance: None,
-        #[cfg(feature = "desktop")]
         session: None,
         generation: 7,
         #[cfg(all(target_os = "macos", feature = "process"))]
@@ -1221,6 +1295,44 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
         call(&wrong, Operation::Input { kind: 3, target: 100, data: b"Wrong generation".to_vec() })
             .is_err()
     );
+    assert!(admitted.is_empty());
+    #[cfg(target_os = "macos")]
+    {
+        assert!(call(&wrong, Operation::Screenshot).is_err());
+        let pending = Exchange::connect(directory.path(), &owner, Operation::Screenshot).unwrap();
+        let Output::Screenshot { owner_generation: 1, capture, .. } =
+            lifecycle.recv_blocking().unwrap()
+        else {
+            panic!("expected selected generation to receive capture")
+        };
+        assert!(call(&owner, Operation::Screenshot).is_err(), "a capture is already in flight");
+        assert!(matches!(call(&owner, Operation::Frame).unwrap(), Reply::Frame { .. }));
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.resize(app_control::MAX_SCENE_BYTES + 64, 0);
+        capture.complete(Ok(png.clone()));
+        assert!(matches!(pending.receive().unwrap(), Reply::Screenshot {
+            instance, generation: 1, png: result
+        } if instance == id && result == png));
+    }
+    for operation in [
+        Operation::key(7, "up", true).unwrap(),
+        Operation::pointer(7, "down", 24, 16, None).unwrap(),
+        Operation::key(7, "up", false).unwrap(),
+    ] {
+        let Operation::Input { kind, target, ref data } = operation else { unreachable!() };
+        let expected = data.clone();
+        assert!(matches!(call(&owner, operation).unwrap(), Reply::Accepted { .. }));
+        awakened.recv_timeout(Duration::from_secs(5)).unwrap();
+        let message = admitted.try_recv().unwrap();
+        assert!(message.source == InputSource::Tool);
+        let input = message.input;
+        assert_eq!((input.kind as u32, input.target, input.data), (kind, target, expected));
+    }
+    for kind in [EventKind::Key, EventKind::Pointer] {
+        assert!(
+            call(&owner, Operation::Input { kind: kind as u32, target: 7, data: vec![] }).is_err()
+        );
+    }
     assert!(admitted.is_empty());
     wrong.process = None;
     assert!(Exchange::connect(directory.path(), &wrong, Operation::Quit).is_err());
@@ -1373,9 +1485,33 @@ fn guest_startup_retries_transient_failure_and_cancels_without_a_window() {
     assert!(active.load(Ordering::Acquire));
     stop.store(true, Ordering::Release);
     wake.try_send(()).unwrap();
-    assert!(owner.join().unwrap().is_err());
+    assert!(matches!(owner.join().unwrap(), Ok(GuestEngine::Canceled)));
     assert!(!active.load(Ordering::Acquire));
     assert!(output.is_empty(), "retry notices are emitted once per outage");
+}
+
+#[cfg(feature = "process")]
+#[test]
+fn guest_startup_quit_during_engine_probe_skips_instance_admission() {
+    use crate::engine::{ipc, reply::Reply};
+
+    let directory = tempfile::tempdir().unwrap();
+    let profile = directory.path().to_owned();
+    let paths = crate::paths::Paths::for_profile(&profile).unwrap();
+    std::fs::create_dir_all(paths.launch_lock.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(profile.join(crate::paths::ENGINE_SOCKET)).unwrap();
+    let mut worker = Worker::start_guest(profile, PathBuf::from("/nonexistent"), None, || {
+        panic!("Quit during the engine probe must precede session resolution")
+    })
+    .unwrap();
+    let (mut connection, _) = listener.accept().unwrap();
+    ipc::read(&mut connection).unwrap();
+    worker.request_stop();
+    let reply = Reply::Protocol { protocol: ipc::LOCAL_PROTOCOL, version: crate::VERSION.into() };
+    ipc::write(&mut connection, &ipc::codec::encode(&reply, 512).unwrap()).unwrap();
+    assert!(matches!(receive(&worker.output()), Output::Closed(0)));
+    worker.completion().recv_blocking().unwrap().unwrap();
+    worker.shutdown();
 }
 
 #[cfg(feature = "connected-engine")]

@@ -13,7 +13,10 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 pub const PROTOCOL: u8 = 1;
 pub const INCOMPATIBLE_FLAGS: u8 = 4;
 /// Exact optional AP support preconditions. Baseline algorithm names are separate.
-pub const OPTIONAL_FEATURES: &[&str] = &["bloblog-append-v1", "shared-session.v1"];
+pub const OPTIONAL_FEATURES: &[&str] =
+    &["bloblog-append-v1", SHARED_SESSION, SESSION_PARTICIPANTS_ACL];
+const SHARED_SESSION: &str = "shared-session.v1";
+const SESSION_PARTICIPANTS_ACL: &str = "session-participants-acl.v1";
 mod admission;
 mod description;
 pub use admission::{
@@ -24,6 +27,9 @@ pub use description::{DESCRIPTION_LIMIT, ServiceDescription};
 pub const INCOMPATIBLE_PROTOCOL: &str = "Playbit and its sync service need compatible updates before they can connect. Your saved data has been kept.";
 
 pub const SHARED_SERVICE_UPGRADE_REQUIRED: &str = "This session needs an updated sync service. Your local data has been kept. Try again after the service is updated.";
+
+pub(crate) const SHARED_REGISTRATION_FEATURES: &[&str] =
+    &[SHARED_SESSION, SESSION_PARTICIPANTS_ACL];
 
 #[derive(Debug)]
 pub struct IncompatibleProtocol;
@@ -66,17 +72,20 @@ impl std::fmt::Display for ServiceFailure {
 }
 impl std::error::Error for ServiceFailure {}
 
-pub fn request(request: &ServiceRequest) -> Result<Frame> {
-    let features = match request {
+pub(super) fn required_features(request: &ServiceRequest) -> &'static [&'static str] {
+    match request {
         ServiceRequest::PublishBloblog { .. } | ServiceRequest::GetBloblog { .. } => {
-            &["bloblog-append-v1"][..]
+            &["bloblog-append-v1"]
         }
         ServiceRequest::RegisterSession { shared_volume_id: Some(_), .. } => {
-            &["shared-session.v1"][..]
+            SHARED_REGISTRATION_FEATURES
         }
         _ => &[],
-    };
-    request_with_features(request, features)
+    }
+}
+
+pub fn request(request: &ServiceRequest) -> Result<Frame> {
+    request_with_features(request, required_features(request))
 }
 
 pub fn request_with_features(

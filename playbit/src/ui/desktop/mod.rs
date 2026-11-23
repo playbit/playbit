@@ -11,6 +11,8 @@ pub mod segmented;
 mod surface;
 pub(crate) mod table;
 pub mod text_editor;
+#[cfg(all(target_os = "macos", feature = "local-store"))]
+pub(crate) mod visual_bell;
 pub mod zoom;
 pub const UI_FONT_FAMILY: &str = "Inter Variable";
 pub(crate) static UI_FONT_DATA: &[u8] = include_bytes!("../../../assets/InterVariable.ttf");

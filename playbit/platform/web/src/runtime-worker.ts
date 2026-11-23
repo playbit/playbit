@@ -20,7 +20,7 @@ import { guestOperations } from "./guest-operations.ts";
 import { operationSupported } from "./guest-imports.ts";
 import { GuestWork } from "./guest-work.ts";
 import type { GuestEvent, QueuedEvent, WorkExports } from "./guest-work.ts";
-import type { ObjectHost, LogConnection } from "./guest-operations.ts";
+import type { GuestIdentity, ObjectHost, LogConnection } from "./guest-operations.ts";
 import { prepareGuest, resolvedSession } from "./updates.ts";
 import type { GuestInstance, SessionResolution } from "./updates.ts";
 import { personalSelections, validateSelection, MAX_PERSONAL_VOLUMES } from "./personal.ts";
@@ -299,12 +299,14 @@ const bundleFiles = new Map<number, FileSystemSyncAccessHandle>();
 const guestBundles = new WeakMap<GuestInstance, number>();
 const bundleStorage = new Map<number, number>();
 let nextBundle = 1;
+let checkingPackageFeatures = false;
 function storageImports() {
     storageBridge = createStorageBridge(stores, { get staging() { return storageResources?.staging ?? []; } }, () => host.exports.memory,
         bytes => crypto.getRandomValues(bytes), () => Math.floor(Date.now() / 1000),
         error => { logs.push(error); if (logs.length > 256) logs.shift(); });
     return { ...storageBridge.imports,
-        operation_supported: (opcode: number) => Number(operationSupported(operations, opcode)),
+        operation_supported: (opcode: number) => Number(operationSupported(operations, opcode)
+            && (opcode !== 0x15 || checkingPackageFeatures || Boolean(guest?.deadline))),
         bundle_length: (slot: number) => bundleFiles.get(slot)?.getSize() ?? -4,
         bundle_read: (slot: number, offset: number, out: number, length: number) => {
             if (length > 65536) return -4;
@@ -339,8 +341,12 @@ async function enterGuest() {
     if (guestFailure) throw guestFailure;
     const current = guest;
     if (!current) throw new Error("The app is stopped; reload the page to restart it");
+    if (current.deadline && !current.deadline.canEnter(events.length !== 0)) return;
     guestWork.beginTurn();
-    try { current.exports.pb_main(); }
+    try {
+        if (current.deadline) await current.deadline.enter();
+        else current.exports.pb_main();
+    }
     catch (cause) {
         if (engineFailure) throw engineFailure;
         // Same retained-session distinction as engine/developer.rs: only the
@@ -384,17 +390,36 @@ function flushConsumedChannels():void {
     }).finally(()=>{consumedChannelsTask=undefined;if(retryConsumedChannels)flushConsumedChannels();});
 }
 let channelClient:SessionChannels|undefined;
-let channelInstance=new Uint8Array(16),channelDevice=new Uint8Array(16);
+let channelDevice=new Uint8Array(16);
+let localIdentity: GuestIdentity | undefined;
+function currentIdentity(): GuestIdentity {
+    if (channelClient) return channelClient.identity;
+    if (!localIdentity) {
+        const account = decodeId(profile.account);
+        // As on native, a local guest uses its profile account for the device ID.
+        localIdentity = { account, device: managed ? channelDevice : account,
+            instance: random(16), session: decodeId(profile.session.id, 32) };
+    }
+    return localIdentity;
+}
 function channelNotice(kind:number,status=-5){if(closed)return;const data=kind===19?new Uint8Array(new Int32Array([status]).buffer):new Uint8Array();guestWork.queue({kind,target:0,data});operationsReady();}
-let dataRevision = 0, guestUpdating = false, dataTurnQueued = false;
+let dataRevision = 0, guestUpdating = false, dataTurnOwner: GuestInstance | undefined;
 const operations = guestOperations({
+    waitForEvent: deadline => {
+        const owner = guest;
+        if (!owner?.deadline) throw new Error("Guest deadline owner unavailable");
+        return owner.deadline.suspend(deadline, () => {
+            if (guest === owner && !closed && !engineFailure) operationsReady();
+        });
+    },
     admitOperation: opcode => accountOperationStatus(managed ? profile?.account : undefined, opcode),
+    identity: () => guest && currentIdentity(),
+    sessionKeySecret: () => profile.seed,
     channels:()=>{
         if(!managed||!profile.seed)throw new AbiError(-1);
         if(!channelClient){
-            if(!channelInstance.some(byte=>byte))channelInstance=crypto.getRandomValues(new Uint8Array(16));
             hostInput(Uint8Array.from(profile.seed));const key=hostOutput(host.exports.pb_session_channel_key()).slice();
-            channelClient=new SessionChannels({session:decodeId(profile.session.id,32),account:decodeId(profile.account),device:channelDevice,instance:channelInstance,build:decodeId(profile.session.resolved_build_id,32),proof:Uint8Array.from(proof),app:profile.session.selector.kind==='app'?profile.session.selector.app:undefined},key,new ChannelHost(()=>host.exports),
+            channelClient=new SessionChannels({...currentIdentity(),build:decodeId(profile.session.resolved_build_id,32),proof:Uint8Array.from(proof),app:profile.session.selector.kind==='app'?profile.session.selector.app:undefined},key,new ChannelHost(()=>host.exports),
                 {connect:async()=>{const connection=await ap('connect');channelDevice=Uint8Array.from(connection.instanceId??[]);return {device:channelDevice,generation:connection.connectionCount};},open:(frame,device,generation)=>ap('beginChannel',frame,device,generation) as Promise<number>,read:handle=>ap('channelRead',handle) as Promise<import('./ap-codec.ts').Frame & {receipt?:number}>,consumed:consumeChannelReceipt,close:handle=>ap('streamClose',handle)},
                 (name,source,message,data)=>operations.channelEvent(name,source,message,data),()=>channelNotice(5),status=>{channelNotice(19,status);void recoverChannels();},()=>{void checkUpdate();});
         }
@@ -489,22 +514,31 @@ async function readLog(entry: Uint8Array<ArrayBuffer>, read: () => Promise<Uint8
     }
 }
 function operationsReady() {
-        if (dataTurnQueued || closed || guestFailure) return;
-        dataTurnQueued = true;
-        void localStep(async () => {
-            dataTurnQueued = false;
-            if (!guest || guestFailure) return;
-            await enterGuest();
-            if (scene) self.postMessage({ replicaScene: presentation() });
-            files?.flushPublication(); replicas?.notify();
-        }).catch(error => { if (!closed) self.postMessage({ guestFailure: String(error.message ?? error) }); });
+    const owner = guest;
+    if (!owner || dataTurnOwner === owner || closed || guestFailure || engineFailure) return;
+    dataTurnOwner = owner;
+    void localStep(async () => {
+        if (dataTurnOwner !== owner) return;
+        dataTurnOwner = undefined;
+        if (guest !== owner || guestFailure || engineFailure) return;
+        // An earlier input can consume the wait before this notification runs.
+        if (owner.deadline && !events.length) {
+            if (guestWork.draining || !owner.deadline.parked || !owner.deadline.canEnter(false)) return;
+        }
+        await enterGuest();
+        if (scene) self.postMessage({ replicaScene: presentation() });
+        files?.flushPublication(); replicas?.notify();
+    }).catch(error => { if (!closed) self.postMessage({ guestFailure: String(error.message ?? error) }); });
 }
 // Wait outside the local queue so worker completions can enter it. Accepted
 // input precedes this fence; readiness continuations can finish finite work.
 async function drainGuest(accepted: Promise<unknown>) {
     await accepted;
     if (managed) await requireAccountAuthority(profile.account);
-    await localStep(() => guestWork.deactivate());
+    await localStep(() => {
+        guestWork.deactivate();
+        guest?.deadline?.deactivate();
+    });
     while (guestWork.pending || operations.data.waiting) {
         if (accountAuthority()) throw unsupportedAccount();
         if (guestFailure) throw guestFailure;
@@ -1234,7 +1268,7 @@ async function refreshPersonal(latest?: PersonalSelections) {
     selections = latest;
 }
 async function startGuest(candidate: GuestInstance) {
-    channelClient?.close();channelClient=undefined;channelInstance=new Uint8Array(16);
+    channelClient?.close();channelClient=undefined;localIdentity=undefined;
     operations.reset();
     const bundleSlot = guestBundles.get(candidate);
     if (bundleSlot !== undefined) {
@@ -1242,12 +1276,18 @@ async function startGuest(candidate: GuestInstance) {
         if (result < 0) throw new Error(`Bundle adoption failed: ${result}`);
         guestBundles.delete(candidate);
     }
+    guest?.deadline?.retire();
     void files.cleanup().catch(error => { logs.push(String(error).slice(0, 512)); });
     operations.refreshVolumes();
     guest = candidate; guestFailure = undefined; scene = null;
     guestWork.queue({ kind: 1, target: 0, data: new Uint8Array() });
     if(managed)operations.pb_session?.();
     await enterGuest();
+    if (!scene && candidate.deadline?.parked) {
+        // A guest may await initialization before submitting its first scene.
+        // Keep the normal open receipt and expose no input targets until then.
+        scene = { root: { kind: "column", children: [], close: 4 }, controls: new Map() };
+    }
     if (!scene) throw new Error(`The app could not open: ${logs.join("; ")}`);
 }
 function adoptSession(session: InvitationSession, tentative = false) {
@@ -1326,7 +1366,11 @@ async function prepareBundle(source: AsyncIterable<Uint8Array> | undefined, sess
         if (source) await writePackage(handle, source, fileYield);
         let result: number;
         do {
-            result = host.exports.pb_package(slot);
+            // Package admission checks the browser. Guest discovery checks the
+            // already-adopted instance, which must explicitly opt in.
+            checkingPackageFeatures = true;
+            try { result = host.exports.pb_package(slot); }
+            finally { checkingPackageFeatures = false; }
             if (result === 0) await fileYield();
         } while (result === 0);
         const metadata = JSON.parse(decoder.decode(hostOutput(result)));
@@ -1344,7 +1388,8 @@ async function prepareBundle(source: AsyncIterable<Uint8Array> | undefined, sess
         const identity = await authenticateBundle(slot, metadata, sessionId, expectedApp, admission);
         const wasm = new Uint8Array(metadata.length);
         if (handle.read(wasm, { at: metadata.offset }) !== wasm.length) throw new Error("Incomplete executable read");
-        const instance = await prepareGuest(wasm, operations);
+        const instance = await prepareGuest(wasm, operations,
+            metadata.required_host_features?.includes("event.poll.deadline") === true);
         guestBundles.set(instance, slot);
         return { instance, app: identity.app as InvitationSession["app"], world: identity.world as string,
             shared: identity.shared as string | null, name: metadata.name, build: metadata.build_id,
@@ -1497,6 +1542,8 @@ async function open(args: RuntimeOpenArgs) {
         profile ??= { account: args.account!, seed: invitation.seed, session: invitation.session, root: replica.volume,
             root_credentials: replica.credentials, root_key: replica.credentials.database_key, replica_ids: Array.from({ length: 2 }, replicaId) };
         if (profile.root.id !== replica.volume.id) throw new Error("Saved session replica differs from the invitation");
+        // Bind guest session information to the invitation validated for this admission.
+        profile.seed = invitation.seed;
         profile.account_replica_id ??= new DataView(random(4).buffer).getUint32(0, true);
         proof = await sessionProof(parsed.privateKey, args.account!);
         if (!sharedFormat && profile.session.shared_volume) await admitWebProfile(directory, true);
@@ -2128,10 +2175,20 @@ async function choosePersonal({ id, args }: { id: number; args: RuntimeSelectPer
     }
 }
 async function retireFiles(): Promise<void> {
-    await localStep(() => hostOutput(host.exports.pb_web_guest_reset()));
+    await localStep(() => {
+        hostOutput(host.exports.pb_web_guest_reset());
+        // Reset starts a new Rust work epoch. Fence its old stack before any
+        // asynchronous cleanup can admit a queued notification on that epoch.
+        if (guest?.deadline) {
+            guest.deadline.retire();
+            guest = undefined;
+            channelClient?.close(); channelClient = undefined;
+        }
+    });
     await files.cleanup(); await blobs.cleanup();
 }
 function closeStorage() {
+    guest?.deadline?.retire();
     channelClient?.close();channelClient=undefined;
     entrySubscriptions.clear(); entryRecoveries.clear();
     accountSignal.close();

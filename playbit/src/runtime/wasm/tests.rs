@@ -1009,3 +1009,268 @@ fn oversized_compiled_module_remains_runnable_without_persistence() {
     );
     assert_eq!(std::fs::read_dir(directory.path().join("cache/wasm-vm")).unwrap().count(), 0);
 }
+
+fn deadline_context() -> GuestContext {
+    let mut context = context();
+    context.required_capabilities.insert(Opcode::EventPollDeadline.capability().into());
+    context
+}
+
+const POLL_FIXTURE: &str = r#"
+    (memory (export "memory") 1)
+    (func $poll (param $op i32) (param $n i64) (param $deadline i64) (result i64)
+        (i32.store (i32.const 64) (i32.const 24))
+        (call $dispatch_log (local.get $op)
+            (i64.const 64) (i64.const 128) (local.get $n) (local.get $deadline)
+            (i64.const 0) (i64.const 0)))
+    (func $drain
+        ;; Construct "waitingresumed" on entry so static-image initialization
+        ;; cannot consume the deliberately small per-turn fuel test budget.
+        (i64.store (i32.const 32) (i64.const 0x72676e6974696177))
+        (i64.store (i32.const 40) (i64.const 0x64656d757365))
+        (loop $more
+            (br_if $more (i64.ge_s
+                (call $poll (i32.const 4) (i64.const 128) (i64.const 0)) (i64.const 0)))))
+    (func $clock (result i64)
+        (call $dispatch_log (i32.const 16) (i64.const 0) (i64.const 0) (i64.const 0)
+             (i64.const 0) (i64.const 0) (i64.const 0)))"#;
+
+#[test]
+fn deadline_poll_publishes_then_resumes_the_selected_guest_stack() {
+    // Two overlapping waits exercise Wasmtime's per-fiber trap/TLS restoration.
+    // A size probe on resume leaves the payload queued even with an expired deadline.
+    let mut context_state = playbit_api::context::ContextState::default();
+    let mut view = context_state.view();
+    view.column_start();
+    view.text(playbit_api::ui::TextStyle::Body, "Waiting for input");
+    view.column_end();
+    let scene = view.finish();
+    let bytes: String = scene.iter().map(|byte| format!("\\{byte:02x}")).collect();
+    let wasm = module(&format!(
+        r#"{POLL_FIXTURE}
+        (data (i32.const 512) "{bytes}")
+        (global $entries (mut i32) (i32.const 0))
+        (func (export "pb_main") (local $retained i32)
+            (if (global.get $entries) (then unreachable))
+            (global.set $entries (i32.const 1))
+            (call $drain)
+            (local.set $retained (i32.const 42))
+            (drop (call $log (i32.const 32) (i32.const 7)))
+            (drop (call $dispatch_log (i32.const 3) (i64.const 512) (i64.const {})
+                (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
+            (if (i64.ne (call $poll (i32.const 21) (i64.const 0) (i64.const -1))
+                        (i64.const 3)) (then unreachable))
+            (if (i32.load (i32.const 68)) (then unreachable))
+            (if (i64.ne (call $poll (i32.const 21) (i64.const 3) (i64.const 0))
+                        (i64.const 3)) (then unreachable))
+            (if (i32.ne (i32.load8_u (i32.const 128)) (local.get $retained)) (then unreachable))
+            (if (i32.ne (i32.load (i32.const 84)) (i32.const 7)) (then unreachable))
+            (drop (call $log (i32.const 39) (i32.const 7))))"#,
+        scene.len()
+    ));
+    for &backend in test_backends() {
+        let runtime = Runtime::with_backend(backend).unwrap();
+        let create = || runtime.create_guest(&wasm, deadline_context(), Box::new(NoData)).unwrap();
+        let mut first = create();
+        let mut second = create();
+        for guest in [&mut first, &mut second] {
+            let frame = guest.pump().unwrap();
+            assert_eq!(frame.logs(), &["waiting"]);
+            assert_eq!(frame.view_bytes(), Some(scene.as_slice()));
+            assert!(!guest.has_ready_work(std::time::Instant::now()));
+            assert_eq!(guest.wake_after(std::time::Instant::now()), None);
+        }
+        first
+            .queue_event(
+                first.generation(),
+                syscall::Event {
+                    kind: syscall::EventKind::Submit,
+                    target: 7,
+                    data: vec![42, 2, 3],
+                },
+            )
+            .unwrap();
+        assert_eq!(first.pump().unwrap().logs(), &["resumed"]);
+        drop(second); // Cancellation while suspended cannot execute its guest continuation.
+    }
+}
+
+#[test]
+fn session_info_stays_with_its_guest_across_deadline_waits() {
+    struct SessionHost(u8);
+    impl Host for SessionHost {
+        fn supported_operations(&self) -> &[Opcode] {
+            &[]
+        }
+        fn session_key_secret(&self) -> syscall::HostResult<Option<[u8; 16]>> {
+            Ok(Some([self.0; 16]))
+        }
+    }
+
+    // The event carries this fixture's expected byte. Each suspended guest must
+    // get its own binding back when the host resumes them in reverse order.
+    let wasm = module(&format!(
+        r#"{POLL_FIXTURE}
+        (func $session (result i32)
+            (i32.store (i32.const 256) (i32.const 64))
+            (if (i64.ne (call $dispatch_log (i32.const 0x163) (i64.const 256)
+                    (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))
+                    (i64.const 0)) (then unreachable))
+            (if (i32.ne (i32.load (i32.const 264)) (i32.const 1)) (then unreachable))
+            (if (i32.ne (i32.load8_u (i32.const 272)) (i32.load8_u (i32.const 304)))
+                (then unreachable))
+            (i32.load8_u (i32.const 304)))
+        (func (export "pb_main") (local $before i32)
+            (call $drain)
+            (local.set $before (call $session))
+            (if (i64.ne (call $poll (i32.const 21) (i64.const 1) (i64.const -1)) (i64.const 1))
+                (then unreachable))
+            (if (i32.ne (local.get $before) (i32.load8_u (i32.const 128))) (then unreachable))
+            (if (i32.ne (call $session) (local.get $before)) (then unreachable)))"#
+    ));
+    for &backend in test_backends() {
+        let runtime = Runtime::with_backend(backend).unwrap();
+        let mut guests = [3, 7].map(|tag| {
+            let mut context = deadline_context();
+            context.identity.session_id = Some([tag; 32]);
+            let mut guest =
+                runtime.create_guest(&wasm, context, Box::new(SessionHost(tag))).unwrap();
+            guest.pump().unwrap();
+            (tag, guest)
+        });
+        for (tag, guest) in guests.iter_mut().rev() {
+            let event =
+                syscall::Event { kind: syscall::EventKind::Submit, target: 7, data: vec![*tag] };
+            guest.queue_event(guest.generation(), event).unwrap();
+            guest.pump().unwrap();
+        }
+    }
+}
+
+#[test]
+fn deadline_poll_uses_the_host_clock_and_only_opted_in_guests_can_wait() {
+    let wasm = module(&format!(
+        r#"{POLL_FIXTURE}
+        (func (export "pb_main") (local $deadline i64)
+            (call $drain)
+            (local.set $deadline (i64.add (call $clock) (i64.const 20000000)))
+            (if (i64.ne (call $poll (i32.const 21) (i64.const 0) (local.get $deadline))
+                        (i64.const -6)) (then unreachable))
+            (if (i64.lt_u (call $clock) (local.get $deadline)) (then unreachable))
+            (drop (call $log (i32.const 39) (i32.const 7))))"#
+    ));
+    let legacy = module(&format!(
+        r#"{POLL_FIXTURE}
+        (func (export "pb_main")
+            (if (i64.ne (call $poll (i32.const 21) (i64.const 0) (i64.const -1))
+                        (i64.const -7)) (then unreachable)))"#
+    ));
+    for &backend in test_backends() {
+        let runtime = Runtime::with_backend(backend).unwrap();
+        run(&runtime, &legacy).unwrap();
+        let mut guest = runtime.create_guest(&wasm, deadline_context(), Box::new(NoData)).unwrap();
+        assert!(guest.pump().unwrap().logs().is_empty());
+        // A spurious pump can only rearm the same deadline; it cannot return
+        // WouldBlock until the monotonic clock actually reaches that deadline.
+        while !guest.wake_due(std::time::Instant::now()) {
+            std::thread::sleep(guest.wake_after(std::time::Instant::now()).unwrap());
+        }
+        assert_eq!(guest.pump().unwrap().logs(), &["resumed"]);
+        assert_eq!(guest.wake_after(std::time::Instant::now()), None);
+    }
+}
+
+#[test]
+fn deadline_poll_refills_fuel_on_suspension_only() {
+    // This single invocation stays live across many callbacks, spending more
+    // than its entire per-turn budget in aggregate. An immediate poll never
+    // surrenders the VM, so a tight loop still traps when it spends its budget.
+    let wait = module(&format!(
+        r#"{POLL_FIXTURE}
+        (func (export "pb_main") (local $i i32)
+            (call $drain)
+            (loop $wait
+                (if (i64.ne (call $poll (i32.const 21) (i64.const 0) (i64.const -1))
+                            (i64.const 0)) (then unreachable))
+                (local.set $i (i32.const 12))
+                (loop $burn
+                    (drop (call $clock))
+                    (br_if $burn (local.tee $i (i32.sub (local.get $i) (i32.const 1)))))
+                (drop (call $log (i32.const 39) (i32.const 7)))
+                (br $wait)))"#
+    ));
+    let spin = module(&format!(
+        r#"{POLL_FIXTURE}
+        (func (export "pb_main")
+            (call $drain)
+            (loop $spin
+                (drop (call $poll (i32.const 21) (i64.const 0) (i64.const 0)))
+                (br $spin)))"#
+    ));
+    for &backend in test_backends() {
+        let runtime =
+            Runtime::with_backend_and_fuel_limit(backend, NonZeroU64::new(24_000)).unwrap();
+        let mut guest = runtime.create_guest(&wait, deadline_context(), Box::new(NoData)).unwrap();
+        assert!(guest.pump().unwrap().logs().is_empty());
+        for _ in 0..8 {
+            guest
+                .queue_event(
+                    guest.generation(),
+                    syscall::Event { kind: syscall::EventKind::Click, target: 7, data: Vec::new() },
+                )
+                .unwrap();
+            assert_eq!(guest.pump().unwrap().logs(), &["resumed"]);
+        }
+        let mut spinner =
+            runtime.create_guest(&spin, deadline_context(), Box::new(NoData)).unwrap();
+        assert!(matches!(spinner.pump(), Err(RuntimeError::FuelExhausted)));
+        // A trap in one store and cancellation of its peer must restore TLS.
+        drop(guest);
+        assert!(matches!(spinner.pump(), Err(RuntimeError::GuestHalted)));
+    }
+}
+
+#[test]
+fn deadline_poll_retirement_cancels_timeouts_and_drains_accepted_events() {
+    let wasm = module(&format!(
+        r#"{POLL_FIXTURE}
+        (func (export "pb_main") (local $deadline i64)
+            (call $drain)
+            (local.set $deadline (i64.add (call $clock) (i64.const 20000000)))
+            (if (i64.ne (call $poll (i32.const 21) (i64.const 0) (local.get $deadline))
+                        (i64.const 0)) (then unreachable))
+            (if (i32.ne (i32.load (i32.const 80)) (i32.const 2)) (then unreachable))
+            (if (i64.ne (call $poll (i32.const 21) (i64.const 0) (i64.const -1))
+                        (i64.const -10)) (then unreachable))
+            (drop (call $log (i32.const 39) (i32.const 7))))"#
+    ));
+    for &backend in test_backends() {
+        let runtime = Runtime::with_backend(backend).unwrap();
+        for queued in [false, true] {
+            let mut guest =
+                runtime.create_guest(&wasm, deadline_context(), Box::new(NoData)).unwrap();
+            assert!(guest.pump().unwrap().logs().is_empty());
+            while !guest.wake_due(std::time::Instant::now()) {
+                std::thread::sleep(guest.wake_after(std::time::Instant::now()).unwrap());
+            }
+            if queued {
+                guest
+                    .queue_event(
+                        guest.generation(),
+                        syscall::Event { kind: syscall::EventKind::Click, target: 7, data: vec![] },
+                    )
+                    .unwrap();
+            }
+            guest.deactivate();
+            assert_eq!(guest.wake_after(std::time::Instant::now()), None);
+            assert_eq!(guest.has_ready_work(std::time::Instant::now()), queued);
+            let frame = guest.pump().unwrap();
+            if queued {
+                assert_eq!(frame.logs(), &["resumed"]);
+            } else {
+                assert!(frame.logs().is_empty());
+            }
+            assert!(!guest.drain_pending());
+        }
+    }
+}

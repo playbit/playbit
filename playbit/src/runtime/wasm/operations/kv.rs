@@ -1,5 +1,5 @@
 //! Wasm KV admission copies only bounded input into existing async operations.
-use super::{WasmState, call};
+use super::{StoreData, call};
 use crate::runtime::linear_memory::layout::kv::{query as query_layout, read as read_layout};
 use crate::runtime::{
     host::{DataOperation, DataResult, kv_stored_root},
@@ -25,7 +25,7 @@ fn root(
 }
 
 pub(super) fn keys_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     entry: u32,
     query: u32,
     after: u32,
@@ -56,7 +56,7 @@ pub(super) fn keys_begin(
 }
 
 pub(super) fn read_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     entry: u32,
     key: u32,
     length: u32,
@@ -88,7 +88,7 @@ pub(super) fn read_begin(
 }
 
 pub(super) fn put_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     entry: u32,
     key: u32,
     length: u32,
@@ -115,7 +115,7 @@ pub(super) fn put_begin(
 }
 
 pub(super) fn delete_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     entry: u32,
     key: u32,
     length: u32,
@@ -138,7 +138,7 @@ pub(super) fn delete_begin(
 }
 
 pub(super) fn bytes_take(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     opcode: Opcode,
@@ -171,7 +171,7 @@ pub(super) fn bytes_take(
 }
 
 pub(super) fn receipt_take(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     opcode: Opcode,

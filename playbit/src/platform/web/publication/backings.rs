@@ -1,9 +1,8 @@
 //! Resolve prepared backings under the received policy, retaining originals
 //! before any rejected local data can leave the active generation.
 use super::*;
-use crate::store::object_contract::Principal;
 
-pub(super) fn rejected(stage: &Preparation, account: Id, entry: EntryId) -> Result<bool> {
+pub(super) fn rejected(stage: &Preparation, actor: DataActor, entry: EntryId) -> Result<bool> {
     if stage.archive.borrow().rejected_backings.contains(&entry) {
         return Ok(true);
     }
@@ -14,16 +13,14 @@ pub(super) fn rejected(stage: &Preparation, account: Id, entry: EntryId) -> Resu
     let unavailable =
         match DatabasePolicy::read_source(&stage.accepted_index, DatabaseId::Entry(entry)) {
             Ok(policy) => {
-                if allowed(policy.authorize(Principal::Human(account), Permission::Write))?
+                if allowed(policy.authorize(actor, Permission::Write))?
                     || (policy.entry.as_ref().and_then(|entry| entry.protocol)
                         == Some(DatabaseProtocol::BlobLog)
-                        && allowed(
-                            policy.authorize(Principal::Human(account), Permission::Append),
-                        )?)
+                        && allowed(policy.authorize(actor, Permission::Append))?)
                 {
                     return Ok(false);
                 }
-                !allowed(policy.authorize_reader(ReplicaReader::Participant(account)))?
+                !allowed(policy.authorize_reader(ReplicaReader::SessionParticipant(actor)))?
                     || !allowed(policy.authorize_reader(ReplicaReader::Service))?
             }
             Err(crate::store::Error::NotFound(_)) => {
@@ -32,7 +29,7 @@ pub(super) fn rejected(stage: &Preparation, account: Id, entry: EntryId) -> Resu
                     &stage.original.index.begin_read().map_err(map_error)?,
                     &stage.accepted_index,
                     &policy,
-                    account,
+                    actor,
                     entry,
                 )
                 .map_err(store_error)?
@@ -79,8 +76,8 @@ pub(super) fn prepare_log(host: &Host, stage: &Preparation) -> Result<()> {
         .backing_quarantined(entry)
         .map_err(store_error)?;
     if !replace
-        && (allowed(policy.authorize(Principal::Human(host.account), Permission::Write))?
-            || allowed(policy.authorize(Principal::Human(host.account), Permission::Append))?)
+        && (allowed(policy.authorize(host.actor(&stage.volume), Permission::Write))?
+            || allowed(policy.authorize(host.actor(&stage.volume), Permission::Append))?)
     {
         stage.log_prepared.set(true);
         return Ok(());
@@ -130,7 +127,7 @@ pub(super) fn merge(
             if ranked == Resolution::KeepLocal {
                 let proposed =
                     SyncDelta { key: delta.key, local: delta.remote, remote: delta.local };
-                match policy.validate_sync_source(&proposed, Some(host.account)) {
+                match policy.validate_sync_source_as(&proposed, Some(host.actor(&stage.volume))) {
                     Ok(_) => {}
                     Err(crate::store::Error::AccessDenied(_)) => {
                         rejected.set(true);

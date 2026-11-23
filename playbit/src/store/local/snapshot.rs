@@ -2,7 +2,6 @@
 use super::*;
 use crate::store::{
     DatabaseId, EntryType,
-    object_contract::Principal,
     volume_index::{BlobVersion, EntryAddress, EntryHeader, EntryKind, IndexSnapshot},
 };
 use std::io::{Read, Write};
@@ -286,7 +285,7 @@ impl LocalStore {
         match snapshot.authorize_retained_read(
             volume,
             defaults,
-            Principal::Human(access.account),
+            self.data_actor(access, volume)?,
             entry.id,
         ) {
             Ok(()) => {}

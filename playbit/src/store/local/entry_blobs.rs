@@ -4,7 +4,6 @@
 use super::*;
 use crate::store::{
     EntryId, MAX_REPLICA_DELTA_BYTES,
-    object_contract::Principal,
     volume_index::{
         self, BlobVersion, EntryAddress, EntryInfo, EntryKind, IndexSnapshot, VolumeEntry,
     },
@@ -310,7 +309,7 @@ impl LocalStore {
                 snapshot.authorize(
                     policy.volume(),
                     policy.default_permissions(),
-                    Principal::Human(access.account),
+                    self.data_actor(access, policy.volume())?,
                     entry,
                     Permission::Write,
                 )?;
@@ -521,7 +520,7 @@ impl LocalStore {
             snapshot.authorize_blob_upload(
                 policy.volume(),
                 policy.default_permissions(),
-                access.account,
+                self.data_actor(access, policy.volume())?,
                 address.entry,
                 revision.ok_or(Error::InvalidInput("upload revision required"))?,
             )?;
@@ -529,14 +528,14 @@ impl LocalStore {
             snapshot.authorize_retained_read(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 address.entry,
             )?;
         } else {
             snapshot.authorize(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 address.entry,
                 permission,
             )?;

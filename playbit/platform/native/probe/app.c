@@ -16,7 +16,7 @@ static PBSysResult probe_handle(PBSysResult result, void* output) {
 typedef struct Probe {
     const uint8_t *off;
     const uint8_t *on;
-    uint32_t off_len, on_len;
+    uint32_t off_len, on_len, view_bytes_limit;
     uint32_t initialized, turns, destroyed, submitted;
     int32_t fail_init, fail_turn;
     PBContext *context;
@@ -36,7 +36,7 @@ static PBStatus app_init(PBContext *context, void *data, void **output) {
     assert(pb_host_platform(NULL) == PB_INVALID_ARGUMENT);
     assert(pb_host_limit(context, PB_LIMIT_QUERY_RECORDS) == 64);
     assert(pb_host_limit(context, PB_LIMIT_QUERY_VALUE_BYTES) == 1048576);
-    assert(pb_host_limit(context, PB_LIMIT_VIEW_BYTES) == 1048576);
+    assert(pb_host_limit(context, PB_LIMIT_VIEW_BYTES) == probe->view_bytes_limit);
     assert(pb_host_limit(context, 0xffffffff) == PB_UNSUPPORTED);
     assert(pb_host_limit(NULL, PB_LIMIT_QUERY_RECORDS) == PB_INVALID_ARGUMENT);
     PBIdentity identity = {.size=sizeof(PBIdentity)};
@@ -97,6 +97,7 @@ uint64_t probe_layout(uint32_t index) {
     const uint64_t layout[] = {
         sizeof(PBEvent), _Alignof(PBEvent), offsetof(PBEvent, kind), offsetof(PBEvent, target),
         sizeof(PBIdentity), _Alignof(PBIdentity), offsetof(PBIdentity, flags), offsetof(PBIdentity, reserved),
+        sizeof(PBSessionInfo), _Alignof(PBSessionInfo), offsetof(PBSessionInfo, internal_id), offsetof(PBSessionInfo, key_secret),
         sizeof(PBApp), _Alignof(PBApp), offsetof(PBApp, user_data), sizeof(Probe), _Alignof(Probe)
     };
     assert(index < sizeof(layout) / sizeof(layout[0]));
@@ -335,7 +336,8 @@ uint64_t catalog_probe_layout(uint32_t index) {
 }
 
 // Read through the public C contract, including rejected outputs and retry semantics.
-PBStatus probe_environment(PBContext *context, uint8_t seed, uint32_t participant_count, uint32_t capability_count) {
+PBStatus probe_environment(PBContext *context, uint8_t seed, uint32_t participant_count,
+                           uint32_t capability_count, uint32_t expected_deadline_count) {
     PBRange names[32] = {0};
     for (uint32_t i = 0; i < 32; i++) names[i].size = sizeof(PBRange);
     memset(names, 0x55, sizeof(names));
@@ -351,6 +353,14 @@ PBStatus probe_environment(PBContext *context, uint8_t seed, uint32_t participan
     assert(caps.names_count == capability_count && names[0].count == 12);
     assert(memcmp(bytes + names[0].offset, "capabilities", 12) == 0);
     assert(names[11].count == 10 && memcmp(bytes + names[11].offset, "host.limit", 10) == 0);
+    const char deadline_name[] = "event.poll.deadline";
+    uint32_t deadline_count = 0;
+    for (uint32_t i = 0; i < caps.names_count; i++) {
+        if (names[i].count == sizeof(deadline_name) - 1 &&
+            memcmp(bytes + names[i].offset, deadline_name, sizeof(deadline_name) - 1) == 0)
+            deadline_count++;
+    }
+    assert(deadline_count == expected_deadline_count);
     assert(pb_capabilities(context, NULL) == PB_INVALID_ARGUMENT);
     caps.names_data = (PBRange *)&caps;
     assert(pb_capabilities(context, &caps) == PB_INVALID_ARGUMENT);

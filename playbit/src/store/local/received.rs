@@ -207,13 +207,14 @@ impl LocalStore {
             return Err(Error::InvalidInput("local bootstrap requires a named backing"));
         };
         let staged_policy = DatabasePolicy::read_source(&received.metadata, database)?;
-        staged_policy.authorize_reader(ReplicaReader::Participant(access.account))?;
+        let actor = self.data_actor(access, staged_policy.volume.volume())?;
+        staged_policy.authorize_reader(ReplicaReader::SessionParticipant(actor))?;
         let operations = self.access_operations(access, received.volume)?;
         let guards = operations.lock()?;
         let index = self.db(received.volume, DatabaseId::Index)?;
         let policy = DatabasePolicy::read(&index, database)?;
         self.admit_access(access, &policy.volume)?;
-        policy.authorize_reader(ReplicaReader::Participant(access.account))?;
+        policy.authorize_reader(ReplicaReader::SessionParticipant(actor))?;
         let local = volume_index::IndexSnapshot::new(index.begin_read()?);
         if !local.backing_ready(id)? {
             return Err(Error::NotFound("local backing is not initialized"));
@@ -246,7 +247,7 @@ impl LocalStore {
         let projection = snapshot.project(
             &self.path.join(crate::paths::STAGING),
             &policy,
-            ReplicaReader::Participant(access.account),
+            ReplicaReader::SessionParticipant(actor),
         )?;
         received.with_database(database, |target| {
             merge_named_replica(
@@ -406,7 +407,7 @@ impl LocalStore {
                 &self.path.join(crate::paths::STAGING),
                 received,
                 &target,
-                access.account,
+                self.data_actor(access, &self.volume(received.volume)?)?,
             )?
         {
             return Ok(());
@@ -417,7 +418,7 @@ impl LocalStore {
                 source,
                 database,
                 &policy,
-                access.account,
+                self.data_actor(access, policy.volume.volume())?,
                 access.build_id.as_deref(),
             )?
             .merge_into(&target)
@@ -488,7 +489,7 @@ impl LocalStore {
             &self.path.join(crate::paths::STAGING),
             received,
             &metadata,
-            access.account,
+            self.data_actor(access, &descriptor)?,
         )?;
         let effective = MetadataPolicy::read(&received.metadata)?;
         if !effective.volume.same_identity(&descriptor) {
@@ -536,7 +537,7 @@ impl LocalStore {
         entry: EntryId,
     ) -> Result<()> {
         let policy = DatabasePolicy::read_source(&received.metadata, DatabaseId::Entry(entry))?;
-        policy.metadata_readable(access.account)?;
+        policy.metadata_readable(self.data_actor(access, policy.volume.volume())?)?;
         self.admit_received_entry(access, received, &policy.volume)?;
         self.prepare_namespace_plan(access, received, &policy.volume)?;
         self.prepare_rejected_cut(access, received)?;
@@ -545,7 +546,7 @@ impl LocalStore {
             &revocations,
             DatabaseId::Revocations,
             &policy,
-            access.account,
+            self.data_actor(access, policy.volume.volume())?,
             access.build_id.as_deref(),
         )?
         .merge_into(&received.revocations)?;
@@ -555,14 +556,14 @@ impl LocalStore {
                 &self.path.join(crate::paths::STAGING),
                 received,
                 &retained,
-                access.account,
+                self.data_actor(access, policy.volume.volume())?,
             )?;
         } else if replica_root(&retained)?.is_some() {
             super::scoped::ScopedSnapshot::for_reconciliation(
                 &retained,
                 DatabaseId::Index,
                 &policy,
-                access.account,
+                self.data_actor(access, policy.volume.volume())?,
                 access.build_id.as_deref(),
             )?
             .merge_into(&received.metadata)?;
@@ -571,7 +572,7 @@ impl LocalStore {
         if !current.volume.volume().same_identity(&self.volume(received.volume)?) {
             return Err(Error::AccessDenied("replica volume mismatch"));
         }
-        current.metadata_readable(access.account)?;
+        current.metadata_readable(self.data_actor(access, current.volume.volume())?)?;
         self.admit_received_entry(access, received, &current.volume)
     }
 
@@ -597,7 +598,7 @@ impl LocalStore {
             if !grant.write
                 && let Some(entry) = received.entry_scope
                 && !DatabasePolicy::read_source(&received.metadata, DatabaseId::Entry(entry))?
-                    .metadata_readable(access.account)?
+                    .metadata_readable(self.data_actor(access, policy.volume())?)?
             {
                 return Err(Error::AccessDenied("personal volume is read-only"));
             }
@@ -650,7 +651,7 @@ impl LocalStore {
                     let append = log
                         && policy
                             .authorize(
-                                crate::store::object_contract::Principal::Human(access.account),
+                                self.data_actor(access, policy.volume.volume())?,
                                 Permission::Append,
                             )
                             .is_ok();
@@ -660,7 +661,7 @@ impl LocalStore {
                             source,
                             &target,
                             &policy,
-                            access.account,
+                            self.data_actor(access, policy.volume.volume())?,
                             quarantined || log,
                         )
                     } else if log {
@@ -781,7 +782,7 @@ impl LocalStore {
                 root.admit(access.account, &session, session.replica_volume())?;
             }
         }
-        policy.authorize(access.account, Permission::Read)
+        policy.authorize(self.data_actor(access, policy.volume())?, Permission::Read)
     }
     #[cfg(test)]
     fn received_before_commit(&self, database: crate::store::DatabaseId) -> Result<()> {

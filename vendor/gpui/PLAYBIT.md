@@ -44,6 +44,10 @@ macOS windows expose a mutable native minimum content size. Updates defer AppKit
 mutation until the GPUI window borrow ends and grow undersized windows without
 shrinking them when constraints relax. Test windows can simulate backing-scale
 changes through their existing resize callback for UI zoom qualification.
+Guest content limits and aspect ratio share the coalesced AppKit style update.
+AppKit handles subsequent live resizing directly. Normal-window constraints
+are reconciled after fullscreen and when the window’s display, backing scale,
+or usable screen area changes.
 
 
 Opt-in `playbit-trace` observations record local window, input, accessibility,

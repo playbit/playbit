@@ -1,4 +1,4 @@
-use super::{WasmState, call, output::Buffer};
+use super::{StoreData, call, output::Buffer};
 use crate::runtime::linear_memory::layout::schema::{
     field as field_layout, schema as schema_layout, type_record,
 };
@@ -68,7 +68,7 @@ fn write_result(
     descriptor.publish(memory.data, schema_layout::LAYOUT);
     Ok(0)
 }
-pub(super) fn read_begin(caller: Caller<'_, WasmState>, entry: u32) -> i64 {
+pub(super) fn read_begin(caller: Caller<'_, impl StoreData>, entry: u32) -> i64 {
     call(caller, |state, memory| {
         let (entry, _) = input::entry_handle(memory, entry, None)?;
         pending_data::admit_entry(state, entry, Opcode::SchemaReadBegin)?;
@@ -82,7 +82,7 @@ pub(super) fn read_begin(caller: Caller<'_, WasmState>, entry: u32) -> i64 {
     })
 }
 pub(super) fn establish_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     entry: u32,
     pointer: u32,
     count: u32,
@@ -102,7 +102,7 @@ pub(super) fn establish_begin(
     })
 }
 pub(super) fn read_take(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     pointer: u32,
@@ -117,7 +117,11 @@ pub(super) fn read_take(
         })
     })
 }
-pub(super) fn establish_take(caller: Caller<'_, WasmState>, generation: u32, slot: u32) -> i64 {
+pub(super) fn establish_take(
+    caller: Caller<'_, impl StoreData>,
+    generation: u32,
+    slot: u32,
+) -> i64 {
     call(caller, |state, _| take_establishment(state, OperationHandle { generation, slot }))
 }
 fn take_establishment(state: &mut State, pending: OperationHandle) -> HostResult<i32> {

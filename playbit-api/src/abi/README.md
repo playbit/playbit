@@ -169,14 +169,62 @@ Rejection leaves the last accepted scene and its bytes unchanged. Desktop uses 6
 also exercise an 8 KiB ceiling. Renderer
 node/text/feature limits and total memory remain separate constraints. C uses `PB_LIMIT_VIEW_BYTES` (kind 3).
 
-The canvas command (`VIEW_CANVAS`, 22) has four little-endian `u32` fields
-for width, height, flags and item count, followed by its item records. Bit 0 of
-flags requests display-driven frame events. Bit 1 requires
-`ui.canvas.viewport.v1` and opts in to a root canvas clipped to the content
-viewport without outer scrolling. A context menu may wrap the root canvas.
-Canvas sizes and coordinates remain logical units. During resize, the host clips
-the last accepted scene while delivering updated geometry through `SurfaceChanged`.
-Zero flags keep ordinary static layout. Unknown bits are rejected.
+The optional window style command (`VIEW_WINDOW_STYLE`, 27) has ID zero
+and one little-endian `u32` bitmask. It may appear once before the scene
+root, in either order with the theme, and requires `ui.window.style.v1`.
+Its bits select titlebar (0), closable (1), minimizable (2), resizable (3),
+transparent titlebar (4), hidden title (5), full-size content beneath the
+titlebar (6), bright appearance (7), dark appearance (8), and hiding the
+Copy Session Link button (9). Session windows show the button by default,
+including over whole-window canvases. Transparent
+titlebars imply full-size content. With neither appearance bit set, the native
+window follows the system appearance. Both appearance bits together or any
+unknown bit make the scene invalid. Zero requests an undecorated window.
+Omitting the command restores host window defaults on that scene.
+
+The optional `VIEW_WINDOW_SIZE_CONSTRAINTS` command (28) requires
+`ui.window.size-constraints.v1`. It has ID zero and may appear once before
+the root, in any order with theme and window style. The 20-byte payload stores
+minimum width, minimum height, maximum width, maximum height, and aspect ratio
+(content width divided by height), in that order. All five values are IEEE 754
+binary32 in little-endian order. Bounds use device-independent points (dp) on the
+native content rectangle before layout padding. A zero bound removes that
+bound and a zero ratio releases the ratio lock. Omitting the command from
+an accepted scene releases all guest constraints.
+
+Fractional bounds are valid. Each bound must be finite and in [0, 2²⁴],
+and each specified minimum must fit its maximum. For ratio validation, an
+omitted maximum counts as 2²⁴. A positive ratio must be at least
+`min_width / max_height` and, when a minimum height is set, at most
+`max_width / min_height`. Quotients are rounded to binary32. Negative,
+infinite, NaN and infeasible values invalidate the entire scene. An unsupported host
+rejects the command. The previous accepted scene survives either rejection.
+
+The canvas command (`VIEW_CANVAS`, 22) starts with four little-endian `u32`
+fields for width, height, flags and item count. Bit 0 requests display-driven
+frame events. Bit 1 selects the padded content viewport and requires
+`ui.canvas.viewport.v1`. Bit 2 selects the entire drawable window and requires
+`ui.canvas.window.v1`. Full-window extent implies full-size content and a
+transparent titlebar on decorated windows. Both extents require a root canvas,
+optionally wrapped in a context menu. Canvas and pointer coordinates use logical
+units from the canvas origin. During resize, the host clips the last accepted
+scene while delivering the new extent through `SurfaceChanged`. For window
+extent the host rounds a fractional logical edge up to cover the last visible
+pixel, and clips drawing to the actual window bounds. Setting both
+extent bits or any unknown flag makes the scene invalid. Zero extent bits keep
+ordinary inline layout.
+
+Widths and heights are positive. The maximum logical edge is 4,096 for inline
+and padded viewport canvases and 16,777,216 for window canvases. All items fit
+inside these dimensions. Pointer coordinates are bounded by the addressed
+canvas and may equal its right or bottom edge. Pixel source images remain
+limited to 4,096 pixels per edge and 32 MiB in aggregate per scene.
+
+Bit 3 adds a little-endian `u32` Display P3 `0xRRGGBBAA` clear color after
+the item count, before the ordered items. It requires `ui.canvas.clear.v1`.
+The host paints that color over the canvas bounds before drawing the items,
+including when the list is empty. An absent clear color leaves the canvas
+transparent. Clear color and extent are independent of frame demand.
 
 ```mermaid
 sequenceDiagram
@@ -264,6 +312,22 @@ nonnegative result gives the payload length. If that length exceeds capacity,
 the host leaves the payload and queue unchanged and sets `written=0`. Otherwise
 it writes the header and payload and consumes exactly one event. `WouldBlock`
 means the queue is empty.
+
+`pb_event_poll_deadline` takes the same outputs and an absolute deadline in
+the monotonic nanoseconds returned by `pb_clock_read`. A queued event returns
+immediately. Otherwise the call waits until an event arrives or the deadline
+expires. On timeout it returns `WouldBlock`. Zero checks the queue immediately.
+`UINT64_MAX` waits indefinitely. A timer queue in guest code can pass its
+earliest deadline on each poll and dispatch all due timers after checking the
+clock. Add `"event.poll.deadline"` to the package's `required_host_features`
+to enable waiting. The running instance advertises the capability when enabled.
+Without this declaration, deadline polls return `Unsupported`.
+
+In the Rust SDK, handle the callback's initial `context.raw_events()` snapshot
+before calling `context.poll_event_deadline(deadline_ns, &mut bytes)` for new
+events. `context.clock_read()` provides the clock. The poll returns a typed
+event borrowing `bytes`, `PollError::BufferTooSmall(required)` for a size
+probe, or `PollError::Host(Error::WouldBlock)` when the deadline expires.
 
 `TextChanged` carries a little-endian `u32` edit count, that many packed
 12-byte edits (`u32 start`, `u32 end`, `u32 inserted_len`), then the complete committed
@@ -426,6 +490,7 @@ Disposal suppresses result delivery without canceling accepted writes or Close.
 The SDK keeps bounded cleanup metadata across callbacks and never retains a
 native Context pointer. Custom callback owners attach the same FileResources
 to every live Context and flush it after their work; App does this automatically.
+`Context::poll_event_deadline` also flushes the attached resources before it waits.
 
 ```mermaid
 sequenceDiagram

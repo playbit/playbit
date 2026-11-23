@@ -158,7 +158,7 @@ impl LocalStore {
             snapshot.authorize_namespace(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 parent,
                 Permission::Write,
             )?;

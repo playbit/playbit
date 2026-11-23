@@ -362,6 +362,7 @@ pub struct Control {
     switch: bool,
     session_style: Option<SessionStyle>,
     toolbar_icon: Option<&'static str>,
+    native_tooltip_visible: bool,
     inspector_icon: Option<&'static str>,
     navigation_accessory_icon: Option<&'static str>,
     circle_icon: Option<&'static str>,
@@ -527,6 +528,7 @@ impl Control {
             switch: false,
             session_style: None,
             toolbar_icon: None,
+            native_tooltip_visible: false,
             inspector_icon: None,
             navigation_accessory_icon: None,
             circle_icon: None,
@@ -822,6 +824,11 @@ impl Control {
         self.press.cancel();
         self.cancel_delayed_rename();
         self.focus_intent = FocusIntent::None;
+    }
+    pub(crate) fn clear_native_tooltip(&mut self, window: &Window) {
+        if std::mem::take(&mut self.native_tooltip_visible) {
+            set_native_tooltip(window, None);
+        }
     }
     pub fn cancel_pointer_press(&mut self, cx: &mut Context<Self>) -> bool {
         self.cancel_delayed_rename();

@@ -20,7 +20,7 @@ pub use audio::{Audio, Gain, Sound, SoundInstance, Timestamp};
 pub(crate) use events::EventBuffer;
 
 mod session;
-pub use session::{Channel, ChannelMessage, Session};
+pub use session::{Channel, ChannelMessage, Session, SessionInfo};
 mod trace;
 pub use trace::TraceSpan;
 mod authenticated;
@@ -52,6 +52,7 @@ pub use schema::{FieldDefinition, Schema, SchemaField, SchemaType, TypeDefinitio
 #[derive(Default)]
 pub struct ContextState {
     events: EventBuffer,
+    event_error: Option<Error>,
     scene: Vec<u8>,
     trace: trace::TraceBuffer,
 }
@@ -74,6 +75,7 @@ pub struct Context<'a> {
     raw: NonNull<ffi::Context>,
     files: Option<FileResources>,
     events: &'a EventBuffer,
+    event_error: &'a mut Option<Error>,
     trace: &'a mut trace::TraceBuffer,
     _borrow: PhantomData<&'a mut ffi::Context>,
 }
@@ -99,12 +101,12 @@ impl<'a> Context<'a> {
     pub fn guest(state: &'a mut ContextState) -> Result<(Self, ViewEncoder<'a>), Error> {
         let raw = NonNull::new(crate::abi::invocation::CONTEXT_TOKEN as *mut ffi::Context)
             .expect("the local guest token is nonzero");
-        state.events.read(raw)?;
-        state.trace.configure(state.events.trace_generation);
+        state.events.read(raw, &mut state.trace, &mut state.event_error)?;
         let context = Self {
             raw,
             files: None,
             events: &state.events,
+            event_error: &mut state.event_error,
             trace: &mut state.trace,
             _borrow: PhantomData,
         };
@@ -125,12 +127,12 @@ impl<'a> Context<'a> {
         state: &'a mut ContextState,
     ) -> Result<(Self, ViewEncoder<'a>), Error> {
         let raw = NonNull::new(raw).ok_or(Error::InvalidArgument)?;
-        state.events.read(raw)?;
-        state.trace.configure(state.events.trace_generation);
+        state.events.read(raw, &mut state.trace, &mut state.event_error)?;
         let context = Self {
             raw,
             files: None,
             events: &state.events,
+            event_error: &mut state.event_error,
             trace: &mut state.trace,
             _borrow: PhantomData,
         };
@@ -149,7 +151,7 @@ impl<'a> Context<'a> {
     /// admission; known events before that boundary remain available once.
     /// Direct callers must return this error to their host after processing them.
     pub fn event_status(&self) -> Result<(), Error> {
-        self.events.status()
+        self.event_error.map_or(Ok(()), Err)
     }
 
     /// Log a message.
@@ -184,6 +186,12 @@ impl<'a> Context<'a> {
         }
         Ok(value)
     }
+    /// Read the host monotonic clock in nanoseconds, including for event-poll deadlines.
+    pub fn clock_read(&self) -> u64 {
+        // SAFETY: this call borrows the live context and takes no output pointers.
+        unsafe { ffi::pb_clock_read(self.raw.as_ptr()) }
+    }
+
     pub fn wake_after(&mut self, delay_ms: u32) -> Result<(), Error> {
         // SAFETY: only the live callback context is borrowed.
         status(unsafe { ffi::pb_wake_after(self.raw.as_ptr(), delay_ms) })

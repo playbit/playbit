@@ -17,6 +17,7 @@ fn desktop_rename_crosses_actual_management_admission_and_returns_exact_committe
     store.kv_put(&access, address, b"old", &bytes).unwrap();
     let expected = store.kv_read(&access, address, b"old", 0, 4, None).unwrap().root;
     let request = Request::KvRename {
+        session: None,
         mutation: Box::new(crate::engine::KvRenameMutation {
             address,
             old_key: b"old".to_vec(),
@@ -61,6 +62,7 @@ fn rename_receipt_cannot_acknowledge_another_key_address_or_root_kind() {
     let encoded = codec::encode(&receipt, codec::MAX_ARCHIVE).unwrap();
     let archived = codec::access::<crate::engine::reply::ArchivedReply>(&encoded).unwrap();
     let request = |address, old_key: &[u8], new_key: &[u8], expected| Request::KvRename {
+        session: None,
         mutation: Box::new(crate::engine::KvRenameMutation {
             address,
             old_key: old_key.to_vec(),

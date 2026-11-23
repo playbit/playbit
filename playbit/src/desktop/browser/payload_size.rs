@@ -272,7 +272,11 @@ mod tests {
             }
             browser.details = Some(Arc::new(current));
             browser.failed(
-                Failure::for_request(&Request::VolumeDetails { volume: volume(1).id }).unwrap(),
+                Failure::for_request(&Request::VolumeDetails {
+                    session: None,
+                    volume: volume(1).id,
+                })
+                .unwrap(),
                 "Current authority is unavailable",
                 cx,
             );

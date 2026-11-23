@@ -76,7 +76,7 @@ impl Host {
                 .authorize_blob_upload(
                     policy.volume(),
                     policy.default_permissions(),
-                    self.account,
+                    self.actor(volume),
                     version.address.entry,
                     version.revision,
                 )
@@ -89,7 +89,7 @@ impl Host {
                 .authorize_retained_read(
                     policy.volume(),
                     policy.default_permissions(),
-                    crate::store::object_contract::Principal::Human(self.account),
+                    self.actor(volume),
                     version.address.entry,
                 )
                 .map_err(store_error)?;

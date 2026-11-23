@@ -12,7 +12,7 @@ export interface SceneText { kind: "text"; style: number; text: string; id?: und
 export interface SceneInput { kind: "input"; id: number; disabled: boolean; readOnly: boolean; value: string; placeholder: string }
 export interface SceneToggle { kind: "button" | "checkbox"; id: number; state: number; disabled: boolean; label: string }
 // A canvas is never disabled; the field stays undefined so validateInput reads it uniformly.
-export interface SceneCanvas { kind: "canvas"; id: number; width: number; height: number; frames: 0 | 1; items: SceneCanvasItem[]; disabled?: undefined }
+export interface SceneCanvas { kind: "canvas"; id: number; width: number; height: number; frames: 0 | 1; clearColor?: number; items: SceneCanvasItem[]; disabled?: undefined }
 // Identified nodes share one namespace; scroll viewports accept no guest input.
 export type SceneControl = SceneInput | SceneToggle | SceneCanvas | SceneScroll;
 export type SceneNode = SceneContainer | SceneText | SceneControl;
@@ -104,10 +104,17 @@ function decodeTextInput(id: number, data: Uint8Array, d: DataView): SceneInput 
 function decodeCanvas(id: number, data: Uint8Array, d: DataView, totals: CanvasTotals): SceneCanvas {
     const length = data.length;
     if (length < 16) throw new Error("Invalid canvas");
-    const width = d.getUint32(0, true), height = d.getUint32(4, true), frames = d.getUint32(8, true), n = d.getUint32(12, true);
-    if (!width || !height || width > 4096 || height > 4096 || (frames !== 0 && frames !== 1) || (!id && frames !== 0) || n > 4096 - totals.items) throw new Error("Canvas exceeds limits");
+    const width = d.getUint32(0, true), height = d.getUint32(4, true), flags = d.getUint32(8, true), n = d.getUint32(12, true);
+    const frames = (flags & 1) as 0 | 1;
+    if (!width || !height || width > 4096 || height > 4096 || (flags & ~9) !== 0 || (!id && frames !== 0) || n > 4096 - totals.items) throw new Error("Canvas exceeds limits");
     const items: SceneCanvasItem[] = [];
     let at = 16;
+    let clearColor: number | undefined;
+    if (flags & 8) {
+        if (length < 20) throw new Error("Truncated Canvas clear color");
+        clearColor = d.getUint32(at, true);
+        at += 4;
+    }
     for (let index = 0; index < n; index++) {
         if (at + 24 > length) throw new Error("Truncated Canvas item");
         const kind = d.getUint32(at, true);
@@ -128,7 +135,7 @@ function decodeCanvas(id: number, data: Uint8Array, d: DataView, totals: CanvasT
     }
     if (at !== length) throw new Error("Trailing Canvas bytes");
     totals.items += n;
-    return { kind: "canvas", id, width, height, frames, items };
+    return { kind: "canvas", id, width, height, frames, clearColor, items };
 }
 
 export function validateInput(controls: Map<number, SceneControl>, kind: number, target: number, data: Uint8Array, validateText: (data: Uint8Array) => void): void {

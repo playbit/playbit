@@ -215,24 +215,92 @@ Readers report missing endpoints and loss without synthesizing completion.
 See [app trace declarations](../docs/app-trace-declarations.md) for declarations,
 CLI start/stop/tail, bounds, privacy and generated names.
 
-## Canvas frame demand
+## Window appearance and canvases
 
-`ViewEncoder::canvas` requires `CanvasFrames::Static` or `Continuous`. Static
+`ViewEncoder::theme` sets semantic colors before the scene root. On macOS,
+`ThemeColor::WindowBackground` paints the whole guest window, including its
+host-drawn titlebar. To control the window decorations, declare
+`ui.window.style.v1` in `required_host_features` and call `window_style` before
+the scene root. Each accepted scene supplies its own style. Omitting it restores
+the host's usual window decorations and appearance. `TRANSPARENT_TITLEBAR`
+reveals the scene beneath the native title and buttons. `FULLSIZE_CONTENT` on
+its own extends the drawable area while AppKit paints its titlebar over it.
+Session windows show the host's Copy Session Link button in the upper right,
+including over a whole-window canvas. Set `WindowStyle::HIDE_SESSION_BUTTON`
+to hide it. The Window menu still offers Copy Session Link.
+
+The macOS AppKit renderer advertises window size constraints for native and Wasm guests.
+A raw scene callback in a headless embedding cannot enforce this feature.
+To require it, declare `ui.window.size-constraints.v1` in
+`required_host_features`. Call `window_size_constraints` once before the root
+of each scene that needs limits. This 16:9 window allows content widths
+from 320.5 to 1280 dp.
+
+```rust
+use playbit_api::ui::WindowSizeConstraints;
+
+view.window_size_constraints(WindowSizeConstraints {
+    min_width: 320.5,
+    max_width: 1280.0,
+    aspect_ratio: 16.0 / 9.0,
+    ..Default::default()
+});
+```
+
+`min_width`, `min_height`, `max_width`, and `max_height` are independent
+binary32 bounds in device-independent points (dp) on the window's content
+area before layout padding. A zero bound leaves that edge unrestricted.
+`aspect_ratio` is content width divided by height. Set it to `0.0` for free resizing within the bounds.
+Omitting the command releases all guest size constraints. The host fits the
+current window to new limits and enforces them during dragging. AppKit receives
+fractional bounds and may round the resulting frame to whole points. System
+window controls, the available display, and fullscreen can also limit the size.
+The `WindowStyle::RESIZABLE` flag controls user resizing of the guest view.
+While displaying the app log or recovery guidance, Playbit can temporarily
+override the guest bounds, aspect ratio and resize flag to keep the text
+readable. Closing the log in a healthy app restores its current scene policy.
+
+`ViewEncoder::canvas` accepts a `CanvasFrames` value and draws an inline
+canvas with a transparent background. Use `ViewEncoder::canvas_with_options`
+to set an extent or clear color. Static
 canvases redraw when their scene changes and retain pointer/key input without
 scheduling animation. Continuous canvases request display-driven frame events
 while visible; the host retains at most one pending frame input. Micro Kart
 opts into continuous frames. A frame event addressed to a static or replaced
 Canvas is rejected by the current scene's input validator.
 
-On macOS, use `ViewEncoder::viewport_canvas` for a canvas that resizes with
-the window. Declare `ui.canvas.viewport.v1` in `required_host_features`.
-Place the canvas at the scene root, optionally wrapped in a context menu. The
-window clips the most recent scene to the content area until the guest handles
-`SurfaceChanged` and draws at the new size. Both frame modes support this layout.
+On macOS, use `CanvasExtent::Viewport` for the padded content area or
+`CanvasExtent::Window` to cover the window edge to edge, including beneath
+visible window controls. Declare `ui.canvas.viewport.v1` or `ui.canvas.window.v1`
+respectively. Place the canvas at the scene root, optionally wrapped in a context
+menu. Read its new dimensions from `SurfaceChanged` on resize. The host clips
+the last submitted canvas while the guest prepares its next scene.
+`ViewEncoder::viewport_canvas` draws a padded viewport canvas with a transparent
+background and the supplied frame mode.
+
+For example, a game can use the same background for the window and canvas,
+retain native window buttons, and hide the title. This example uses
+`ui.window.style.v1`, `ui.canvas.window.v1`, and `ui.canvas.clear.v1`.
+
+```rust
+use playbit_api::ui::{
+    CanvasExtent, CanvasFrames, CanvasOptions, Color, ThemeColor, ThemeOverride, WindowStyle,
+};
+
+let background = Color(0x171a20ff);
+view.theme(&[ThemeOverride { role: ThemeColor::WindowBackground, color: background }]);
+view.window_style(WindowStyle::STANDARD | WindowStyle::HIDDEN_TITLE);
+view.canvas_with_options(7, width, height, CanvasOptions {
+    frames: CanvasFrames::Continuous,
+    extent: CanvasExtent::Window,
+    clear_color: Some(background),
+}, &items);
+```
 
 The Canvas command payload is four little-endian u32 values (width, height,
-flags, item count), followed by ordered tagged items. Flag bit 0 requests
-continuous frames and bit 1 selects viewport layout. Every item has
+flags, item count), an optional Display P3 RGBA clear color, and ordered tagged items.
+Flag bit 0 requests continuous frames, bit 1 selects the padded viewport, bit 2
+selects the whole window, and bit 3 includes the clear color. Every item has
 six little-endian u32 values: kind (0 rectangle, 1 text, 2 pixels), x, y, width, height and
 Display P3 RGBA color. A text item adds font size, bold (0/1), UTF-8 byte count and those
 bytes. Text uses the host UI font, aligned at the top left and clipped to its
@@ -251,7 +319,9 @@ reject a requiring package before execution and reject unsupported submissions.
 
 All canvases in one scene share a limit of 4,096 items, 64 KiB of text and
 32 MiB of packed pixels, within the 64 MiB scene submission limit.
-Coordinates and nonzero dimensions must fit inside the canvas (at most 4,096
-points per edge). Missing/unknown kinds or modes, malformed UTF-8, noncanonical
+Coordinates and nonzero dimensions must fit inside the canvas. Inline and
+padded viewport canvases support up to 4,096 logical units per edge. Window
+canvases support up to 16,777,216 logical units per edge so that large displays
+and zoomed-out windows remain drawable. Missing/unknown kinds or modes, malformed UTF-8, noncanonical
 flags and trailing bytes are invalid. SDK, native/Wasm hosts, UIKit and web hosts
 use this same shape for the features they advertise.

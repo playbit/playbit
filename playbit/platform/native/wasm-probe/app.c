@@ -689,10 +689,44 @@ uint32_t probe_layout(uint32_t index) {
         sizeof(((PBBloblogBlob*)0)->data),
         offsetof(PBBloblogBlob, length),
         sizeof(((PBBloblogBlob*)0)->length),
+        sizeof(PBSessionInfo),
+        _Alignof(PBSessionInfo),
+        6,
+        offsetof(PBSessionInfo, size),
+        sizeof(((PBSessionInfo*)0)->size),
+        offsetof(PBSessionInfo, written),
+        sizeof(((PBSessionInfo*)0)->written),
+        offsetof(PBSessionInfo, flags),
+        sizeof(((PBSessionInfo*)0)->flags),
+        offsetof(PBSessionInfo, reserved),
+        sizeof(((PBSessionInfo*)0)->reserved),
+        offsetof(PBSessionInfo, internal_id),
+        sizeof(((PBSessionInfo*)0)->internal_id),
+        offsetof(PBSessionInfo, key_secret),
+        sizeof(((PBSessionInfo*)0)->key_secret),
     };
     return index < sizeof(layout) / sizeof(layout[0]) ? layout[index] : UINT32_MAX;
 }
 uint32_t probe_imports(void) {
+    PBSessionInfo info = {.size = sizeof(PBSessionInfo), .written = 64};
+    char code[PB_SESSION_CODE_CHARS + 1];
+    const uint8_t seed[] = "session-seed-v1!";
+    const char expected[] = "FFUk4yL7S6oHXq7rrK6a48";
+    if (pb_session_code(&info, code) != 0 || code[0] != '\0')
+        return 0x163;
+    info.flags = PB_SESSION_HAS_KEY_SECRET;
+    if (pb_session_code(&info, code) != PB_SESSION_CODE_CHARS || code[PB_SESSION_CODE_CHARS] != '\0')
+        return 0x163;
+    for (uint32_t i = 0; i < PB_SESSION_CODE_CHARS; i++)
+        if (code[i] != '1')
+            return 0x163;
+    for (uint32_t i = 0; i < sizeof(info.key_secret); i++)
+        info.key_secret[i] = seed[i];
+    if (pb_session_code(&info, code) != PB_SESSION_CODE_CHARS)
+        return 0x163;
+    for (uint32_t i = 0; i < sizeof(expected); i++)
+        if (code[i] != expected[i])
+            return 0x163;
     PBContext *ctx = pb_guest_context();
     PBVolumeHandle volume = pb_handle_pack(UINT32_C(0x7edcba98), UINT32_C(0x89abcdef));
     PBOperationHandle handle = volume;
@@ -707,8 +741,13 @@ uint32_t probe_imports(void) {
     if (pb_event_poll(ctx, (void *)(storage + 128), (void *)(storage + 256),
                       UINT32_C(0x80000000) + 3) != PB_UNSUPPORTED)
         return 3;
+    if (pb_event_poll_deadline(ctx, (void *)(storage + 128), (void *)(storage + 256),
+                              UINT32_C(0x80000000) + 3, UINT64_C(0x8877665544332200) + 4) != PB_UNSUPPORTED)
+        return 114;
     if (pb_identity(ctx, (void *)(storage + 128)) != PB_UNSUPPORTED)
         return 4;
+    if (pb_session_info(ctx, (void *)(storage + 128)) != PB_UNSUPPORTED)
+        return 0x163;
     if (pb_wake_after(ctx, UINT32_C(0x80000000) + 1) != PB_UNSUPPORTED)
         return 5;
     if (pb_update_defer(ctx, UINT64_C(0x8877665544332200) + 1) != PB_UNSUPPORTED)

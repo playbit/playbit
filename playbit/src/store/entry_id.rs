@@ -102,6 +102,7 @@ mod tests {
     fn archived_entry_identity_rejects_zero_before_deserialization() {
         use crate::engine::{Request, ipc::codec};
         let request = Request::EntryDetails {
+            session: None,
             volume: crate::store::Id::from_bytes([1; 16]),
             entry: EntryId([0; 15]),
         };

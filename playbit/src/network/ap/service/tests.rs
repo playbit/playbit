@@ -305,7 +305,12 @@ fn required_features_are_support_preconditions_with_bounded_unique_names() {
         );
     }
     let shared = request(&registration).unwrap();
-    assert_eq!(admit_request(PROTOCOL, &shared.body, &[]).unwrap_err().code, "unsupported_feature");
+    for incomplete in [&[][..], &["shared-session.v1"], &["session-participants-acl.v1"]] {
+        assert_eq!(
+            admit_request(PROTOCOL, &shared.body, incomplete).unwrap_err().code,
+            "unsupported_feature"
+        );
+    }
     assert_eq!(admit_request(PROTOCOL, &shared.body, OPTIONAL_FEATURES).unwrap(), registration);
     if let ServiceRequest::RegisterSession { shared_volume_id, .. } = &mut registration {
         *shared_volume_id = None;

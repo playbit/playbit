@@ -518,6 +518,71 @@ test('owned root grants retain persisted incarnations and reject stale metadata 
     assert.throws(() => select(encodeId(new Uint8Array(16).fill(0x00))));
 });
 
+test('an admitted browser guest can receive and publish the Shared database with its original invitation', async () => {
+    const addressHost = await createHost(bootstrap(encodeId(new Uint8Array(16).fill(0x81))));
+    const original = bootstrap(addressHost.volumes()[0]);
+    const { session_id } = await deriveSessionKeys(new Uint8Array(16).fill(0x49));
+    const request = encoder.encode(JSON.stringify({ app: original.session.app, session: session_id }));
+    const { world, shared } = JSON.parse(decoder.decode(addressHost.raw('pb_scope_addresses', request, request.length)));
+    original.root.id = shared;
+    original.root.share_key_with_service = true;
+    Object.assign(original.session, { id: session_id, root_volume: world, shared_volume: shared });
+    const owner = await createHost(original);
+
+    // Deliver the same native provisioning fact used by the blob authority
+    // fixtures, in a delta for this Shared Index's database fingerprint.
+    const { snapshots } = JSON.parse(await readFile(new URL('../tests/blob-authority-vectors.json', import.meta.url)));
+    const [storageKey, stored] = snapshots.read_only.find(([key]) => key[0] === 0 && key[1] === 3 && key[2] === 18);
+    const key = Uint8Array.from(storageKey.slice(1));
+    assert.equal(decoder.decode(key.subarray(2)), original.session.resolved_build_id);
+    const hello = owner.raw('pb_sync_begin', new Uint8Array(), 1, 0);
+    assert(hello instanceof Uint8Array);
+    assert.equal(owner.host.exports.pb_sync_finish(0), 0);
+    const delta = new Uint8Array(32 + 6 + key.length + stored.length), view = new DataView(delta.buffer);
+    view.setUint32(0, delta.length, true); view.setUint16(4, 6, true); view.setUint16(8, 1, true);
+    delta[10] = hello[10]; delta.set(hello.subarray(12, 20), 12); delta.set(stored.slice(2, 10), 20);
+    view.setUint32(28, 1, true); view.setUint16(32, key.length, true); view.setUint32(34, stored.length, true);
+    delta.set(key, 38); delta.set(stored, 38 + key.length);
+    const provision = new Uint8Array(32 + delta.length);
+    provision.set(decodeId(shared, 16)); provision.set(delta, 32);
+    assert(owner.raw('pb_live_apply', provision, provision.length) instanceof Uint8Array);
+
+    const guestProfile = { ...original, account: encodeId(new Uint8Array(16).fill(0x66)), local: null };
+    const guestStores = new Map();
+    for (const [slot, store] of owner.stores) {
+        const replica = new File();
+        replica.bytes = store.handle.bytes.slice();
+        guestStores.set(slot, await OpfsStore.open(replica, owner.resources, async () => {}));
+    }
+    const guest = await createHost(guestProfile, guestStores);
+    guest.register(entryId);
+    assert.deepEqual(guest.volumes(), [shared]);
+    assert.equal(guest.read(), false);
+    assert.equal(guest.edit(true), 0);
+    const deliver = (from, to) => {
+        const outgoing = from.raw('pb_live_peek', new Uint8Array());
+        assert(outgoing instanceof Uint8Array && outgoing.length > 41);
+        assert.equal(databaseIdentity(outgoing.subarray(16, 32)), entryId);
+        const apply = new Uint8Array(outgoing.length - 9);
+        apply.set(outgoing.subarray(0, 32)); apply.set(outgoing.subarray(41), 32);
+        assert(to.raw('pb_live_apply', apply, apply.length) instanceof Uint8Array);
+    };
+    assert.equal(owner.read(), false);
+    deliver(guest, owner);
+    assert.equal(owner.read(), true);
+    assert.equal(owner.edit(false), 0);
+    assert.equal(guest.read(), true);
+    deliver(owner, guest);
+    assert.equal(guest.read(), false);
+
+    const ordinary = await createHost({ ...guestProfile, session: { ...original.session, shared_volume: null, root_volume: shared } }, owner.stores);
+    const volumeRequest = encoder.encode(JSON.stringify(shared));
+    assert.equal(JSON.parse(decoder.decode(ordinary.raw('pb_replica_catalog_allowed', volumeRequest, volumeRequest.length))), false);
+    assert.throws(() => ordinary.register(entryId), /lookup failed/);
+    const other = await deriveSessionKeys(new Uint8Array(16).fill(0x48));
+    await assert.rejects(createHost({ ...guestProfile, session: { ...original.session, id: other.session_id } }, owner.stores), /Shared session binding/);
+});
+
 test('Shared invitation and recovery retain only the native session capability and its original scope', async () => {
     const profile = bootstrap(encodeId(new Uint8Array(16).fill(0xa8))), host = await createHost(profile);
     const resolve = async request => {

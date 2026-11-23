@@ -20,6 +20,8 @@ pub struct SceneNode {
     pub height: u32,
     pub frames: u32,
     pub items: usize,
+    pub clear_color: u32,
+    pub has_clear_color: u8,
 }
 #[repr(C)]
 #[derive(Default)]
@@ -124,13 +126,17 @@ pub unsafe extern "C" fn pb_ios_scene_node(node: *const ViewNode) -> SceneNode {
             out.disabled = *disabled as u8;
             label
         }
-        ViewNode::Canvas { id, width, height, frames, items, .. } => {
+        ViewNode::Canvas { id, width, height, frames, clear_color, items, .. } => {
             out.kind = 7;
             out.id = *id;
             out.width = *width;
             out.height = *height;
             out.frames = *frames as u32;
             out.items = items.len();
+            if let Some(color) = clear_color {
+                out.clear_color = color.0;
+                out.has_clear_color = 1;
+            }
             ""
         }
         _ => "", // Rejected by storage before exposing a scene.
@@ -209,7 +215,8 @@ mod tests {
             width: 16,
             height: 8,
             frames: playbit_api::ui::CanvasFrames::Static,
-            viewport: false,
+            extent: playbit_api::ui::CanvasExtent::Inline,
+            clear_color: None,
             items: vec![CanvasItem::Pixels {
                 bounds: playbit_api::ui::CanvasRect {
                     x: 2,
@@ -250,7 +257,8 @@ mod tests {
                 width: 320,
                 height: 200,
                 frames: playbit_api::ui::CanvasFrames::Static,
-                viewport: false,
+                extent: playbit_api::ui::CanvasExtent::Inline,
+                clear_color: Some(playbit_api::ui::Color(0x22334480)),
                 items: vec![
                     CanvasItem::Rect(playbit_api::ui::CanvasRect {
                         x: 1,
@@ -286,6 +294,7 @@ mod tests {
             );
             let canvas = pb_ios_scene_child(&root, 1);
             let fields = pb_ios_scene_node(canvas);
+            assert_eq!((fields.has_clear_color, fields.clear_color), (1, 0x22334480));
             assert_eq!(
                 (fields.width, fields.height, fields.items, fields.frames),
                 (320, 200, 2, 0)

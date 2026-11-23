@@ -2362,8 +2362,18 @@ impl LocalStore {
         self.changes.publish(index.volume.id, crate::store::DatabaseId::Index, delta);
         Ok(())
     }
-    /// For a session access to a personal volume, returns the grant validated
-    /// here so `authorize` does not repeat the session lookup and grant scan.
+    /// Resolve the local account’s retained invitation against the Shared binding.
+    pub(crate) fn data_actor(&self, access: &Access, volume: &Volume) -> Result<DataActor> {
+        let Some(id) = access.session_id().filter(|_| {
+            access.account == self.account.id && !volume.personal && volume.share_key_with_service
+        }) else {
+            return Ok(access.account.into());
+        };
+        let session = self.session(id)?;
+        DataActor::for_session(access.account, &session, volume)
+    }
+
+    /// Return the current personal-volume grant so callers can also enforce its write flag.
     fn admit_access(
         &self,
         access: &Access,
@@ -2467,7 +2477,7 @@ impl LocalStore {
         {
             return Err(Error::AccessDenied("personal volume is read-only"));
         }
-        index.authorize(access.account, permission)
+        index.authorize(self.data_actor(access, index.volume())?, permission)
     }
     /// Replace only this human subject's volume grant, preserving other grants
     /// and object overrides. Authorization and read/modify/write share one gate.

@@ -597,7 +597,7 @@ impl Engine {
 
     pub(super) fn dispatch_local(&mut self, request: Request) -> Result<reply::Reply> {
         use reply::Reply;
-        let access = Access::owner(self.services.store.account().id);
+        let access = request.management_access(&self.services.store)?;
         Ok(match request {
             #[rustfmt::skip]
             Request::Syscall { .. } | Request::InstanceEvents { .. }
@@ -677,12 +677,12 @@ impl Engine {
     ) -> Result<reply::Reply> {
         use reply::Reply;
         Ok(match request {
-            Request::Entries { volume, after, limit } => Reply::Entries {
+            Request::Entries { volume, after, limit, .. } => Reply::Entries {
                 volume,
                 after,
                 page: self.services.store.entries(access, volume, after, limit as usize)?,
             },
-            Request::DirectoryEntries { volume, target, cut, after, limit } => {
+            Request::DirectoryEntries { volume, target, cut, after, limit, .. } => {
                 Reply::DirectoryEntries {
                     volume,
                     target,
@@ -699,14 +699,14 @@ impl Engine {
                     )?,
                 }
             }
-            Request::VolumeDetails { volume } => Reply::VolumeDetails {
+            Request::VolumeDetails { volume, .. } => Reply::VolumeDetails {
                 details: self.services.store.volume_details(access, volume)?,
             },
-            Request::EntryDetails { volume, entry } => Reply::EntryDetails {
+            Request::EntryDetails { volume, entry, .. } => Reply::EntryDetails {
                 volume,
                 details: self.services.store.entry_details(access, volume, entry)?,
             },
-            Request::EntryRevisions { address, after, limit } => Reply::EntryRevisions {
+            Request::EntryRevisions { address, after, limit, .. } => Reply::EntryRevisions {
                 address,
                 after,
                 page: Box::new(self.services.store.entry_revisions(
@@ -716,26 +716,26 @@ impl Engine {
                     limit as usize,
                 )?),
             },
-            Request::CreateDatabase { volume, name, kind } => Reply::VolumeEntry {
+            Request::CreateDatabase { volume, name, kind, .. } => Reply::VolumeEntry {
                 volume,
                 entry: self.services.store.create_database(access, volume, &name, *kind)?,
             },
-            Request::CreateDatabaseIn { volume, parent, name, kind } => Reply::VolumeEntry {
+            Request::CreateDatabaseIn { volume, parent, name, kind, .. } => Reply::VolumeEntry {
                 volume,
                 entry: self
                     .services
                     .store
                     .create_database_in(access, volume, parent, &name, *kind)?,
             },
-            Request::RenameEntry { volume, entry, name } => {
+            Request::RenameEntry { volume, entry, name, .. } => {
                 self.services.store.rename_entry(access, volume, entry, &name)?;
                 Reply::EntryChanged { volume, entry }
             }
-            Request::RenameEntryComponent { volume, entry, name } => {
+            Request::RenameEntryComponent { volume, entry, name, .. } => {
                 self.services.store.rename_entry_component(access, volume, entry, &name)?;
                 Reply::EntryChanged { volume, entry }
             }
-            Request::KvRename { mutation } => {
+            Request::KvRename { mutation, .. } => {
                 let KvRenameMutation { address, old_key, new_key, expected, value } = *mutation;
                 let root = self
                     .services
@@ -745,11 +745,13 @@ impl Engine {
                     receipt: reply::KvRenameReceipt { address, old_key, new_key, root },
                 }
             }
-            Request::RemoveEntry { volume, entry } => {
+            Request::RemoveEntry { volume, entry, .. } => {
                 self.services.store.remove_entry(access, volume, entry)?;
                 Reply::EntryChanged { volume, entry }
             }
-            Request::EntryPermissions { volume, entry, permissions, retained_permissions } => {
+            Request::EntryPermissions {
+                volume, entry, permissions, retained_permissions, ..
+            } => {
                 self.services.store.set_entry_permissions_with_retained(
                     access,
                     volume,
@@ -759,15 +761,23 @@ impl Engine {
                 )?;
                 Reply::EntryPermissions { volume, entry }
             }
-            Request::BloblogCreate { volume, name } => {
-                let access = bloblog::access(&self.services.store, volume)?;
+            Request::BloblogCreate { volume, name, .. } => {
+                let access = if access.session_id().is_some() {
+                    access.clone()
+                } else {
+                    bloblog::access(&self.services.store, volume)?
+                };
                 Reply::VolumeEntry {
                     volume,
                     entry: self.services.store.create_bloblog(&access, volume, &name)?,
                 }
             }
-            Request::BloblogCreateIn { volume, parent, name } => {
-                let access = bloblog::access(&self.services.store, volume)?;
+            Request::BloblogCreateIn { volume, parent, name, .. } => {
+                let access = if access.session_id().is_some() {
+                    access.clone()
+                } else {
+                    bloblog::access(&self.services.store, volume)?
+                };
                 Reply::VolumeEntry {
                     volume,
                     entry: self.services.store.create_bloblog_in(&access, volume, parent, &name)?,
@@ -784,11 +794,11 @@ impl Engine {
     ) -> Result<reply::Reply> {
         use reply::Reply;
         Ok(match request {
-            Request::Schema { database, schema } => {
+            Request::Schema { database, schema, .. } => {
                 self.services.store.establish_schema(access, database, &schema)?;
                 Reply::Schema { database, ok: true }
             }
-            Request::CreateObject { database, type_id, fields } => {
+            Request::CreateObject { database, type_id, fields, .. } => {
                 Reply::ObjectCreated(reply::ObjectResult {
                     database,
                     object: self
@@ -797,21 +807,21 @@ impl Engine {
                         .create_object_with_fields(access, database, type_id, &fields)?,
                 })
             }
-            Request::ReadObject { database, object } => Reply::Object(reply::ObjectResult {
+            Request::ReadObject { database, object, .. } => Reply::Object(reply::ObjectResult {
                 database,
                 object: self.services.store.read_object(access, database, object)?,
             }),
-            Request::EditObject { database, object, fields } => {
+            Request::EditObject { database, object, fields, .. } => {
                 Reply::Object(reply::ObjectResult {
                     database,
                     object: self.services.store.edit_fields(access, database, object, &fields)?,
                 })
             }
-            Request::RemoveObject { database, object } => {
+            Request::RemoveObject { database, object, .. } => {
                 self.services.store.remove_object(access, database, object)?;
                 Reply::ObjectRemoved { database, object }
             }
-            Request::Objects { database, type_id, after, limit } => {
+            Request::Objects { database, type_id, after, limit, .. } => {
                 Reply::Objects(reply::ObjectPageResult {
                     database,
                     type_id,
@@ -881,5 +891,50 @@ impl Engine {
             },
             _ => unreachable!("owner dispatch routes only sessions operations here"),
         })
+    }
+}
+
+impl Request {
+    /// Only the explicitly opened Shared scope supplies group membership.
+    /// LocalStore checks the retained account, session and current policy on each operation.
+    pub(crate) fn selected_shared_volume(&self) -> Option<(Id, &[u8; 32])> {
+        let (volume, session) = match self {
+            Self::Entries { volume, session, .. }
+            | Self::DirectoryEntries { volume, session, .. }
+            | Self::VolumeDetails { volume, session }
+            | Self::EntryDetails { volume, session, .. }
+            | Self::CreateDatabase { volume, session, .. }
+            | Self::CreateDatabaseIn { volume, session, .. }
+            | Self::BloblogCreate { volume, session, .. }
+            | Self::BloblogCreateIn { volume, session, .. }
+            | Self::RenameEntry { volume, session, .. }
+            | Self::RenameEntryComponent { volume, session, .. }
+            | Self::RemoveEntry { volume, session, .. }
+            | Self::EntryPermissions { volume, session, .. }
+            | Self::FileCreate { volume, session, .. }
+            | Self::FileCreateIn { volume, session, .. }
+            | Self::PayloadSize { volume, session, .. } => (*volume, session),
+            Self::EntryRevisions { address, session, .. }
+            | Self::Schema { database: address, session, .. }
+            | Self::CreateObject { database: address, session, .. }
+            | Self::ReadObject { database: address, session, .. }
+            | Self::EditObject { database: address, session, .. }
+            | Self::RemoveObject { database: address, session, .. }
+            | Self::Objects { database: address, session, .. } => (address.volume, session),
+            Self::KvRename { mutation, session } => (mutation.address.volume, session),
+            _ => return None,
+        };
+        Some((volume, session.as_deref()?))
+    }
+
+    pub(super) fn management_access(&self, store: &LocalStore) -> Result<Access> {
+        let Some((volume, id)) = self.selected_shared_volume() else {
+            return Ok(Access::owner(store.account().id));
+        };
+        let session = store.session(&crate::identifier::encode(id))?;
+        if session.shared_volume != Some(volume) {
+            return Err("Selected session does not bind this Shared volume".into());
+        }
+        Ok(Access::session_version(store.account().id, session.id, session.resolved_build_id))
     }
 }

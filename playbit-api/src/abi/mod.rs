@@ -26,7 +26,7 @@ pub mod environment;
 pub mod files;
 
 pub mod pending;
-pub(crate) mod session;
+pub mod session;
 
 pub mod authenticated;
 

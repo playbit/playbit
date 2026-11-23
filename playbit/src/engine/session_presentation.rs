@@ -1,5 +1,5 @@
-//! Human session references at local tool boundaries. Internal IPC and remote
-//! protocols retain the public identity; only explicit output exports the code.
+//! Human session references at local tool boundaries. Management commands use
+//! the public identity internally and format a code for explicit reference output.
 use super::{Request, Result, reply::Reply};
 use crate::{release_channel::ReleaseChannel, store::SessionReference};
 use serde_json::Value;
@@ -83,6 +83,7 @@ mod tests {
         assert!(store.sessions().expect("sessions").is_empty());
         assert!(store.volumes().expect("volumes").is_empty());
         assert!(store.session_seed(reference.internal_id()).is_err());
+        assert!(SessionReference::retained(store, reference.internal_id()).is_err());
         assert!(store.session_proof(reference.internal_id(), store.account().id).is_err());
         let unknown = SessionReference::new([0x4b; 16]).expect("unknown reference");
         assert!(store.session_reference(unknown.internal_id()).is_err());

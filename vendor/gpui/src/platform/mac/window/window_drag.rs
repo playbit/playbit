@@ -79,7 +79,7 @@ pub(super) extern "C" fn send_window_event(this: &Object, _: Sel, event: id) {
         if event.eventType() == cocoa::appkit::NSEventType::NSLeftMouseDown
             && event.clickCount() == 2
             && !event.modifierFlags().contains(NSEventModifierFlags::NSControlKeyMask)
-            && lock.transparent_titlebar
+            && lock.has_custom_titlebar()
             && {
                 let movable: BOOL = msg_send![this, isMovable];
                 movable == YES

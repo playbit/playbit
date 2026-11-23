@@ -1,12 +1,13 @@
 // Typed host callbacks behind one bounded scalar syscall entry.
+import { clockNs } from "./guest-deadline.ts";
 // A tiny import/re-export module gives JS callbacks real Wasm signatures. The
 // engine then rejects wrong guest signatures at link time, before pb_main runs.
 // Data begin/take return immediately; readiness resumes a later guest turn.
 const signatures = {
     pb_session:"", pb_channel_open:"ii", pb_channel_begin:"Iiiii", pb_channel_take:"Ii",
     pb_host_platform: "", pb_host_limit: "i", pb_quit_on_last_window: "i", pb_log: "ii", pb_view_submit: "ii", pb_event_poll: "iii",
-    pb_trace_record: "iiII", pb_clock_read: "", pb_random_fill: "ii",
-    pb_identity: "i", pb_wake_after: "i", pb_update_defer: "I",
+    pb_trace_record: "iiII", pb_clock_read: "", pb_random_fill: "ii", pb_event_poll_deadline: "iiiI",
+    pb_identity: "i", pb_session_info: "i", pb_wake_after: "i", pb_update_defer: "I",
     pb_volumes: "i", pb_volumes_observe: "I", pb_file_dispose: "Ii", pb_operation_dispose: "Ii",
     pb_entry_resolve_begin: "Iiii", pb_entry_resolve_take: "Iii",
     pb_kv_keys_begin: "iiii", pb_kv_keys_take: "Iiiii",
@@ -40,6 +41,13 @@ const signatures = {
     pb_sound_set_balance: "Iiii", pb_sound_stop: "Iii",
 } as const;
 export type OperationName = keyof typeof signatures;
+const promiseIntegration = WebAssembly as typeof WebAssembly & {
+    Suspending?: new (callback: (opcode: number, ...args: bigint[]) => bigint | Promise<bigint>) => WebAssembly.ImportValue;
+    promising?: (main: () => void) => () => Promise<void>;
+};
+export const supportsDeadline = () => typeof promiseIntegration.Suspending === "function"
+    && typeof promiseIntegration.promising === "function";
+export const promisingMain = (main: () => void) => promiseIntegration.promising!(main);
 type Arguments<S extends string> = S extends `${infer First}${infer Rest}`
     ? [First extends "I" ? bigint : number, ...Arguments<Rest>] : [];
 export type GuestOperations = { [K in Exclude<OperationName, "pb_clock_read">]?: (...args: Arguments<typeof signatures[K]>) => number | bigint | Promise<number | bigint> }
@@ -65,14 +73,16 @@ const entryPoint = new WebAssembly.Module(Uint8Array.from([
     ...section(2, [1, ...text("playbit"), ...text("pb_main"), 0, 0]),
 ]));
 
-export function bindOperations(module: WebAssembly.Module, operations: GuestOperations): WebAssembly.Exports {
+export function bindOperations(module: WebAssembly.Module, operations: GuestOperations, deadline = false): WebAssembly.Exports {
     const imports = WebAssembly.Module.imports(module);
     if (imports.length > 27 || imports.some(item => item.module !== "playbit"
         || item.kind !== "function" || !entries.includes(item.name))) {
         throw new Error("This app may import only pb_syscall");
     }
+    const syscall = (opcode: number, ...args: bigint[]) => dispatch(operations, opcode, args, deadline);
     return new WebAssembly.Instance(bindings, { playbit: {
-        pb_syscall: (opcode: number, ...args: bigint[]) => dispatch(operations, opcode, args),
+        pb_syscall: deadline
+            ? new promiseIntegration.Suspending!(syscall) : syscall,
     } }).exports;
 }
 
@@ -87,6 +97,7 @@ const layouts: Record<number, Layout> = {
     0x160:{name:"pb_channel_open",handle:false,count:2,wide:0},
     0x161:{name:"pb_channel_begin",handle:true,count:4,wide:1},
     0x162:{name:"pb_channel_take",handle:true,count:1,wide:1},
+    0x163: { name: "pb_session_info", handle: false, count: 1, wide: 0 },
     0x140: { name: "pb_kv_keys_begin", handle: false, count: 4, wide: 0 },
     0x141: { name: "pb_kv_keys_take", handle: true, count: 4, wide: 1 },
     0x142: { name: "pb_kv_read_begin", handle: false, count: 4, wide: 0 },
@@ -161,6 +172,7 @@ const layouts: Record<number, Layout> = {
     0x2: { name: "pb_log", handle: false, count: 2, wide: 0 },
     0x3: { name: "pb_view_submit", handle: false, count: 2, wide: 0 },
     0x4: { name: "pb_event_poll", handle: false, count: 3, wide: 0 },
+    0x15: { name: "pb_event_poll_deadline", handle: false, count: 4, wide: 8 },
     0x5: { name: "pb_identity", handle: false, count: 1, wide: 0 },
     0xb: { name: "pb_wake_after", handle: false, count: 1, wide: 0 },
     0x9: { name: "pb_update_defer", handle: false, count: 1, wide: 1 },
@@ -174,7 +186,7 @@ export function operationSupported(operations: GuestOperations, opcode: number):
     return (opcode >>> 0) === 0x10
         || (layout !== undefined && typeof operations[layout.name] === 'function');
 }
-function dispatch(operations: GuestOperations, opcode: number, values: bigint[]): bigint {
+function dispatch(operations: GuestOperations, opcode: number, values: bigint[], deadline: boolean): bigint | Promise<bigint> {
     const args = values.map(value => BigInt.asUintN(64, value));
     const layout = layouts[opcode >>> 0];
     if (!layout) return -7n; // Unknown operations have no handler.
@@ -182,8 +194,9 @@ function dispatch(operations: GuestOperations, opcode: number, values: bigint[])
         if ((index >= layout.count && args[index] !== 0n)
             || (!(layout.wide & (1 << index)) && args[index] > 0xffffffffn)) return -3n;
     }
+    if (layout.name === "pb_event_poll_deadline" && !deadline) return -7n;
     if (layout.name === "pb_clock_read") {
-        return operations.pb_clock_read?.() ?? BigInt(Math.trunc(performance.now() * 1_000_000));
+        return operations.pb_clock_read?.() ?? clockNs();
     }
     const handler = operations[layout.name];
     if (!handler) return -7n;
@@ -194,6 +207,9 @@ function dispatch(operations: GuestOperations, opcode: number, values: bigint[])
     if (layout.handle) parameters.splice(0, 1, args[0] >> 32n, Number(args[0] & 0xffffffffn));
     // The explicit layout table supplies the checked callback signature.
     const result = (handler as (...args: (number | bigint)[]) => number | bigint | Promise<number | bigint>)(...parameters);
-    if (result instanceof Promise) throw new Error("Guest syscall returned pending work");
+    if (result instanceof Promise) {
+        if (layout.name === "pb_event_poll_deadline" && supportsDeadline()) return result.then(BigInt);
+        throw new Error("Guest syscall returned pending work");
+    }
     return BigInt(result);
 }

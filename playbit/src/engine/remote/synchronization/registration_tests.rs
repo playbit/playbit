@@ -123,15 +123,19 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
                         let mut registered = false;
                         let mut released = Some(released);
                         let mut requests = Vec::new();
+                        // The previous service understands the Shared binding, but cannot
+                        // interpret the Session participants subject in its index.
+                        let features = if consumer == "unsupported-shared" {
+                            &["shared-session.v1"][..]
+                        } else {
+                            service::OPTIONAL_FEATURES
+                        };
                         while let Some((mut send, mut read, frame)) =
                             testing::next_request_with_receipt(&connection).await
                         {
-                            let request = service::admit_request(
-                                service::PROTOCOL,
-                                &frame.body,
-                                &["shared-session.v1"],
-                            )
-                            .unwrap();
+                            let request =
+                                service::admit_request(service::PROTOCOL, &frame.body, features)
+                                    .unwrap();
                             let mut error = None;
                             let mut code = "operation_failed";
                             let mut data = None;
@@ -139,11 +143,8 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
                                 ServiceRequest::Describe { .. } => {
                                     assert_eq!(role, Role::Session, "World remains baseline");
                                     let mut description = service::ServiceDescription::baseline();
-                                    description.features = if consumer == "unsupported-shared" {
-                                        vec![]
-                                    } else {
-                                        vec!["shared-session.v1".into()]
-                                    };
+                                    description.features =
+                                        features.iter().map(|feature| (*feature).into()).collect();
                                     data = Some(serde_json::to_value(description).unwrap());
                                     "describe"
                                 }
@@ -155,6 +156,22 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
                                     );
                                     "upload"
                                 }
+                                ServiceRequest::RegisterVolume { volume_id, .. }
+                                    if consumer == "unsupported-shared"
+                                        && volume_id
+                                            != &server_expected
+                                                .lock()
+                                                .unwrap()
+                                                .as_ref()
+                                                .unwrap()
+                                                .replica_volume()
+                                                .to_string() =>
+                                {
+                                    "baseline-volume"
+                                }
+                                ServiceRequest::RegisterSession {
+                                    shared_volume_id: None, ..
+                                } if consumer == "unsupported-shared" => "baseline-session",
                                 ServiceRequest::RegisterVolume { volume_id, .. } => {
                                     assert_eq!(
                                         volume_id,
@@ -182,7 +199,7 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
                                         &expected.shared_volume.map(|id| id.to_string())
                                     );
                                     assert_eq!(session_id, &expected.id);
-                                    if matches!(consumer, "unsupported-shared" | "invalid-shared") {
+                                    if consumer == "invalid-shared" {
                                         error = Some("invalid AP operation request");
                                         code = "invalid_request";
                                     } else if reject_registration {
@@ -347,6 +364,43 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
                     remote.sync_session(&store, &session).unwrap_err().to_string(),
                     expected
                 );
+                // The initial/reconnect pass continues with ordinary registrations
+                // while both owner bootstrap and session access retain the Shared error.
+                let root = store.create_volume("Baseline root", true).unwrap();
+                let baseline = store
+                    .create_session(
+                        &session.app,
+                        session.selector.clone(),
+                        &session.resolved_build_id,
+                        root.id,
+                    )
+                    .unwrap();
+                let mut reconnect = Synchronization::new(
+                    &store,
+                    ClientScope::Provider(vec![root.id, session.replica_volume()]),
+                    crate::trace::Interval::new("replication.sync"),
+                )
+                .unwrap();
+                reconnect.registrations(&remote, &store).unwrap();
+                assert!(matches!(reconnect.phase, Phase::Owned));
+                assert_eq!(reconnect.volumes, [root.id]);
+                assert_eq!(reconnect.first_error.unwrap().to_string(), expected);
+                assert!(store.pending_operations().unwrap().iter().all(|op| !matches!(
+                    &op.operation, PendingKind::RegisterSession { session, .. } if session.id == baseline.id)));
+                assert_eq!(
+                    remote
+                        .sync_owned_volume(&store, store.volume(session.replica_volume()).unwrap())
+                        .unwrap_err()
+                        .to_string(),
+                    expected
+                );
+                // An owner first seen after registration is deferred by the
+                // owner phase itself, allowing an unrelated publication to proceed.
+                let mut late = BTreeSet::new();
+                remote
+                    .sync_registered_owners(&store, Some(&[session.replica_volume()]), &mut late)
+                    .unwrap();
+                assert_eq!(late, BTreeSet::from([session.replica_volume()]));
             }
             if reject_registration {
                 // The backing registration succeeded. A rejected session must not
@@ -384,7 +438,10 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
             } else {
                 match consumer {
                     "listeners" => {
-                        expected.extend(["listen", "open"]);
+                        if role == Role::Root {
+                            expected.push("listen");
+                        }
+                        expected.push("open");
                         Some("registration not found")
                     }
                     "session" | "late-session" => {
@@ -395,7 +452,10 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
                         expected.push("resolve");
                         Some("registration not found")
                     }
-                    "unsupported-shared" => error.as_deref(),
+                    "unsupported-shared" => {
+                        expected.extend(["baseline-volume", "baseline-session"]);
+                        error.as_deref()
+                    }
                     "invalid-shared" => Some("invalid AP operation request"),
                     "canceled-registration" => Some(CANCELED),
                     "files" => None,

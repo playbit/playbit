@@ -7,7 +7,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { guestOperations } from "./guest-operations.ts";
-import { bindOperations } from "./guest-imports.ts";
+import { bindOperations, supportsDeadline } from "./guest-imports.ts";
 import { prepareGuest } from "./updates.ts";
 import { decodeScene } from "./scene.ts";
 import { bootstrap, createHost, entryId, account, key } from "../tests/host-fixture.mjs";
@@ -217,10 +217,13 @@ for (const language of ["c", "rust"]) test(`all independently compiled ${languag
             : name.endsWith("_begin") || name === "pb_file_open_take" || name === "pb_file_list_open_take"
                 || name === "pb_audio_open_take" || name === "pb_sound_open_pcm" ? 0x7edcba9889abcdefn : -7;
     }]));
-    const instance = await WebAssembly.instantiate(module, { playbit: bindOperations(module, callbacks) });
-    assert.equal(instance.exports.probe_imports(), 0);
-    assert.equal(calls.length, names.length);
-    assert.deepEqual(new Set(calls.map(([name]) => name)), new Set(names));
+    const deadline = supportsDeadline();
+    const instance = await WebAssembly.instantiate(module, { playbit: bindOperations(module, callbacks, deadline) });
+    const probe = deadline ? WebAssembly.promising(instance.exports.probe_imports) : instance.exports.probe_imports;
+    assert.equal(await probe(), 0);
+    const supported = names.filter(name => deadline || name !== "pb_event_poll_deadline");
+    assert.equal(calls.length, supported.length);
+    assert.deepEqual(new Set(calls.map(([name]) => name)), new Set(supported));
     assert.deepEqual(calls.find(([name]) => name === "pb_host_limit")[1], [0x80000001]);
     const generation = calls.find(([name]) => name === "pb_update_defer")[1][0];
     assert.equal(typeof generation, "bigint");
@@ -274,6 +277,40 @@ test("host platform identifies the web without memory or data service access", a
 
 });
 
+test("session.info reads only the current binding and preserves unknown output fields", () => {
+    const { services, operations, memory } = adapter();
+    const module = new WebAssembly.Module(Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0));
+    const { pb_syscall } = bindOperations(module, operations);
+    const read = (extra = 0n) => pb_syscall(0x163, 16n, extra, 0n, 0n, 0n, 0n);
+    const bytes = new Uint8Array(memory.buffer, 16, 80).fill(0xa5);
+    const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    initialize(memory, 16, bytes.length);
+    const original = bytes.slice();
+    assert.equal(read(), -1n);
+    assert.deepEqual(bytes, original);
+    const internalId = new Uint8Array(32).fill(0x36);
+    const keySecret = new Uint8Array(16).fill(0x19);
+    services.identity = () => ({ session: internalId });
+    services.sessionKeySecret = () => keySecret;
+    assert.equal(read(1n), -3n);
+    assert.deepEqual(bytes, original);
+    assert.equal(read(), 0n);
+    assert.equal(data.getUint32(0, true), 80);
+    assert.equal(data.getUint32(4, true), 64);
+    assert.equal(data.getUint32(8, true), 1);
+    assert.equal(data.getUint32(12, true), 0);
+    assert.deepEqual(bytes.slice(16, 48), internalId);
+    assert.deepEqual(bytes.slice(48, 64), keySecret);
+    assert.deepEqual(bytes.slice(64), original.slice(64));
+    services.sessionKeySecret = () => undefined;
+    assert.equal(read(), 0n);
+    assert.equal(data.getUint32(8, true), 0);
+    assert.deepEqual(bytes.slice(48, 64), new Uint8Array(16));
+    services.identity = () => undefined;
+    assert.equal(read(), -1n);
+    assert.equal(data.getUint32(4, true), 0);
+});
+
 test("web capability discovery advertises owned File operations", async () => {
     const database = await host(), a = adapter(undefined, database.exports);
     const data = new DataView(a.memory.buffer);
@@ -288,6 +325,7 @@ test("web capability discovery advertises owned File operations", async () => {
     });
     assert(names.includes("host.platform"));
     assert(names.includes("host.limit"));
+    assert(names.includes("session.info"));
     for (const name of ['file.open.begin', 'file.open.take', 'file.status.begin', 'file.status.take',
         'file.close.begin', 'file.close.take', 'file_list.open.begin', 'file_list.open.take',
         'file_list.next.begin', 'file_list.next.take', 'file_list.close', 'file.dispose']) {
@@ -478,13 +516,17 @@ test('a full event queue retains volume observation until a poll makes space', (
 test('identity and presence publish caller-sized records while preserving future tails', () => {
     const a = adapter(), data = new DataView(a.memory.buffer);
     const identity = { account: new Uint8Array(16).fill(1), device: new Uint8Array(16).fill(2), instance: new Uint8Array(16).fill(3), session: new Uint8Array(32).fill(4) };
-    a.services.channels = () => ({ identity, participants: [new Uint8Array(80).fill(5), new Uint8Array(80).fill(6)] });
+    a.services.identity = () => identity;
+    a.services.channels = () => ({ participants: [new Uint8Array(80).fill(5), new Uint8Array(80).fill(6)] });
     initialize(a.memory, 128, 112); new Uint8Array(a.memory.buffer, 232, 8).fill(7);
     assert.equal(a.operations.pb_identity(128), 0);
     assert.equal(data.getUint32(128, true), 112); assert.equal(data.getUint32(132, true), 104);
     assert.equal(data.getBigUint64(136, true), a.services.work.epoch); assert.equal(data.getUint8(144), 1); assert.equal(data.getUint8(160), 2);
     assert.equal(data.getUint8(176), 3); assert.equal(data.getUint8(192), 4); assert.equal(data.getUint32(224, true), 2);
     assert(new Uint8Array(a.memory.buffer, 232, 8).every(byte => byte === 7));
+    a.services.identity = () => undefined;
+    assert.equal(a.operations.pb_identity(128), -1);
+    assert.equal(data.getUint32(132, true), 0);
     initialize(a.memory, 512, 96); initialize(a.memory, 608, 96);
     new Uint8Array(a.memory.buffer, 600, 8).fill(8); new Uint8Array(a.memory.buffer, 696, 8).fill(9);
     assert.equal(a.operations.pb_presence(512, 2, 96, 16), 0); assert.equal(data.getUint32(16, true), 2);

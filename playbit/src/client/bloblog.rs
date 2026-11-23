@@ -46,9 +46,11 @@ pub async fn create(volume: Id, name: String) -> Result<crate::store::volume_ind
         let _permit = permit;
         crate::engine::profile::initialize()?;
         let profile = profile_path();
-        let reply =
-            ipc::call_archive(&profile, &crate::engine::Request::BloblogCreate { volume, name })?
-                .into_owned()?;
+        let reply = ipc::call_archive(
+            &profile,
+            &crate::engine::Request::BloblogCreate { session: None, volume, name },
+        )?
+        .into_owned()?;
         match reply {
             crate::engine::reply::Reply::VolumeEntry { entry, .. } => Ok(entry),
             _ => Err("unexpected append log creation reply".into()),

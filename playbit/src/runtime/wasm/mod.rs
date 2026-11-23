@@ -5,6 +5,7 @@
 //! module so native execution can reuse them without a VM.
 
 pub(crate) mod compiled;
+mod deadline;
 mod guest;
 #[cfg(target_os = "macos")]
 mod jit_memory;

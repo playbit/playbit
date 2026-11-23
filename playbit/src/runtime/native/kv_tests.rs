@@ -17,6 +17,7 @@ fn native_kv_owns_binary_inputs_and_short_output_retains_the_snapshot() {
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const Context).cast_mut().cast();
     // SAFETY: the context lives on its active owner thread for the entire test.
@@ -89,6 +90,7 @@ fn native_kv_rejects_bad_admission_and_consumes_a_current_denial_without_copying
         state: Mutex::new(state),
         owner: std::thread::current().id(),
         active: AtomicBool::new(true),
+        poll_yielder: Default::default(),
     });
     let raw = (&*context as *const Context).cast_mut().cast();
     // SAFETY: the borrowed active context and all buffers live on this thread.

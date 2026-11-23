@@ -37,6 +37,20 @@ pub(in crate::runtime) fn identity(state: &State) -> HostResult<(u64, &Identity)
     require_supported(state, Opcode::Identity)?;
     Ok((u64::from(state.generation), &state.context.identity))
 }
+pub(in crate::runtime) fn session_info(
+    state: &State,
+) -> HostResult<playbit_api::abi::session::SessionInfo> {
+    use playbit_api::abi::session::{HAS_KEY_SECRET, SessionInfo};
+    require_supported(state, Opcode::SessionInfo)?;
+    let internal_id = state.context.identity.session_id.ok_or(super::HostError::NotFound)?;
+    let secret = state.host.session_key_secret()?;
+    Ok(SessionInfo {
+        flags: if secret.is_some() { HAS_KEY_SECRET } else { 0 },
+        internal_id,
+        key_secret: secret.unwrap_or([0; 16]),
+        ..SessionInfo::default()
+    })
+}
 pub(in crate::runtime) fn presence(state: &State) -> HostResult<&[Participant]> {
     require_supported(state, Opcode::Presence)?;
     Ok(&state.context.participants)

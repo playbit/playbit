@@ -100,7 +100,8 @@ impl Cohort {
             width,
             height,
             frames: CanvasFrames::Static,
-            viewport: false,
+            extent: playbit_api::ui::CanvasExtent::Inline,
+            clear_color: None,
             items,
         }
     }

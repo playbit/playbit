@@ -106,14 +106,15 @@ operations need no discovery round trip. Native `ApConnection::describe` and
 web `ApConnection.describe` lazily cache one bounded result per authenticated
 connection; reconnect discards it. Discovery uses existing operation admission
 and deadlines, never a freshness poll, new worker or local-render dependency.
-A `register_session` request with `shared_volume_id` requires the exact
-`shared-session.v1` feature in discovery and in `required_features`. The client
-checks the cached authenticated discovery result before sending that registration.
-If absent, it retains the pending registration and local data and reports that
-the session needs an updated sync service. Root-backed registrations without
+Clients creating a Shared volume with the Session participants ACL require both
+`shared-session.v1` (the binding) and `session-participants-acl.v1` (the ACL
+subject) in discovery and in `register_session.required_features`. Discovery is
+checked before sending the registration. If either feature is absent, the client
+retains the pending registration and local data and reports that the session
+needs an updated sync service. Root-backed registrations without
 `shared_volume_id` remain baseline operations and need no discovery round trip.
-The wire capability does not replace the separate central-record admission of
-the same name.
+The Shared binding independently requires `shared-session.v1` in central-record
+admission.
 
 Advertisement never replaces authorization. AP relays opaque client replica
 bytes unchanged; transport support does not imply record read/write support.
@@ -1469,6 +1470,9 @@ Cover schema, ACL/revocation, consent and received changes; a checkbox-only hook
 is not complete synchronization.
 
 Private volumes use the existing authorized encrypted peer path over AP.
+A session with a bound Shared volume uses hosted replication. AP rejects
+`PeerListen` and `PeerRequest` for that session before admitting the connection
+or offering a transfer, so the hosted replica enforces current revocations.
 Account state uses the same ordering, delta and recovery model with a canonical
 client-encrypted account replica. Never replicate the mixed-secret local profile
 wholesale. Preserve existing recovery bootstrap and explicit personal consent.
@@ -1517,6 +1521,12 @@ Invitation payloads have exactly two capability shapes. Legacy invitations retai
 `shared: {volume, credentials}`, whose volume must match the derived session
 binding and belong to its creator. Mixed or partial shapes reject. The existing
 4 KiB envelope and encryption/key-derivation contract stay unchanged.
+
+After a signed-in participant opens the session, replica operations scoped to
+that session and build can match the `session_participants` ACL subject on its
+bound Shared volume. An unscoped request uses account and public grants. The
+normal volume and entry ACLs govern reads and writes, including after a grant
+is changed. AP uses the existing database credentials and replication protocol.
 
 ```mermaid
 sequenceDiagram

@@ -8,7 +8,7 @@ pub fn rejected_sources<S: kvdb::Storage, T: kvdb::Storage>(
     local: &kvdb::ReadTxn<'_, S>,
     remote: &kvdb::Db<T>,
     policy: &MetadataPolicy,
-    account: Id,
+    actor: impl Into<DataActor>,
     entry: EntryId,
 ) -> Result<bool> {
     let mut rejected = false;
@@ -16,7 +16,7 @@ pub fn rejected_sources<S: kvdb::Storage, T: kvdb::Storage>(
         local,
         remote,
         policy,
-        account,
+        actor.into(),
         entry,
         &mut namespace::source::cut::Scan::materializing(0)?,
         |_, _, _, _| {
@@ -33,7 +33,7 @@ pub(crate) fn visit_rejected_sources<S: kvdb::Storage, T: kvdb::Storage>(
     local: &kvdb::ReadTxn<'_, S>,
     remote: &kvdb::Db<T>,
     policy: &MetadataPolicy,
-    account: Id,
+    actor: DataActor,
     entry: EntryId,
     scan: &mut namespace::source::cut::Scan,
     mut visit: impl FnMut(&[u8], kvdb::Clock, &[u8], &mut namespace::source::cut::Scan) -> Result<bool>,
@@ -80,7 +80,7 @@ pub(crate) fn visit_rejected_sources<S: kvdb::Storage, T: kvdb::Storage>(
             match snapshot.authorize_source(
                 policy.volume(),
                 policy.default_permissions(),
-                account,
+                actor,
                 &delta,
             ) {
                 Ok(()) => {}

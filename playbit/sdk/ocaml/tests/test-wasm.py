@@ -52,6 +52,13 @@ let () =
     if random <> Bytes.make 32 'b' then failwith "failed random output copy";
     host_error Error.limit_exceeded (fun () -> random_fill (Bytes.create (max_random_bytes + 1)));
     random_fill Bytes.empty;
+    if poll_deadline (Int64.add (monotonic_ns ()) 50_000L) <> None then
+        failwith "deadline should have expired";
+    (match poll_deadline Int64.minus_one with
+     | Some event when event.kind = Int32.of_int EventKind.data_changed
+                       && Bytes.equal event.data (Bytes.make 256 'd') -> ()
+     | _ -> failwith "deadline size probe lost event");
+    if poll_deadline 0L <> None then failwith "nonblocking deadline poll";
     if Obj.tag (Obj.repr stdout) <> Obj.custom_tag
        || List.length (channels ()) <> 2 then failwith "standard channel representation";
     flush stdout;
@@ -95,7 +102,20 @@ const module = new WebAssembly.Module(fs.readFileSync(wasm));
 assert(WebAssembly.Module.imports(module).length===1, 'one import');
 assert(JSON.stringify(WebAssembly.Module.exports(module).map(e=>e.name).sort())===JSON.stringify(['memory','pb_main']), 'exports');
 let instance, calls=0, configurations=0, delivered=false, randomCalls=0; const logs=[];
+const deadlines=[];
 instance = new WebAssembly.Instance(module, {playbit:{pb_syscall(op,...args) {
+    if (op===abi['Opcode::ClockRead']) return 1n<<50n;
+    if (op===abi['Opcode::EventPollDeadline']) {
+        deadlines.push(BigInt.asUintN(64,args[3]));
+        assert(args[0]===8n && args[1]===32n && args[4]===0n && args[5]===0n, 'deadline poll slots');
+        if (deadlines.length===1 || deadlines.length===4) return -6n;
+        if (args[2]<256n) return 256n;
+        const data=new DataView(instance.exports.memory.buffer), header=Number(args[0]);
+        data.setUint32(header+4,24,true);data.setBigUint64(header+8,7n,true);
+        data.setUint32(header+16,abi['EventKind::DataChanged'],true);data.setUint32(header+20,0,true);
+        new Uint8Array(instance.exports.memory.buffer,Number(args[1]),256).fill(100);
+        return 256n;
+    }
     if (op===abi['Opcode::RandomFill']) {
         randomCalls++;
         assert(args[0]===80n && args.slice(2).every(x=>x===0n), 'random scalar slots');
@@ -131,6 +151,8 @@ instance = new WebAssembly.Instance(module, {playbit:{pb_syscall(op,...args) {
     throw Error('Unexpected syscall '+op);
 }}});
 instance.exports.pb_main(); assert(calls===6&&configurations===4&&delivered, 'trace configuration snapshots and capacity retry');
+assert(deadlines.length===4 && deadlines[0]===(1n<<50n)+50000n && deadlines[1]===(1n<<64n)-1n
+    && deadlines[2]===deadlines[1] && deadlines[3]===0n, 'full deadline survives size probe and retry');
 assert(randomCalls===3, 'random buffer copies, errors and local limit');
 assert(logs.join('|')==='bad header rejected|init|configuration rejected|configuration rejected|caught|turn 1', 'first turn: '+logs);
 let trapped=false;try {instance.exports.pb_main();}catch {trapped=true;}assert(trapped, 'uncaught exception traps');

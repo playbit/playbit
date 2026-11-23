@@ -117,6 +117,19 @@ impl AppWindow {
         });
     }
 
+    pub(super) fn copy_current_session_link(&mut self, cx: &mut Context<Self>) {
+        let Some(handle) = self.handle.as_ref() else { return };
+        let (Some(startup), Some(session)) = (handle.startup.as_ref(), handle.session) else {
+            return;
+        };
+        self.copy_session_link(
+            startup.0.clone(),
+            crate::identifier::encode(&session),
+            handle.generation,
+            cx,
+        );
+    }
+
     fn copy_session_link(
         &mut self,
         profile: std::path::PathBuf,
@@ -156,7 +169,7 @@ impl AppWindow {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(invitation));
                         this.show_session_link_copied(cx);
                     }
-                    Err(error) => super::super::super::alert::show(
+                    Err(error) => this.report_action(
                         super::super::super::alert::Kind::Recoverable,
                         &format!("Couldn’t copy session link: {error}"),
                         cx,
@@ -193,11 +206,18 @@ impl AppWindow {
         }
     }
 
-    pub(super) fn session_titlebar(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Stateful<gpui::Div>> {
+    pub(super) fn hide_session_button(&self, window: &mut Window, cx: &mut App) {
+        let Some(link) = &self.session_link else { return };
+        if link.control.read(cx).focused(window) {
+            self.focus.focus(window);
+        }
+        link.control.update(cx, |control, cx| {
+            control.clear_native_tooltip(window);
+            control.set(properties(true), cx);
+        });
+    }
+
+    pub(super) fn session_button(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let link = self.session_link.as_ref()?;
         link.control.update(cx, |control, cx| {
             control.set(properties(self.closing || self.stopped || link.copying.is_some()), cx);
@@ -206,6 +226,25 @@ impl AppWindow {
                 cx,
             );
         });
+        Some(
+            div()
+                .absolute()
+                .right(ui(4.))
+                .top(ui(4.))
+                // Keep the host glyph legible over any guest titlebar or canvas color.
+                .rounded(ui(12.))
+                .bg(rgba(Theme::light().color(ThemeColor::WindowBackground).0))
+                .debug_selector(|| "copy-session-link".into())
+                .child(link.control.clone()),
+        )
+    }
+
+    pub(super) fn session_titlebar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        let button = self.session_button(cx)?;
         Some(
             div()
                 .id("app-titlebar")
@@ -229,14 +268,7 @@ impl AppWindow {
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child(window.window_title()),
                 )
-                .child(
-                    div()
-                        .absolute()
-                        .right(ui(4.))
-                        .top(ui(4.))
-                        .debug_selector(|| "copy-session-link".into())
-                        .child(link.control.clone()),
-                ),
+                .child(button),
         )
     }
 }

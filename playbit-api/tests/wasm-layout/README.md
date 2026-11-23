@@ -1,6 +1,6 @@
 # wasm32 ABI layout fixture
 
-Compile all 34 Rust ABI records for wasm32 and inspect the
+Compile all 35 Rust ABI records for wasm32 and inspect the
 `playbit.abi.records` custom section: size, alignment, field count, then each
 field's offset and width. The fixture also compiles the immutable name/type/
 field-offset and full-struct-size checks in `../abi_prefix.rs`.

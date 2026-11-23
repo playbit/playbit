@@ -1,4 +1,4 @@
-use super::{WasmState, call, output::Buffer};
+use super::{StoreData, call, output::Buffer};
 use crate::runtime::linear_memory::layout::data::{
     entry_handle, range as range_layout, volume as volume_layout, volumes as descriptor_layout,
 };
@@ -54,7 +54,7 @@ fn write_volumes(
     }
     Ok((used_bytes, used_tags))
 }
-pub(super) fn volumes(caller: Caller<'_, WasmState>, pointer: u32) -> i64 {
+pub(super) fn volumes(caller: Caller<'_, impl StoreData>, pointer: u32) -> i64 {
     call(caller, |state, memory| {
         let descriptor = memory.record(pointer, descriptor_layout::LAYOUT, false, None)?;
         let volumes = Buffer::records(
@@ -122,7 +122,7 @@ pub(super) fn volumes(caller: Caller<'_, WasmState>, pointer: u32) -> i64 {
     })
 }
 pub(super) fn resolve_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     name: u32,
@@ -157,7 +157,7 @@ pub(super) fn resolve_begin(
 }
 
 pub(super) fn resolve_take(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     output: u32,

@@ -1,5 +1,7 @@
 //! Same-user tools address one exact GUI-owned session instance. One exchange
 //! has one result; losing a reply never replays input or an application Quit.
+mod canvas_input;
+
 #[cfg(feature = "process")]
 use crate::engine::ipc;
 use crate::{
@@ -17,6 +19,8 @@ pub const REQUEST_LIMIT: usize = playbit_api::abi::syscall::MAX_EVENT_BYTES + 10
 // Tool snapshots retain their existing IPC budget independently of rendering.
 pub const MAX_SCENE_BYTES: usize = 1024 * 1024;
 pub const REPLY_LIMIT: usize = MAX_SCENE_BYTES + 4096;
+pub const MAX_SCREENSHOT_BYTES: usize = 2 * 1024 * 1024;
+pub const SCREENSHOT_REPLY_LIMIT: usize = MAX_SCREENSHOT_BYTES + 4096;
 
 #[cfg(all(feature = "process", target_os = "macos"))]
 pub use crate::engine::process_owner::ExitStatusWatch;
@@ -140,6 +144,7 @@ pub enum Operation {
     Input { kind: u32, target: u32, data: Vec<u8> },
     Quit,
     Show { presentation: u64 },
+    Screenshot,
 }
 #[derive(Debug, serde::Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum Reply {
@@ -147,6 +152,7 @@ pub enum Reply {
     Logs(LogBatch),
     Accepted { instance: Id, generation: u64 },
     Error { error: String },
+    Screenshot { instance: Id, generation: u64, png: Vec<u8> },
 }
 
 #[allow(unsafe_code, reason = "geteuid returns the socket namespace's OS account.")]
@@ -227,6 +233,7 @@ impl Exchange {
             Operation::Input { .. } => 2,
             Operation::Quit => 3,
             Operation::Show { .. } => 4,
+            Operation::Screenshot => 5,
         };
         ipc::codec::write(&mut stream, &ipc::codec::encode(&request, REQUEST_LIMIT)?)?;
         // No further requests can be sent on this exchange. EOF is normal and
@@ -268,7 +275,8 @@ impl Exchange {
                 }
             }
         }
-        let bytes = ipc::codec::read(&mut self.stream, REPLY_LIMIT)?;
+        let limit = if self.operation == 5 { SCREENSHOT_REPLY_LIMIT } else { REPLY_LIMIT };
+        let bytes = ipc::codec::read(&mut self.stream, limit)?;
         let archived = ipc::codec::access::<ArchivedReply>(&bytes)?;
         // Validate collection bounds before allocating an owned reply.
         match archived {
@@ -282,7 +290,11 @@ impl Exchange {
                         .iter()
                         .try_fold(0usize, |n, line| n.checked_add(line.message.len()))
                         .is_some_and(|n| n <= 64 * 1024) => {}
-            ArchivedReply::Accepted { .. } => {}
+            ArchivedReply::Screenshot { png, .. }
+                if self.operation == 5
+                    && png.len() <= MAX_SCREENSHOT_BYTES
+                    && png.as_slice().starts_with(b"\x89PNG\r\n\x1a\n") => {}
+            ArchivedReply::Accepted { .. } if (2..=4).contains(&self.operation) => {}
             ArchivedReply::Error { error } if error.len() <= 4096 => {
                 return Err(error.as_str().into());
             }
@@ -291,6 +303,7 @@ impl Exchange {
         let reply = rkyv::api::low::deserialize::<Reply, rkyv::rancor::Error>(archived)?;
         let (instance, generation, operation) = match &reply {
             Reply::Frame { instance, generation, .. } => (*instance, *generation, 0),
+            Reply::Screenshot { instance, generation, .. } => (*instance, *generation, 5),
             Reply::Logs(batch) => {
                 batch.validate(self.after)?;
                 (batch.cursor.instance, batch.cursor.generation, 1)
@@ -302,7 +315,6 @@ impl Exchange {
         if instance != self.instance
             || (generation != self.generation && !log_reset)
             || operation != self.operation
-            || (matches!(reply, Reply::Accepted { .. }) && self.operation < 2)
         {
             return Err("The reply has another session-instance binding or operation".into());
         }

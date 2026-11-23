@@ -20,7 +20,7 @@ The wasm32 ABI fixture lives in `playbit-api/tests/wasm-layout/`.
 
 ## Binding maintenance and target contract
 
-`bindgen/` parses the existing Rust syscall enums, six selected wrappers,
+`bindgen/` parses the existing Rust syscall enums, selected wrappers,
 error/event values, host limits/platforms and view wire constants.
 It emits OCaml declarations/constants and scalar Wasm wrappers. The compiler
 fork contains no syscall opcode table. Wrapper signatures or bodies outside the
@@ -71,6 +71,14 @@ tuple only when exactly one member matches, and leave it unresolved when there
 are zero or multiple matches. Match authenticated senders from `Session.message`
 against the full account, device, and instance tuple.
 
+`Session.info ()` reads metadata locally and returns `None` outside a session.
+The record has a 32-byte public `internal_id` and an optional 16-byte invitation
+seed, `key_secret`. `Session.code info` formats that seed as the 22-character
+code to append to your deployment's invitation URL, such as
+`"https://playbit.app/s#" ^ code`. A published invitation gives anyone holding
+its link access to the session. Apps requiring this operation declare the
+`session.info` host feature.
+
 `Session.open_channel` opens a named live channel after the session's Shared
 backing is initialized. Subscribe, publish, unsubscribe, and close asynchronously.
 Match a `DataReady` event to the operation using `Session.ready`, then call
@@ -92,7 +100,14 @@ and payload of a live message, including subscribed publishers' own messages.
 `LimitExceeded`. The host restores desired subscriptions on reconnect. Guests
 request any needed fresh application state after a disconnect or dropped messages.
 
-`monotonic_ns ()` reads the host's monotonic clock in nanoseconds. `wake_after`
+`monotonic_ns ()` reads the host's monotonic clock in nanoseconds. Declare
+`event.poll.deadline` in `required_host_features` to use `poll_deadline`.
+Pass the earliest absolute deadline from the guest's timer queue. A queued
+event returns `Some event` immediately. The call returns `None` when the
+deadline expires with an empty queue. `0L` polls immediately and
+`Int64.minus_one` waits indefinitely.
+
+`wake_after`
 replaces a guest's pending one-shot `Wake` event with a delay of 1,000 to
 86,400,000 milliseconds. Use display-driven frame events for visible animation.
 
@@ -104,9 +119,26 @@ with the action ID as its target. Pixel canvases use tightly packed sRGB RGBA8
 with nearest-neighbor presentation. Packed pixels require `ui.canvas.pixels.v1`
 and allow at most 32 MiB across a scene, within the 64 MiB view limit. Pointer/key/frame/surface decoders validate their exact payloads.
 For a root canvas that redraws to the available surface, use
-`View.viewport_canvas` and declare `ui.canvas.viewport.v1`. The macOS host
+`View.viewport_canvas` and declare `ui.canvas.viewport.v1`. This draws a
+transparent canvas in the padded viewport. The macOS host
 clips the current scene to the resized viewport while the app handles
 `EventKind.surface_changed`. The layout works for both static and continuous canvases.
+
+`View.canvas_with_options ~extent:View.Window` uses the whole drawable window,
+including the area behind the titlebar controls.
+Its optional `~clear_color` takes a Display P3 `0xRRGGBBAA` value. Declare
+`ui.canvas.window.v1` for window extent and `ui.canvas.clear.v1` for a clear.
+`View.theme` applies semantic color overrides, including `ThemeColor.window_background`.
+With `ui.window.style.v1`, call `View.window_style` before the root to choose
+the titlebar, window controls, and system appearance. Session windows show a
+Copy Session Link button over the upper-right corner of the game surface. Add
+`WindowStyle.hide_session_button` to the style to hide it.
+
+Declare `ui.window.size-constraints.v1` to constrain the native window's content
+size. For example, call `View.window_size_constraints ~min_width:320.5 ~max_width:1280.
+~aspect_ratio:(16. /. 9.) view` before the scene root. Bounds are floating-point
+logical units. Omit a bound or pass zero to clear it. A zero or omitted ratio
+unlocks the aspect ratio. Omitting the call in a later scene clears all guest limits.
 
 `Audio.open_begin` / `Audio.open_take` asynchronously request audio output;
 wait for operation-ready events before retrying a pending take. A preference of

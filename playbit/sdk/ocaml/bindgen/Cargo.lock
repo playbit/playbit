@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "docdb"
-version = "0.1.2-beta"
+version = "0.1.3-beta"
 
 [[package]]
 name = "playbit-api"
-version = "0.1.2-beta"
+version = "0.1.3-beta"
 dependencies = [
  "docdb",
 ]

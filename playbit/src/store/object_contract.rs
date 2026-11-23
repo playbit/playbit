@@ -38,6 +38,7 @@ pub enum Permission {
 pub enum Subject {
     Public,
     Principal(Principal),
+    SessionParticipants,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -90,12 +91,22 @@ impl Acl {
 pub(crate) struct CheckedAcl<'a>(&'a Acl);
 impl CheckedAcl<'_> {
     pub(crate) fn permits(&self, principal: Option<Principal>, permission: Permission) -> bool {
+        self.permits_in_session(principal, false, permission)
+    }
+
+    pub(crate) fn permits_in_session(
+        &self,
+        principal: Option<Principal>,
+        participant: bool,
+        permission: Permission,
+    ) -> bool {
         if principal.is_none() && permission != Permission::Read {
             return false;
         }
         self.0.grants.iter().any(|grant| {
             let matches = match grant.subject {
                 Subject::Public => true,
+                Subject::SessionParticipants => participant,
                 Subject::Principal(subject) => Some(subject) == principal,
             };
             matches && grant.permissions.contains(&permission)

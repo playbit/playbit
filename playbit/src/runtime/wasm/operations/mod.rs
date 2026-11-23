@@ -1,5 +1,5 @@
 //! Two scalar dispatch imports backed by checked shared operations and bounded memory.
-use super::guest::WasmState;
+use super::guest::{StoreData, WasmState};
 use crate::runtime::{
     instance::State,
     linear_memory::Memory,
@@ -13,7 +13,7 @@ mod authenticated_tests;
 mod bloblog;
 #[cfg(test)]
 mod bloblog_tests;
-mod control;
+pub(super) mod control;
 #[cfg(test)]
 mod entry_tests;
 mod environment;
@@ -58,14 +58,18 @@ pub(super) fn define(linker: &mut Linker<WasmState>) -> wasmtime::Result<()> {
     )?;
     Ok(())
 }
-fn dispatch(mut caller: Caller<'_, WasmState>, operation: u32, arguments: [u64; 6]) -> i64 {
+pub(super) fn dispatch(
+    mut caller: Caller<'_, impl StoreData>,
+    operation: u32,
+    arguments: [u64; 6],
+) -> i64 {
     use playbit_api::abi::{dispatch, syscall::Opcode};
     let opcode = match dispatch::admit(operation, &arguments, 32) {
         Ok(opcode) => opcode,
         Err(error) => return error as i64,
     };
     if opcode == Opcode::ClockRead {
-        if caller.data().fuel_limit.is_some() {
+        if caller.data().fuel_limit().is_some() {
             let fuel = caller.get_fuel().expect("metered guest enables fuel");
             caller
                 .set_fuel(fuel.saturating_sub(HOST_CALL_FUEL))
@@ -77,7 +81,7 @@ fn dispatch(mut caller: Caller<'_, WasmState>, operation: u32, arguments: [u64; 
 }
 
 fn dispatch_operation(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     opcode: playbit_api::abi::syscall::Opcode,
     arguments: [u64; 6],
 ) -> i64 {
@@ -142,7 +146,7 @@ fn dispatch_operation(
 }
 
 fn volume_dispatch(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     opcode: playbit_api::abi::syscall::Opcode,
     arguments: [u64; 6],
 ) -> i64 {
@@ -169,7 +173,7 @@ fn volume_dispatch(
 }
 
 fn platform_dispatch(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     opcode: playbit_api::abi::syscall::Opcode,
     arguments: [u64; 6],
 ) -> i64 {
@@ -190,8 +194,10 @@ fn platform_dispatch(
 
         Opcode::Log => control::log(caller, a as u32, b as u32),
         Opcode::ViewSubmit => control::view_submit(caller, a as u32, b as u32),
+        Opcode::EventPollDeadline => HostError::Unsupported as i64,
         Opcode::EventPoll => control::event_poll(caller, a as u32, b as u32, c as u32),
         Opcode::Identity => control::identity(caller, a as u32),
+        Opcode::SessionInfo => control::session_info(caller, a as u32),
         Opcode::WakeAfter => control::wake_after(caller, a as u32),
         Opcode::QuitOnLastWindow => control::quit_on_last_window(caller, a as u32),
         Opcode::UpdateDefer => control::update_defer(caller, a),
@@ -200,13 +206,20 @@ fn platform_dispatch(
 }
 
 fn call<T: Into<i64>>(
-    mut caller: Caller<'_, WasmState>,
+    mut caller: Caller<'_, impl StoreData>,
+    operation: impl FnOnce(&mut State, &mut Memory<'_>) -> HostResult<T>,
+) -> i64 {
+    call_borrowed(&mut caller, operation)
+}
+
+fn call_borrowed<T: Into<i64>>(
+    caller: &mut Caller<'_, impl StoreData>,
     operation: impl FnOnce(&mut State, &mut Memory<'_>) -> HostResult<T>,
 ) -> i64 {
     let Some(Extern::Memory(memory)) = caller.get_export("memory") else {
         return HostError::InvalidArgument as i64;
     };
-    let fuel = if caller.data().fuel_limit.is_some() {
+    let fuel = if caller.data().fuel_limit().is_some() {
         let fuel = caller.get_fuel().expect("metered guest enables fuel");
         if fuel <= HOST_CALL_FUEL {
             caller.set_fuel(0).expect("metered guest enables fuel");
@@ -218,15 +231,15 @@ fn call<T: Into<i64>>(
     };
     // compile_app rejects shared memory; this linker exposes no imported memory.
     // While the synchronous import owns the caller, guest execution is suspended.
-    let (data, state) = memory.data_and_store_mut(&mut caller);
+    let (data, state) = memory.data_and_store_mut(&mut *caller);
     let mut memory = Memory { data, fuel };
-    state.app.assert_invariants();
-    let result = if state.app.halted {
-        Err(HostError::StaleHandle)
-    } else {
-        operation(&mut state.app, &mut memory)
-    };
-    state.app.assert_invariants();
+    let result = state.with_app(|app| {
+        app.assert_invariants();
+        let result =
+            if app.halted { Err(HostError::StaleHandle) } else { operation(app, &mut memory) };
+        app.assert_invariants();
+        result
+    });
     let remaining = memory.fuel;
     if let Some(remaining) = remaining {
         caller.set_fuel(remaining).expect("fuel remains enabled throughout the synchronous import");
@@ -235,7 +248,7 @@ fn call<T: Into<i64>>(
 }
 
 fn storage_dispatch(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     opcode: playbit_api::abi::syscall::Opcode,
     arguments: [u64; 6],
 ) -> i64 {
@@ -267,7 +280,7 @@ fn storage_dispatch(
 }
 
 fn channel_call(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     opcode: playbit_api::abi::syscall::Opcode,
     slots: [u64; 6],
 ) -> i64 {

@@ -1,7 +1,9 @@
 pb_log 0x2 P128,I2
 pb_view_submit 0x3 P128,I2
 pb_event_poll 0x4 P128,P256,I3
+pb_event_poll_deadline 0x15 P128,P256,I3,L4
 pb_identity 0x5 P128
+pb_session_info 0x163 P128
 pb_wake_after 0xb I1
 pb_update_defer 0x9 L1
 pb_volumes 0x7 P128

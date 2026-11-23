@@ -481,7 +481,12 @@ impl Browser {
         }
         let Some(id) = self.records.draft_id else { return false };
         let Some(snapshot) = self.local_draft_snapshot(id, cx) else { return false };
-        match self.send.enqueue(Request::EditObject { database, object, fields: fields.clone() }) {
+        match self.send.enqueue(Request::EditObject {
+            session: self.request_session(),
+            database,
+            object,
+            fields: fields.clone(),
+        }) {
             Ok(admission) => {
                 draft_publications::track_record(admission, snapshot, fields, cx);
                 true

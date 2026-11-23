@@ -156,6 +156,9 @@ impl Apps {
             ),
             wake,
         )?;
+        binding
+            .bind_session_info(&mut host)
+            .map_err(|error| format!("Session info admission failed: {error:?}"))?;
         context.volumes = host
             .enable_files(
                 services,

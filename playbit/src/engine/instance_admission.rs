@@ -185,7 +185,7 @@ impl Engine {
             Request::InstanceClaim { instance } => {
                 // Validate the retained binding before changing ownership.
                 let binding = self.session_instances.descriptor(instance)?;
-                let (session, volumes) = match self.instance_context(&binding) {
+                let (session, volumes, session_reference) = match self.launch_context(&binding) {
                     Ok(context) => context,
                     Err(error) => {
                         self.session_instances.reject_unclaimed(instance)?;
@@ -194,7 +194,13 @@ impl Engine {
                     }
                 };
                 let (instance, context) = self.session_instances.claim(instance, peer)?;
-                Reply::InstanceAdmission(Admission { instance, context, session, volumes })
+                Reply::InstanceAdmission(Admission {
+                    instance,
+                    context,
+                    session,
+                    volumes,
+                    session_reference,
+                })
             }
             Request::InstanceReconstruct { context: prior, target } => {
                 let super::session_instance::ReconstructionTarget { incarnation, build } = *target;
@@ -203,7 +209,7 @@ impl Engine {
                 binding.build = build.clone();
                 // Current session consent narrows the original immutable
                 // extra-volume ceiling. Reconstruction never adds a grant.
-                let (session, volumes) = self.instance_context(&binding)?;
+                let (session, volumes, session_reference) = self.launch_context(&binding)?;
                 self.service_executor.cancel_channels(prior.into());
                 self.network.blobs.retire_channels(*prior.instance.as_bytes());
                 if self.service_executor.context_pending(prior)
@@ -238,7 +244,13 @@ impl Engine {
                         );
                     }
                     let (instance, context) = reconstructed?;
-                    Reply::InstanceAdmission(Admission { instance, context, session, volumes })
+                    Reply::InstanceAdmission(Admission {
+                        instance,
+                        context,
+                        session,
+                        volumes,
+                        session_reference,
+                    })
                 }
             }
             _ => return Err("Not a session-instance management operation".into()),
@@ -276,6 +288,19 @@ impl Engine {
         } else {
             StopReason::ContextUnavailable
         }
+    }
+    fn launch_context(
+        &self,
+        binding: &SessionInstance,
+    ) -> Result<(
+        crate::store::Session,
+        Vec<crate::runtime::host::AvailableVolume>,
+        crate::store::SessionReference,
+    )> {
+        let (session, volumes) = self.instance_context(binding)?;
+        let reference =
+            crate::store::SessionReference::retained(&self.services.store, &session.id)?;
+        Ok((session, volumes, reference))
     }
     fn instance_context(
         &self,

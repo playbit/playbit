@@ -4,7 +4,7 @@ use super::Launch;
 use crate::ui::desktop::alert::Failure;
 use crate::{
     engine::{
-        Services,
+        GuestRenderer, Services,
         native::{Apps, MAX_APPS},
     },
     runtime::{
@@ -58,13 +58,36 @@ pub(super) struct Message {
     pending: PendingInput,
     pub(super) input: Input,
     epoch: u64,
+    source: InputSource,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputSource {
+    Window,
+    Tool,
+}
+impl InputSource {
+    fn event<'a>(self, input: Input, scene: impl FnOnce() -> Option<&'a ViewNode>) -> Event {
+        let mut event = Event { kind: input.kind, target: input.target, data: input.data };
+        // The scene can resize between tool admission and the owner's turn.
+        // Physical input was already mapped by the surface that received it.
+        if self == Self::Tool
+            && event.kind == EventKind::Pointer
+            && let Some((width, height)) =
+                scene().and_then(|view| super::super::canvas::canvas_size(view, event.target))
+            && let Ok(mut pointer) = playbit_api::abi::syscall::PointerInput::decode(&event.data)
+        {
+            pointer.x = pointer.x.min(width);
+            pointer.y = pointer.y.min(height);
+            event.data.copy_from_slice(&pointer.encode());
+        }
+        event
+    }
 }
 #[derive(Clone)]
 pub(super) struct Handle {
     pub generation: u64,
     #[cfg(all(feature = "native-audio", target_os = "macos"))]
     audio_instance: Option<[u8; 16]>,
-    #[cfg(feature = "desktop")]
     pub session: Option<[u8; 32]>,
     #[cfg(all(target_os = "macos", feature = "process"))]
     pub(super) startup: Option<Arc<(PathBuf, crate::engine::session_instance::Context)>>,
@@ -92,7 +115,6 @@ impl Handle {
                 generation,
                 #[cfg(all(feature = "native-audio", target_os = "macos"))]
                 audio_instance: None,
-                #[cfg(feature = "desktop")]
                 session: None,
                 inputs,
                 wake,
@@ -127,6 +149,13 @@ impl Handle {
         self.send(input, None)
     }
     pub fn send(&self, input: Input, epoch: Option<u64>) -> bool {
+        self.enqueue(input, epoch, InputSource::Window)
+    }
+    #[cfg(feature = "process")]
+    pub(super) fn send_tool_input(&self, input: Input) -> bool {
+        self.enqueue(input, None, InputSource::Tool)
+    }
+    fn enqueue(&self, input: Input, epoch: Option<u64>, source: InputSource) -> bool {
         // UI admission is serial. Frames may not follow an unacknowledged input.
         if input.kind == EventKind::Frame && self.input_pending() {
             return false;
@@ -146,16 +175,21 @@ impl Handle {
         } else {
             playbit_api::abi::syscall::MAX_EVENT_BYTES
         };
+        let input_kind = input.kind;
         let pending =
             (input.data.len() <= max_bytes).then(|| PendingInput::try_new(&self.pending)).flatten();
         if let Some(pending) = pending
-            && self.inputs.try_send(Message { input, epoch, pending }).is_ok()
+            && self.inputs.try_send(Message { input, epoch, pending, source }).is_ok()
         {
             let _ = self.wake.try_send(());
             true
         } else {
             crate::trace::mark("ui.input.rejected");
-            let _ = self.errors.try_send(ADMISSION_ERROR);
+            // A display callback can race the old queue closing during hot reload.
+            // Its frame is disposable, and no user action needs to be retried.
+            if input_kind != EventKind::Frame {
+                let _ = self.errors.try_send(ADMISSION_ERROR);
+            }
             false
         }
     }
@@ -180,6 +214,12 @@ pub(super) enum Output {
     },
     #[cfg(feature = "process")]
     QuitRequested,
+    #[cfg(all(target_os = "macos", feature = "process"))]
+    Screenshot {
+        instance: crate::store::Id,
+        owner_generation: u64,
+        capture: Arc<super::screenshot::Capture>,
+    },
     #[cfg(feature = "process")]
     ShowRequested {
         owner_generation: u64,
@@ -271,7 +311,11 @@ impl Worker {
                 &send,
                 &worker_stop,
             )
-            .and_then(|child| {
+            .and_then(|started| {
+                let GuestEngine::Ready(child) = started else {
+                    let _ = send.send_blocking(Output::Closed(0));
+                    return Ok(());
+                };
                 resolve().map_err(Failure::from).and_then(|instance| match instance {
                     Some(instance) => {
                         let root = Some(instance.root);
@@ -527,7 +571,7 @@ fn own_guest(
         Arc::new(move || {
             let _ = host_wake.try_send(());
         }),
-        fuel_limit,
+        crate::engine::gui_guest::GuestOptions { fuel_limit, renderer: GuestRenderer::AppKit },
     )
     .map_err(|error| error.to_string())?;
     let mut replaces = None;
@@ -607,6 +651,11 @@ fn drain_guest_work(
 
 /// Startup has no window yet, but it uses the same bounded retry owner.
 #[cfg(feature = "process")]
+enum GuestEngine {
+    Ready(Option<std::process::Child>),
+    Canceled,
+}
+#[cfg(feature = "process")]
 fn initialize_guest_engine(
     profile: &std::path::Path,
     engine: &std::path::Path,
@@ -614,7 +663,7 @@ fn initialize_guest_engine(
     receive: &mpsc::Receiver<()>,
     output: &async_channel::Sender<Output>,
     stop: &AtomicBool,
-) -> Result<Option<std::process::Child>, Failure> {
+) -> Result<GuestEngine, Failure> {
     let mut recovery = GuestRecovery {
         profile,
         engine,
@@ -643,11 +692,16 @@ struct GuestRecovery<'a> {
 }
 #[cfg(feature = "process")]
 impl GuestRecovery<'_> {
-    fn initialize(&mut self) -> Result<Option<std::process::Child>, Failure> {
+    fn initialize(&mut self) -> Result<GuestEngine, Failure> {
         let active = Arc::new(AtomicBool::new(false));
         let mut first = true;
         let started = Instant::now();
         let result = loop {
+            // No guest has been admitted. An explicit Quit can end startup
+            // without reporting the preceding transient error as a failed drain.
+            if self.stop.load(Ordering::Acquire) {
+                break Ok(GuestEngine::Canceled);
+            }
             crate::engine::restart::reap(&mut self.child, self.profile);
             let result = if self.child.is_none() {
                 let launch =
@@ -659,7 +713,7 @@ impl GuestRecovery<'_> {
                     .map(|_| ())
             };
             match result {
-                Ok(()) => break Ok(self.child.take()),
+                Ok(()) => break Ok(GuestEngine::Ready(self.child.take())),
                 Err(error) => {
                     let details = error.to_string();
                     crate::platform::failure::log(
@@ -683,14 +737,16 @@ impl GuestRecovery<'_> {
                         break Err(details.into());
                     }
                     let delay = self.backoff.failed(Instant::now());
-                    if !self.wait_retry(delay) {
+                    if !self.wait_retry(delay) && !self.stop.load(Ordering::Acquire) {
                         break Err(details.into());
                     }
                 }
             }
         };
         active.store(false, Ordering::Release);
-        result
+        // The engine probe may finish after Quit. Check again at admission,
+        // before the caller can reserve an instance or deliver a guest turn.
+        if self.stop.load(Ordering::Acquire) { Ok(GuestEngine::Canceled) } else { result }
     }
     fn recover(
         &mut self,
@@ -798,7 +854,10 @@ impl GuestRecovery<'_> {
             Arc::new(move || {
                 let _ = wake.try_send(());
             }),
-            self.fuel_limit,
+            crate::engine::gui_guest::GuestOptions {
+                fuel_limit: self.fuel_limit,
+                renderer: GuestRenderer::AppKit,
+            },
             stop_reason,
         )
     }
@@ -828,7 +887,6 @@ fn run_guest(
         generation: guest.generation(),
         #[cfg(all(feature = "native-audio", target_os = "macos"))]
         audio_instance: Some(*guest.admission().context.instance.as_bytes()),
-        #[cfg(feature = "desktop")]
         session: Some(guest.session_identity()),
         #[cfg(all(target_os = "macos", feature = "process"))]
         startup: Some(Arc::new((profile.to_owned(), guest.admission().context))),
@@ -881,7 +939,8 @@ fn run_guest(
             // before it is transferred to runtime work before deactivation.
             handle.inputs.close();
             while let Ok(message) = receiver.try_recv() {
-                if let Err(error) = admit_guest_input(guest, &handle, message.input, message.epoch)
+                if let Err(error) =
+                    admit_guest_input(guest, &handle, message.input, message.epoch, message.source)
                 {
                     handle.failed();
                     rejected_input = Some(error);
@@ -940,7 +999,7 @@ fn advance_guest(
 
         frame_input = message.input.kind == EventKind::Frame;
         pending = Some(message.pending);
-        admit_guest_input(guest, handle, message.input, message.epoch)
+        admit_guest_input(guest, handle, message.input, message.epoch, message.source)
     } else {
         Ok(())
     };
@@ -973,13 +1032,13 @@ fn admit_guest_input(
     handle: &Handle,
     input: Input,
     epoch: u64,
+    source: InputSource,
 ) -> Result<(), String> {
     if epoch != handle.epoch() {
         return Err("An earlier input failed. Try the action again.".into());
     }
-    guest
-        .input(Event { kind: input.kind, target: input.target, data: input.data })
-        .map_err(|error| format!("Input failed: {error:?}. Try the action again."))
+    let event = source.event(input, || guest.scene());
+    guest.input(event).map_err(|error| format!("Input failed: {error:?}. Try the action again."))
 }
 
 #[allow(unsafe_code, reason = "The host binds trusted C descriptors on their owner thread.")]
@@ -1010,9 +1069,12 @@ unsafe fn run(
     publish_zoom(&services, Some(launches[0].root), output)?;
     // Drop order is intentional: apps release their store references first.
     let data_wake = wake.clone();
-    let mut apps = Apps::new(Arc::new(move || {
-        let _ = data_wake.try_send(());
-    }));
+    let mut apps = Apps::with_renderer(
+        Arc::new(move || {
+            let _ = data_wake.try_send(());
+        }),
+        GuestRenderer::AppKit,
+    );
     // SAFETY: descriptors remain valid until this owner returns.
     let slots = unsafe { attach(&mut apps, &services, launches, &wake, output)? };
     drive(&mut apps, slots, receive, output, stop, |apps| {
@@ -1061,15 +1123,11 @@ fn drive(
                     }
                     let _job = Span::new("ui.worker.input");
 
-                    apps.input(
-                        slot.handle.generation,
-                        Event {
-                            kind: message.input.kind,
-                            target: message.input.target,
-                            data: message.input.data,
-                        },
-                    )
-                    .map_err(|error| format!("Accepted input failed: {error:?}"))?;
+                    let event = message
+                        .source
+                        .event(message.input, || apps.scene(slot.handle.generation).ok().flatten());
+                    apps.input(slot.handle.generation, event)
+                        .map_err(|error| format!("Accepted input failed: {error:?}"))?;
                 }
                 apps.deactivate(slot.handle.generation)
                     .map_err(|error| format!("Cannot deactivate app: {error:?}"))?;
@@ -1143,7 +1201,6 @@ fn open_slot(
             apps.instance_id(generation)
                 .map_err(|error| format!("Cannot bind native app audio: {error:?}"))?,
         ),
-        #[cfg(feature = "desktop")]
         session: apps
             .session_identity(generation)
             .map_err(|error| format!("Cannot bind native app session: {error:?}"))?,
@@ -1194,9 +1251,12 @@ unsafe fn run_connected(
         return Err("A native host must launch between one and four apps".into());
     }
     let data_wake = wake.clone();
-    let mut apps = Apps::new(Arc::new(move || {
-        let _ = data_wake.try_send(());
-    }));
+    let mut apps = Apps::with_renderer(
+        Arc::new(move || {
+            let _ = data_wake.try_send(());
+        }),
+        GuestRenderer::AppKit,
+    );
     let root = prepared
         .services
         .store
@@ -1274,15 +1334,10 @@ fn advance(
 
         frame_input = message.input.kind == EventKind::Frame;
         admitted = if message.epoch == slot.handle.epoch() {
-            apps.input(
-                generation,
-                Event {
-                    kind: message.input.kind,
-                    target: message.input.target,
-                    data: message.input.data,
-                },
-            )
-            .map_err(|error| format!("Input failed: {error:?}. Try the action again."))
+            let event =
+                message.source.event(message.input, || apps.scene(generation).ok().flatten());
+            apps.input(generation, event)
+                .map_err(|error| format!("Input failed: {error:?}. Try the action again."))
         } else {
             Err("An earlier input failed. Try the action again.".into())
         };

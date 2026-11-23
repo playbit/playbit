@@ -10,6 +10,8 @@ import { envelopeLength } from "./blob.ts";
 import { FixtureWork } from "../tests/work-fixture.mjs";
 import { bootstrap, createHost, key, File } from "../tests/host-fixture.mjs";
 import { GuestWork } from "./guest-work.ts";
+import { GuestDeadline, clockNs } from "./guest-deadline.ts";
+import { bindOperations, supportsDeadline } from "./guest-imports.ts";
 import { guestOperations } from "./guest-operations.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -1493,6 +1495,107 @@ retireFiles = async () => {};
     assert.equal(events.filter(value => value === 'register').length, 1);
 });
 
+for (const parkAgain of [true, false]) test(`the parked worker publishes its scene and ignores stale readiness after input (repark=${parkAgain})`, {skip:!supportsDeadline(),timeout:3000}, async () => {
+    const replies = new Map();
+    const cleanup = Promise.withResolvers(), release = Promise.withResolvers();
+    const context = vm.createContext({...compatibleWorkerStorage(), workerChannel, encodeId, decodeId, validId,
+        guestOperations:lifecycleOperations, GuestWork:FixtureWork, GuestDeadline, AccountSignal,
+        observeAccountMetadata(){}, TextEncoder, TextDecoder, crypto, clearTimeout, console, cleanup, release,
+        self:{location:{href:"https://playbit.app/runtime-worker.js?channel=public"},
+            postMessage: message => replies.get(message.id)?.(message)}});
+    vm.runInContext(source.replace(/^import .*;$/gm,'') + `
+        profile = {account:'owner',session:{creator:'owner',selector:{kind:'exact'}}};
+        host = {exports:{pb_web_guest_reset:()=>globalThis.resetFails ? -5 : 0,pb_recovery_abort(){},pb_sync_finish(){}}};
+        hostOutput = status=>{if(status<0) throw Error('reset failed');};
+        files = {async cleanup(){if(closing) {cleanup.resolve(); await release.promise;}},flushPublication(){}};
+        blobs = {async cleanup(){},close(){}}; refreshPersonal=async()=>{}; connectReplication=()=>{};
+        validateInput = (_controls,kind,target) => { if(kind!==2||target!==7) throw Error('invalid input'); };
+        const memory = new WebAssembly.Memory({initial:1});
+        const data = new DataView(memory.buffer); data.setUint32(32,24,true);
+        let entries = 0;
+        const candidate = {exports:{memory},deadline:new GuestDeadline(async()=>{
+            entries++;
+            if (guestWork.poll()?.kind!==1) throw Error("Launch missing");
+            scene = {root:{stage:'opened'}, controls:new Map()};
+            const result = await operations.pb_event_poll_deadline(32,64,8,0xffffffffffffffffn);
+            if (result!==0 || data.getUint32(48,true)!==2) throw Error("Click missing");
+            scene = {root:{stage:'clicked'},controls:new Map()};
+            if (!${parkAgain}) return;
+            await operations.pb_event_poll_deadline(32,64,8,0xffffffffffffffffn);
+            throw Error("Retired guest unexpectedly resumed");
+        })};
+        globalThis.openGuest=async()=>{ await startGuest(candidate); return presentation(); };
+        globalThis.scheduleReady=()=>{ operationsReady(); return work; };
+        globalThis.state=()=>({entries,parked:candidate.deadline.parked,attached:!!guest,closed});
+    `,context);
+    const request = (id,method,args) => new Promise(resolve=>{
+        replies.set(id,resolve);
+        context.self.onmessage({data:{id,method,args}});
+    });
+    assert.equal((await context.openGuest()).scene.stage,'opened');
+    assert.equal(context.state().parked,true);
+    const input = request(1,'input',{kind:2,target:7,data:[]});
+    // Schedule a timer or data notification behind the already admitted input.
+    const stale = context.scheduleReady();
+    assert.equal((await input).result.scene.stage,'clicked');
+    await stale;
+    assert.equal(context.state().parked,parkAgain);
+    assert.equal(context.state().entries,1);
+    context.resetFails = true;
+    assert.match((await request(2,'close',{})).error,/reset failed/);
+    assert.equal(context.state().attached,true);
+    assert.equal(context.state().parked,parkAgain);
+    context.resetFails = false;
+    const closing = request(3,'close',{});
+    await cleanup.promise;
+    assert.equal(context.state().attached,false);
+    assert.equal(context.state().parked,false);
+    await context.scheduleReady();
+    release.resolve();
+    assert.equal((await closing).result.closed,true);
+    assert.equal(context.state().parked,false);
+    assert.equal(context.state().entries,1);
+});
+
+for (const transition of ['update', 'close']) test(`a live guest timeout is delivered during a pending ${transition}`, {skip:!supportsDeadline(),timeout:3000}, async () => {
+    const frame = Promise.withResolvers(), closed = Promise.withResolvers();
+    const checking = Promise.withResolvers(), answer = Promise.withResolvers();
+    const context = vm.createContext({...compatibleWorkerStorage(), workerChannel, encodeId, decodeId, validId,
+        guestOperations:lifecycleOperations, GuestWork:FixtureWork, GuestDeadline, clockNs, AccountSignal,
+        observeAccountMetadata(){}, TextEncoder, TextDecoder, crypto, clearTimeout, console,
+        requireAccountAuthority: async () => { checking.resolve(); await answer.promise; throw Error('authority unavailable'); },
+        self:{location:{href:'https://playbit.app/runtime-worker.js?channel=public'},postMessage: message => {
+            if (message.replicaScene) frame.resolve(message.replicaScene);
+            if (message.id === 2) closed.resolve(message);
+        }}});
+    vm.runInContext(source.replace(/^import .*;$/gm,'') + `
+        profile = {account:'owner',session:{creator:'owner',selector:{kind:'exact'}}};
+        host = {exports:{}}; files = {async cleanup(){},flushPublication(){}}; connectReplication=()=>{};
+        const memory = new WebAssembly.Memory({initial:1});
+        new DataView(memory.buffer).setUint32(32,24,true);
+        let entries = 0;
+        globalThis.launch = () => localStep(async () => {
+            if (${transition === 'update'}) { guestUpdating = true; guestWork.deactivate(); }
+            await startGuest({exports:{memory},deadline:new GuestDeadline(async () => {
+                entries++; if (guestWork.poll()?.kind !== 1) throw Error('Launch missing');
+                scene = {root:{stage:'opened'},controls:new Map()};
+                const result = await operations.pb_event_poll_deadline(32,64,8,clockNs()+25_000_000n);
+                scene = {root:{result,entries},controls:new Map()};
+            })});
+        });
+        globalThis.close = () => { managed = true; self.onmessage({data:{id:2,method:'close',args:{}}}); };
+    `, context);
+    await context.launch();
+    if (transition === 'close') { context.close(); await checking.promise; }
+    const {scene} = await frame.promise;
+    assert.equal(scene.result,-6);
+    assert.equal(scene.entries,1);
+    if (transition === 'close') {
+        answer.resolve();
+        assert.match((await closed.promise).error,/authority unavailable/);
+    }
+});
+
 test('trapped Wasm is never reentered by input or replication; developer reload replaces it', async () => {
     // (module (func (export "pb_main") unreachable)) -- a real Wasm trap.
     const trap = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([
@@ -1588,6 +1691,43 @@ retireFiles = async () => {};
     assert.equal(await context.replace(1), true);
     assert.equal(await context.replace(0), false);
     assert.equal(await context.replace(1), true);
+});
+
+test('a browser example reads the same session through identity.read and session.info', async () => {
+    const account = new Uint8Array(16).fill(2), internalId = new Uint8Array(32).fill(3);
+    const memory = new WebAssembly.Memory({ initial: 1 }), data = new DataView(memory.buffer);
+    const info = new Uint8Array(memory.buffer, 16, 64), identity = new Uint8Array(memory.buffer, 80, 104);
+    const module = new WebAssembly.Module(Uint8Array.of(0, 97, 115, 109, 1, 0, 0, 0));
+    const context = vm.createContext({ ...compatibleWorkerStorage(), workerChannel, decodeId,
+        guestOperations: lifecycleOperations, GuestWork: FixtureWork, AccountSignal, observeAccountMetadata() {},
+        TextEncoder, TextDecoder, crypto, memory,
+        self: { location: { href: 'https://playbit.app/runtime-worker.js?channel=public' }, postMessage() {} },
+        read(operations) {
+            const { pb_syscall } = bindOperations(module, operations);
+            data.setUint32(info.byteOffset, info.length, true);
+            assert.equal(pb_syscall(0x163, 16n, 0n, 0n, 0n, 0n, 0n), 0n);
+            assert.equal(data.getUint32(24, true), 0);
+            assert.deepEqual(info.slice(16, 48), internalId);
+            assert.deepEqual(info.slice(48, 64), new Uint8Array(16));
+            data.setUint32(identity.byteOffset, identity.length, true);
+            assert.equal(pb_syscall(0x5, 80n, 0n, 0n, 0n, 0n, 0n), 0n);
+            assert.deepEqual(identity.slice(16, 32), account);
+            assert.deepEqual(identity.slice(32, 48), account);
+            assert(identity.slice(48, 64).some(byte => byte !== 0));
+            assert.deepEqual(identity.slice(64, 96), info.slice(16, 48));
+            assert.equal(data.getUint32(176, true), 2);
+        },
+    });
+    vm.runInContext(source.replace(/^import .*;$/gm, '') + `
+        profile = { account: ${JSON.stringify(encodeId(account))}, session: { id: ${JSON.stringify(encodeId(internalId))}, selector: {kind: 'exact'} } };
+        managed = false;
+        files = { cleanup: async () => {} };
+        globalThis.launch = () => startGuest({ exports: { memory, pb_main() {
+            read(operations);
+            scene = { controls: new Map() };
+        } } });
+    `, context);
+    await context.launch();
 });
 
 test('each web guest generation registers a distinct nonzero app instance',async()=>{

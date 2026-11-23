@@ -1,7 +1,8 @@
 //! Host-owned guest lifecycle shared by native and headless hosts.
 //!
 //! Calls run on the host's serialized worker, never on its UI thread. A return
-//! from `pump` is a safe boundary: no Wasm stack or asynchronous syscall remains.
+//! from `pump` is a safe boundary. A deadline-poll guest may retain a suspended
+//! Wasm stack; dropping that guest cancels the wait without running old code.
 //! Pending host work may outlive a turn; its handles and callbacks belong to the
 //! guest generation that began it and never transfer into a replacement guest.
 //! Candidate startup can have durable effects; recovery restores the previous

@@ -338,7 +338,7 @@ pub extern "C" fn pb_replica_catalog_allowed(length: usize) -> i32 {
             true
         } else {
             let policy = host.admit_volume(&volume, Permission::Read)?;
-            match policy.authorize(host.account, Permission::Read) {
+            match policy.authorize(host.actor(&volume), Permission::Read) {
                 Ok(()) => true,
                 Err(crate::store::Error::AccessDenied(_)) => false,
                 Err(error) => return Err(store_error(error)),

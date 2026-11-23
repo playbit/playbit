@@ -3,7 +3,7 @@
 //! A single durable intent bounds abandoned work; recovery discards only that
 //! unpublished root. Opening a published root only establishes additive schema.
 use super::*;
-use crate::store::EntryId;
+use crate::store::{DatabaseId, EntryId};
 const INITIALIZATION_CACHE_BYTES: usize = 512 * 1024;
 const INTENT: &[u8] = b"initializing-root";
 const APP_ROOT: &[u8] = b"local-app-root";
@@ -438,34 +438,30 @@ impl LocalStore {
     ) -> Result<()> {
         let directory = self.path.join(crate::paths::VOLUMES).join(volume.id.to_string());
         fs::DirBuilder::new().mode(0o700).create(&directory).map_err(io)?;
-        drop(create_replica(
-            &directory.join(crate::store::DatabaseId::Revocations.file_name()),
-            crate::store::DatabaseId::Revocations.hash_key(&credentials.database_key, volume.id),
-            INITIALIZATION_CACHE_BYTES,
-        )?);
+        let create = |id: DatabaseId| {
+            create_replica(
+                &directory.join(id.file_name()),
+                id.hash_key(&credentials.database_key, volume.id),
+                INITIALIZATION_CACHE_BYTES,
+            )
+        };
+        drop(create(DatabaseId::Revocations)?);
         #[cfg(test)]
         checkpoint(2)?;
         for seed in &declaration.databases {
-            let database = create_replica(
-                &directory.join(crate::store::DatabaseId::Entry(seed.id).file_name()),
-                crate::store::DatabaseId::Entry(seed.id)
-                    .hash_key(&credentials.database_key, volume.id),
-                INITIALIZATION_CACHE_BYTES,
-            )?;
+            let database = create(DatabaseId::Entry(seed.id))?;
             seed.write_objects(&database, volume.owner, now_unix_secs())?;
         }
         let blobs = self.prepare_initial_blobs(volume.id, credentials, &declaration.blobs)?;
-        let mut index = MetadataPolicy::new(volume.clone(), declaration.permissions.clone())?;
-        if let Some(session) = self.shared_initialization_session(volume.id, purpose)? {
+        let shared = self.shared_initialization_session(volume.id, purpose)?;
+        let mut index =
+            MetadataPolicy::new(volume.clone(), declaration.volume_permissions(shared.is_some()))?;
+        if let Some(session) = shared {
             index.provisioned_versions.insert(session.resolved_build_id);
         }
         #[cfg(test)]
         checkpoint(3)?;
-        let db = create_replica(
-            &directory.join(crate::store::DatabaseId::Index.file_name()),
-            crate::store::DatabaseId::Index.hash_key(&credentials.database_key, volume.id),
-            INITIALIZATION_CACHE_BYTES,
-        )?;
+        let db = create(DatabaseId::Index)?;
         let mut tx = db.begin_write(now_unix_secs())?;
         index.write_entries(&mut tx, MetadataPolicy::MAX_MATERIALIZED_BYTES)?;
         for seed in &declaration.databases {

@@ -1,5 +1,5 @@
 //! Checked typed begin/take lowering. Every result is retained across short buffers.
-use super::{WasmState, call, query, read};
+use super::{StoreData, call, query, read};
 use crate::runtime::linear_memory::layout::data::query as query_layout;
 use crate::runtime::{
     host::{DataOperation, DataResult},
@@ -10,7 +10,7 @@ use playbit_api::abi::syscall as contract;
 use wasmtime::Caller;
 
 pub(super) fn read_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     entry: u32,
     object: u32,
     fields: u32,
@@ -38,7 +38,7 @@ pub(super) fn read_begin(
 }
 
 pub(super) fn edit_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     entry: u32,
     object: u32,
     fields: u32,
@@ -64,7 +64,7 @@ pub(super) fn edit_begin(
     })
 }
 
-pub(super) fn query_begin(caller: Caller<'_, WasmState>, entry: u32, query: u32) -> i64 {
+pub(super) fn query_begin(caller: Caller<'_, impl StoreData>, entry: u32, query: u32) -> i64 {
     call(caller, |state, memory| {
         let (entry, _) = input::entry_handle(memory, entry, None)?;
         pending_data::admit_entry(state, entry, Opcode::ObjectQueryBegin)?;
@@ -105,7 +105,7 @@ pub(super) fn query_begin(caller: Caller<'_, WasmState>, entry: u32, query: u32)
 }
 
 pub(super) fn read_take(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     pointer: u32,
@@ -129,7 +129,7 @@ pub(super) fn read_take(
     })
 }
 
-pub(super) fn edit_take(caller: Caller<'_, WasmState>, generation: u32, slot: u32) -> i64 {
+pub(super) fn edit_take(caller: Caller<'_, impl StoreData>, generation: u32, slot: u32) -> i64 {
     call(caller, |state, _| {
         pending_data::admit_take(
             state,
@@ -148,7 +148,7 @@ pub(super) fn edit_take(caller: Caller<'_, WasmState>, generation: u32, slot: u3
 }
 
 pub(super) fn query_take(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     pointer: u32,

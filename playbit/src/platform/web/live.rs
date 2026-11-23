@@ -199,7 +199,9 @@ impl Host {
             return Err(Error::AccessDenied);
         }
         policy.ordinary_protocol().map_err(map_error)?;
-        policy.authorize_reader(ReplicaReader::Participant(self.account)).map_err(map_error)?;
+        policy
+            .authorize_reader(ReplicaReader::SessionParticipant(self.actor(volume)))
+            .map_err(map_error)?;
         Ok(policy)
     }
     fn receive_delta(
@@ -513,7 +515,7 @@ fn outbound_change(
         bytes
     };
     let entries =
-        crate::store::authorize_publication_delta(&volume.index, policy, host.account, bytes)
+        crate::store::authorize_publication_delta(&volume.index, policy, host.actor(volume), bytes)
             .map_err(store_error)?;
     if entries.is_empty() {
         authority::check(host, volume, None)?;

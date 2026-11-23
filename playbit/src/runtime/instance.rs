@@ -127,6 +127,7 @@ pub(super) struct State {
     pub(super) pending_update: Option<PendingUpdate>,
     pub(super) deferred_update: Option<u64>,
     pub(super) wake_deadline: Option<Instant>,
+    pub(super) poll_deadline: Option<u64>,
     pub(super) capabilities: Capabilities<PendingOperation>,
     pub(super) channel_listener: Option<u64>,
     pub(super) pending_data_bytes: usize,
@@ -261,6 +262,7 @@ impl State {
             pending_update: None,
             deferred_update: None,
             wake_deadline: None,
+            poll_deadline: None,
             capabilities,
             channel_listener: None,
             pending_data_bytes: 0,
@@ -436,6 +438,9 @@ pub(super) fn validate_context(
     validate_participants(&context.participants)?;
     let mut supported: BTreeSet<_> =
         abi::REGISTRY.iter().map(|(opcode, _)| *opcode).filter(|opcode| opcode.is_core()).collect();
+    if !context.required_capabilities.contains(Opcode::EventPollDeadline.capability()) {
+        supported.remove(&Opcode::EventPollDeadline);
+    }
     for opcode in host.supported_operations() {
         if opcode.is_core() || !supported.insert(*opcode) {
             return Err(HostError::InvalidArgument);

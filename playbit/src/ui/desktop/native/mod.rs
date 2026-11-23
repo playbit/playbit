@@ -23,6 +23,8 @@ mod ffi;
 mod network;
 #[cfg(feature = "connected-engine")]
 pub mod portable;
+#[cfg(all(target_os = "macos", feature = "process"))]
+mod screenshot;
 pub(crate) mod window;
 mod worker;
 const MAX_LOG_LINES: usize = 256;
@@ -132,8 +134,8 @@ fn present(worker: Rc<RefCell<worker::Worker>>, focus_window: bool) -> std::io::
     application.run(move |cx: &mut App| {
         #[cfg(feature = "desktop")]
         crate::desktop::launch_timing::appkit_ready();
-        #[cfg(target_os = "macos")]
-        super::appearance::set_light_appearance();
+        // Guest windows choose their own AppKit appearance. Leaving the
+        // process appearance inherited lets individual windows follow macOS.
         #[cfg(all(target_os = "macos", feature = "desktop"))]
         let mut icon = crate::desktop::guest_app::icon::Observer::new();
         #[cfg(all(target_os = "macos", feature = "desktop"))]

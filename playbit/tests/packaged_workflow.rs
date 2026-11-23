@@ -7,7 +7,7 @@
     feature = "test-support"
 ))]
 
-use playbit::{package::Package, store::LocalStore};
+use playbit::{engine::profile, package::Package, store::LocalStore};
 use std::{
     collections::BTreeMap,
     fs,
@@ -31,6 +31,10 @@ fn prepare_offline_signer_profile() {
     assert_eq!(metadata.mode() & 0o077, 0, "fixture parent must be private");
     // Atomic creation rejects an existing profile, file or symlink, even if empty.
     fs::DirBuilder::new().mode(0o700).create(&path).expect("fixture profile must not exist");
+    if let Some(channel) = profile::channel_from_environment().expect("valid fixture channel") {
+        profile::initialize_selected(&path, channel)
+            .expect("fresh fixture profile admits its channel");
+    }
     let store = LocalStore::open(&path).expect("new isolated profile opens");
     store.set_work_offline(true).expect("fixture remains explicitly offline");
     let package = Package::new(

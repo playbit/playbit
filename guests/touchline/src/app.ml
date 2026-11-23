@@ -5,6 +5,8 @@ let room = Room.create ()
 let controls = Controls.create ()
 let book = Scorebook.create ()
 let canvas = 1l
+let background = 0xe6ebdcffl
+let window_style = WindowStyle.(standard lor transparent_titlebar lor hidden_title lor theme_bright)
 let pass = 2l
 let shoot = 3l
 let rematch = 4l
@@ -168,7 +170,10 @@ let render () =
     let seconds = (game.ticks_left + Match.ticks_per_second - 1) / Match.ticks_per_second in
     Art.draw_scorebug ~home_score:game.home_score ~away_score:game.away_score ~seconds in
   let scene = View.create () in
-  let canvas () = View.viewport_canvas scene canvas ~width:view.width ~height:view.height
+  View.theme scene [ThemeColor.window_background, background];
+  View.window_style scene window_style;
+  let canvas () = View.canvas_with_options ~extent:View.Window ~clear_color:background
+    scene canvas ~width:view.width ~height:view.height
     ~continuous:true (Match_view.draw view ~pitch ~board) in
   let actions = match status, game.phase with
     | Room.Full, _ -> []

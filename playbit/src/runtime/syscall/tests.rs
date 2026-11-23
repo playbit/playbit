@@ -81,6 +81,7 @@ const CALLER: &str = r#"(module
 
 #[derive(Default)]
 struct Records {
+    session_key_secret: Option<[u8; 16]>,
     creates: usize,
     edits: usize,
     queries: usize,
@@ -95,6 +96,9 @@ struct Records {
 struct TestHost(Arc<Mutex<Records>>);
 
 impl Host for TestHost {
+    fn session_key_secret(&self) -> HostResult<Option<[u8; 16]>> {
+        Ok(self.0.lock().unwrap().session_key_secret)
+    }
     fn supported_operations(&self) -> &[Opcode] {
         &[
             Opcode::SchemaReadBegin,
@@ -768,6 +772,9 @@ fn object_file_scene_requires_current_read_capabilities_and_rejects_path_images(
             scene,
             crate::runtime::ViewNode::Theme {
                 theme: playbit_api::ui::Theme::light(),
+                window_background_specified: false,
+                window_style: None,
+                window_size_constraints: None,
                 child: Box::new(crate::runtime::ViewNode::Column(vec![
                     crate::runtime::ViewNode::FileImage {
                         file,
@@ -1138,6 +1145,45 @@ fn projected_query_rejects_host_identity_type_field_and_value_violations() {
     page.records.as_mut().unwrap()[0].fields[0].values =
         Some(vec![Value::Bytes(vec![0; abi::MAX_DATA_BYTES + 1])]);
     assert_eq!(validate(&page), Err(HostError::LimitExceeded));
+}
+
+#[test]
+fn session_info_returns_only_the_current_session_and_admits_the_complete_output_first() {
+    use playbit_api::abi::session::HAS_KEY_SECRET;
+    for backend in [ExecutionBackend::Native, ExecutionBackend::Pulley] {
+        let (mut guest, records) = guest(backend);
+        let read_info =
+            |guest: &mut GuestInstance| scalar(guest, Opcode::SessionInfo, [64, 0, 0, 0, 0, 0]);
+        records.lock().unwrap().session_key_secret = Some([42; 16]);
+        write(&mut guest, 64, &[0xa5; 72]);
+        put_u32(&mut guest, 64, 72);
+        assert_eq!(read_info(&mut guest), HostError::NotFound as i32);
+        assert_eq!(get_u32(&mut guest, 68), 0);
+        guest.store.data_mut().app.context.identity.session_id = Some([31; 32]);
+        for key_secret in [None, Some([0; 16]), Some([42; 16])] {
+            records.lock().unwrap().session_key_secret = key_secret;
+            assert_eq!(read_info(&mut guest), 0);
+            assert_eq!(get_u32(&mut guest, 68), 64);
+            assert_eq!(
+                get_u32(&mut guest, 72),
+                if key_secret.is_some() { HAS_KEY_SECRET } else { 0 }
+            );
+            assert_eq!(get_u32(&mut guest, 76), 0);
+            assert_eq!(read(&mut guest, 80, 32), [31; 32]);
+            assert_eq!(read(&mut guest, 112, 16), key_secret.unwrap_or([0; 16]));
+            assert_eq!(read(&mut guest, 128, 8), [0xa5; 8]);
+        }
+        write(&mut guest, 64, &[0xa5; 72]);
+        put_u32(&mut guest, 64, 63);
+        let before = read(&mut guest, 64, 72);
+        assert_eq!(read_info(&mut guest), HostError::BufferTooSmall as i32);
+        assert_eq!(read(&mut guest, 64, 72), before);
+        assert_eq!(
+            scalar(&mut guest, Opcode::SessionInfo, [64, 1, 0, 0, 0, 0]),
+            HostError::InvalidArgument as i32
+        );
+        assert_eq!(read(&mut guest, 64, 72), before);
+    }
 }
 
 #[test]

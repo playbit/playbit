@@ -1,5 +1,5 @@
 //! Wasm File adapters use fixed little-endian records and preadmitted spans.
-use super::{WasmState, call, output::Buffer};
+use super::{StoreData, call, output::Buffer};
 use crate::runtime::linear_memory::layout::files::{
     file_close_result, file_list_entry, file_reference, file_status,
 };
@@ -35,7 +35,7 @@ fn operation(packed: u64) -> rt::OperationHandle {
     let (generation, slot) = playbit_api::abi::dispatch::unpack_handle(packed);
     rt::OperationHandle { generation, slot }
 }
-pub(super) fn dispatch(caller: Caller<'_, WasmState>, opcode: Opcode, slots: [u64; 6]) -> i64 {
+pub(super) fn dispatch(caller: Caller<'_, impl StoreData>, opcode: Opcode, slots: [u64; 6]) -> i64 {
     let [a, b, c, d, _, _] = slots;
     match opcode {
         Opcode::FileOpenBegin | Opcode::FileWriteBegin => {
@@ -66,14 +66,14 @@ pub(super) fn dispatch(caller: Caller<'_, WasmState>, opcode: Opcode, slots: [u6
         _ => fixed_take(caller, opcode, operation(a), b as u32),
     }
 }
-fn begin(caller: Caller<'_, WasmState>, file: abi::FileHandle, action: Action) -> i64 {
+fn begin(caller: Caller<'_, impl StoreData>, file: abi::FileHandle, action: Action) -> i64 {
     call(caller, |state, _memory| {
         let handle = pending_files::begin(state, file, action)?;
         Ok(playbit_api::abi::dispatch::pack_handle(handle.generation, handle.slot) as i64)
     })
 }
 fn input_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     opcode: Opcode,
     a: u64,
     b: u64,
@@ -96,14 +96,14 @@ fn input_begin(
         Ok(playbit_api::abi::dispatch::pack_handle(handle.generation, handle.slot) as i64)
     })
 }
-fn next_begin(caller: Caller<'_, WasmState>, file: abi::FileHandle) -> i64 {
+fn next_begin(caller: Caller<'_, impl StoreData>, file: abi::FileHandle) -> i64 {
     call(caller, |state, _memory| {
         let handle = pending_files::list_next(state, abi::FileListHandle(file.0))?;
         Ok(playbit_api::abi::dispatch::pack_handle(handle.generation, handle.slot) as i64)
     })
 }
 fn fixed_take(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     opcode: Opcode,
     operation: rt::OperationHandle,
     pointer: u32,
@@ -152,7 +152,7 @@ fn fixed_take(
     })
 }
 fn read_take(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     operation: rt::OperationHandle,
     pointer: u32,
     capacity: u32,
@@ -174,7 +174,11 @@ fn read_take(
         })
     })
 }
-fn next_take(caller: Caller<'_, WasmState>, operation: rt::OperationHandle, pointer: u32) -> i64 {
+fn next_take(
+    caller: Caller<'_, impl StoreData>,
+    operation: rt::OperationHandle,
+    pointer: u32,
+) -> i64 {
     call(caller, |state, memory| {
         pending_files::admit_take(state, operation, Opcode::FileListNextTake)?;
         let record = memory.record(pointer, file_list_entry::LAYOUT, false, None)?;

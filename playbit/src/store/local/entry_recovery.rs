@@ -1,8 +1,9 @@
 //! Explicit recovery publishes a fresh identity; retirement is never erased.
 use super::*;
+#[cfg(test)]
+use crate::store::object_contract::Principal;
 use crate::store::{
     DatabaseId, EntryId, MAX_REPLICA_DELTA_BYTES,
-    object_contract::Principal,
     volume_index::{
         self, EntryAddress, EntryInfo, EntryKind, HistoryCursor, HistoryPage, IndexSnapshot,
         VolumeEntry,
@@ -204,7 +205,7 @@ impl LocalStore {
         snapshot.authorize_retained_read(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             address.entry,
         )
     }
@@ -360,7 +361,7 @@ impl LocalStore {
                 retained.authorize_retained_read(
                     policy.volume(),
                     policy.default_permissions(),
-                    Principal::Human(access.account),
+                    self.data_actor(access, policy.volume())?,
                     address.entry,
                 )
             }

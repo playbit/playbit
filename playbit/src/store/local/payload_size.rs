@@ -2,7 +2,6 @@
 use super::*;
 use crate::store::{
     DatabaseId, EntryId, EntryType,
-    object_contract::Principal,
     volume_index::{self, EntryAddress, IndexSnapshot},
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,7 +81,7 @@ impl LocalStore {
                 snapshot.authorize_namespace(
                     policy.volume(),
                     policy.default_permissions(),
-                    Principal::Human(access.account),
+                    self.data_actor(access, policy.volume())?,
                     entry,
                     Permission::Read,
                 )?;
@@ -154,7 +153,7 @@ impl LocalStore {
                     snapshot.authorize(
                         policy.volume(),
                         policy.default_permissions(),
-                        Principal::Human(access.account),
+                        self.data_actor(access, policy.volume())?,
                         entry,
                         Permission::Read,
                     )?;
@@ -193,7 +192,7 @@ impl LocalStore {
             snapshot.authorize_namespace(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 entry,
                 Permission::Read,
             )?;
@@ -202,7 +201,7 @@ impl LocalStore {
         snapshot.authorize(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             entry,
             Permission::Read,
         )?;
@@ -264,7 +263,7 @@ fn within_directory(
 mod tests {
     use super::*;
     use crate::store::{
-        object_contract::{Grant, Subject},
+        object_contract::{Grant, Principal, Subject},
         volume_index::EntryKind,
     };
 

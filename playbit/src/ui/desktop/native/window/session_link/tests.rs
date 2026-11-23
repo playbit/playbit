@@ -77,36 +77,33 @@ fn add_font(cx: &gpui::TestAppContext) {
         .unwrap();
 }
 
+fn copy_button_bounds(window: &Window) -> Option<gpui::Bounds<gpui::Pixels>> {
+    let (_, node) = window
+        .accessibility_nodes_for_test()
+        .find(|(_, node)| node.label() == Some("Copy session link"))?;
+    assert_eq!(node.role(), gpui::accesskit::Role::Button);
+    let bounds = node.bounds().unwrap();
+    Some(gpui::Bounds::from_corners(
+        gpui::point(px(bounds.x0 as f32), px(bounds.y0 as f32)),
+        gpui::point(px(bounds.x1 as f32), px(bounds.y1 as f32)),
+    ))
+}
+
 #[gpui::test]
 fn titlebar_pointer_and_keyboard_copy_current_session_without_guest_input(
     cx: &mut gpui::TestAppContext,
 ) {
-    // Dispatch pointer and key events through the titlebar, verify the exact
-    // retained session over IPC without guest input and timed success feedback,
-    // then check drawer geometry.
+    // Exercise titlebar and menu copies against the exact retained session.
     add_font(cx);
     let profile = tempfile::tempdir().unwrap();
     let session = [9; 32];
-    let (_, server) = invitation_server(profile.path(), vec![session, session]);
+    let (_, server) = invitation_server(profile.path(), vec![session, session, session]);
     let (handle, inputs) = retained_handle(profile.path(), 7, session);
     let window = cx.update(|cx| open("Guest".into(), Some(handle), None, true, cx).unwrap());
     window.update(cx, |_, window, _| window.activate_window()).unwrap();
     cx.run_until_parked();
     while inputs.try_recv().is_ok() {}
-    let bounds = window
-        .update(cx, |_, window, _| {
-            let (_, node) = window
-                .accessibility_nodes_for_test()
-                .find(|(_, node)| node.label() == Some("Copy session link"))
-                .unwrap();
-            assert_eq!(node.role(), gpui::accesskit::Role::Button);
-            let bounds = node.bounds().unwrap();
-            gpui::Bounds::from_corners(
-                gpui::point(px(bounds.x0 as f32), px(bounds.y0 as f32)),
-                gpui::point(px(bounds.x1 as f32), px(bounds.y1 as f32)),
-            )
-        })
-        .unwrap();
+    let bounds = window.update(cx, |_, window, _| copy_button_bounds(window).unwrap()).unwrap();
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     visual.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
@@ -137,7 +134,6 @@ fn titlebar_pointer_and_keyboard_copy_current_session_without_guest_input(
         "https://playbit.app/join/invitation-1"
     );
     assert!(inputs.is_empty(), "keyboard activation must not reach the guest");
-    server.join().unwrap();
 
     cx.executor().advance_clock(std::time::Duration::from_millis(1999));
     cx.run_until_parked();
@@ -157,6 +153,148 @@ fn titlebar_pointer_and_keyboard_copy_current_session_without_guest_input(
                 this.session_link.as_ref().unwrap().copied.is_none(),
                 "success feedback expires two seconds after the most recent copy"
             );
+        })
+        .unwrap();
+    // Opting out while the copy button has keyboard focus returns ownership to
+    // the guest; the Window menu still targets the same retained session.
+    window
+        .update(cx, |this, _, cx| {
+            let view = ViewNode::Theme {
+                window_background_specified: false,
+                window_size_constraints: None,
+                window_style: Some(WindowStyle::HIDE_SESSION_BUTTON),
+                theme: Theme::light(),
+                child: Box::new(ViewNode::Column(vec![])),
+            };
+            assert!(this.apply(view, InputAck::default(), cx));
+            assert!(!this.close(cx), "borderless nonclosable window declines Close");
+            assert!(!this.closing);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .update(cx, |this, window, cx| {
+            assert!(copy_button_bounds(window).is_none());
+            assert!(this.focus.is_focused(window));
+            assert!(window.is_action_available(&CopySessionLink, cx));
+            window.dispatch_action(Box::new(CopySessionLink), cx);
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard().unwrap().text().unwrap(),
+        "https://playbit.app/join/invitation-2"
+    );
+    server.join().unwrap();
+}
+
+#[gpui::test]
+fn floating_session_button_preserves_guest_pointer_and_titlebar_drag_outside_its_bounds(
+    cx: &mut gpui::TestAppContext,
+) {
+    add_font(cx);
+    let profile = tempfile::tempdir().unwrap();
+    let session = [9; 32];
+    let (_, server) = invitation_server(profile.path(), vec![session]);
+    let (handle, inputs) = retained_handle(profile.path(), 7, session);
+    let scene = |window_style, child| ViewNode::Theme {
+        window_style,
+        window_size_constraints: None,
+        theme: Theme::light(),
+        window_background_specified: false,
+        child: Box::new(child),
+    };
+    let titled = WindowStyle::STANDARD | WindowStyle::TRANSPARENT_TITLEBAR;
+    let window = cx.update(|cx| {
+        open(
+            "Guest".into(),
+            Some(handle),
+            Some(scene(Some(titled), ViewNode::Column(vec![]))),
+            true,
+            cx,
+        )
+        .unwrap()
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.run_until_parked();
+    let bounds = window.update(cx, |_, window, _| copy_button_bounds(window).unwrap()).unwrap();
+    let beside = gpui::point(bounds.left() - px(2.), bounds.center().y);
+    assert!(cx.window_can_drag_at(window.into(), beside));
+    assert!(!cx.window_can_drag_at(window.into(), bounds.center()));
+    let canvas = |id| ViewNode::Canvas {
+        id,
+        width: 640,
+        height: 560,
+        frames: playbit_api::ui::CanvasFrames::Static,
+        extent: CanvasExtent::Window,
+        clear_color: None,
+        items: vec![],
+    };
+    window
+        .update(cx, |this, _, cx| {
+            assert!(this.apply(scene(None, canvas(0)), InputAck::default(), cx));
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert!(cx.window_can_drag_at(window.into(), beside));
+    assert!(!cx.window_can_drag_at(window.into(), bounds.center()));
+    for style in [None, Some(WindowStyle::NONE)] {
+        window
+            .update(cx, |this, _, cx| {
+                assert!(this.apply(scene(style, canvas(1)), InputAck::default(), cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let overlay =
+            window.update(cx, |_, window, _| copy_button_bounds(window).unwrap()).unwrap();
+        assert_eq!(overlay, bounds);
+        while inputs.try_recv().is_ok() {}
+        visual.simulate_click(beside, Default::default());
+        assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::Pointer);
+        assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::Pointer);
+    }
+    // Hide between down and up. A later drag from the canvas onto the
+    // restored button must not complete the old press.
+    visual.simulate_mouse_down(bounds.center(), gpui::MouseButton::Left, Default::default());
+    let set_style = |style, cx: &mut gpui::TestAppContext| {
+        window
+            .update(cx, |this, _, cx| {
+                assert!(this.apply(scene(Some(style), canvas(1)), InputAck::default(), cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+    };
+    set_style(WindowStyle::HIDE_SESSION_BUTTON, cx);
+    visual.simulate_mouse_up(bounds.center(), gpui::MouseButton::Left, Default::default());
+    set_style(WindowStyle::NONE, cx);
+    visual.simulate_mouse_down(beside, gpui::MouseButton::Left, Default::default());
+    visual.simulate_mouse_up(bounds.center(), gpui::MouseButton::Left, Default::default());
+    cx.run_until_parked();
+    assert!(cx.read_from_clipboard().is_none());
+    while inputs.try_recv().is_ok() {}
+    visual.simulate_click(bounds.center(), Default::default());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard().unwrap().text().unwrap(),
+        "https://playbit.app/join/invitation-0"
+    );
+    assert!(inputs.is_empty(), "the copy button owns its hitbox over the game");
+    server.join().unwrap();
+
+    // A menu-initiated copy can still be pending when the button reappears.
+    set_style(WindowStyle::HIDE_SESSION_BUTTON, cx);
+    window
+        .update(cx, |this, _, _| {
+            this.session_link.as_mut().unwrap().copying =
+                Some(Copying { _task: gpui::Task::ready(()), state: Default::default() });
+        })
+        .unwrap();
+    set_style(WindowStyle::NONE, cx);
+    window
+        .update(cx, |this, window, cx| {
+            this.focus.focus(window);
+            window.focus_next();
+            assert!(!this.session_link.as_ref().unwrap().control.read(cx).focused(window));
         })
         .unwrap();
 }

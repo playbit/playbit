@@ -49,6 +49,7 @@ pub struct Step {
     pub wake_after: Option<Duration>,
 }
 pub struct Apps {
+    renderer: super::GuestRenderer,
     running: Vec<Running>,
     observed: Option<FeedStatus>,
     running_gauge: crate::trace::Gauge,
@@ -56,7 +57,14 @@ pub struct Apps {
 }
 impl Apps {
     pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self::with_renderer(wake, super::GuestRenderer::Embedded)
+    }
+    pub(crate) fn with_renderer(
+        wake: Arc<dyn Fn() + Send + Sync>,
+        renderer: super::GuestRenderer,
+    ) -> Self {
         Self {
+            renderer,
             running: Vec::with_capacity(MAX_APPS),
             observed: None,
             wake,
@@ -171,6 +179,7 @@ impl Apps {
         .map_err(|_| HostError::Unavailable)?;
         context.volumes =
             host.enable_files(services, Access::owner(account), None, None, &context.volumes)?;
+        host.renderer = self.renderer;
         let host = Box::new(host);
         // SAFETY: the caller retains callback code/data and owns this thread through teardown.
         let session_identity = context.identity.session_id;
@@ -238,6 +247,7 @@ impl Apps {
             self.wake.clone(),
         )
         .map_err(|_| HostError::Unavailable)?;
+        binding.bind_session_info(&mut host)?;
         context.volumes = host.enable_files(
             services,
             binding.access.clone(),
@@ -245,6 +255,7 @@ impl Apps {
             Some(blobs),
             &context.volumes,
         )?;
+        host.renderer = self.renderer;
         let host = Box::new(host);
         // SAFETY: the caller retains callbacks and state until detach/clear/drop.
         let session_identity = context.identity.session_id;

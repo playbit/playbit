@@ -4,7 +4,7 @@ use playbit::{
     store::Id,
     ui::app_control::{self, Exchange, Operation},
 };
-use std::path::Path;
+use std::{io::Write, path::Path};
 
 pub(super) fn run(
     args: &[String],
@@ -14,32 +14,54 @@ pub(super) fn run(
 ) -> Result<serde_json::Value> {
     let (args, selected) = selection(args)?;
     let session = crate::session_argument(crate::argument(args, 1)?, channel)?;
-    let operation =
-        match args[0].as_str() {
-            "frame" if args.len() == 2 => Operation::Frame,
-            "logs" if args.len() == 2 => Operation::Logs { after: None },
-            "stop" if args.len() == 2 => Operation::Quit,
-            "input" if args.len() >= 4 => match args[2].as_str() {
-                "click" if args.len() == 4 => {
-                    Operation::Input { kind: 2, target: args[3].parse()?, data: vec![] }
-                }
-                "submit" if args.len() == 5 => Operation::Input {
-                    kind: 3,
-                    target: args[3].parse()?,
-                    data: args[4].as_bytes().to_vec(),
-                },
-                _ => return Err(
-                    "Expected pb input SESSION click TARGET or submit TARGET TEXT [--instance ID]"
-                        .into(),
-                ),
+    let operation = match args[0].as_str() {
+        "frame" if args.len() == 2 => Operation::Frame,
+        "screenshot" if args.len() == 3 => Operation::Screenshot,
+        "logs" if args.len() == 2 => Operation::Logs { after: None },
+        "stop" if args.len() == 2 => Operation::Quit,
+        "input" if args.len() >= 4 => match args[2].as_str() {
+            "click" if args.len() == 4 => {
+                Operation::Input { kind: 2, target: args[3].parse()?, data: vec![] }
+            }
+            "submit" if args.len() == 5 => Operation::Input {
+                kind: 3,
+                target: args[3].parse()?,
+                data: args[4].as_bytes().to_vec(),
             },
-            _ => return Err("Expected an app control and SESSION [--instance ID]".into()),
-        };
+            "key" if args.len() == 6 => {
+                let pressed = match args[5].as_str() {
+                    "down" => true,
+                    "up" => false,
+                    _ => return Err("Expected key transition down or up".into()),
+                };
+                Operation::key(args[3].parse()?, &args[4], pressed)?
+            }
+            "pointer" if (7..=8).contains(&args.len()) => Operation::pointer(
+                args[3].parse()?,
+                &args[4],
+                args[5].parse()?,
+                args[6].parse()?,
+                args.get(7).map(String::as_str),
+            )?,
+            _ => {
+                return Err(
+                    "Expected click, submit, key or pointer arguments (see pb help input)".into()
+                );
+            }
+        },
+        _ => return Err("Expected an app control and SESSION [--instance ID]".into()),
+    };
     let Reply::InstanceOwners(owners) = call(Request::InstanceList { session })? else {
         return Err("Unexpected session-instance list reply".into());
     };
     let owner = app_control::select(owners, selected)?;
     let reply = Exchange::connect(profile, &owner, operation)?.receive()?;
+    if let app_control::Reply::Screenshot { instance, generation, png } = reply {
+        let destination = std::path::absolute(&args[2])?;
+        super::files::export(&destination, |file| file.write_all(&png).map_err(Into::into))?;
+        return Ok(serde_json::json!({"instance": instance, "generation": generation,
+            "path": destination, "bytes": png.len()}));
+    }
     if let app_control::Reply::Logs(batch) = &reply {
         if batch.dropped != 0 {
             playbit::diagnostic!("App log buffer overwrote {} lines.", batch.dropped);

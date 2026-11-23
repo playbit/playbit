@@ -1,7 +1,7 @@
 //! One bounded turn snapshot. Payloads keep delivery order; a separate index groups UI targets.
 extern crate alloc;
 
-use super::{Event, EventKind, ffi};
+use super::{Context, Event, EventKind, PollError, ffi, trace::TraceBuffer};
 use crate::abi::syscall::{
     Error, FrameInput, KeyInput, MAX_EVENT_BYTES, MAX_QUEUED_EVENT_BYTES, MAX_QUEUED_EVENTS,
     OPTIONAL_EVENT_KIND_BIT, PointerInput,
@@ -14,8 +14,6 @@ pub(crate) struct EventBuffer {
     records: Vec<Record>,
     bytes: Vec<u8>,
     ui: Vec<(u32, usize)>,
-    terminal: Option<Error>,
-    pub(super) trace_generation: u64,
 }
 
 struct Record {
@@ -31,17 +29,22 @@ const _: () = assert!(
 );
 
 impl EventBuffer {
-    pub(super) fn read(&mut self, raw: NonNull<ffi::Context>) -> Result<(), Error> {
-        if let Some(error) = self.terminal {
+    pub(super) fn read(
+        &mut self,
+        raw: NonNull<ffi::Context>,
+        trace: &mut TraceBuffer,
+        event_error: &mut Option<Error>,
+    ) -> Result<(), Error> {
+        if let Some(error) = *event_error {
             return Err(error);
         }
         self.records.clear();
         self.ui.clear();
 
-        match self.read_all(raw) {
+        match self.read_all(raw, trace) {
             Ok(()) => Ok(()),
             Err(Error::Unsupported) => {
-                self.terminal = Some(Error::Unsupported);
+                *event_error = Some(Error::Unsupported);
                 self.ui.sort_unstable();
                 // Deliver admitted events once before the wrapper reports the terminal status.
                 if self.records.is_empty() { Err(Error::Unsupported) } else { Ok(()) }
@@ -54,11 +57,11 @@ impl EventBuffer {
         }
     }
 
-    pub(super) fn status(&self) -> Result<(), Error> {
-        self.terminal.map_or(Ok(()), Err)
-    }
-
-    fn read_all(&mut self, raw: NonNull<ffi::Context>) -> Result<(), Error> {
+    fn read_all(
+        &mut self,
+        raw: NonNull<ffi::Context>,
+        trace: &mut TraceBuffer,
+    ) -> Result<(), Error> {
         let mut start = 0;
         let mut consumed = 0;
         let mut charged = 0;
@@ -100,20 +103,10 @@ impl EventBuffer {
             }
             consumed += 1;
             charged += length + 20;
-            let Some(kind) = event_kind(header.kind)? else {
+            let Some(kind) = classify(&header, &self.bytes[start..start + length], trace)? else {
                 continue;
             };
-            if kind == EventKind::TraceConfig {
-                if length != 8 || header.target != 0 {
-                    return Err(Error::InvalidArgument);
-                }
-                self.trace_generation = u64::from_le_bytes(
-                    self.bytes[start..start + 8].try_into().expect("config extent"),
-                );
-                continue;
-            }
             if is_ui(kind) {
-                validate_ui(kind, header.target, &self.bytes[start..start + length])?;
                 self.ui.push((header.target, self.records.len()));
             }
             self.records.push(Record {
@@ -166,6 +159,87 @@ impl EventBuffer {
             data: &self.bytes[record.data.clone()],
         }
     }
+}
+
+impl Context<'_> {
+    /// Consume one new event, waiting until an event arrives or the absolute
+    /// `clock_read()` deadline in nanoseconds. Zero polls immediately and
+    /// `u64::MAX` waits indefinitely. At expiry an empty queue returns
+    /// `PollError::Host(Error::WouldBlock)`. A size probe leaves the event queued.
+    /// Process `raw_events()` first to handle the callback's initial snapshot.
+    /// Include `event.poll.deadline` in the package's `required_host_features`.
+    pub fn poll_event_deadline<'buf>(
+        &mut self,
+        deadline_ns: u64,
+        payload: &'buf mut [u8],
+    ) -> Result<Event<'buf>, PollError> {
+        self.event_status().map_err(PollError::Host)?;
+        let capacity = payload.len().min(MAX_EVENT_BYTES);
+        loop {
+            // A registered callback can remain parked indefinitely. Release dropped
+            // File resources before waiting, including after an internal event
+            // has freed queue space for a previously deferred disposal.
+            if let Some(files) = self.files.clone() {
+                files.flush(self).map_err(PollError::Host)?;
+            }
+            let mut header = ffi::Event::default();
+            // SAFETY: both outputs are disjoint live borrows until the poll returns.
+            let result = unsafe {
+                ffi::pb_event_poll_deadline(
+                    self.raw.as_ptr(),
+                    &mut header,
+                    payload.as_mut_ptr(),
+                    capacity as u32,
+                    deadline_ns,
+                )
+            };
+            if result < 0 {
+                return Err(PollError::Host(Error::try_from(result).unwrap_or(Error::Internal)));
+            }
+            if result > MAX_EVENT_BYTES as i64 {
+                return Err(PollError::Host(Error::LimitExceeded));
+            }
+            let length = result as usize;
+            if length > capacity {
+                return Err(PollError::BufferTooSmall(length));
+            }
+            let kind = match classify(&header, &payload[..length], self.trace) {
+                Ok(Some(kind)) => kind,
+                Ok(None) => continue,
+                Err(error) => {
+                    if error == Error::Unsupported {
+                        *self.event_error = Some(error);
+                    }
+                    return Err(PollError::Host(error));
+                }
+            };
+            return Ok(Event {
+                generation: header.generation,
+                kind,
+                target: header.target,
+                data: &payload[..length],
+            });
+        }
+    }
+}
+
+fn classify(
+    header: &ffi::Event,
+    data: &[u8],
+    trace: &mut TraceBuffer,
+) -> Result<Option<EventKind>, Error> {
+    let Some(kind) = event_kind(header.kind)? else { return Ok(None) };
+    if kind == EventKind::TraceConfig {
+        if header.target != 0 {
+            return Err(Error::InvalidArgument);
+        }
+        trace.configure(u64::from_le_bytes(data.try_into().map_err(|_| Error::InvalidArgument)?));
+        return Ok(None);
+    }
+    if is_ui(kind) {
+        validate_ui(kind, header.target, data)?;
+    }
+    Ok(Some(kind))
 }
 
 fn is_ui(kind: EventKind) -> bool {

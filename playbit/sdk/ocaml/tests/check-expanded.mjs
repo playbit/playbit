@@ -13,6 +13,7 @@ let liveChannel = null, subscribed = false, unsubscribeTakes = 0, closes = 0, st
 const clock = 0xfedcba9876543210n;
 let instance, entryCalls = 0, volumeCalls = 0, passed = false, submitted = 0, pending = null;
 let identityCalls = 0, presenceCalls = 0, sessionCalls = 0, channelOpens = 0;
+let infoCalls = 0;
 let subscribeTakes = 0, publicationCalls = 0, wakeCalls = 0, clockCalls = 0, eventRetries = 0;
 const events = [], channelOperations = new Set();
 const liveAliases = new Set();
@@ -62,6 +63,20 @@ instance = new WebAssembly.Instance(module, {playbit: {pb_syscall(op, ...slots) 
             const canvas = words(640, 479, abi.CANVAS_FLAG_CONTINUOUS | abi.CANVAS_FLAG_VIEWPORT, 0);
             const expected = Buffer.concat([Buffer.from('PBV1'), command(abi.VIEW_CANVAS, 19, canvas)]);
             assert(Buffer.from(scene).equals(expected), 'exact continuous viewport canvas');
+            return 0n;
+        }
+        if (submitted === 4) {
+            const style = words(abi['WindowStyle::TITLEBAR'] | abi['WindowStyle::CLOSABLE'] |
+                abi['WindowStyle::TRANSPARENT_TITLEBAR'] | abi['WindowStyle::HIDE_SESSION_BUTTON']);
+            const constraints = Buffer.alloc(20);
+            [320.25, 0.5, 0, 180.140625, 16 / 9].forEach((value, i) => constraints.writeFloatLE(value, i * 4));
+            const theme = Buffer.concat([Buffer.of(abi['ThemeColor::WindowBackground']), words(0x132d41ff)]);
+            const canvas = words(15360, 9000, abi.CANVAS_FLAG_WINDOW | abi.CANVAS_FLAG_CLEAR, 1,
+                0xa1b2c3d4, 0, 15359, 8999, 1, 1, 0xffffffff);
+            const expected = Buffer.concat([Buffer.from('PBV1'), command(abi.VIEW_WINDOW_STYLE, 0, style),
+                command(abi.VIEW_WINDOW_SIZE_CONSTRAINTS, 0, constraints),
+                command(abi.VIEW_THEME, 0, theme), command(abi.VIEW_CANVAS, 19, canvas)]);
+            assert(Buffer.from(scene).equals(expected), 'styled window with a clear color behind its canvas items');
             return 0n;
         }
         assert(submitted === 1, 'unexpected scene');
@@ -133,6 +148,18 @@ instance = new WebAssembly.Instance(module, {playbit: {pb_syscall(op, ...slots) 
         bytes(p+64, 32).fill(99);
         set32(p+96, 2);
         if (++identityCalls === 2) set32(p+100, 0x80000000);
+        return 0n;
+    }
+    if (opcode('SessionInfo',op)) {
+        const call = ++infoCalls, p = Number(slots[0]);
+        assert(u32(p) === 64 && u32(p+4) === 0 && slots.slice(1).every(s => s === 0n), 'session info record capacity');
+        if (call === 4) return BigInt(abi['Error::NotFound']);
+        if (call === 5) return BigInt(abi['Error::Unsupported']);
+        set32(p+4, 64);
+        set32(p+8, call <= 2 ? 0x80000001 : 0x80000000);
+        bytes(p+16, 32).fill(99);
+        if (call === 1) bytes(p+48, 16).set(Buffer.from('session-seed-v1!'));
+        if (call === 6) set32(p+12, 0x80000000);
         return 0n;
     }
     if (opcode('Presence',op)) {
@@ -356,9 +383,9 @@ instance = new WebAssembly.Instance(module, {playbit: {pb_syscall(op, ...slots) 
     throw Error(`Unexpected syscall ${op}`);
 }}});
 instance.exports.pb_main();
-assert(passed && submitted===3 && entryCalls===2 && volumeCalls===21 && pending===null && audioTakes===2 && soundPlays===3, 'all expanded bindings exercised and consumed');
+assert(passed && submitted===4 && entryCalls===2 && volumeCalls===21 && pending===null && audioTakes===2 && soundPlays===3, 'all expanded bindings exercised and consumed');
 assert(disposedAliases===90 && liveAliases.size===0, 'all aliases released across six automatic roles, released Root prefix, missing roots and excessive capacity');
-assert(identityCalls===2 && presenceCalls===3 && sessionCalls===2 && channelOpens===2 && subscribeTakes===2
+assert(identityCalls===2 && infoCalls===6 && presenceCalls===3 && sessionCalls===2 && channelOpens===2 && subscribeTakes===2
        && unsubscribeTakes===2 && closes===2 && staleCalls===1 && liveChannel===null && !subscribed
        && publicationCalls===2 && wakeCalls===3 && clockCalls===1 && eventRetries===1
        && channelOperations.size===0 && events.length===0, 'live session and wake fixtures complete');

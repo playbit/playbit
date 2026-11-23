@@ -6,7 +6,7 @@ use playbit::{
 use std::{
     fs::{self, File, OpenOptions},
     os::unix::fs::OpenOptionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 struct Output {
@@ -46,21 +46,29 @@ pub(super) fn run(
             Ok(serde_json::json!({"bytes": total}))
         } else {
             let destination = std::path::absolute(&args[3])?;
-            let parent = destination.parent().ok_or("File destination has no parent")?;
-            let path = parent.join(format!(".playbit-read-{}", Id::generate()?));
-            let mut output =
-                OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
-            let staged = Output { path };
-            let bytes = context.read_file(volume, entry, &mut output)?;
-            // Exports share the native ordinary-fsync contract. Rust's Apple
-            // sync_all requests a device-wide F_FULLFSYNC instead.
-            rustix::io::retry_on_intr(|| rustix::fs::fsync(&output))?;
-            drop(output);
-            fs::rename(&staged.path, &destination)?;
+            let bytes = export(&destination, |file| context.read_file(volume, entry, file))?;
             Ok(serde_json::json!({"bytes": bytes}))
         }
     })();
     context.finish(result)
+}
+
+/// Publish a complete private file, including when another export races this one.
+pub(super) fn export<T>(
+    destination: &Path,
+    write: impl FnOnce(&mut File) -> Result<T>,
+) -> Result<T> {
+    let parent = destination.parent().ok_or("File destination has no parent")?;
+    let path = parent.join(format!(".playbit-read-{}", Id::generate()?));
+    let mut output = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+    let staged = Output { path };
+    let value = write(&mut output)?;
+    // Exports share the native ordinary-fsync contract. Rust's Apple
+    // sync_all requests a device-wide F_FULLFSYNC instead.
+    rustix::io::retry_on_intr(|| rustix::fs::fsync(&output))?;
+    drop(output);
+    fs::rename(&staged.path, destination)?;
+    Ok(value)
 }
 
 #[cfg(test)]

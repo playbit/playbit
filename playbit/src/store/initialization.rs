@@ -4,7 +4,7 @@
 //! succeeds. Callers supply generated IDs before opening the short seed writer.
 use super::{
     EntryId, Error, Id, Result,
-    object_contract::{Acl, Schema, Value},
+    object_contract::{Acl, Grant, Permission, Schema, Subject, Value},
     object_database,
     volume_index::{DatabaseProtocol, EntryKind, validate_name},
 };
@@ -64,6 +64,21 @@ pub struct InitialObject {
 }
 
 impl RootInitialization {
+    /// The host supplies this group only for the registered session's Shared volume.
+    /// Signed app declarations still cannot choose grants for private roles.
+    pub(crate) fn volume_permissions(&self, shared: bool) -> Acl {
+        if shared {
+            Acl {
+                grants: vec![Grant {
+                    subject: Subject::SessionParticipants,
+                    permissions: vec![Permission::Read, Permission::Write],
+                }],
+            }
+        } else {
+            self.permissions.clone()
+        }
+    }
+
     /// Read a declaration only after bounding its source bytes. Typed callers
     /// receive the same canonical-size check at initialization admission.
     // fuzz: store_contract

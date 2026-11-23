@@ -46,6 +46,8 @@ pub const VIEW_SEGMENTED_CONTROL: u8 = 23;
 pub const VIEW_SCROLL_START: u8 = 24;
 pub const VIEW_SCROLL_END: u8 = 25;
 pub const VIEW_JPEG_IMAGE: u8 = 26;
+pub const VIEW_WINDOW_STYLE: u8 = 27;
+pub const VIEW_WINDOW_SIZE_CONSTRAINTS: u8 = 28;
 pub const MAX_IMAGE_BYTES: usize = 128 * 1024;
 pub const MAX_IMAGE_PIXELS: u32 = 1024 * 1024;
 
@@ -80,6 +82,8 @@ pub fn segment_ids_valid(group: u32, selected: u32, ids: &[u32]) -> bool {
     found
 }
 pub const MAX_CANVAS_EDGE: u32 = 4096;
+/// Logical geometry only. Binary32 represents every integer up to and including 2^24.
+pub const MAX_WINDOW_CANVAS_EDGE: u32 = 1 << 24;
 pub const MAX_CANVAS_ITEMS: usize = 4096;
 pub const MAX_CANVAS_TEXT_BYTES: usize = 64 * 1024;
 pub const MAX_CANVAS_FONT_SIZE: u32 = 96;
@@ -87,8 +91,105 @@ pub const MAX_CANVAS_FONT_SIZE: u32 = 96;
 pub const MAX_CANVAS_PIXEL_BYTES: usize = 32 * 1024 * 1024;
 pub const CANVAS_PIXELS_FEATURE: &str = "ui.canvas.pixels.v1";
 pub const CANVAS_VIEWPORT_FEATURE: &str = "ui.canvas.viewport.v1";
+pub const CANVAS_WINDOW_FEATURE: &str = "ui.canvas.window.v1";
+pub const CANVAS_CLEAR_FEATURE: &str = "ui.canvas.clear.v1";
+pub const WINDOW_STYLE_FEATURE: &str = "ui.window.style.v1";
+pub const WINDOW_SIZE_CONSTRAINTS_FEATURE: &str = "ui.window.size-constraints.v1";
 pub const CANVAS_FLAG_CONTINUOUS: u32 = 1;
 pub const CANVAS_FLAG_VIEWPORT: u32 = 2;
+pub const CANVAS_FLAG_WINDOW: u32 = 4;
+pub const CANVAS_FLAG_CLEAR: u32 = 8;
+
+/// The window decorations and system appearance requested for one scene.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowStyle(u32);
+
+impl WindowStyle {
+    pub const TITLEBAR: Self = Self(1 << 0);
+    pub const CLOSABLE: Self = Self(1 << 1);
+    pub const MINIMIZABLE: Self = Self(1 << 2);
+    pub const RESIZABLE: Self = Self(1 << 3);
+    /// Implies full-size content.
+    pub const TRANSPARENT_TITLEBAR: Self = Self(1 << 4);
+    pub const HIDDEN_TITLE: Self = Self(1 << 5);
+    pub const FULLSIZE_CONTENT: Self = Self(1 << 6);
+    pub const THEME_BRIGHT: Self = Self(1 << 7);
+    pub const THEME_DARK: Self = Self(1 << 8);
+    /// Hide the host's Copy Session Link button in this window.
+    pub const HIDE_SESSION_BUTTON: Self = Self(1 << 9);
+
+    /// A titled, closable, minimizable and resizable window.
+    pub const STANDARD: Self =
+        Self(Self::TITLEBAR.0 | Self::CLOSABLE.0 | Self::MINIMIZABLE.0 | Self::RESIZABLE.0);
+    pub const NONE: Self = Self(0);
+
+    pub const fn from_bits(bits: u32) -> Option<Self> {
+        let appearances = Self::THEME_BRIGHT.0 | Self::THEME_DARK.0;
+        if bits >= (Self::HIDE_SESSION_BUTTON.0 << 1) || bits & appearances == appearances {
+            return None;
+        }
+        Some(Self(bits))
+    }
+
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    pub const fn contains(self, flags: Self) -> bool {
+        self.0 & flags.0 == flags.0
+    }
+}
+
+impl core::ops::BitOr for WindowStyle {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+/// Window content bounds in device-independent points (dp), before layout padding.
+/// A zero bound leaves that edge unrestricted. A zero width/height ratio releases the lock.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WindowSizeConstraints {
+    pub min_width: f32,
+    pub min_height: f32,
+    pub max_width: f32,
+    pub max_height: f32,
+    pub aspect_ratio: f32,
+}
+
+impl WindowSizeConstraints {
+    /// Whether the bounds admit a positive content size with the requested aspect ratio.
+    pub fn is_valid(self) -> bool {
+        let edge_limit = MAX_WINDOW_CANVAS_EDGE as f32;
+        let width_max = if self.max_width == 0.0 { edge_limit } else { self.max_width };
+        let height_max = if self.max_height == 0.0 { edge_limit } else { self.max_height };
+        let ratio = self.aspect_ratio;
+        (0.0..=width_max).contains(&self.min_width)
+            && width_max <= edge_limit
+            && (0.0..=height_max).contains(&self.min_height)
+            && height_max <= edge_limit
+            && (ratio == 0.0
+                || ratio.is_finite()
+                    && ratio > 0.0
+                    && self.min_width / height_max <= ratio
+                    && (self.min_height == 0.0 || ratio <= width_max / self.min_height))
+    }
+
+    fn words(self) -> [u32; 5] {
+        [self.min_width, self.min_height, self.max_width, self.max_height, self.aspect_ratio]
+            .map(|value| if value == 0.0 { 0 } else { value.to_bits() })
+    }
+}
+
+// Compare the canonical scene words so equality is total even for an unsubmitted NaN.
+impl PartialEq for WindowSizeConstraints {
+    fn eq(&self, other: &Self) -> bool {
+        self.words() == other.words()
+    }
+}
+impl Eq for WindowSizeConstraints {}
 
 /// Frame events are opt-in. Static canvases redraw on scene changes without
 /// keeping a display callback alive while there is no app work.
@@ -97,6 +198,43 @@ pub const CANVAS_FLAG_VIEWPORT: u32 = 2;
 pub enum CanvasFrames {
     Static = 0,
     Continuous = CANVAS_FLAG_CONTINUOUS,
+}
+
+/// Inline canvases participate in layout. Viewport and Window canvases are
+/// clipped scene roots and receive their available size through SurfaceChanged.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u32)]
+pub enum CanvasExtent {
+    #[default]
+    Inline = 0,
+    /// The padded content area; requires [CANVAS_VIEWPORT_FEATURE].
+    Viewport = CANVAS_FLAG_VIEWPORT,
+    /// The whole drawable window, including beneath the titlebar. Requires [CANVAS_WINDOW_FEATURE].
+    Window = CANVAS_FLAG_WINDOW,
+}
+
+impl CanvasExtent {
+    pub const fn max_edge(self) -> u32 {
+        match self {
+            Self::Inline | Self::Viewport => MAX_CANVAS_EDGE,
+            Self::Window => MAX_WINDOW_CANVAS_EDGE,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CanvasOptions {
+    pub frames: CanvasFrames,
+    pub extent: CanvasExtent,
+    /// Paint beneath every item. None leaves the canvas transparent.
+    /// A specified color requires [CANVAS_CLEAR_FEATURE].
+    pub clear_color: Option<Color>,
+}
+
+impl Default for CanvasOptions {
+    fn default() -> Self {
+        Self { frames: CanvasFrames::Static, extent: CanvasExtent::Inline, clear_color: None }
+    }
 }
 
 /// A filled rectangle in canvas coordinates; color is Display P3 0xRRGGBBAA.
@@ -441,6 +579,8 @@ pub struct ViewEncoder<'a> {
     depth: usize,
     roots: u32,
     theme_written: bool,
+    window_style_written: bool,
+    window_size_constraints_written: bool,
     canvas_items: usize,
     canvas_text_bytes: usize,
     canvas_pixel_bytes: usize,
@@ -459,6 +599,8 @@ impl<'a> ViewEncoder<'a> {
             depth: 0,
             roots: 0,
             theme_written: false,
+            window_style_written: false,
+            window_size_constraints_written: false,
             canvas_items: 0,
             canvas_text_bytes: 0,
             canvas_pixel_bytes: 0,
@@ -480,6 +622,34 @@ impl<'a> ViewEncoder<'a> {
             self.write(&item.color.0.to_le_bytes());
         }
         self.theme_written = true;
+    }
+
+    /// Set the native window style for this scene before starting its root.
+    /// Omitting the style restores host defaults. Requires [WINDOW_STYLE_FEATURE].
+    pub fn window_style(&mut self, style: WindowStyle) {
+        assert_eq!(self.depth, 0, "window style must precede the root");
+        assert_eq!(self.roots, 0, "window style must precede the root");
+        assert!(!self.window_style_written, "window style may only be written once");
+        assert!(WindowStyle::from_bits(style.bits()).is_some(), "conflicting window appearances");
+        self.command(VIEW_WINDOW_STYLE, 0, &style.bits().to_le_bytes());
+        self.window_style_written = true;
+    }
+
+    /// Set the content size limits and width/height ratio before starting this scene's root.
+    /// Omission releases all guest size constraints. Requires [WINDOW_SIZE_CONSTRAINTS_FEATURE].
+    pub fn window_size_constraints(&mut self, constraints: WindowSizeConstraints) {
+        assert!(
+            self.depth == 0 && self.roots == 0,
+            "window size constraints must precede the root"
+        );
+        assert!(
+            !self.window_size_constraints_written,
+            "window size constraints may only be written once"
+        );
+        assert!(constraints.is_valid(), "incompatible window size constraints");
+        let words = constraints.words().map(u32::to_le_bytes);
+        self.command(VIEW_WINDOW_SIZE_CONSTRAINTS, 0, words.as_flattened());
+        self.window_size_constraints_written = true;
     }
 
     pub fn column_start(&mut self) {
@@ -621,13 +791,7 @@ impl<'a> ViewEncoder<'a> {
         self.command(VIEW_IMAGE_DESCRIPTION, 0, alt_text.as_bytes())
     }
 
-    /// Draw rectangles and clipped labels in order. Frame input is opt-in.
-    /// Limits count all canvases in this scene, not each control independently.
-    /// Payload: u32 width/height/flags/count, then tagged items. Each item
-    /// has u32 kind (0 rectangle, 1 text, 2 pixels), x/y/width/height/color. Text adds u32
-    /// font size, bold (0/1), UTF-8 byte length, then exactly those bytes.
-    /// Pixels require `ui.canvas.pixels.v1` and add u32 source width/height and
-    /// byte length, then exactly source width * source height * 4 RGBA8 bytes.
+    /// Draw a transparent inline canvas with a nonzero input target. Frame input is opt-in.
     pub fn canvas(
         &mut self,
         id: u32,
@@ -636,15 +800,43 @@ impl<'a> ViewEncoder<'a> {
         frames: CanvasFrames,
         items: &[CanvasItem<'_>],
     ) -> Canvas<'_, 'a> {
-        self.require_element(id);
-        self.encode_canvas(id, width, height, frames, false, items.iter().copied());
+        assert_ne!(id, 0, "element ID must be nonzero");
+        self.canvas_with_options(
+            id,
+            width,
+            height,
+            CanvasOptions { frames, ..Default::default() },
+            items,
+        )
+    }
+
+    /// Draw ordered items with the given frame mode, extent and optional clear color.
+    /// Limits count all canvases in this scene, not each control independently.
+    /// Payload: u32 width/height/flags/count, optional clear color, then tagged items. Each item
+    /// has u32 kind (0 rectangle, 1 text, 2 pixels), x/y/width/height/color. Text adds u32
+    /// font size, bold (0/1), UTF-8 byte length, then exactly those bytes.
+    /// Pixels require `ui.canvas.pixels.v1` and add u32 source width/height and
+    /// byte length, then exactly source width * source height * 4 RGBA8 bytes.
+    pub fn canvas_with_options(
+        &mut self,
+        id: u32,
+        width: u32,
+        height: u32,
+        options: CanvasOptions,
+        items: &[CanvasItem<'_>],
+    ) -> Canvas<'_, 'a> {
+        if options.extent == CanvasExtent::Inline {
+            self.require_parent();
+        } else {
+            assert!(self.stack[..self.depth].iter().all(|kind| *kind == VIEW_CONTEXT_MENU_START));
+        }
+        assert!(id != 0 || options.frames == CanvasFrames::Static);
+        self.encode_canvas(id, width, height, options, items.iter().copied());
         Canvas { encoder: self, id }
     }
 
-    /// Place a root canvas in the content viewport without outer scrolling.
-    /// Theme and context menu wrappers can surround the canvas. The host clips
-    /// the most recent scene to the viewport while the guest handles a resize.
-    /// Requires [CANVAS_VIEWPORT_FEATURE]. Frame delivery is independently opt-in.
+    /// Draw a transparent root canvas in the padded content viewport.
+    /// Requires [CANVAS_VIEWPORT_FEATURE]. A context menu may wrap the canvas.
     pub fn viewport_canvas(
         &mut self,
         id: u32,
@@ -653,10 +845,8 @@ impl<'a> ViewEncoder<'a> {
         frames: CanvasFrames,
         items: &[CanvasItem<'_>],
     ) -> Canvas<'_, 'a> {
-        assert!(self.stack[..self.depth].iter().all(|kind| *kind == VIEW_CONTEXT_MENU_START));
-        assert!(id != 0 || frames == CanvasFrames::Static);
-        self.encode_canvas(id, width, height, frames, true, items.iter().copied());
-        Canvas { encoder: self, id }
+        let options = CanvasOptions { frames, extent: CanvasExtent::Viewport, clear_color: None };
+        self.canvas_with_options(id, width, height, options, items)
     }
 
     /// Draw rectangles without pointer, key, or animation-frame input.
@@ -667,8 +857,7 @@ impl<'a> ViewEncoder<'a> {
             0,
             width,
             height,
-            CanvasFrames::Static,
-            false,
+            CanvasOptions::default(),
             rects.iter().copied().map(CanvasItem::Rect),
         )
     }
@@ -678,14 +867,14 @@ impl<'a> ViewEncoder<'a> {
         id: u32,
         width: u32,
         height: u32,
-        frames: CanvasFrames,
-        viewport: bool,
+        options: CanvasOptions,
         items: I,
     ) where
         I: ExactSizeIterator<Item = CanvasItem<'b>> + Clone,
     {
-        assert!((1..=MAX_CANVAS_EDGE).contains(&width), "invalid canvas width");
-        assert!((1..=MAX_CANVAS_EDGE).contains(&height), "invalid canvas height");
+        let edges = 1..=options.extent.max_edge();
+        assert!(edges.contains(&width), "invalid canvas width");
+        assert!(edges.contains(&height), "invalid canvas height");
         assert!(
             items.len() <= MAX_CANVAS_ITEMS - self.canvas_items,
             "scene exceeds canvas item limit"
@@ -694,7 +883,7 @@ impl<'a> ViewEncoder<'a> {
         let mut text_bytes = self.canvas_text_bytes;
         let mut pixel_bytes = self.canvas_pixel_bytes;
         let item_count = items.len();
-        let mut payload_len = 16 + item_count * 24;
+        let mut payload_len = 16 + 4 * usize::from(options.clear_color.is_some()) + item_count * 24;
         for item in items.clone() {
             match item {
                 CanvasItem::Rect(rect) if rect.fits(width, height) => {}
@@ -722,8 +911,12 @@ impl<'a> ViewEncoder<'a> {
         self.write_header(VIEW_CANVAS, id, payload_len);
         self.write_u32(width);
         self.write_u32(height);
-        self.write_u32(frames as u32 | if viewport { CANVAS_FLAG_VIEWPORT } else { 0 });
+        let clear = if options.clear_color.is_some() { CANVAS_FLAG_CLEAR } else { 0 };
+        self.write_u32(options.frames as u32 | options.extent as u32 | clear);
         self.write_u32(item_count as u32);
+        if let Some(color) = options.clear_color {
+            self.write_u32(color.0);
+        }
         for item in items {
             self.encode_canvas_item(item);
         }
@@ -953,6 +1146,8 @@ impl<'a> ViewEncoder<'a> {
         self.bytes.truncate(VIEW_MAGIC.len());
         self.roots = 0;
         self.theme_written = false;
+        self.window_style_written = false;
+        self.window_size_constraints_written = false;
         self.canvas_items = 0;
         self.canvas_text_bytes = 0;
         self.canvas_pixel_bytes = 0;
@@ -1125,6 +1320,29 @@ mod tests {
 
     pub(super) fn assert_panics(action: impl FnOnce()) {
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)).is_err());
+    }
+
+    #[test]
+    fn window_size_constraints_encode_fractional_dp_and_canonical_zero() {
+        // An upper bound below one dp is meaningful on a scaled display.
+        let constraints = WindowSizeConstraints {
+            min_width: 0.5,
+            min_height: -0.0,
+            max_width: 0.75,
+            max_height: 0.25,
+            aspect_ratio: 2.0,
+        };
+        let mut state = crate::context::ContextState::default();
+        let mut view = state.view();
+        view.window_size_constraints(constraints);
+        view.column_start();
+        view.column_end();
+        let bytes = view.finish();
+        let expected = [0.5_f32, 0.0, 0.75, 0.25, 2.0].map(f32::to_le_bytes);
+        assert_eq!(&bytes[13..33], expected.as_flattened());
+        assert!(
+            !WindowSizeConstraints { aspect_ratio: 2.0_f32.next_down(), ..constraints }.is_valid()
+        );
     }
 
     #[test]

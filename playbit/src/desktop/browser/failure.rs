@@ -96,7 +96,7 @@ impl Failure {
     }
 
     pub(in crate::desktop) fn for_request(request: &Request) -> Option<Self> {
-        if let Request::PayloadSize { volume, entry } = request {
+        if let Request::PayloadSize { volume, entry, .. } = request {
             return Some(Self(Target::PayloadSize { volume: *volume, entry: *entry }));
         }
         if let Request::Permissions { volume, .. } = request {
@@ -105,8 +105,8 @@ impl Failure {
         if let Request::EntryPermissions { volume, entry, .. } = request {
             return Some(Self(Target::Permissions { volume: *volume, entry: *entry }));
         }
-        if let Request::RenameEntry { volume, entry, name }
-        | Request::RenameEntryComponent { volume, entry, name } = request
+        if let Request::RenameEntry { volume, entry, name, .. }
+        | Request::RenameEntryComponent { volume, entry, name, .. } = request
         {
             return Some(Self(Target::Rename {
                 volume: *volume,
@@ -114,7 +114,7 @@ impl Failure {
                 name: name.clone(),
             }));
         }
-        if let Request::CreateDatabase { volume, name, kind } = request {
+        if let Request::CreateDatabase { volume, name, kind, .. } = request {
             return Some(Self(Target::Create {
                 volume: *volume,
                 pending: creation::PendingCreate::Database(*kind.clone()),
@@ -123,7 +123,7 @@ impl Failure {
                 name_collision: false,
             }));
         }
-        if let Request::BloblogCreate { volume, name } = request {
+        if let Request::BloblogCreate { volume, name, .. } = request {
             return Some(Self(Target::Create {
                 volume: *volume,
                 pending: creation::PendingCreate::AppendLog,
@@ -132,7 +132,7 @@ impl Failure {
                 name_collision: false,
             }));
         }
-        if let Request::CreateDatabaseIn { volume, parent, name, kind } = request {
+        if let Request::CreateDatabaseIn { volume, parent, name, kind, .. } = request {
             return Some(Self(Target::Create {
                 volume: *volume,
                 parent: Some(*parent),
@@ -141,7 +141,7 @@ impl Failure {
                 pending: creation::PendingCreate::Database(*kind.clone()),
             }));
         }
-        if let Request::BloblogCreateIn { volume, parent, name } = request {
+        if let Request::BloblogCreateIn { volume, parent, name, .. } = request {
             return Some(Self(Target::Create {
                 volume: *volume,
                 parent: Some(*parent),
@@ -167,11 +167,11 @@ impl Failure {
         }
         let (database, kind) = match request {
             Request::CreateObject { database, type_id, .. } => (*database, Kind::Create(*type_id)),
-            Request::EditObject { database, object, fields } => {
+            Request::EditObject { database, object, fields, .. } => {
                 (*database, Kind::Edit(*object, fields.keys().copied().collect()))
             }
-            Request::RemoveObject { database, object } => (*database, Kind::Remove(*object)),
-            Request::ReadObject { database, object } => (*database, Kind::Read(*object)),
+            Request::RemoveObject { database, object, .. } => (*database, Kind::Remove(*object)),
+            Request::ReadObject { database, object, .. } => (*database, Kind::Read(*object)),
             Request::Objects { database, type_id, after, .. } => {
                 (*database, Kind::Page(*type_id, *after))
             }
@@ -255,6 +255,7 @@ impl Browser {
         };
         let picker = if let Kind::Page(type_id, after) = &kind {
             self.picker_failed(&Request::Objects {
+                session: None,
                 database,
                 type_id: *type_id,
                 after: *after,
@@ -312,7 +313,7 @@ impl Browser {
         let refreshing = permission_refresh_required(error);
         let mut read_waiting = false;
         match request {
-            Request::VolumeDetails { volume } if volume == self.volume.id => {
+            Request::VolumeDetails { volume, .. } if volume == self.volume.id => {
                 self.volume_details = None;
                 self.permission_refresh.volume = refreshing;
                 read_waiting = refreshing;
@@ -325,7 +326,7 @@ impl Browser {
                     matched = true;
                 }
             }
-            Request::EntryDetails { volume, entry }
+            Request::EntryDetails { volume, entry, .. }
                 if volume == self.volume.id && Some(entry) == self.selected =>
             {
                 self.clear_blob_preview(cx);

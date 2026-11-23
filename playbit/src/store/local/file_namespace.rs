@@ -3,7 +3,6 @@
 use super::*;
 use crate::store::{
     EntryId,
-    object_contract::Principal,
     volume_index::{self, EntryInfo, EntryKind, IndexSnapshot, VolumeEntry},
 };
 use std::io::Read;
@@ -229,7 +228,7 @@ impl LocalStore {
         snapshot.authorize_namespace(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             entry.id,
             Permission::Read,
         )?;
@@ -286,7 +285,7 @@ impl LocalStore {
             snapshot.authorize_retained_read(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 parent,
             )?;
         }
@@ -326,7 +325,7 @@ impl LocalStore {
             IndexSnapshot::new(db.begin_read()?).authorize_retained_read(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 parent,
             )?;
         }
@@ -439,7 +438,7 @@ impl LocalStore {
         snapshot.authorize_namespace(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             entry.id,
             Permission::Write,
         )?;
@@ -508,7 +507,7 @@ impl LocalStore {
             snapshot.authorize_retained_read(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 directory,
             )?;
         }
@@ -532,7 +531,7 @@ impl LocalStore {
             snapshot.authorize_namespace(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 target.entry,
                 Permission::Write,
             )?;
@@ -563,7 +562,7 @@ impl LocalStore {
                 snapshot.authorize_namespace(
                     policy.volume(),
                     policy.default_permissions(),
-                    Principal::Human(access.account),
+                    self.data_actor(access, policy.volume())?,
                     parent,
                     Permission::Write,
                 )?;
@@ -583,7 +582,7 @@ impl LocalStore {
                 snapshot.authorize_namespace(
                     policy.volume(),
                     policy.default_permissions(),
-                    Principal::Human(access.account),
+                    self.data_actor(access, policy.volume())?,
                     *parent,
                     Permission::Write,
                 )?;
@@ -634,7 +633,7 @@ impl LocalStore {
             snapshot.authorize_retained_read(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 parent,
             )?;
         }
@@ -645,7 +644,7 @@ impl LocalStore {
             snapshot.authorize_staged_write(
                 policy.volume(),
                 policy.default_permissions(),
-                Principal::Human(access.account),
+                self.data_actor(access, policy.volume())?,
                 target.entry,
             )
         }

@@ -2,14 +2,15 @@
 use super::canvas_images::CanvasImages;
 use crate::runtime::{CanvasItem, ViewNode};
 use gpui::{Bounds, Pixels, Point, div, prelude::*, px, rgba, size};
+use playbit_api::ui::{CanvasExtent, Color};
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 /// Shared drawing surface and pointer gestures. `report` receives local pointer
 /// values; the app scene encodes them when forwarding input to a guest.
 pub(crate) fn canvas_element(
     id: u32,
-    width: u32,
-    height: u32,
+    dimensions: (u32, u32),
+    clear_color: Option<Color>,
     items: Vec<CanvasItem>,
     images: gpui::Entity<CanvasImages>,
     scale: f32,
@@ -17,6 +18,7 @@ pub(crate) fn canvas_element(
 ) -> gpui::AnyElement {
     // Painting learns where the canvas sits; the pointer handlers need the same
     // origin to report positions inside it.
+    let (width, height) = dimensions;
     let origin = Rc::new(Cell::new(gpui::point(px(0.), px(0.))));
     let painted = origin.clone();
     let report = Rc::new(report);
@@ -29,6 +31,9 @@ pub(crate) fn canvas_element(
         gpui::canvas(
             move |bounds: Bounds<Pixels>, _, _| painted.set(bounds.origin),
             move |bounds, _, window, cx| {
+                if let Some(color) = clear_color {
+                    window.paint_quad(gpui::fill(bounds, rgba(color.0)));
+                }
                 let mut pixel_index = 0;
                 for item in &items {
                     let rect = match item {
@@ -161,43 +166,44 @@ pub fn canvas_step(elapsed: Duration) -> u32 {
     elapsed.as_micros().clamp(1, 100_000) as u32
 }
 
-pub fn canvas_id(view: &ViewNode) -> Option<u32> {
+fn find_canvas<T>(
+    view: &ViewNode,
+    select: &impl Fn(u32, (u32, u32), playbit_api::ui::CanvasFrames) -> Option<T>,
+) -> Option<T> {
     match view {
-        ViewNode::Canvas { id, .. } if *id != 0 => Some(*id),
+        ViewNode::Canvas { id, width, height, frames, .. } if *id != 0 => {
+            select(*id, (*width, *height), *frames)
+        }
         ViewNode::Column(children) | ViewNode::Row(children) | ViewNode::List(children) => {
-            children.iter().find_map(canvas_id)
+            children.iter().find_map(|child| find_canvas(child, select))
         }
         ViewNode::Theme { child, .. }
         | ViewNode::ContextMenu { child, .. }
-        | ViewNode::Scroll { child, .. } => canvas_id(child),
+        | ViewNode::Scroll { child, .. } => find_canvas(child, select),
         _ => None,
     }
+}
+
+pub fn canvas_id(view: &ViewNode) -> Option<u32> {
+    find_canvas(view, &|id, _, _| Some(id))
 }
 
 pub fn canvas_frame_target(view: &ViewNode) -> Option<u32> {
-    match view {
-        ViewNode::Canvas { id, frames: playbit_api::ui::CanvasFrames::Continuous, .. }
-            if *id != 0 =>
-        {
-            Some(*id)
-        }
-        ViewNode::Column(children) | ViewNode::Row(children) | ViewNode::List(children) => {
-            children.iter().find_map(canvas_frame_target)
-        }
-        ViewNode::Theme { child, .. }
-        | ViewNode::ContextMenu { child, .. }
-        | ViewNode::Scroll { child, .. } => canvas_frame_target(child),
-        _ => None,
-    }
+    find_canvas(view, &|id, _, frames| {
+        (frames == playbit_api::ui::CanvasFrames::Continuous).then_some(id)
+    })
 }
 
-pub fn is_viewport_canvas(view: &ViewNode) -> bool {
+#[cfg(all(target_os = "macos", feature = "local-store", feature = "native-runtime"))]
+pub(super) fn canvas_size(view: &ViewNode, target: u32) -> Option<(u32, u32)> {
+    find_canvas(view, &|id, size, _| (id == target).then_some(size))
+}
+
+pub fn canvas_extent(view: &ViewNode) -> CanvasExtent {
     match view {
-        ViewNode::Canvas { viewport, .. } => *viewport,
-        ViewNode::Theme { child, .. } | ViewNode::ContextMenu { child, .. } => {
-            is_viewport_canvas(child)
-        }
-        _ => false,
+        ViewNode::Canvas { extent, .. } => *extent,
+        ViewNode::Theme { child, .. } | ViewNode::ContextMenu { child, .. } => canvas_extent(child),
+        _ => CanvasExtent::Inline,
     }
 }
 
@@ -217,7 +223,8 @@ mod tests {
                 width: 1,
                 height: 1,
                 frames: playbit_api::ui::CanvasFrames::Continuous,
-                viewport: false,
+                extent: playbit_api::ui::CanvasExtent::Inline,
+                clear_color: None,
                 items: vec![],
             }),
             None
@@ -228,7 +235,8 @@ mod tests {
                 width: 1,
                 height: 1,
                 frames: playbit_api::ui::CanvasFrames::Static,
-                viewport: false,
+                extent: playbit_api::ui::CanvasExtent::Inline,
+                clear_color: None,
                 items: vec![],
             }),
             None
@@ -239,7 +247,8 @@ mod tests {
                 width: 1,
                 height: 1,
                 frames: playbit_api::ui::CanvasFrames::Continuous,
-                viewport: false,
+                extent: playbit_api::ui::CanvasExtent::Inline,
+                clear_color: None,
                 items: vec![],
             }),
             Some(7)

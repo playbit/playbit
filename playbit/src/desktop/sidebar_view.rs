@@ -622,7 +622,19 @@ impl Shell {
         volume: crate::store::Volume,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.browser.as_ref().is_some_and(|browser| browser.read(cx).volume.id != volume.id)
+        self.select_volume_in(volume, None, cx)
+    }
+
+    pub(super) fn select_volume_in(
+        &mut self,
+        volume: crate::store::Volume,
+        session: Option<[u8; 32]>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let same_target = |browser: &browser::Browser| {
+            browser.volume.id == volume.id && browser.shared_session() == session
+        };
+        if self.browser.as_ref().is_some_and(|browser| !same_target(browser.read(cx)))
             && !self.prepare_browser_navigation(cx)
         {
             return false;
@@ -633,17 +645,17 @@ impl Shell {
         self.new_session = None;
         self.invitation = None;
         self.error.clear();
-        if let Some(browser) =
-            self.browser.as_ref().filter(|browser| browser.read(cx).volume.id == volume.id)
+        if let Some(browser) = self.browser.as_ref().filter(|browser| same_target(browser.read(cx)))
         {
             let selected = browser.update(cx, |browser, cx| browser.show_volume(cx));
             cx.notify();
             return selected;
         }
         let browser = cx.new(|cx| {
-            let mut browser = browser::Browser::new(volume, self.send.clone(), cx);
+            let mut browser = browser::Browser::new(volume, self.send.for_browser(session), cx);
             browser.set_account(self.account.id, self.account_profile.display_name.as_deref());
             self.set_browser_volumes(&mut browser);
+            browser.set_session_shared_volumes(self.applications.sessions());
             browser
         });
         self.browser_notice =
@@ -1766,7 +1778,7 @@ mod tests {
             .unwrap();
         let address =
             crate::store::volume_index::EntryAddress { volume: volume.id, entry: entry.id };
-        let request = Request::EntryRevisions { address, after: None, limit: 64 };
+        let request = Request::EntryRevisions { session: None, address, after: None, limit: 64 };
         let (send, _requests, errors) = worker_queue::channel();
         let (responses, receive) = async_channel::bounded(1);
         let host =

@@ -135,6 +135,7 @@ impl Host for FileHost {
             Opcode::FileCloseTake,
             Opcode::FileStatusBegin,
             Opcode::FileStatusTake,
+            Opcode::OperationDispose,
         ]
     }
     fn begin_file(&mut self, _: u64, call: Arc<Call>, retention: Retention) -> HostResult<u64> {
@@ -270,6 +271,56 @@ fn c_file_layouts_and_operations_match_rust() {
     assert_eq!(state.bytes, b"hello");
     assert!(state.files.is_empty() && state.completions.is_empty());
 }
+
+// Use the SDK's registered callback and automatic FileResources owner.
+#[unsafe(no_mangle)]
+fn playbit_app() -> playbit_api::App {
+    playbit_api::app(
+        (),
+        |_, context, _| {
+            let mut rows = [data_abi::Volume::default()];
+            let mut text = [0; 16];
+            let root = context
+                .available_volumes(&mut rows, &mut [], &mut text)
+                .unwrap()
+                .take_file(0)
+                .unwrap();
+            let open = root.open(context, b"probe.txt", ffi::FILE_READ).unwrap();
+            let mut payload = [0; 8];
+            let ready = context.poll_event_deadline(u64::MAX, &mut payload).unwrap();
+            assert_eq!(ready.operation(), Ok(open.handle()));
+            drop(open);
+            drop(root);
+            assert_eq!(
+                context.poll_event_deadline(u64::MAX, &mut payload),
+                Err(PollError::Host(Error::Closed))
+            );
+        },
+        true,
+    )
+}
+
+#[test]
+fn registered_guest_releases_dropped_file_work_before_its_next_indefinite_poll() {
+    let content = Arc::new(Mutex::new(Content::default()));
+    let mut ctx = context(50);
+    ctx.required_capabilities.insert("event.poll.deadline".into());
+    // SAFETY: the linked SDK retains the registered callback and its state for the instance.
+    let mut instance = unsafe {
+        NativeInstance::new(ctx, Box::new(FileHost(content.clone())), playbit_api::native_app())
+            .unwrap()
+    };
+    instance.pump().unwrap();
+    let token = *content.lock().unwrap().completions.keys().next().unwrap();
+    instance.notify_data(instance.generation(), token).unwrap();
+    instance.pump().unwrap();
+    instance.deactivate();
+    assert!(!instance.has_ready_work(std::time::Instant::now()));
+    assert!(!instance.drain_pending(), "a dropped File open must not keep Quit pending");
+    let state = content.lock().unwrap();
+    assert!(state.completions.is_empty() && state.files.is_empty());
+}
+
 struct Expected {
     read: Error,
     write: Error,

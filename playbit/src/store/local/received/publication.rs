@@ -96,7 +96,7 @@ impl ReceivedVolume {
         })
     }
 
-    fn seal(&self, pending: &PendingPublication) -> Result<()> {
+    fn seal(&self, pending: &PendingPublication, actor: DataActor) -> Result<()> {
         let path = self._directory.0.join(MANIFEST);
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -112,9 +112,7 @@ impl ReceivedVolume {
             for database in page.databases {
                 let DatabaseId::Entry(id) = database else { unreachable!("named stage page") };
                 let policy = DatabasePolicy::read_source(&self.metadata, database)?;
-                if policy
-                    .authorize_reader(ReplicaReader::Participant(pending.access.account))
-                    .is_ok()
+                if policy.authorize_reader(ReplicaReader::SessionParticipant(actor)).is_ok()
                     && volume_index::IndexSnapshot::new(self.metadata.begin_read()?)
                         .source_backing_ready(id)?
                 {
@@ -240,6 +238,7 @@ impl LocalStore {
         stage: &ReceivedVolume,
         gate: &VolumeOperation,
     ) -> Result<PendingPublication> {
+        let actor = self.data_actor(access, &self.volume(stage.volume)?)?;
         let pending = PendingPublication {
             operation: stage.operation,
             volume: stage.volume,
@@ -249,14 +248,14 @@ impl LocalStore {
             authority_entry_generation: stage.authority_entry_generation,
             authority_qualified: stage.authority_qualified,
             entry_scope: stage.entry_scope,
-            namespace_digest: self.preflight_namespace_plan(stage, access.account)?,
+            namespace_digest: self.preflight_namespace_plan(stage, actor)?,
             rejected_digest: rejected::RejectedCut::read(&stage._directory.0)?
                 .as_ref()
                 .map(encode)
                 .transpose()?
                 .map(|bytes| *blake3::hash(&bytes).as_bytes()),
         };
-        stage.seal(&pending)?;
+        stage.seal(&pending, actor)?;
         let _profile = self.lock_profile()?;
         if self.pending_publication(stage.volume)?.is_some() {
             return Err(Error::LocalContention("volume already has a pending publication"));

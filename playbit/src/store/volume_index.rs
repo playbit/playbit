@@ -7,7 +7,7 @@
 //! the source namespace or confer authority.
 use crate::store::catalog::record::{self, decode, encode};
 use crate::store::object_contract::{Acl, EntryAcl, Permission, Principal, Schema};
-use crate::store::{EntryId, Error, Id, Result, Volume};
+use crate::store::{DataActor, EntryId, Error, Id, Result, Volume};
 use kvdb::sync::{Delta, EntState, Resolution};
 use kvdb::{LocalIndexes, ReadTxn, Resolver, Storage, WriteTxn};
 use serde::{Deserialize, Serialize};
@@ -1113,7 +1113,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        principal: Principal,
+        principal: impl Into<DataActor>,
         id: EntryId,
         permission: Permission,
     ) -> Result<()> {
@@ -1131,7 +1131,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        principal: Principal,
+        principal: impl Into<DataActor>,
         id: EntryId,
         permission: Permission,
     ) -> Result<()> {
@@ -1149,11 +1149,12 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        account: Id,
+        actor: impl Into<DataActor>,
         id: EntryId,
     ) -> Result<bool> {
+        let actor = actor.into();
         super::catalog::admit_entry_metadata(|permission| {
-            self.authorize(volume, defaults, Principal::Human(account), id, permission)
+            self.authorize(volume, defaults, actor, id, permission)
         })
     }
 
@@ -1164,7 +1165,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        account: Id,
+        actor: impl Into<DataActor>,
         id: EntryId,
         revision: EntryId,
     ) -> Result<()> {
@@ -1173,8 +1174,9 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         if !matches!(initial.kind, EntryKind::Blob { .. }) {
             return Err(Error::InvalidInput("entry is not an independent blob"));
         }
+        let actor = actor.into();
         admit_blob_upload(revision == initial.created_revision, |permission| {
-            self.authorize(volume, defaults, Principal::Human(account), id, permission)
+            self.authorize(volume, defaults, actor, id, permission)
         })
     }
 
@@ -1195,7 +1197,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        principal: Principal,
+        principal: impl Into<DataActor>,
         id: EntryId,
     ) -> Result<()> {
         let birth = self.tx.get(&entry_key(id))?.ok_or(Error::NotFound("entry"))?;
@@ -1209,7 +1211,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        principal: Principal,
+        principal: impl Into<DataActor>,
         id: EntryId,
     ) -> Result<()> {
         let birth = self.tx.get(&entry_key(id))?.ok_or(Error::NotFound("entry"))?;
@@ -1221,10 +1223,11 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        principal: Principal,
+        principal: impl Into<DataActor>,
         id: EntryId,
         permission: Permission,
     ) -> Result<()> {
+        let actor = principal.into();
         let override_acl = self.permissions(id)?;
         let acl = match &override_acl {
             EntryAcl::Inherit => defaults,
@@ -1232,11 +1235,11 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         };
         if content_permission(
             matches!(override_acl, EntryAcl::Inherit),
-            principal == Principal::Human(volume.owner),
-            principal == crate::store::catalog::PLAYBIT_REPLICA_PRINCIPAL,
+            actor.principal() == Principal::Human(volume.owner),
+            actor.principal() == crate::store::catalog::PLAYBIT_REPLICA_PRINCIPAL,
             volume.share_key_with_service,
             permission == Permission::Read,
-            acl.permits(Some(principal), permission),
+            actor.permits(volume.id, acl, permission),
         ) {
             Ok(())
         } else {
@@ -1248,11 +1251,11 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        account: Id,
+        actor: impl Into<DataActor>,
         id: EntryId,
         permission: Permission,
     ) -> Result<bool> {
-        match self.authorize_acl(volume, defaults, Principal::Human(account), id, permission) {
+        match self.authorize_acl(volume, defaults, actor, id, permission) {
             Ok(()) => Ok(true),
             Err(Error::AccessDenied(_)) => Ok(false),
             Err(error) => Err(error),
@@ -1266,14 +1269,15 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        account: Id,
+        actor: impl Into<DataActor>,
         id: EntryId,
     ) -> Result<()> {
-        if account == volume.owner
-            || self.source_granted(volume, defaults, account, id, Permission::Write)?
-            || self.source_granted(volume, defaults, account, id, Permission::ManagePermissions)?
+        let actor = actor.into();
+        if actor.human()? == volume.owner
+            || self.source_granted(volume, defaults, actor, id, Permission::Write)?
+            || self.source_granted(volume, defaults, actor, id, Permission::ManagePermissions)?
             || (!self.tx.has(&meta_key(RETIRED, id))?
-                && self.source_granted(volume, defaults, account, id, Permission::Append)?)
+                && self.source_granted(volume, defaults, actor, id, Permission::Append)?)
         {
             Ok(())
         } else {
@@ -1289,7 +1293,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        account: Id,
+        actor: impl Into<DataActor>,
         delta: &Delta<'_>,
     ) -> Result<()> {
         let id = validate_source(delta)?;
@@ -1297,7 +1301,8 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
             return Ok(());
         }
         self.validate_revision_creation(id, delta)?;
-        let owner = account == volume.owner;
+        let actor = actor.into();
+        let owner = actor.human()? == volume.owner;
         if delta.key[0] == ENTRY_ID_BYTE
             && let EntState::Present { value, .. } = delta.remote
             && !initial_permission_admitted(
@@ -1321,7 +1326,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
                 || self.source_granted(
                     volume,
                     defaults,
-                    account,
+                    actor,
                     id,
                     Permission::ManagePermissions,
                 )?;
@@ -1331,7 +1336,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
                 Err(Error::AccessDenied("entry permission management"))
             };
         }
-        let write = self.source_granted(volume, defaults, account, id, Permission::Write)?;
+        let write = self.source_granted(volume, defaults, actor, id, Permission::Write)?;
         if source_permission(owner, false, write, false, false) {
             return Ok(());
         }
@@ -1345,7 +1350,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
             delta.local == delta.remote,
         );
         let append = admitted_birth
-            && self.source_granted(volume, defaults, account, id, Permission::Append)?;
+            && self.source_granted(volume, defaults, actor, id, Permission::Append)?;
         if source_permission(owner, false, write, append, admitted_birth) {
             Ok(())
         } else {
@@ -1378,10 +1383,12 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        account: Id,
+        actor: impl Into<DataActor>,
         key: &[u8],
         remote: EntState<'_>,
     ) -> Result<()> {
+        let actor = actor.into();
+        let account = actor.human()?;
         let current = self.tx.get_with_clock(key)?;
         let local = match &current {
             Some((clock, value)) => EntState::Present { clock: *clock, value },
@@ -1394,7 +1401,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
                 || self.source_granted(
                     volume,
                     defaults,
-                    account,
+                    actor,
                     id,
                     Permission::ManagePermissions,
                 )?
@@ -1404,7 +1411,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
             }
             return Err(Error::AccessDenied("entry permission publication"));
         }
-        self.authorize_source(volume, defaults, account, &delta)
+        self.authorize_source(volume, defaults, actor, &delta)
     }
 
     /// An exact locally authorized ACL commit may still leave after self-removal.

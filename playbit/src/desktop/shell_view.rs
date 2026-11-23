@@ -244,6 +244,7 @@ impl Shell {
                 focus: focus_window,
                 window_min_size: Some(minimum),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                frame_autosave_name: Some("Sessions".into()),
                 titlebar: Some(gpui::TitlebarOptions {
                     title: Some("Sessions".into()),
                     appears_transparent: true,

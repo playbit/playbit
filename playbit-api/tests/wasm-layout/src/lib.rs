@@ -17,7 +17,7 @@ static EVENT_LAYOUT: [u32; 5] = [
 #[used]
 #[allow(unsafe_code, reason = "Read-only compiler layout fixture.")]
 #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "playbit.abi.records"))]
-static LAYOUT: [u32; 684] = [
+static LAYOUT: [u32; 699] = [
     size_of::<playbit_api::abi::data::EntryHandle>() as u32,
     align_of::<playbit_api::abi::data::EntryHandle>() as u32,
     5,
@@ -702,4 +702,19 @@ static LAYOUT: [u32; 684] = [
     <playbit_api::abi::bloblog::Blob as Record>::FIELDS[2].width,
     core::mem::offset_of!(playbit_api::abi::bloblog::Blob, length) as u32,
     <playbit_api::abi::bloblog::Blob as Record>::FIELDS[3].width,
+    size_of::<playbit_api::abi::session::SessionInfo>() as u32,
+    align_of::<playbit_api::abi::session::SessionInfo>() as u32,
+    6,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, size) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[0].width,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, written) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[1].width,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, flags) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[2].width,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, reserved) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[3].width,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, internal_id) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[4].width,
+    core::mem::offset_of!(playbit_api::abi::session::SessionInfo, key_secret) as u32,
+    <playbit_api::abi::session::SessionInfo as Record>::FIELDS[5].width,
 ];

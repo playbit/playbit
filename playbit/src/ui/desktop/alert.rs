@@ -1,9 +1,9 @@
-//! AppKit application-modal errors. Never retain a GPUI borrow in runModal.
+//! Bounded native diagnostics and feedback. Only failures requiring attention interrupt input.
 #![allow(unsafe_code, reason = "NSAlert is created, run and released on AppKit's main thread.")]
 use gpui::{App, Global};
 #[cfg(not(test))]
 use objc::{class, msg_send, runtime::Object, sel, sel_impl};
-use std::{collections::VecDeque, path::Path};
+use std::{collections::VecDeque, path::Path, sync::Arc};
 
 mod origin;
 pub(crate) use origin::Origin;
@@ -18,7 +18,9 @@ const FAILURE_TRUNCATED: &str = "\n[failure report truncated at 64 KiB]";
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Recoverable,
+    InputRejected,
     LocalDraft,
+    DraftRetained,
     GuestLaunch,
     AppContextUnavailable,
     FinderOpen,
@@ -26,8 +28,19 @@ pub enum Kind {
     RecoverySlow,
 }
 impl Kind {
-    pub fn button(self) -> &'static str {
-        if self == Self::Critical { "Quit" } else { "Dismiss" }
+    fn modal_button(self) -> Option<&'static str> {
+        match self {
+            Self::Critical => Some("Quit"),
+            // A local draft can be the only copy of an unsaved edit.
+            Self::LocalDraft => Some("Dismiss"),
+            Self::Recoverable
+            | Self::InputRejected
+            | Self::DraftRetained
+            | Self::GuestLaunch
+            | Self::AppContextUnavailable
+            | Self::FinderOpen
+            | Self::RecoverySlow => None,
+        }
     }
 }
 /// A fatal failure retains its detecting owner across UI and completion queues.
@@ -54,16 +67,23 @@ impl std::fmt::Display for Failure {
 
 struct Notice {
     kind: Kind,
-    details: String,
+    details: Arc<str>,
+    feedback_window: Option<gpui::AnyWindowHandle>,
     coalescible: bool,
     acknowledged: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     logged: bool,
     origin: Option<Origin>,
 }
+struct Feedback {
+    window: gpui::AnyWindowHandle,
+    kind: Kind,
+    details: Arc<str>,
+}
 #[derive(Default)]
 struct Alerts {
     pending: VecDeque<Notice>,
-    active_recoverable: Option<String>,
+    feedback: VecDeque<Feedback>,
+    active_recoverable: Option<(Option<gpui::AnyWindowHandle>, Arc<str>)>,
     running: bool,
     overflow: usize,
     #[cfg(test)]
@@ -154,11 +174,17 @@ fn package_upgrade_required(details: &str) -> bool {
 
 pub fn message(kind: Kind, details: &str, profile: &Path) -> (&'static str, String) {
     match kind {
+        Kind::DraftRetained => ("Local draft retained", bounded(details, MAX_DETAILS).into()),
+        Kind::Recoverable if details.starts_with("Couldn’t save UI zoom.") => (
+            "Zoom setting couldn’t be saved",
+            "Zoom wasn’t saved. Retry zoom or Quit.".into(),
+        ),
+        Kind::InputRejected => ("Input wasn’t delivered", bounded(details, MAX_DETAILS).into()),
         Kind::AppContextUnavailable => (
             "This app needs to be reopened",
             "This app can no longer use its data. Close this window, then reopen the session from your library after access or synchronization has recovered. Earlier accepted changes may have been saved; no actions were repeated. (#1020)".into(),
         ),
-        Kind::RecoverySlow => ("Playbit is still recovering", "Playbit’s background process isn’t responding. We’re still trying to restart or reconnect to it. Wait a moment before trying your action again. (#1003)".into()),
+        Kind::RecoverySlow => ("Playbit is still recovering", "Playbit is reconnecting to its background process. Please wait a moment. (#1003)".into()),
         Kind::Critical => ("Playbit can’t continue", if profile_error(details) {
             "Playbit couldn’t open your local profile. Quit Playbit and check the profile’s logs for details. Your local data has been kept. (#1002)".into()
         } else if corrupt_error(details) {
@@ -229,7 +255,7 @@ pub fn message(kind: Kind, details: &str, profile: &Path) -> (&'static str, Stri
 
 fn recoverable_message(details: &str) -> String {
     let guidance = if details.contains("diagnostics") {
-        "Playbit couldn’t open diagnostics for this app. Dismiss this message to keep using the app. (#1009)"
+        "Playbit couldn’t open diagnostics for this app. You can keep using the app. (#1009)"
     } else if details.contains("authenticated")
         || details.contains("credentials")
         || details.contains("sign-in")
@@ -283,7 +309,25 @@ pub fn show(kind: Kind, details: &str, cx: &mut App) {
 }
 
 pub(crate) fn show_with_origin(kind: Kind, details: &str, origin: Option<Origin>, cx: &mut App) {
-    enqueue(kind, details, origin, None, cx);
+    enqueue(kind, details, origin, None, cx.active_window(), cx);
+}
+
+/// Report an error discovered while rendering a particular window, even if
+/// another window currently has keyboard focus.
+pub(crate) fn show_in_window(
+    kind: Kind,
+    details: &str,
+    window: gpui::AnyWindowHandle,
+    cx: &mut App,
+) {
+    enqueue(kind, details, None, None, Some(window), cx);
+}
+
+/// The originating guest window owns its inline feedback. Retain the same
+/// bounded process diagnostic without delivering it to a second window.
+pub(super) fn record_in_window(kind: Kind, details: &str, cx: &mut App) {
+    assert!(kind.modal_button().is_none());
+    enqueue(kind, details, None, None, None, cx);
 }
 
 pub(crate) fn fatal(
@@ -291,7 +335,14 @@ pub(crate) fn fatal(
     acknowledged: std::rc::Rc<std::cell::Cell<bool>>,
     cx: &mut App,
 ) {
-    enqueue(Kind::Critical, &failure.details, Some(failure.origin.clone()), Some(acknowledged), cx);
+    enqueue(
+        Kind::Critical,
+        &failure.details,
+        Some(failure.origin.clone()),
+        Some(acknowledged),
+        None,
+        cx,
+    );
 }
 
 fn enqueue(
@@ -299,27 +350,44 @@ fn enqueue(
     details: &str,
     origin: Option<Origin>,
     acknowledged: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+    feedback_window: Option<gpui::AnyWindowHandle>,
     cx: &mut App,
 ) {
     if !cx.has_global::<Alerts>() {
         cx.set_global(Alerts::default());
     }
+    let coalescible =
+        matches!(kind, Kind::Recoverable | Kind::InputRejected) && details.len() <= MAX_DETAILS;
+    let details: Arc<str> = bounded(details, MAX_DETAILS).into();
+    if let Some(window) = feedback_window.filter(|_| kind.modal_button().is_none()) {
+        let feedback = &mut cx.global_mut::<Alerts>().feedback;
+        let schedule = feedback.is_empty();
+        feedback.retain(|bell| bell.window != window);
+        if feedback.len() == MAX_PENDING {
+            feedback.pop_front();
+        }
+        feedback.push_back(Feedback { window, kind, details: details.clone() });
+        if schedule {
+            // Exit the originating render borrow before updating any window.
+            cx.defer(deliver_feedback);
+        }
+    }
     let alerts = cx.global_mut::<Alerts>();
-    let coalescible = kind == Kind::Recoverable && details.len() <= MAX_DETAILS;
     if coalescible
-        && (alerts.active_recoverable.as_deref() == Some(details)
-            || alerts.pending.iter().any(|notice| notice.coalescible && notice.details == details))
+        && (alerts
+            .active_recoverable
+            .as_ref()
+            .is_some_and(|(target, text)| *target == feedback_window && text == &details)
+            || alerts.pending.iter().any(|notice| {
+                notice.coalescible
+                    && notice.feedback_window == feedback_window
+                    && notice.details == details
+            }))
     {
         return;
     }
-    let notice = Notice {
-        kind,
-        details: bounded(details, MAX_DETAILS).into(),
-        coalescible,
-        acknowledged,
-        logged: false,
-        origin,
-    };
+    let notice =
+        Notice { kind, feedback_window, details, coalescible, acknowledged, logged: false, origin };
     if alerts.pending.len() == MAX_PENDING {
         alerts.overflow = alerts.overflow.saturating_add(1);
         // A fatal error must never disappear behind recoverable notices.
@@ -334,11 +402,29 @@ fn enqueue(
     } else {
         alerts.pending.push_back(notice);
     }
-    if alerts.running {
-        return;
-    }
+    let start = !alerts.running;
     alerts.running = true;
-    run_alerts(cx);
+    if start {
+        run_alerts(cx);
+    }
+}
+
+fn deliver_feedback(cx: &mut App) {
+    let feedback = std::mem::take(&mut cx.global_mut::<Alerts>().feedback);
+    let profile = crate::engine::profile_path();
+    for Feedback { window, kind, details } in feedback {
+        let (_, body) = message(kind, &details, &profile);
+        #[cfg(feature = "desktop")]
+        crate::desktop::show_error_feedback(window, &body, cx);
+        #[cfg(feature = "connected-engine")]
+        if let Some(sign_in) = window.downcast::<super::sign_in::SignIn>() {
+            let _ = sign_in.update(cx, |sign_in, _, cx| sign_in.show_feedback(&body, cx));
+        }
+        #[cfg(feature = "native-runtime")]
+        if let Some(guest) = window.downcast::<super::native::window::AppWindow>() {
+            let _ = guest.update(cx, |guest, _, cx| guest.show_feedback(&body, &details, cx));
+        }
+    }
 }
 
 fn run_alerts(cx: &mut App) {
@@ -347,11 +433,11 @@ fn run_alerts(cx: &mut App) {
             let next = cx.update(|cx| {
                 let alerts = cx.global_mut::<Alerts>();
                 let notice = alerts.pending.pop_front();
-                // The native modal loop can admit more failures while this notice is open.
+                // More failures can arrive while this notice is logged or presented.
                 alerts.active_recoverable = notice
                     .as_ref()
                     .filter(|notice| notice.coalescible)
-                    .map(|notice| notice.details.clone());
+                    .map(|notice| (notice.feedback_window, notice.details.clone()));
                 if notice.is_none() {
                     alerts.running = false;
                 }
@@ -384,16 +470,16 @@ fn run_alerts(cx: &mut App) {
                     }
                 })
                 .await;
-            // Yield until the originating entity/window borrow has been released.
-            gpui::Timer::after(std::time::Duration::ZERO).await;
-            #[cfg(not(test))]
-            {
-                let (title, body) = message(notice.kind, &notice.details, &profile);
-                run_modal(title, &body, notice.kind.button());
+            if let Some(_button) = notice.kind.modal_button() {
+                #[cfg(not(test))]
+                {
+                    let (title, body) = message(notice.kind, &notice.details, &profile);
+                    run_modal(title, &body, _button);
+                }
             }
             #[cfg(test)]
             let _ = cx.update(|cx| {
-                cx.global_mut::<Alerts>().presented.push((notice.kind, notice.details.clone()));
+                cx.global_mut::<Alerts>().presented.push((notice.kind, notice.details.to_string()));
             });
             if notice.kind == Kind::Critical {
                 if let Some(acknowledged) = notice.acknowledged {
@@ -428,6 +514,8 @@ fn run_modal(title: &str, body: &str, button: &str) {
     unsafe {
         let pool: *mut Object = msg_send![class!(NSAutoreleasePool), new];
         let alert: *mut Object = msg_send![class!(NSAlert), new];
+        let panel: *mut Object = msg_send![alert, window];
+        let _: () = msg_send![panel, setAppearance: super::appearance::aqua()];
         for (text, role) in [(title, 0), (body, 1), (button, 2)] {
             let text = std::ffi::CString::new(text.replace('\0', "�")).expect("NUL removed");
             let string: *mut Object =
@@ -457,7 +545,37 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn repeated_recoverable_notices_coalesce_until_dismissed(cx: &mut gpui::TestAppContext) {
+    fn full_diagnostic_queue_keeps_the_latest_bell_for_each_window(cx: &mut gpui::TestAppContext) {
+        let first = cx.add_window(|_, _| gpui::EmptyView).into();
+        let second = cx.add_window(|_, _| gpui::EmptyView).into();
+        cx.update(|cx| {
+            for index in 1..=9 {
+                let window = if index % 2 == 0 { second } else { first };
+                enqueue(
+                    Kind::InputRejected,
+                    &format!("Input {index}"),
+                    None,
+                    None,
+                    Some(window),
+                    cx,
+                );
+            }
+            let alerts = cx.global::<Alerts>();
+            assert_eq!(alerts.pending.len(), 8);
+            assert_eq!(alerts.overflow, 1);
+            let bells: Vec<_> =
+                alerts.feedback.iter().map(|bell| (bell.window, &*bell.details)).collect();
+            assert!(bells == [(second, "Input 8"), (first, "Input 9")]);
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(cx.global::<Alerts>().feedback.is_empty());
+            assert_eq!(take_presented(cx).len(), 8);
+        });
+    }
+
+    #[gpui::test]
+    fn repeated_recoverable_notices_coalesce_while_being_reported(cx: &mut gpui::TestAppContext) {
         let details = "access denied: current authority requires authenticated catch-up";
         cx.update(|cx| {
             show(Kind::Recoverable, details, cx);
@@ -492,8 +610,8 @@ mod tests {
         let acknowledged = std::rc::Rc::new(std::cell::Cell::new(false));
         let other = std::rc::Rc::new(std::cell::Cell::new(false));
         cx.update(|cx| {
-            enqueue(Kind::Critical, details, None, Some(acknowledged.clone()), cx);
-            enqueue(Kind::Critical, details, None, Some(other.clone()), cx);
+            enqueue(Kind::Critical, details, None, Some(acknowledged.clone()), None, cx);
+            enqueue(Kind::Critical, details, None, Some(other.clone()), None, cx);
             assert_eq!(cx.global::<Alerts>().pending.len(), 2);
         });
         cx.run_until_parked();
@@ -566,7 +684,7 @@ mod tests {
             assert!(body.contains(detail));
             assert!(body.contains("After resolving this"));
         }
-        assert_eq!(Kind::GuestLaunch.button(), "Dismiss");
+        assert_eq!(Kind::GuestLaunch.modal_button(), None);
     }
 
     #[test]
@@ -585,7 +703,7 @@ mod tests {
         assert!(body.len() <= MAX_DETAILS);
         assert!(body.starts_with(instructions));
         assert!(body.ends_with("🌱"));
-        assert_eq!(Kind::FinderOpen.button(), "Dismiss");
+        assert_eq!(Kind::FinderOpen.modal_button(), None);
     }
 
     #[test]
@@ -628,7 +746,7 @@ mod tests {
             let (title, body) = message(kind, details, Path::new("/profile"));
             assert_eq!(title, "This app needs to be rebuilt");
             assert_eq!(body, format!("{details} (#1015)"));
-            assert_eq!(kind.button(), "Dismiss");
+            assert_eq!(kind.modal_button(), None);
         }
     }
 
@@ -642,7 +760,7 @@ mod tests {
             body,
             "This app can no longer use its data. Close this window, then reopen the session from your library after access or synchronization has recovered. Earlier accepted changes may have been saved; no actions were repeated. (#1020)"
         );
-        assert_eq!(Kind::AppContextUnavailable.button(), "Dismiss");
+        assert_eq!(Kind::AppContextUnavailable.modal_button(), None);
         // Pending initial synchronization reports readiness without claiming an uncertain write.
         for details in [
             "waiting for initial database synchronization",
@@ -753,9 +871,17 @@ mod tests {
     }
     #[test]
     fn errors_offer_only_the_action_appropriate_to_their_severity() {
-        assert_eq!(Kind::Critical.button(), "Quit");
-        assert_eq!(Kind::Recoverable.button(), "Dismiss");
-        assert_eq!(Kind::RecoverySlow.button(), "Dismiss");
+        assert_eq!(Kind::Critical.modal_button(), Some("Quit"));
+        assert_eq!(Kind::LocalDraft.modal_button(), Some("Dismiss"));
+        for kind in [
+            Kind::Recoverable,
+            Kind::InputRejected,
+            Kind::RecoverySlow,
+            Kind::FinderOpen,
+            Kind::AppContextUnavailable,
+        ] {
+            assert_eq!(kind.modal_button(), None);
+        }
         assert!(
             message(
                 Kind::Critical,
@@ -777,7 +903,7 @@ mod tests {
         assert!(
             message(Kind::RecoverySlow, "connection refused", Path::new("/profile"))
                 .1
-                .contains("still trying")
+                .contains("reconnecting to its background process")
         );
     }
 }

@@ -53,6 +53,8 @@ impl Render for Control {
         if !self.disabled {
             root = self.pointer_handlers(root, cx);
             root = self.keyboard_handlers(root, cx);
+        } else {
+            self.clear_native_tooltip(window);
         }
         let entity = cx.entity().downgrade();
         root.child(
@@ -832,7 +834,12 @@ impl Control {
                 this.clear_copy_feedback();
             }
             if this.toolbar_icon.is_some() || this.navigation_accessory_icon.is_some() {
-                set_native_tooltip(window, hovered.then_some(this.label.as_ref()));
+                if *hovered && !this.disabled {
+                    set_native_tooltip(window, Some(this.label.as_ref()));
+                    this.native_tooltip_visible = true;
+                } else {
+                    this.clear_native_tooltip(window);
+                }
                 cx.notify();
             }
             if this.press.pointer

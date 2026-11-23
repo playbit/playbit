@@ -10,6 +10,7 @@ typedef uint8_t ExpectedBytes256[256];
 typedef PBStatus (*ExpectedInit)(PBContext *, void *, void **);
 typedef PBStatus (*ExpectedTurn)(PBContext *, void *);
 typedef void (*ExpectedDestroy)(void *);
+typedef PBSysResult (*ExpectedDeadlinePoll)(PBContext *, PBEvent *, uint8_t *, uint32_t, uint64_t);
 
 #ifdef __cplusplus
 template <class T, class U> constexpr bool same_type = false;
@@ -26,11 +27,13 @@ static_assert(sizeof(PBSysResult) == 8 && PBSysResult(-1) < 0, "signed syscall r
 static_assert(sizeof(PBStatus) == 4, "callback status");
 static_assert(same_type<decltype(pb_file_select_begin((PBContext *)0)), int64_t>, "handle result");
 static_assert(same_type<decltype(&pb_random_fill), PBSysResult (*)(PBContext *, uint8_t *, uint32_t)>, "random output signature");
+static_assert(same_type<decltype(&pb_event_poll_deadline), ExpectedDeadlinePoll>, "deadline poll signature");
 #else
 _Static_assert(sizeof(PBSysResult) == 8 && (PBSysResult)-1 < 0, "signed syscall result");
 _Static_assert(sizeof(PBStatus) == 4, "callback status");
 _Static_assert(_Generic(pb_file_select_begin((PBContext *)0), int64_t: 1, default: 0), "handle result");
 _Static_assert(_Generic(&pb_random_fill, PBSysResult (*)(PBContext *, uint8_t *, uint32_t): 1, default: 0), "random output signature");
+_Static_assert(_Generic(&pb_event_poll_deadline, ExpectedDeadlinePoll: 1, default: 0), "deadline poll signature");
 #endif
 
 FIELD_TYPE(PBEntryHandle, size, uint32_t);
@@ -469,3 +472,18 @@ PREFIX_ASSERT(sizeof(PBBloblogBlob) >= 16);
 PREFIX_ASSERT(PREFIX_ALIGN(PBBloblogBlob) == 4);
 PREFIX_ASSERT(offsetof(PBBloblogBlob, length) == 12);
 #endif
+
+FIELD_TYPE(PBSessionInfo, size, uint32_t);
+FIELD_TYPE(PBSessionInfo, written, uint32_t);
+FIELD_TYPE(PBSessionInfo, flags, uint32_t);
+FIELD_TYPE(PBSessionInfo, reserved, uint32_t);
+FIELD_TYPE(PBSessionInfo, internal_id, ExpectedBytes32);
+FIELD_TYPE(PBSessionInfo, key_secret, ExpectedBytes16);
+PREFIX_ASSERT(sizeof(PBSessionInfo) >= 64);
+PREFIX_ASSERT(PREFIX_ALIGN(PBSessionInfo) == 4);
+PREFIX_ASSERT(offsetof(PBSessionInfo, size) == 0);
+PREFIX_ASSERT(offsetof(PBSessionInfo, written) == 4);
+PREFIX_ASSERT(offsetof(PBSessionInfo, flags) == 8);
+PREFIX_ASSERT(offsetof(PBSessionInfo, reserved) == 12);
+PREFIX_ASSERT(offsetof(PBSessionInfo, internal_id) == 16);
+PREFIX_ASSERT(offsetof(PBSessionInfo, key_secret) == 48);

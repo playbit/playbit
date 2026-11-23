@@ -512,6 +512,7 @@ fn supported(opcode: Opcode) -> bool {
 
 pub(super) fn supports(feature: &str) -> bool {
     feature == abi::SESSION_VOLUME_FEATURE
+        || (feature == playbit_api::ui::CANVAS_CLEAR_FEATURE && supported(Opcode::ViewSubmit))
         || playbit_api::abi::syscall::REGISTRY
             .iter()
             .any(|(opcode, capability)| *capability == feature && supported(*opcode))
@@ -529,6 +530,10 @@ pub extern "C" fn pb_web_capabilities() -> i32 {
         }
         if host.session.borrow().shared_volume.is_some() {
             let name = arrays.bytes(abi::SESSION_VOLUME_FEATURE.as_bytes())?;
+            arrays.ranges.push(name);
+        }
+        if supports(playbit_api::ui::CANVAS_CLEAR_FEATURE) {
+            let name = arrays.bytes(playbit_api::ui::CANVAS_CLEAR_FEATURE.as_bytes())?;
             arrays.ranges.push(name);
         }
         let record = environment::Capabilities {

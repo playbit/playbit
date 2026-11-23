@@ -77,8 +77,10 @@ let result_layer ~density ~font_zoom (pitch : fit) full_time =
   let max_zoom = max font_zoom pitch.zoom in
   Option.map (fun (panel : fit) ->
     let center_x, center_y = Art.project ~x:(Match.width /. 2.) ~y:(Match.height /. 2.) in
-    let x = b.x + center_x * b.w / (pitch.texels_w * pitch.sample) - panel.box.w / 2 in
-    let y = b.y + center_y * b.h / (pitch.texels_h * pitch.sample) - panel.box.h / 2 in
+    let to_canvas coord span texels =
+      int_of_float (float coord *. float span /. float (texels * pitch.sample)) in
+    let x = b.x + to_canvas center_x b.w pitch.texels_w - panel.box.w / 2 in
+    let y = b.y + to_canvas center_y b.h pitch.texels_h - panel.box.h / 2 in
     let bounds = { panel.box with
       x = max area.x (min (area.x + area.w - panel.box.w) x);
       y = max area.y (min (area.y + area.h - panel.box.h) y) } in
@@ -96,8 +98,8 @@ let wrap text max_width =
   List.rev (current :: lines)
 
 let create ?full_time ~width ~height ~density footer =
-  let width = max 1 (min Playbit.max_canvas_edge width)
-  and height = max 1 (min Playbit.max_canvas_edge height) in
+  let width = max 1 (min Playbit.max_window_canvas_edge width)
+  and height = max 1 (min Playbit.max_window_canvas_edge height) in
   let margin = min 8 (width / 32) in
   let usable = width - 2 * margin in
   let font_zoom = max 1 (int_of_float (Float.round density)) in
@@ -133,7 +135,8 @@ let create ?full_time ~width ~height ~density footer =
     List.iter (fun (align, text) ->
       label ~align ~y:(footer_y + row * line) ~row_h:line ~interactive:(text = footer.hint) text
     ) labels) rows;
-  let top = min 8 (height / 45) in
+  (* Keep the score and calls below the native titlebar controls. *)
+  let top = min 32 height in
   let messages = match footer.message with
     | None -> []
     | Some text -> wrap text (max 1 (int_of_float (float usable *. density /. float font_zoom)))

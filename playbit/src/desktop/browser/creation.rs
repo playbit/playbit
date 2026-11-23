@@ -49,11 +49,13 @@ impl Browser {
         let (Some(account), Some(volume)) = (self.signed_in_account, &self.volume_details) else {
             return false;
         };
-        let principal = Some(Principal::Human(account));
-        if account != volume.volume.owner
-            && !volume.permissions.permits(principal, Permission::Write)
-            && !volume.permissions.permits(principal, Permission::Append)
-        {
+        let participant = self.shared_session().is_some();
+        let can_create = volume.permissions.checked().is_ok_and(|acl| {
+            [Permission::Write, Permission::Append].into_iter().any(|permission| {
+                acl.permits_in_session(Some(Principal::Human(account)), participant, permission)
+            })
+        });
+        if account != volume.volume.owner && !can_create {
             return false;
         }
         if let Some(parent) = parent {
@@ -178,22 +180,29 @@ impl Browser {
         };
         let request = match (&pending, parent) {
             (PendingCreate::Database(kind), Some(parent)) => Request::CreateDatabaseIn {
+                session: self.request_session(),
                 volume: self.volume.id,
                 parent,
                 name: name.clone(),
                 kind: Box::new(kind.clone()),
             },
             (PendingCreate::Database(kind), None) => Request::CreateDatabase {
+                session: self.request_session(),
                 volume: self.volume.id,
                 name: name.clone(),
                 kind: Box::new(kind.clone()),
             },
-            (PendingCreate::AppendLog, Some(parent)) => {
-                Request::BloblogCreateIn { volume: self.volume.id, parent, name: name.clone() }
-            }
-            (PendingCreate::AppendLog, None) => {
-                Request::BloblogCreate { volume: self.volume.id, name: name.clone() }
-            }
+            (PendingCreate::AppendLog, Some(parent)) => Request::BloblogCreateIn {
+                session: self.request_session(),
+                volume: self.volume.id,
+                parent,
+                name: name.clone(),
+            },
+            (PendingCreate::AppendLog, None) => Request::BloblogCreate {
+                session: self.request_session(),
+                volume: self.volume.id,
+                name: name.clone(),
+            },
         };
         if self.submit(request) {
             self.creating_entry = Some(pending);
@@ -315,9 +324,19 @@ impl Browser {
 
     fn entry_rename_request(&self, entry: EntryId, name: &str) -> Request {
         if name.contains('/') {
-            Request::RenameEntry { volume: self.volume.id, entry, name: name.into() }
+            Request::RenameEntry {
+                session: self.request_session(),
+                volume: self.volume.id,
+                entry,
+                name: name.into(),
+            }
         } else {
-            Request::RenameEntryComponent { volume: self.volume.id, entry, name: name.into() }
+            Request::RenameEntryComponent {
+                session: self.request_session(),
+                volume: self.volume.id,
+                entry,
+                name: name.into(),
+            }
         }
     }
 
@@ -443,7 +462,7 @@ mod tests {
             while requests.try_recv().is_ok() {}
             browser.commit_rename(directory.entry.id, "bar2", cx);
             assert!(matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest {
-                request: Request::RenameEntryComponent { volume: got, entry, name }, ..
+                request: Request::RenameEntryComponent { volume: got, entry, name, .. }, ..
             }) if got == volume(1).id && entry == directory.entry.id && name == "bar2"));
             let editor = browser.renaming.as_ref().unwrap().editor.entity_id();
             browser.receive(Reply::EntryChanged { volume: volume(1).id, entry: entry(3).id }, cx);
@@ -522,11 +541,11 @@ mod tests {
             browser.commit_rename(blob.entry.id, "Sample Copy2.bin", cx);
             let Message::Request(queued) = requests.try_recv().unwrap() else { panic!() };
             assert!(
-                matches!(&queued.request, Request::RenameEntryComponent { volume: got, entry, name }
+                matches!(&queued.request, Request::RenameEntryComponent { volume: got, entry, name, .. }
                 if *got == volume(1).id && *entry == blob.entry.id && name == "Sample Copy2.bin")
             );
             browser.failed(
-                Failure::for_request(&Request::RenameEntryComponent {
+                Failure::for_request(&Request::RenameEntryComponent { session: None,
                     volume: volume(1).id,
                     entry: blob.entry.id,
                     name: "Older name.bin".into(),

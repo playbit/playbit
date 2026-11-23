@@ -2,7 +2,6 @@ use super::*;
 use crate::store::{
     EntryId,
     bloblog::{self, Cursor, Entry, Log, Page},
-    object_contract::Principal,
     volume_index::{self, DatabaseProtocol, IndexSnapshot},
 };
 
@@ -33,7 +32,7 @@ impl LocalStore {
         snapshot.authorize(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             entry,
             permission,
         )?;

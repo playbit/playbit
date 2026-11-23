@@ -32,8 +32,13 @@ use std::{
 const MAX_SOCKETS: usize = 8;
 const MAX_LOG_WAITERS: usize = 4;
 const MAX_WRITES: usize = 8 * 1024 * 1024;
+// Even when data replies exhaust their credit, each socket can return one short
+// pre-admission refusal (binding, request size, or busy) including framing.
+const DATA_WRITE_BUDGET: usize = MAX_WRITES - MAX_SOCKETS * 256;
 const _: () = assert!(app_control::REPLY_LIMIT <= MAX_WRITES);
 const _: () = assert!(app_control::REPLY_LIMIT <= codec::MAX_MESSAGE);
+const _: () = assert!(app_control::SCREENSHOT_REPLY_LIMIT <= codec::MAX_MESSAGE);
+const _: () = assert!(app_control::SCREENSHOT_REPLY_LIMIT <= MAX_WRITES);
 const IO_QUANTUM: usize = 64 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_LOG_BYTES: usize = 64 * 1024;
@@ -166,6 +171,7 @@ impl Publisher {
                     reset: after.is_some() && !same,
                 })))
             }
+            Operation::Screenshot => Err("Screenshot requires an active native window".into()),
             Operation::Frame => {
                 if let Some(error) = &state.failure {
                     return Err(error.clone().into());
@@ -194,9 +200,19 @@ impl Publisher {
                 let kind = match kind {
                     2 => playbit_api::abi::syscall::EventKind::Click,
                     3 => playbit_api::abi::syscall::EventKind::Submit,
-                    _ => return Err("App controls accept only click or submit input".into()),
+                    11 if target != 0
+                        && playbit_api::abi::syscall::PointerInput::decode(&data).is_ok() =>
+                    {
+                        playbit_api::abi::syscall::EventKind::Pointer
+                    }
+                    12 if target != 0
+                        && playbit_api::abi::syscall::KeyInput::decode(&data).is_ok() =>
+                    {
+                        playbit_api::abi::syscall::EventKind::Key
+                    }
+                    _ => return Err("Invalid app control input kind, target, or payload".into()),
                 };
-                if !handle.send(Input { kind, target, data, revision: None }, None) {
+                if !handle.send_tool_input(Input { kind, target, data, revision: None }) {
                     return Err(
                         "App input queue is full or closed; this input did not start".into()
                     );
@@ -274,6 +290,8 @@ impl Server {
                     outputs,
                     pending: Vec::with_capacity(MAX_SOCKETS),
                     token: 1,
+                    #[cfg(target_os = "macos")]
+                    capture: std::sync::Weak::new(),
                 };
                 if let Err(error) = reactor.run(&worker_stop) {
                     crate::diagnostic!("App control endpoint stopped: {error}");
@@ -311,9 +329,24 @@ impl Drop for Endpoint {
     }
 }
 enum State {
-    Reading { header: [u8; codec::HEADER_LEN], received: usize, body: codec::Bytes },
-    Logs { generation: u64, after: Option<LogCursor> },
-    Writing { bytes: codec::Bytes, offset: usize },
+    Reading {
+        header: [u8; codec::HEADER_LEN],
+        received: usize,
+        body: codec::Bytes,
+    },
+    Logs {
+        generation: u64,
+        after: Option<LogCursor>,
+    },
+    #[cfg(target_os = "macos")]
+    Screenshot {
+        generation: u64,
+        result: std::sync::mpsc::Receiver<std::result::Result<Vec<u8>, String>>,
+    },
+    Writing {
+        bytes: codec::Bytes,
+        offset: usize,
+    },
 }
 struct Pending {
     stream: UnixStream,
@@ -335,6 +368,8 @@ struct Reactor {
     outputs: async_channel::Sender<Output>,
     pending: Vec<Pending>,
     token: usize,
+    #[cfg(target_os = "macos")]
+    capture: std::sync::Weak<super::screenshot::Capture>,
 }
 impl Reactor {
     #[allow(
@@ -351,7 +386,7 @@ impl Reactor {
             for index in (0..self.pending.len()).rev() {
                 let expired =
                     self.pending[index].deadline.is_some_and(|deadline| deadline <= Instant::now());
-                if expired || self.finish_logs(index).is_err() {
+                if expired || self.finish_wait(index).is_err() {
                     self.close(index)?;
                 }
             }
@@ -465,13 +500,6 @@ impl Reactor {
                 }
                 Ok(true)
             }
-            Pending { stream, state: State::Logs { .. }, .. } => {
-                // Only cancellation/closure is meaningful after one request.
-                match stream.read(&mut [0]) {
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(true),
-                    _ => Ok(false),
-                }
-            }
             Pending { stream, state: State::Writing { bytes, offset }, .. } => {
                 let end = (*offset + IO_QUANTUM).min(bytes.len());
                 match stream.write(&bytes[*offset..end]) {
@@ -483,6 +511,13 @@ impl Reactor {
                     }
                     Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(true),
                     Err(error) => Err(error.into()),
+                }
+            }
+            Pending { stream, .. } => {
+                // Only cancellation/closure is meaningful after one request.
+                match stream.read(&mut [0]) {
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(true),
+                    _ => Ok(false),
                 }
             }
         }
@@ -504,7 +539,12 @@ impl Reactor {
         }
         // Reserve the largest single response before any effect admission. A
         // slow reader cannot turn a known pre-admission refusal into a mutation.
-        if self.write_bytes() + app_control::REPLY_LIMIT > MAX_WRITES {
+        let limit = if matches!(&request.operation, ArchivedOperation::Screenshot) {
+            app_control::SCREENSHOT_REPLY_LIMIT
+        } else {
+            app_control::REPLY_LIMIT
+        };
+        if self.write_bytes() + limit > DATA_WRITE_BUDGET {
             return self.reply(
                 index,
                 Reply::Error {
@@ -515,6 +555,13 @@ impl Reactor {
         let generation = request.generation.to_native();
         let operation =
             rkyv::api::low::deserialize::<Operation, rkyv::rancor::Error>(&request.operation)?;
+        #[cfg(target_os = "macos")]
+        if matches!(operation, Operation::Screenshot) {
+            return match self.start_capture(index, generation) {
+                Ok(()) => Ok(()),
+                Err(error) => self.reply(index, Reply::Error { error: error.to_string() }),
+            };
+        }
         let wait = match &operation {
             Operation::Logs { after } => Some(*after),
             _ => None,
@@ -548,11 +595,65 @@ impl Reactor {
             ),
         }
     }
-    fn finish_logs(&mut self, index: usize) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    fn start_capture(&mut self, index: usize, generation: u64) -> Result<()> {
+        let state = self.publisher.snapshot.lock().expect("app control snapshot lock poisoned");
+        if state.generation == 0 || state.generation != generation || state.quitting {
+            return Err("The selected app owner is unavailable for capture".into());
+        }
+        drop(state);
+        if self.capture.upgrade().is_some() {
+            return Err("A screenshot of this instance is already in progress".into());
+        }
+        let (sender, result) = std::sync::mpsc::sync_channel(1);
+        let capture =
+            Arc::new(super::screenshot::Capture::new(sender, self.publisher.poller.clone()));
+        self.capture = Arc::downgrade(&capture);
+        self.outputs
+            .try_send(Output::Screenshot {
+                instance: self.publisher.instance,
+                owner_generation: generation,
+                capture,
+            })
+            .map_err(|_| "The app lifecycle queue is busy; screenshot was not started")?;
+        self.pending[index].state = State::Screenshot { generation, result };
+        self.pending[index].deadline = Some(Instant::now() + IO_TIMEOUT);
+        Ok(())
+    }
+
+    fn finish_wait(&mut self, index: usize) -> Result<()> {
+        #[cfg(target_os = "macos")]
+        if let State::Screenshot { generation, result } = &self.pending[index].state {
+            let reply = match result.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => return Ok(()),
+                Err(_) => Reply::Error { error: "The capture owner stopped".into() },
+                Ok(Err(error)) => Reply::Error { error },
+                Ok(Ok(png)) => {
+                    let state =
+                        self.publisher.snapshot.lock().expect("app control snapshot lock poisoned");
+                    if state.generation != *generation || state.quitting {
+                        Reply::Error {
+                            error: "The selected app owner changed during capture".into(),
+                        }
+                    } else {
+                        Reply::Screenshot {
+                            instance: self.publisher.instance,
+                            generation: *generation,
+                            png,
+                        }
+                    }
+                }
+            };
+            self.reply(index, reply)?;
+            self.publisher
+                .poller
+                .modify(&self.pending[index].stream, self.pending[index].interest())?;
+            return Ok(());
+        }
         let State::Logs { generation, after } = self.pending[index].state else {
             return Ok(());
         };
-        if self.write_bytes() + app_control::REPLY_LIMIT > MAX_WRITES {
+        if self.write_bytes() + app_control::REPLY_LIMIT > DATA_WRITE_BUDGET {
             return Ok(());
         }
         let reply =
@@ -574,12 +675,19 @@ impl Reactor {
             .iter()
             .map(|pending| match &pending.state {
                 State::Writing { bytes, .. } => bytes.capacity(),
+                #[cfg(target_os = "macos")]
+                State::Screenshot { .. } => app_control::SCREENSHOT_REPLY_LIMIT,
                 _ => 0,
             })
             .sum()
     }
     fn reply(&mut self, index: usize, reply: Reply) -> Result<()> {
-        let archive = codec::encode(&reply, app_control::REPLY_LIMIT - codec::HEADER_LEN)?;
+        let limit = if matches!(&reply, Reply::Screenshot { .. }) {
+            app_control::SCREENSHOT_REPLY_LIMIT
+        } else {
+            app_control::REPLY_LIMIT
+        };
+        let archive = codec::encode(&reply, limit - codec::HEADER_LEN)?;
         let mut bytes = codec::Bytes::with_capacity(archive.len() + codec::HEADER_LEN);
         bytes.extend_from_slice(&codec::frame_header(archive.len())?);
         bytes.extend_from_slice(&archive);

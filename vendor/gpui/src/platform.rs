@@ -485,6 +485,10 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn is_active(&self) -> bool;
     fn is_hovered(&self) -> bool;
     fn set_title(&mut self, title: &str);
+    #[cfg(target_os = "macos")]
+    fn set_macos_window_style(&self, style: MacWindowStyle);
+    #[cfg(target_os = "macos")]
+    fn titlebar_height(&self) -> Pixels;
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);
     fn minimize(&self);
     fn zoom(&self);
@@ -1224,6 +1228,11 @@ pub struct WindowOptions {
     /// - `Some(WindowBounds)`: Open a window with corresponding state and its restore size.
     pub window_bounds: Option<WindowBounds>,
 
+    /// A unique name for AppKit to save and restore this window's frame.
+    /// On first open, AppKit uses the supplied window bounds.
+    #[cfg(target_os = "macos")]
+    pub frame_autosave_name: Option<String>,
+
     /// The titlebar configuration of the window
     pub titlebar: Option<TitlebarOptions>,
 
@@ -1278,6 +1287,8 @@ pub struct WindowOptions {
 )]
 pub(crate) struct WindowParams {
     pub bounds: Bounds<Pixels>,
+    #[cfg(target_os = "macos")]
+    pub frame_autosave_name: Option<String>,
 
     /// The titlebar configuration of the window
     #[cfg_attr(feature = "wayland", allow(dead_code))]
@@ -1355,6 +1366,8 @@ impl Default for WindowOptions {
     fn default() -> Self {
         Self {
             window_bounds: None,
+            #[cfg(target_os = "macos")]
+            frame_autosave_name: None,
             titlebar: Some(TitlebarOptions {
                 title: Default::default(),
                 appears_transparent: Default::default(),
@@ -1388,6 +1401,46 @@ pub struct TitlebarOptions {
 
     /// The position of the macOS traffic light buttons
     pub traffic_light_position: Option<Point<Pixels>>,
+}
+
+/// Normal-window content limits in AppKit points. Zero clears an individual limit or ratio.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MacWindowSizeConstraints {
+    /// Smallest content dimensions in AppKit points.
+    pub min: Size<f64>,
+    /// Largest content dimensions in AppKit points.
+    pub max: Size<f64>,
+    /// Content width divided by height.
+    pub aspect_ratio: f32,
+}
+
+/// Mutable appearance and decorations of a normal AppKit window.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MacWindowStyle {
+    /// Constraints on the size of the drawable content.
+    pub size_constraints: MacWindowSizeConstraints,
+    /// Draw the system titlebar.
+    pub titled: bool,
+    /// Enable the close control.
+    pub closable: bool,
+    /// Enable the minimize control.
+    pub minimizable: bool,
+    /// Allow window resizing.
+    pub resizable: bool,
+    /// Show the window's underlying background or content through the titlebar.
+    pub transparent_titlebar: bool,
+    /// Omit the displayed title while preserving the window's name.
+    pub hidden_title: bool,
+    /// Extend the content view under the titlebar.
+    pub full_size_content: bool,
+    /// Custom inset for the traffic lights, measured from the top left.
+    pub traffic_light_position: Option<Point<Pixels>>,
+    /// A native appearance override. None inherits the application appearance.
+    pub appearance: Option<WindowAppearance>,
+    /// Display P3 backing color under the rendered scene.
+    pub background: crate::Rgba,
 }
 
 /// The kind of window to create

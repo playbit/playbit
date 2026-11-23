@@ -296,6 +296,12 @@ impl Shell {
         let browser_reply = response.browser_reply.take();
         let data_reply = response.data_reply.take();
         let browser_failure = response.browser_failure.take();
+        let current_session =
+            self.browser.as_ref().and_then(|browser| browser.read(cx).shared_session());
+        let response_session = response.credit.as_ref().and_then(|credit| credit.browser_session);
+        if current_session != response_session {
+            return (browser_reply.is_some() || data_reply.is_some(), browser_failure.is_some());
+        }
         let size_matches = self.browser.as_ref().is_some_and(|browser| {
             browser.read(cx).payload_size_response_matches(
                 response.credit.as_ref().map(|credit| credit.admission()),

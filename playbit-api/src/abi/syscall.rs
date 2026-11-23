@@ -136,9 +136,11 @@ pub enum Opcode {
     VolumesObserve = 18,
     Session = 19,
     RandomFill = 20,
+    EventPollDeadline = 21,
     ChannelOpen = 0x160,
     ChannelBegin = 0x161,
     ChannelTake = 0x162,
+    SessionInfo = 0x163,
     SchemaReadBegin = 0x102,
     SchemaReadTake = 0x103,
     SchemaEstablishBegin = 0x104,
@@ -224,6 +226,7 @@ pub const REGISTRY: &[(Opcode, &str)] = &[
     (Opcode::VolumesObserve, "volume.observe"),
     (Opcode::Session, "session.read"),
     (Opcode::RandomFill, "random.fill"),
+    (Opcode::EventPollDeadline, "event.poll.deadline"),
     (Opcode::ChannelOpen, "session.channel"),
     (Opcode::ChannelBegin, "session.channel.begin"),
     (Opcode::ChannelTake, "session.channel.take"),
@@ -276,6 +279,7 @@ pub const REGISTRY: &[(Opcode, &str)] = &[
     (Opcode::FileListClose, "file_list.close"),
     (Opcode::OperationDispose, "operation.dispose"),
     (Opcode::FileDispose, "file.dispose"),
+    (Opcode::SessionInfo, "session.info"),
     (Opcode::AudioOpenBegin, "audio.open.begin"),
     (Opcode::AudioOpenTake, "audio.open.take"),
     (Opcode::AudioClose, "audio.close"),
@@ -302,6 +306,7 @@ impl Opcode {
             0x160 => Some(Self::ChannelOpen),
             0x161 => Some(Self::ChannelBegin),
             0x162 => Some(Self::ChannelTake),
+            0x163 => Some(Self::SessionInfo),
             0x102 => Some(Self::SchemaReadBegin),
             0x103 => Some(Self::SchemaReadTake),
             0x104 => Some(Self::SchemaEstablishBegin),
@@ -395,6 +400,7 @@ impl Opcode {
             18 => Some(Self::VolumesObserve),
             19 => Some(Self::Session),
             20 => Some(Self::RandomFill),
+            21 => Some(Self::EventPollDeadline),
             _ => None,
         }
     }
@@ -408,7 +414,7 @@ impl Opcode {
     }
 
     pub const fn is_core(self) -> bool {
-        (self as u32) < 0x100 || matches!(self, Self::FileDispose)
+        (self as u32) < 0x100 || matches!(self, Self::FileDispose | Self::SessionInfo)
     }
 }
 
@@ -887,6 +893,8 @@ mod tests {
             (9, "update.defer"),
             (10, "presence.read"),
             (11, "wake.after"),
+            (21, "event.poll.deadline"),
+            (0x163, "session.info"),
             (0x102, "object.schema.read.begin"),
             (0x103, "object.schema.read.take"),
             (0x104, "object.schema.establish.begin"),

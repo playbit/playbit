@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, reason = "Tests assert isolated fixture operations.")]
 use super::*;
 use crate::package::{Package, VolumeInitializers};
-use crate::store::{InitialDatabase, InitialDatabaseKind, volume_index::EntryAddress};
+use crate::store::{DatabaseId, InitialDatabase, InitialDatabaseKind, volume_index::EntryAddress};
 
 fn table() -> crate::store::EntryId {
     crate::store::EntryId::from_bytes([8; 15]).unwrap()
@@ -114,6 +114,59 @@ fn fresh_shared_is_lazy_then_publishes_one_original_capability() {
 }
 
 #[test]
+fn acl_save_preserves_shared_build_provision_clocks_and_delta() {
+    let (_directory, store, package) = fixture();
+    let session = session(&store, &package);
+    let volume = store.open_automatic_volume(&session.id, Role::Session).unwrap();
+    let owner = Access::owner(volume.owner);
+    let index = store.db(volume.id, DatabaseId::Index).unwrap();
+    let provision_key = |build: &str| {
+        crate::store::catalog::entry_policy_keys(Some(build))
+            .unwrap()
+            .into_iter()
+            .find(|key| key.ends_with(build.as_bytes()))
+            .unwrap()
+    };
+    let provision_clock = |key: &[u8]| {
+        let tx = index.begin_read().unwrap();
+        tx.get_with_clock(key).unwrap().map(|(clock, value)| {
+            assert_eq!(value.as_ref(), b"true");
+            clock
+        })
+    };
+    let original_key = provision_key(&session.resolved_build_id);
+    let original_clock = provision_clock(&original_key).unwrap();
+    let mut changes = store.take_change_receiver().unwrap();
+    while !changes.drain().records.is_empty() {}
+    let mut changed_keys = || {
+        let batch = changes.drain();
+        let [record] = batch.records.as_slice() else { panic!("one committed Shared Index delta") };
+        assert_eq!(record.volume(), volume.id);
+        assert_eq!(
+            record.kind(),
+            crate::store::change_feed::CommittedChangeKind::Database(DatabaseId::Index)
+        );
+        let mut keys = Vec::new();
+        kvdb::sync::visit_delta(record.bytes(), crate::store::MAX_REPLICA_DELTA_BYTES, |key, _| {
+            keys.push(key.to_vec())
+        })
+        .unwrap();
+        keys
+    };
+    store.set_permissions(&owner, volume.id, Acl::default()).unwrap();
+    assert_eq!(changed_keys(), [crate::store::catalog::DEFAULT_PERMISSIONS_KEY.to_vec()]);
+    assert_eq!(provision_clock(&original_key), Some(original_clock));
+
+    let build = crate::identifier::encode(&[0xb8; 32]);
+    let new_key = provision_key(&build);
+    assert_eq!(provision_clock(&new_key), None);
+    store.provision_version(&owner, volume.id, &build).unwrap();
+    assert_eq!(changed_keys().as_slice(), std::slice::from_ref(&new_key));
+    assert!(provision_clock(&new_key).unwrap() > original_clock);
+    assert_eq!(provision_clock(&original_key), Some(original_clock));
+}
+
+#[test]
 fn recovered_same_account_shared_never_reseeds_missing_backing() {
     // Account recovery transfers the exact capability, not the creator's local
     // initializer authority. A missing replica remains unavailable on device 2.
@@ -219,9 +272,13 @@ fn authorized_recipient_imports_shared_and_replicates_offline_edits_without_seed
     let recipient_directory = tempfile::tempdir().unwrap();
     let recipient = LocalStore::open(recipient_directory.path()).unwrap();
     assert_ne!(creator.account.id, recipient.account.id);
-    creator
-        .grant_volume(&Access::owner(creator.account.id), shared.id, recipient.account.id, true)
-        .unwrap();
+    assert_eq!(
+        creator.volume_details(&creator_access, shared.id).unwrap().permissions.grants,
+        [crate::store::object_contract::Grant {
+            subject: crate::store::object_contract::Subject::SessionParticipants,
+            permissions: vec![Permission::Read, Permission::Write],
+        }]
+    );
     let channel = crate::release_channel::ReleaseChannel::Public;
     let link = creator.invitation(&session.id, channel).unwrap();
     let envelope = creator.session_envelope(&session.id).unwrap();

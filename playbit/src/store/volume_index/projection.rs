@@ -156,7 +156,7 @@ impl<S: Storage> IndexSnapshot<'_, S> {
         &self,
         volume: &Volume,
         defaults: &Acl,
-        principal: Principal,
+        principal: impl Into<DataActor>,
         id: EntryId,
         permission: Permission,
     ) -> Result<()> {

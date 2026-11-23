@@ -2,9 +2,7 @@
 //! Authorization, schema and backing snapshots share the volume boundary.
 use super::*;
 use crate::store::{
-    EntryId, MAX_REPLICA_DELTA_BYTES,
-    object_contract::Principal,
-    object_database,
+    EntryId, MAX_REPLICA_DELTA_BYTES, object_database,
     volume_index::{EntryAddress, EntryKind, IndexSnapshot},
 };
 
@@ -28,7 +26,7 @@ impl LocalStore {
         snapshot.authorize(
             policy.volume(),
             policy.default_permissions(),
-            Principal::Human(access.account),
+            self.data_actor(access, policy.volume())?,
             address.entry,
             permission,
         )?;

@@ -67,14 +67,15 @@ pub fn execute(profile: &Path, queued: QueuedData, engine_lost: bool) -> WorkerR
     let result = if engine_lost {
         Err(DataFailure { status: None, message: super::worker_queue::RETIRED.into() })
     } else if let Some(source) = &queued.rename {
-        rename::execute(profile, &queued.call, source).map(|root| {
+        rename::execute(profile, queued._credit.browser_session, &queued.call, source).map(|root| {
             committed_root = Some(root);
             DataResult::KvWritten
         })
     } else {
         let exchange = |request| ipc::call_archive(profile, &request)?.into_owned();
         let result: crate::engine::Result<DataResult> = (|| {
-            let mut context = DataContext::open_volume(volume, &exchange)?;
+            let mut context =
+                DataContext::open_browser(volume, queued._credit.browser_session, &exchange)?;
             let result = context.execute(queued.call);
             context.finish(result)
         })();

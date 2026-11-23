@@ -249,6 +249,8 @@ impl Inbox {
 }
 
 pub struct GuestHost {
+    pub(super) renderer: super::GuestRenderer,
+    pub(super) session_key_secret: Option<crate::store::Seed>,
     shared: Arc<Shared>,
     mutations: mpsc::SyncSender<LaneWork>,
     reads: mpsc::SyncSender<LaneWork>,
@@ -282,6 +284,8 @@ impl GuestHost {
         let event_stop = event_lane(&profile, context, &shared, bulk.clone())?;
         Ok((
             Self {
+                renderer: super::GuestRenderer::Embedded,
+                session_key_secret: None,
                 shared: shared.clone(),
                 mutations,
                 reads,
@@ -307,6 +311,12 @@ impl GuestHost {
     }
 }
 impl Host for GuestHost {
+    fn session_key_secret(&self) -> HostResult<Option<crate::store::Seed>> {
+        if self.shared.state.lock().expect("guest completion lock poisoned").failure.is_some() {
+            return Err(HostError::Unavailable);
+        }
+        Ok(self.session_key_secret)
+    }
     fn channel_consumed(
         &mut self,
         _recipient: [u8; 16],
@@ -334,7 +344,7 @@ impl Host for GuestHost {
         )
     }
     fn supported_features(&self) -> &[&str] {
-        super::guest_features()
+        self.renderer.features()
     }
     fn audio_wake(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
         Some(self.shared.wake.clone())

@@ -16,7 +16,7 @@ pub(super) fn run(
             let volume = Id::parse(&args[1])?;
             playbit::store::volume_index::validate_name(&args[2])?;
             let Reply::VolumeEntry { entry, .. } =
-                call(Request::BloblogCreate { volume, name: args[2].clone() })?
+                call(Request::BloblogCreate { session: None, volume, name: args[2].clone() })?
             else {
                 return Err("unexpected append log creation reply".into());
             };
@@ -225,7 +225,7 @@ mod tests {
         let context = Context::Tool { handle: volume, incarnation: volume };
         let reads = Cell::new(0);
         let exchange = |request| match request {
-            Request::BloblogCreate { volume: target, name } => {
+            Request::BloblogCreate { volume: target, name, .. } => {
                 assert_eq!(target, volume);
                 assert_eq!(name, "Events");
                 Ok(Reply::VolumeEntry { volume, entry: entry.clone() })

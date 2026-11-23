@@ -32,8 +32,9 @@ inventing an API, command, permission, or substitute architecture.
 
 Use `pb` for scaffolding, building, the retained `pb run` watcher, and GUI
 inspection. When the agent has Playbit MCP connected, use its `playbit` tool
-for structured session and authorized data operations; discover its installed
-schema through `tools/list`. Both interfaces use the same engine and profile.
+for structured session and authorized data operations and `playbit_gui` for
+instance-targeted canvas input and rendered screenshots. Discover the installed
+tools through `tools/list`. Both interfaces use the same engine and profile.
 
 The bundled stdio server is `../../../MacOS/playbit-mcp` relative to this skill.
 An MCP client must be configured to launch it; installing this skill alone does
@@ -61,7 +62,7 @@ process. Inspect state before retrying a mutation whose result is uncertain.
    or documented `pb` data operations for live schema changes.
 5. Exercise the requested behavior in the GUI, including persistence after
    reopening. Inspect the actual window as well as logs/build output. `pb frame`,
-   `pb input`, and `pb logs` can inspect/control the known session instance;
+   `pb input`, `pb screenshot`, and `pb logs` address the known session instance;
    their command help describes the supported arguments.
 
 Stopping the watcher retains the session and data. Resume development from the

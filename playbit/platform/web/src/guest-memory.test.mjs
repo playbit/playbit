@@ -6,10 +6,10 @@ import { captureResult, Input, Output, record, recordArray, publishRecord } from
 
 function initialize(memory, pointer, size) { const data = new DataView(memory.buffer); data.setUint32(pointer, size, true); data.setUint32(pointer + 4, 0, true); }
 
-test('web layouts match every field of all 34 compiler-verified C records', async () => {
+test('web layouts match every field of the compiler-verified C records', async () => {
     const expected = (await readFile(new URL('../../native/wasm-probe/layout-v2.tsv', import.meta.url), 'utf8')).trim().split('\n').map(line => Number(line.split(/\s+/).at(-1)));
     const actual = Object.values(ABI).flatMap(layout => [layout.size, layout.alignment, layout.fields.length, ...layout.fields.flat()]);
-    assert.equal(actual.length, 684); assert.deepEqual(actual, expected);
+    assert.deepEqual(actual, expected);
 });
 
 test('volume role tail preserves the released 80-byte output contract', () => {

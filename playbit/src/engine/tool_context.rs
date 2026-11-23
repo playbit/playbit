@@ -96,22 +96,23 @@ impl Contexts {
         let session = match scope {
             ToolScope::Account => None,
             ToolScope::Session(id) => Some(store.session(&id)?),
-            ToolScope::Volume(volume) => {
+            ToolScope::Volume(volume) | ToolScope::BrowserVolume(volume) => {
                 if store.volume(volume)?.owner == store.account().id {
                     None
                 } else {
-                    Some(
-                        store
-                            .sessions()?
-                            .into_iter()
-                            .find(|session| {
-                                (session.replica_volume() == volume)
-                                    && store
-                                        .session_denial(&session.id)
-                                        .is_ok_and(|denial| denial.is_none())
-                            })
-                            .ok_or("Tool volume requires an authorized joined session")?,
-                    )
+                    let browser = matches!(scope, ToolScope::BrowserVolume(_));
+                    let joined = store.sessions()?.into_iter().find(|session| {
+                        session.replica_volume() == volume
+                            && (!browser || session.shared_volume.is_none())
+                            && store
+                                .session_denial(&session.id)
+                                .is_ok_and(|denial| denial.is_none())
+                    });
+                    if browser {
+                        joined
+                    } else {
+                        Some(joined.ok_or("Tool volume requires an authorized joined session")?)
+                    }
                 }
             }
         };

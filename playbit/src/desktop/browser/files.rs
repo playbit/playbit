@@ -46,7 +46,7 @@ impl Pending {
                 Self::Import { volume: *volume, parent: Some(*parent), name: name.clone() }
             }
             Request::DuplicateEntry { address } => Self::Duplicate(*address),
-            Request::RemoveEntry { volume, entry } => {
+            Request::RemoveEntry { volume, entry, .. } => {
                 Self::Delete(EntryAddress { volume: *volume, entry: *entry })
             }
             _ => return None,
@@ -131,9 +131,20 @@ impl Browser {
                 return;
             }
             if let Some(parent) = parent {
-                Request::FileCreateIn { volume, parent, name: name.into(), path }
+                Request::FileCreateIn {
+                    session: self.request_session(),
+                    volume,
+                    parent,
+                    name: name.into(),
+                    path,
+                }
             } else {
-                Request::FileCreate { volume, name: name.into(), path }
+                Request::FileCreate {
+                    session: self.request_session(),
+                    volume,
+                    name: name.into(),
+                    path,
+                }
             }
         };
         self.start_file(request);

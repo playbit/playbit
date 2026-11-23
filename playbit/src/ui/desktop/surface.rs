@@ -3,7 +3,10 @@
 use super::scene::{Input, SendInput};
 use gpui::{canvas, prelude::*};
 use playbit_api::abi::{environment::Surface, syscall::EventKind};
+use playbit_api::ui::CanvasExtent;
 use std::{cell::Cell, rc::Rc};
+
+pub(super) const CONTENT_PADDING: f32 = 16.;
 
 #[derive(Clone, Default)]
 pub(super) struct Observer {
@@ -26,16 +29,24 @@ impl Observer {
             }
         }
     }
-    pub fn element(&self, send: SendInput, right_inset: f32) -> impl IntoElement {
+    pub fn element(&self, send: SendInput, extent: CanvasExtent) -> impl IntoElement {
         let observer = self.clone();
         canvas(
             move |bounds, window, _| {
                 let zoom = f32::from(window.rem_size()) / 16.;
+                let edge = |points: gpui::Pixels| {
+                    let logical = f32::from(points) / zoom;
+                    match extent {
+                        // Cover the last partial logical unit. The window clips the excess.
+                        CanvasExtent::Window => logical.ceil() as u32,
+                        CanvasExtent::Inline | CanvasExtent::Viewport => {
+                            (logical - 2. * CONTENT_PADDING).max(0.).floor() as u32
+                        }
+                    }
+                };
                 let surface = Surface {
-                    // Both Mac hosts use a 16-point inset on each viewport edge.
-                    width: (f32::from(bounds.size.width) / zoom - 32. - right_inset).max(0.).floor()
-                        as u32,
-                    height: (f32::from(bounds.size.height) / zoom - 32.).max(0.).floor() as u32,
+                    width: edge(bounds.size.width),
+                    height: edge(bounds.size.height),
                     pixel_scale: window.scale_factor() * zoom,
                     inputs: Surface::POINTER | Surface::KEYBOARD,
                 };

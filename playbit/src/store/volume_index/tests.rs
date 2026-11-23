@@ -33,6 +33,111 @@ fn record(name: &str, revision: u8) -> EntryInfo {
 }
 
 #[test]
+fn session_participant_grant_is_bound_to_its_shared_volume_and_current_entry_acl() {
+    use crate::package::{AppIdentity, AutomaticVolumeRole};
+    use crate::store::object_contract::{Grant, Subject};
+    use crate::store::{
+        BuildSelector, DatabaseId, DatabasePolicy, MetadataPolicy, Session, UpdateAuthority,
+    };
+    let owner = Id::from_bytes([8; 16]);
+    let guest = Id::from_bytes([9; 16]);
+    let app = AppIdentity { publisher: owner, app_id: "test.plaza".into() };
+    let session_key = [3; 32];
+    let world = app.volume_id(AutomaticVolumeRole::Root, None, None, None).unwrap();
+    let shared =
+        app.volume_id(AutomaticVolumeRole::Session, Some(session_key), None, None).unwrap();
+    let build = crate::identifier::encode(&[4; 32]);
+    let session = Session {
+        app,
+        id: crate::identifier::encode(&session_key),
+        root_volume: world,
+        shared_volume: Some(shared),
+        creator: owner,
+        selector: BuildSelector::Exact { build_id: build.clone() },
+        resolved_build_id: build,
+        update_authority: UpdateAuthority::Creator,
+    };
+    let volume = Volume {
+        id: shared,
+        owner,
+        name: "Room".into(),
+        personal: false,
+        share_key_with_service: true,
+    };
+    let acl = Acl {
+        grants: vec![Grant {
+            subject: Subject::SessionParticipants,
+            permissions: vec![Permission::Read, Permission::Write],
+        }],
+    };
+    let metadata = MetadataPolicy::new(volume.clone(), acl.clone()).unwrap();
+    let actor = DataActor::session_participant(guest, &session, &volume).unwrap();
+    assert!(metadata.authorize(guest, Permission::Read).is_err());
+    metadata.authorize(actor, Permission::Read).unwrap();
+    let reserved = DatabasePolicy::reserved(metadata.clone(), DatabaseId::Index).unwrap();
+    assert!(
+        reserved
+            .authorize_reader(crate::store::ReplicaReader::SessionParticipant(
+                crate::store::PLAYBIT_REPLICA_PRINCIPAL.into()
+            ))
+            .is_err()
+    );
+    for permission in [Permission::Append, Permission::ManagePermissions] {
+        assert!(metadata.authorize(actor, permission).is_err());
+    }
+    let other_public_key = [5; 32];
+    let other_volume = Volume {
+        id: session
+            .app
+            .volume_id(AutomaticVolumeRole::Session, Some(other_public_key), None, None)
+            .unwrap(),
+        ..volume.clone()
+    };
+    let other_session = Session {
+        id: crate::identifier::encode(&other_public_key),
+        shared_volume: Some(other_volume.id),
+        ..session.clone()
+    };
+    let other_member = DataActor::for_session(guest, &other_session, &other_volume).unwrap();
+    assert!(metadata.authorize(other_member, Permission::Write).is_err());
+    let world = Volume { id: session.root_volume, ..volume.clone() };
+    let other = MetadataPolicy::new(world.clone(), acl).unwrap();
+    assert!(other.authorize(actor, Permission::Read).is_err());
+    let ordinary = DataActor::for_session(guest, &session, &world).unwrap();
+    assert!(metadata.authorize(ordinary, Permission::Read).is_err());
+    assert!(
+        DataActor::session_participant(guest, &session, &Volume { personal: true, ..volume })
+            .is_err()
+    );
+
+    let index = db();
+    metadata.write(&index, WALL).unwrap();
+    put(&index, 1, record("inherited", 7), WALL + 1);
+    let mut restricted = record("restricted", 8);
+    restricted.initial_permissions = EntryAcl::Replace(Acl::default());
+    put(&index, 2, restricted, WALL + 2);
+    let mut explicit = record("participants", 9);
+    explicit.initial_permissions = EntryAcl::Replace(metadata.default_permissions().clone());
+    put(&index, 3, explicit, WALL + 3);
+    for (entry, allowed) in [(id(1), true), (id(2), false), (id(3), true)] {
+        let db = DatabasePolicy::read(&index, DatabaseId::Entry(entry)).unwrap();
+        assert_eq!(db.authorize(actor, Permission::Write).is_ok(), allowed);
+        assert_eq!(
+            snapshot(&index)
+                .authorize(
+                    metadata.volume(),
+                    metadata.default_permissions(),
+                    actor,
+                    entry,
+                    Permission::Read
+                )
+                .is_ok(),
+            allowed
+        );
+    }
+}
+
+#[test]
 fn immutable_initial_permission_replay_requires_current_authority_and_an_existing_birth() {
     use crate::store::object_contract::{Grant, Subject};
     let a = db();

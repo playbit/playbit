@@ -1,5 +1,5 @@
 //! Admit fixed outputs before starting work or consuming a completion.
-use super::{WasmState, call, files::reference};
+use super::{StoreData, call, files::reference};
 use crate::runtime::linear_memory::layout::{files::file_reference, pending::selection};
 use crate::runtime::{
     linear_memory::input,
@@ -8,7 +8,7 @@ use crate::runtime::{
 use wasmtime::Caller;
 
 pub(super) fn create_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     entry: u32,
     type_id: u32,
     fields: u32,
@@ -34,7 +34,7 @@ pub(super) fn create_begin(
         Ok(playbit_api::abi::dispatch::pack_handle(handle.generation, handle.slot) as i64)
     })
 }
-pub(super) fn copy_begin(caller: Caller<'_, WasmState>, source: u32, destination: u32) -> i64 {
+pub(super) fn copy_begin(caller: Caller<'_, impl StoreData>, source: u32, destination: u32) -> i64 {
     call(caller, |state, memory| {
         let source = memory.record(source, file_reference::LAYOUT, true, None)?;
         let destination = memory.record(destination, file_reference::LAYOUT, true, None)?;
@@ -46,7 +46,7 @@ pub(super) fn copy_begin(caller: Caller<'_, WasmState>, source: u32, destination
         Ok(playbit_api::abi::dispatch::pack_handle(handle.generation, handle.slot) as i64)
     })
 }
-pub(super) fn select_begin(caller: Caller<'_, WasmState>) -> i64 {
+pub(super) fn select_begin(caller: Caller<'_, impl StoreData>) -> i64 {
     call(caller, |state, _memory| {
         let handle = file_ops::select_begin(state)?;
         Ok(playbit_api::abi::dispatch::pack_handle(handle.generation, handle.slot) as i64)
@@ -54,7 +54,7 @@ pub(super) fn select_begin(caller: Caller<'_, WasmState>) -> i64 {
 }
 
 fn poll(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     output: u32,
@@ -68,7 +68,7 @@ fn poll(
     })
 }
 pub(super) fn create_poll(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     output: u32,
@@ -76,7 +76,7 @@ pub(super) fn create_poll(
     poll(caller, generation, slot, output, Opcode::ObjectCreatePoll)
 }
 pub(super) fn copy_poll(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     output: u32,
@@ -90,7 +90,7 @@ pub(super) fn copy_poll(
 }
 
 pub(super) fn select_poll(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     output: u32,

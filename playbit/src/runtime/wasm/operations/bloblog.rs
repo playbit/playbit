@@ -1,5 +1,5 @@
 //! Wasm bloblog admission copies bounded inputs into the shared async owner.
-use super::{WasmState, call};
+use super::{StoreData, call};
 use crate::runtime::{
     host::DataOperation,
     linear_memory::{disjoint, input},
@@ -9,7 +9,7 @@ use playbit_api::abi::bloblog as abi;
 use wasmtime::Caller;
 
 pub(super) fn append_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     volume: u64,
     log: u32,
     blobs: u32,
@@ -41,7 +41,7 @@ pub(super) fn append_begin(
 }
 
 pub(super) fn read_begin(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     volume: u64,
     log: u32,
     cursor: u32,
@@ -75,7 +75,7 @@ pub(super) fn read_begin(
 }
 
 pub(super) fn take(
-    caller: Caller<'_, WasmState>,
+    caller: Caller<'_, impl StoreData>,
     generation: u32,
     slot: u32,
     opcode: Opcode,

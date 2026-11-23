@@ -98,6 +98,7 @@ impl Browser {
                     fields: BTreeMap::new(),
                 };
                 this.submit(Request::Schema {
+                    session: this.request_session(),
                     database: EntryAddress { volume: this.volume.id, entry },
                     schema: Schema { types: BTreeMap::from([(id, declaration)]) },
                 });
@@ -228,6 +229,7 @@ impl Browser {
             )]),
         };
         self.submit(Request::Schema {
+            session: self.request_session(),
             database,
             schema: Schema { types: BTreeMap::from([(type_id, declaration)]) },
         });
