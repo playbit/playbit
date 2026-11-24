@@ -513,6 +513,29 @@ fn open(browser: &mut Browser, cx: &mut Context<Browser>) {
     browser.receive(Reply::EntryDetails { volume: browser.volume.id, details: info }, cx);
 }
 
+impl Browser {
+    pub(in crate::desktop) fn fixture_selected_kv_store(
+        &mut self,
+        requests: &async_channel::Receiver<Message>,
+        cx: &mut Context<Self>,
+    ) -> gpui::ScrollHandle {
+        self.fixture_namespace(vec![super::super::tests::summary(&entry(1))]);
+        open(self, cx);
+        let preview = b"Portside FC 5 - 20 Rovers";
+        let page = Page {
+            root: None,
+            keys: vec![crate::store::key_value::Key {
+                bytes: b"last-result".to_vec(),
+                len_bytes: preview.len() as u64,
+                preview: preview.to_vec(),
+            }],
+            next: None,
+        };
+        self.receive_kv(reply(data(requests), Ok(R::KvKeys(page))), cx);
+        self.scrolling.columns.read(cx).handle()
+    }
+}
+
 fn open_value(
     browser: &mut Browser,
     requests: &async_channel::Receiver<Message>,

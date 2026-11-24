@@ -96,7 +96,7 @@ pub extern "C" fn pb_web_channel_receive(
     source: usize,
     kind: u32,
 ) -> i32 {
-    input_call(length, 2 * 255 + channel::SOURCE_BYTES + channel::MAX_MESSAGE_BYTES + 44, |input| {
+    input_call(length, 2 * 255 + channel::SOURCE_BYTES + channel::MAX_CONTROL_BYTES, |input| {
         if expected > 255
             || destination > 255
             || source > channel::SOURCE_BYTES
@@ -117,7 +117,12 @@ pub extern "C" fn pb_web_channel_receive(
                 let mut output = Vec::with_capacity(1 + participants.len() * channel::SOURCE_BYTES);
                 output.push(2);
                 for participant in participants {
-                    output.extend(participant.encode().map_err(|_| Error::InvalidArgument)?);
+                    output.extend(
+                        participant.participant.encode().map_err(|_| Error::InvalidArgument)?,
+                    );
+                    let name = participant.display_name.as_bytes();
+                    output.extend((name.len() as u16).to_le_bytes());
+                    output.extend(name);
                 }
                 Ok(output)
             }

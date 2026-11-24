@@ -41,6 +41,7 @@ impl WasmOwner {
             app_name: package.name().to_owned(),
             app_build: Some(playbit::identifier::decode::<32>(&record.resolved_build_id).unwrap()),
             identity: Identity {
+                display_name: String::new(),
                 account_id: account,
                 device_id: account,
                 is_service: false,

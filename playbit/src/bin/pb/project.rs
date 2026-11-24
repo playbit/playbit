@@ -42,7 +42,7 @@ fn template(
             files.get_mut(Path::new("Cargo.toml")).ok_or("template is missing Cargo.toml")?;
         *cargo = cargo_manifest(cargo, &resources)?.into_bytes();
     }
-    for required in ["playbit.toml", "playbit-volumes.json", "icon.svg", ".gitignore"] {
+    for required in ["playbit.toml", "playbit-volumes.json", ".gitignore"] {
         if !files.contains_key(Path::new(required)) {
             return Err(format!("project template is missing {required}").into());
         }
@@ -59,7 +59,7 @@ fn template(
     }
     manifest.app_id = app_id.into();
     manifest.lang = Some(language);
-    manifest.icon = Some("icon.svg".into());
+    manifest.icon.get_or_insert_with(|| "icon.svg".into());
     if !ocaml {
         manifest.build_cmd = "cargo rustc --lib --crate-type cdylib".into();
         manifest.release = BuildCommand {
@@ -75,10 +75,50 @@ fn template(
     });
     }
     files.insert("playbit.toml".into(), toml::to_string_pretty(&manifest)?.into_bytes());
+    let readme = project_readme(&resources.with_file_name("MacOS"));
+    files.insert("README.md".into(), readme.into_bytes());
     if files.values().map(Vec::len).sum::<usize>() > MAX_TEMPLATE_BYTES {
         return Err("configured project template exceeds 512 KiB".into());
     }
     Ok(files)
+}
+
+fn project_readme(bin_directory: &Path) -> String {
+    let path = bin_directory
+        .to_str()
+        .filter(|path| !path.contains(':') && !path.chars().any(char::is_control))
+        .unwrap_or("/Applications/Playbit.app/Contents/MacOS");
+    let path = path.replace('\'', "'\\''");
+    format!(
+        r#"# Playbit project
+
+## Set up your terminal
+
+Add the `Contents/MacOS` folder inside your copy of Playbit to `PATH`. Run this
+command in each new terminal, or add it to `~/.zshrc` for future zsh sessions.
+
+```sh
+export PATH='{path}':"$PATH"
+```
+
+Update the path if you move Playbit or use a different copy. Run `pb --version`
+to check that your terminal can find `pb`.
+
+## Run your app
+
+From the project folder containing `playbit.toml`, run the following command.
+
+```sh
+pb run
+```
+
+This builds your app and opens a new Playbit session. Keep the command running
+while editing your source files. Playbit rebuilds and updates the app when you save.
+
+Press Ctrl-C to stop watching. To resume working in the same session, find its ID
+with `pb session list` and run `pb run --session SESSION_ID` from this folder.
+"#
+    )
 }
 
 fn read_template(template: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
@@ -87,7 +127,7 @@ fn read_template(template: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
     }
     let mut files = BTreeMap::new();
     let mut pending = vec![(template.to_path_buf(), 0)];
-    let mut entries = 0;
+    let mut entries = 1; // The CLI adds README.md to the template.
     let mut size = 0;
     while let Some((directory, depth)) = pending.pop() {
         for entry in fs::read_dir(directory)? {
@@ -307,10 +347,10 @@ mod tests {
     }
 
     #[test]
-    fn installed_paths_are_toml_escaped_and_missing_sdk_leaves_source_empty() {
-        // Exercise spaces, quotes, backslashes and Unicode in the actual installation path.
+    fn installed_paths_are_escaped_and_missing_sdk_leaves_source_empty() {
+        // Exercise shell metacharacters and Unicode in the actual installation path.
         let install = fixture();
-        let app = install.path().join("Playbit \"quoted\" \\ 🐚.app");
+        let app = install.path().join("Playbit 'quoted' \"$HOME\" \\ `exit 88` 🐚.app");
         fs::rename(install.path().join("Playbit.app"), &app).expect("move installation");
         let executable = app.join("Contents/MacOS/pb");
         let source = tempfile::tempdir().expect("source");
@@ -321,6 +361,17 @@ mod tests {
             cargo["dependencies"]["playbit-api"]["path"].as_str(),
             Some("target/playbit/sdk/playbit-api")
         );
+        let readme = fs::read_to_string(source.path().join("README.md")).expect("README");
+        let setup =
+            readme.lines().find(|line| line.starts_with("export PATH=")).expect("setup command");
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("{setup}\nprintf '%s' \"$PATH\"")])
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .expect("run README command");
+        assert!(output.status.success());
+        let bin = app.join("Contents/MacOS").canonicalize().expect("actual bin directory");
+        assert_eq!(output.stdout, format!("{}:/usr/bin:/bin", bin.display()).into_bytes());
         fs::remove_file(app.join("Contents/Resources/playbit-api/Cargo.toml")).expect("remove SDK");
         let source = tempfile::tempdir().expect("source");
         assert!(scaffold(source.path(), "Test", &executable).is_err());

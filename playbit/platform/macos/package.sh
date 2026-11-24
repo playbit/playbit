@@ -91,7 +91,7 @@ cp vendor/accesskit_macos/LICENSE-MIT "$app/Contents/Resources/AccessKit-LICENSE
 python3 playbit/platform/macos/build-provider.py "$app" "target/$pb_build_profile/provider-signing"
 python3 playbit/platform/macos/build-thumbnail.py "$app" "target/$pb_build_profile/thumbnail-signing"
 # Developer ID and notarization credentials are chosen by private distribution
-# tooling. Public/local builds need neither a signing account nor remote access.
+# tooling. Local builds use ad-hoc signing.
 pb_entitlements=playbit/platform/macos/runtime-entitlements.plist
 pb_engine_entitlements="target/$pb_build_profile/playbit-signing-entitlements.plist"
 python3 playbit/platform/macos/keychain-signing.py "$app" "$pb_engine_entitlements"
@@ -113,16 +113,15 @@ for executable in pb playbit-mcp; do
             --entitlements "$pb_entitlements" "$app/Contents/MacOS/$executable"
     fi
 done
-# Templates use the shared package codec without starting an account or engine.
-# The final app seal authenticates them before the user's engine signs a copy.
-# Compile the menu app and TODO test fixture so opening them needs neither Cargo nor AP.
-pb_packager="$PWD/$app/Contents/MacOS/pb"
-(cd guests/little-list && "$pb_packager" build --release --sdk=system --template)
-mkdir -p "$app/Contents/Resources/examples/little-list"
-pb_little_list_template="$app/Contents/Resources/examples/little-list/little-list.pbapp"
-cp "target/release/Little List.pbapp" "$pb_little_list_template"
-# The running app checks this sealed digest before signing a template copy.
-pb_little_list_digest=$(PYTHONPATH="$PWD/scripts" python3 - "$pb_little_list_template" <<'PYTHON'
+# The launcher examples retain the signed packages issued by their publisher.
+# The app seal also binds each installed resource to the release.
+install_example() {
+    pb_example="$app/Contents/Resources/examples/$1"
+    mkdir -p "$pb_example"
+    pb_filename="$pb_example/$1${5:-}.pbapp"
+    cp "$3" "$pb_filename"
+    cp "$4" "$pb_example/icon.png"
+    pb_digest=$(PYTHONPATH="$PWD/scripts" python3 - "$pb_filename" <<'PY_DIGEST'
 import hashlib
 import sys
 from identifier import encode
@@ -130,12 +129,33 @@ from identifier import encode
 with open(sys.argv[1], "rb") as template:
     data = template.read(1024 * 1024 + 1)
 if len(data) > 1024 * 1024:
-    sys.exit("Bundled Little List template exceeds 1 MiB")
+    sys.exit(f"Bundled template exceeds 1 MiB: {sys.argv[1]}")
 print(encode(hashlib.sha256(data).digest()))
-PYTHON
+PY_DIGEST
 )
-/usr/libexec/PlistBuddy -c "Add :PlaybitLittleListTemplateSHA256 string $pb_little_list_digest" \
-    "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Add :$2 string $pb_digest" "$app/Contents/Info.plist"
+}
+pb_packager="$PWD/$app/Contents/MacOS/pb"
+install_channel_examples() {
+    pb_sources=playbit/platform/macos/examples
+    install_example "$1" "$2" "$pb_sources/$1.pbapp" "$3"
+    install_example "$1" "${2}Testing" "$pb_sources/$1-testing.pbapp" "$3" -testing
+    install_example "$1" "${2}Personal" "$pb_sources/$1-personal.pbapp" "$3" -personal
+}
+install_channel_examples little-list PlaybitLittleListTemplateSHA256 guests/little-list/icon.png
+(
+    pb_apps_commit=fbf5fabbc96f1d28a243be21495b8147cc023730
+    pb_apps_cache="$PWD/target/$pb_build_profile/example-apps.git"
+    git init --quiet --bare "$pb_apps_cache"
+    if ! git --git-dir="$pb_apps_cache" cat-file -e "$pb_apps_commit^{commit}" 2>/dev/null; then
+        git --git-dir="$pb_apps_cache" fetch --depth=1 --no-tags https://github.com/playbit/apps.git \
+            "$pb_apps_commit:refs/pins/$pb_apps_commit"
+    fi
+    pb_apps_src=$(mktemp -d "$PWD/target/$pb_build_profile/example-apps.XXXXXX")
+    trap 'rm -rf "$pb_apps_src"' EXIT
+    git --git-dir="$pb_apps_cache" show "$pb_apps_commit:football/icon.png" > "$pb_apps_src/icon.png"
+    install_channel_examples football PlaybitFootballTemplateSHA256 "$pb_apps_src/icon.png"
+)
 (cd guests/todo && "$pb_packager" build --release --sdk=system --template)
 mkdir -p "$app/Contents/Resources/examples/todo"
 cp target/release/TODO.pbapp "$app/Contents/Resources/examples/todo/todo.pbapp"

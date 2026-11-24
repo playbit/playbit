@@ -649,7 +649,7 @@ pub(crate) mod environment {
     pub(crate) mod participant {
         use super::super::Layout;
         pub(crate) const MIN_SIZE: u32 = 88;
-        pub(crate) const SIZEOF: u32 = 88;
+        pub(crate) const SIZEOF: u32 = 344;
         pub(crate) const ALIGNMENT: u32 = 4;
         pub(crate) const SIZE: usize = 0;
         pub(crate) const WRITTEN: usize = 4;
@@ -657,6 +657,7 @@ pub(crate) mod environment {
         pub(crate) const DEVICE_ID: usize = 24;
         pub(crate) const INSTANCE_ID: usize = 40;
         pub(crate) const BUILD_ID: usize = 56;
+        pub(crate) const DISPLAY_NAME: usize = 88;
         pub(crate) const LAYOUT: Layout = Layout {
             minimum: MIN_SIZE,
             size: SIZEOF,
@@ -668,8 +669,10 @@ pub(crate) mod environment {
                 (DEVICE_ID, 16),
                 (INSTANCE_ID, 16),
                 (BUILD_ID, 32),
+                (DISPLAY_NAME, playbit_api::abi::environment::DISPLAY_NAME_BYTES),
             ],
         };
+        pub(crate) const OUTPUT: Layout = LAYOUT.before_output_tail(DISPLAY_NAME);
     }
 }
 
@@ -813,7 +816,7 @@ pub(crate) mod operations {
     pub(crate) mod identity {
         use super::super::Layout;
         pub(crate) const MIN_SIZE: u32 = 104;
-        pub(crate) const SIZEOF: u32 = 104;
+        pub(crate) const SIZEOF: u32 = 360;
         pub(crate) const ALIGNMENT: u32 = 8;
         pub(crate) const SIZE: usize = 0;
         pub(crate) const WRITTEN: usize = 4;
@@ -824,6 +827,7 @@ pub(crate) mod operations {
         pub(crate) const SESSION_ID: usize = 64;
         pub(crate) const FLAGS: usize = 96;
         pub(crate) const RESERVED: usize = 100;
+        pub(crate) const DISPLAY_NAME: usize = 104;
         pub(crate) const LAYOUT: Layout = Layout {
             minimum: MIN_SIZE,
             size: SIZEOF,
@@ -838,8 +842,10 @@ pub(crate) mod operations {
                 (SESSION_ID, 32),
                 (FLAGS, 4),
                 (RESERVED, 4),
+                (DISPLAY_NAME, playbit_api::abi::environment::DISPLAY_NAME_BYTES),
             ],
         };
+        pub(crate) const OUTPUT: Layout = LAYOUT.before_output_tail(DISPLAY_NAME);
     }
 }
 

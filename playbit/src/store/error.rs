@@ -56,6 +56,11 @@ impl fmt::Display for Error {
 }
 
 impl Error {
+    #[cfg(feature = "connected-engine")]
+    pub(crate) const OWNER_CAPTURE_CHANGED: &'static str = "owner volume changed during capture";
+    #[cfg(all(not(target_arch = "wasm32"), feature = "local-store"))]
+    pub(crate) const PENDING_BACKING: &'static str = "accepted backing is pending";
+
     pub const UNSUPPORTED_VOLUME_FORMAT: &'static str = "This session uses a data format this version of Playbit can’t open. Your saved data has been kept.";
 
     #[cfg(feature = "local-store")]

@@ -475,6 +475,17 @@ fn prepared_changes_are_bound_to_hash_key_and_branch_factor() {
         prepare(&dst, &src).merge(&other, Lww, WALL, 65536),
         Err(Error::HashKeyMismatch)
     ));
+    let received = prepare(&dst, &src);
+    assert!(matches!(
+        received.merge_projection(&other, &[99; 32], Lww, WALL, 65536),
+        Err(Error::HashKeyMismatch)
+    ));
+    received
+        .merge_projection(&other, &dst.meta().hash_key, Lww, WALL, 65536)
+        .unwrap()
+        .finish_with_delta()
+        .unwrap();
+    assert_eq!(other.begin_read().unwrap().get(b"key").unwrap().unwrap().as_ref(), b"value");
     let mut options = CreateOptions::syncable([32; 32], 1);
     options.branch_factor = 4;
     let other = Db::create(MemStorage::new(), &options).unwrap();
@@ -551,4 +562,36 @@ fn merge_requires_a_syncable_database_and_can_forget_local_only_entries() {
     assert!(r.get(b"local-only").unwrap().is_none());
     assert!(r.is_del(b"local-only").unwrap().is_none(), "forgotten, not tombstoned");
     assert_eq!(r.get(b"shared").unwrap().unwrap().as_ref(), b"s");
+}
+
+#[test]
+fn projection_journals_only_changed_logical_values_across_hash_contexts() {
+    let public = [0x93; 32];
+    let source = Db::create(MemStorage::new(), &CreateOptions::syncable(public, 1)).unwrap();
+    let canonical = db();
+    let large = vec![7; 32768];
+    for db in [&source, &canonical] {
+        put(db, b"large", &large, WALL);
+    }
+    put(&source, b"after", b"new", WALL + 1);
+    let mut req = Vec::new();
+    let mut rx = PreparedSync::new_projection(
+        &canonical,
+        public,
+        Bytes::default(),
+        Bytes::default(),
+        32,
+        &mut req,
+    )
+    .unwrap();
+    exchange(&mut rx, &source, req).unwrap();
+    let prepared = rx.finish().unwrap();
+    assert!(prepared.journal.len() <= 32);
+    let (result, _) = prepared
+        .merge_projection(&canonical, &public, Lww, WALL + 2, 65536)
+        .unwrap()
+        .finish_with_delta()
+        .unwrap();
+    assert_eq!(result.applied, 1);
+    assert_eq!(canonical.begin_read().unwrap().get(b"after").unwrap().unwrap().as_ref(), b"new");
 }

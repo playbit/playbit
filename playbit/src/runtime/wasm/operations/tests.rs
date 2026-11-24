@@ -131,6 +131,7 @@ pub(super) fn context() -> GuestContext {
         app_name: "Test app".into(),
         app_build: None,
         identity: Identity {
+            display_name: "Zoë".into(),
             account_id: [1; 16],
             is_service: false,
             device_id: [2; 16],
@@ -443,10 +444,20 @@ fn named_control_imports_preserve_outputs_events_and_scoped_identity() {
         for offset in [0, 3, 65528, u32::MAX] {
             assert_eq!(identity.call(&mut store, offset).unwrap(), -3);
         }
-        word(memory.data_mut(&mut store), 32, 104);
+        memory.data_mut(&mut store)[136..392].fill(0x55);
+        for size in [104, 128, 359] {
+            word(memory.data_mut(&mut store), 32, size);
+            assert_eq!(identity.call(&mut store, 32).unwrap(), 0);
+            assert_eq!(&memory.data(&store)[32..36], &size.to_le_bytes());
+            assert_eq!(&memory.data(&store)[36..40], &104_u32.to_le_bytes());
+            assert_eq!(&memory.data(&store)[48..64], &[1; 16]);
+            assert_eq!(&memory.data(&store)[96..128], &[4; 32]);
+            assert_eq!(&memory.data(&store)[136..392], &[0x55; 256]);
+        }
+        word(memory.data_mut(&mut store), 32, 360);
         assert_eq!(identity.call(&mut store, 32).unwrap(), 0);
-        assert_eq!(&memory.data(&store)[48..64], &[1; 16]);
-        assert_eq!(&memory.data(&store)[96..128], &[4; 32]);
+        assert_eq!(&memory.data(&store)[136..140], "Zoë".as_bytes());
+        assert_eq!(&memory.data(&store)[140..392], &[0; 252]);
         let generation = store.data().app.generation;
         assert_eq!(
             u64::from_le_bytes(memory.data(&store)[40..48].try_into().unwrap()),
@@ -864,11 +875,11 @@ fn surface_notifications_are_validated_before_queueing_and_poll_exact_bytes() {
             Event { data: data[..15].to_vec(), ..event.clone() },
         ] {
             assert!(crate::runtime::syscall::validate_input(&view, &bad).is_err());
-            assert!(store.data_mut().app.queue_event(generation, bad).is_err());
+            assert!(store.data_mut().app.queue_event(generation, bad, None).is_err());
             assert_eq!(store.data().app.events.len(), 1, "only Started remains");
         }
-        assert!(store.data_mut().app.queue_event(generation + 1, event.clone()).is_err());
-        store.data_mut().app.queue_event(generation, event).unwrap();
+        assert!(store.data_mut().app.queue_event(generation + 1, event.clone(), None).is_err());
+        store.data_mut().app.queue_event(generation, event, None).unwrap();
         let poll = instance.get_typed_func::<(u32, u32, u32), i32>(&mut store, "event").unwrap();
         let memory = instance.get_memory(&mut store, "memory").unwrap();
         word(memory.data_mut(&mut store), 32, 24);

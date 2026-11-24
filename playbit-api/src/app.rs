@@ -506,6 +506,9 @@ mod tests {
         let event = context.poll_event_deadline(0, &mut []).expect("empty event payload");
         assert_eq!((event.target, event.kind), (1, EventKind::Click));
 
+        host.push(EventKind::IdentityChanged, 0, &[]);
+        let changed = context.poll_event_deadline(0, &mut []).expect("known advisory event");
+        assert_eq!(changed.kind, EventKind::IdentityChanged);
         host.push_raw(999, 0, &[]);
         host.push(EventKind::Click, 2, &[]);
         assert_eq!(

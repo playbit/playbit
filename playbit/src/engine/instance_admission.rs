@@ -24,6 +24,20 @@ impl Engine {
                 | Request::InstanceLaunchFailed { .. }
         );
         let response = match request {
+            Request::PrepareSession { session } => {
+                let retained = self.services.store.session(&session)?;
+                self.check_local_purge(&retained.app)?;
+                if self.services.store.app_removed(&retained.app)?
+                    && self.session_instances.owns_session(
+                        &session,
+                        self.services.store.account().id,
+                        peer,
+                    )?
+                {
+                    return self.prepare_existing_session(retained, true);
+                }
+                return self.dispatch_reply(Request::PrepareSession { session });
+            }
             Request::InstanceChannelsAck { context, delivery } => {
                 let instance = self.session_instances.authorize(context, peer)?;
                 {
@@ -69,6 +83,7 @@ impl Engine {
                     return Err("Saved instance belongs to another account".into());
                 }
                 let retained = self.services.store.session(&binding.session)?;
+                self.check_app_launch(&retained.app)?;
                 self.check_instance_build(&retained, &retained.resolved_build_id)?;
                 if binding.root != retained.root_volume {
                     return Err("Saved instance has a different session binding".into());
@@ -124,6 +139,7 @@ impl Engine {
             } => {
                 super::host_mount::validate(&host_mounts)?;
                 let retained = self.services.store.session(&session)?;
+                self.check_app_launch(&retained.app)?;
                 self.check_instance_build(&retained, &retained.resolved_build_id)?;
                 if extra_volumes.len() + host_mounts.len()
                     > playbit_api::abi::syscall::MAX_VOLUMES - 2
@@ -185,16 +201,18 @@ impl Engine {
             Request::InstanceClaim { instance } => {
                 // Validate the retained binding before changing ownership.
                 let binding = self.session_instances.descriptor(instance)?;
-                let (session, volumes, session_reference) = match self.launch_context(&binding) {
-                    Ok(context) => context,
-                    Err(error) => {
-                        self.session_instances.reject_unclaimed(instance)?;
-                        self.state_changed();
-                        return Err(error);
-                    }
-                };
+                let (session, volumes, session_reference) =
+                    match self.launch_context(&binding, false) {
+                        Ok(context) => context,
+                        Err(error) => {
+                            self.session_instances.reject_unclaimed(instance)?;
+                            self.state_changed();
+                            return Err(error);
+                        }
+                    };
                 let (instance, context) = self.session_instances.claim(instance, peer)?;
                 Reply::InstanceAdmission(Admission {
+                    display_name: self.services.store.guest_display_name().clone(),
                     instance,
                     context,
                     session,
@@ -209,7 +227,7 @@ impl Engine {
                 binding.build = build.clone();
                 // Current session consent narrows the original immutable
                 // extra-volume ceiling. Reconstruction never adds a grant.
-                let (session, volumes, session_reference) = self.launch_context(&binding)?;
+                let (session, volumes, session_reference) = self.launch_context(&binding, true)?;
                 self.service_executor.cancel_channels(prior.into());
                 self.network.blobs.retire_channels(*prior.instance.as_bytes());
                 if self.service_executor.context_pending(prior)
@@ -245,6 +263,7 @@ impl Engine {
                     }
                     let (instance, context) = reconstructed?;
                     Reply::InstanceAdmission(Admission {
+                        display_name: self.services.store.guest_display_name().clone(),
                         instance,
                         context,
                         session,
@@ -289,15 +308,38 @@ impl Engine {
             StopReason::ContextUnavailable
         }
     }
+    fn check_local_purge(&self, app: &crate::package::AppIdentity) -> Result<()> {
+        if self.purging_app.as_ref() == Some(app) {
+            return Err("This app’s local data is being removed".into());
+        }
+        Ok(())
+    }
+
+    fn check_app_launch(&self, app: &crate::package::AppIdentity) -> Result<()> {
+        self.check_local_purge(app)?;
+        if self.services.store.app_removed(app)? {
+            return Err(
+                "This app was removed. Import it or join its session again to open it.".into()
+            );
+        }
+        Ok(())
+    }
+
     fn launch_context(
         &self,
         binding: &SessionInstance,
+        reconstructing: bool,
     ) -> Result<(
         crate::store::Session,
         Vec<crate::runtime::host::AvailableVolume>,
         crate::store::SessionReference,
     )> {
         let (session, volumes) = self.instance_context(binding)?;
+        if reconstructing {
+            self.check_local_purge(&session.app)?;
+        } else {
+            self.check_app_launch(&session.app)?;
+        }
         let reference =
             crate::store::SessionReference::retained(&self.services.store, &session.id)?;
         Ok((session, volumes, reference))

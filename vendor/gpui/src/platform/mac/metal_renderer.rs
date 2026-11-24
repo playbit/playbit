@@ -1053,8 +1053,6 @@ impl MetalRenderer {
         align_offset(instance_offset);
 
         let texture = self.sprite_atlas.metal_texture(texture_id);
-        let texture_size =
-            size(DevicePixels(texture.width() as i32), DevicePixels(texture.height() as i32));
         command_encoder.set_render_pipeline_state(&self.polychrome_sprites_pipeline_state);
         command_encoder.set_vertex_buffer(
             SpriteInputIndex::Vertices as u64,
@@ -1070,11 +1068,6 @@ impl MetalRenderer {
             SpriteInputIndex::ViewportSize as u64,
             mem::size_of_val(&viewport_size) as u64,
             &viewport_size as *const Size<DevicePixels> as *const _,
-        );
-        command_encoder.set_vertex_bytes(
-            SpriteInputIndex::AtlasTextureSize as u64,
-            mem::size_of_val(&texture_size) as u64,
-            &texture_size as *const Size<DevicePixels> as *const _,
         );
         command_encoder.set_fragment_buffer(
             SpriteInputIndex::Sprites as u64,

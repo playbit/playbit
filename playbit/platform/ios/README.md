@@ -117,6 +117,8 @@ cargo test --locked --release -p playbit --lib platform::ios
 cargo test --locked --release -p playbit ui::embedded
 ```
 
+A saved name syncs across devices through the encrypted account replica. The account publisher also sends the name to AP for its readable account profile.
+
 ## Portable app surface notifications
 
 The window owner sends the shared `SurfaceChanged` event after initial layout

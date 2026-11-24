@@ -201,7 +201,11 @@ impl SignIn {
         let code = editor("Six-digit email code", 6, false, true, Step::Code, cx);
         let name = editor("Display name", 256, false, false, Step::Name, cx);
         let saved = cx.new(|cx| {
-            TextEditor::new("", cx).literal().placeholder("Saved account key").read_only()
+            TextEditor::new("", cx)
+                .literal()
+                .tabular_numerals()
+                .placeholder("Saved account key")
+                .read_only()
         });
         let error_scrollbars = cx.new(|_| Scrollbars::new(false));
         let scroll = error_scrollbars.read(cx).handle();

@@ -36,6 +36,8 @@ impl StopReason {
 
 #[derive(Clone, Debug, serde::Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct Notice {
+    #[serde(skip)]
+    pub display_name: String,
     pub context: Context,
     pub sequence: u64,
     pub revision: Option<(Id, u64)>,
@@ -78,9 +80,11 @@ pub(super) mod channel {
             revision: Option<(Id, u64)>,
             mount_revision: u64,
             volumes: Vec<crate::runtime::host::AvailableVolume>,
+            display_name: String,
         ) -> Result<Self> {
             let notice = Notice {
                 context,
+                display_name: if revision.is_some() { display_name } else { String::new() },
                 sequence: 1,
                 revision,
                 data_revision: revision.map_or(0, |(_, revision)| revision),
@@ -143,6 +147,7 @@ pub(super) mod channel {
             mount_revision: u64,
             stop: Option<StopReason>,
             volumes: Vec<crate::runtime::host::AvailableVolume>,
+            display_name: String,
         ) -> Result<()> {
             if !self.needs_update(revision, mount_revision, stop) {
                 return Ok(());
@@ -160,13 +165,16 @@ pub(super) mod channel {
                     }
                     _ => true,
                 };
+            let stop =
+                stop.or_else(|| revision.is_none().then_some(StopReason::ContextUnavailable));
             let notice = Notice {
                 context: self.context,
+                display_name: if stop.is_none() { display_name } else { String::new() },
                 sequence,
                 revision,
                 data_revision,
                 mount_revision,
-                stop: stop.or_else(|| revision.is_none().then_some(StopReason::ContextUnavailable)),
+                stop,
                 gap,
                 volumes,
             };
@@ -223,7 +231,8 @@ pub(super) mod channel {
         let records = notice
             .volumes
             .capacity()
-            .checked_mul(std::mem::size_of::<crate::runtime::host::AvailableVolume>())?;
+            .checked_mul(std::mem::size_of::<crate::runtime::host::AvailableVolume>())?
+            .checked_add(notice.display_name.capacity())?;
         notice.volumes.iter().try_fold(records, |bytes, volume| {
             let tags = volume.tags.capacity().checked_mul(std::mem::size_of::<String>())?;
             let bytes = bytes.checked_add(volume.name.capacity())?.checked_add(tags)?;
@@ -231,6 +240,9 @@ pub(super) mod channel {
         })
     }
     fn validate_notice(notice: &Notice) -> Result<()> {
+        if !notice.display_name.is_empty() {
+            crate::store::account::validate_display_name(&notice.display_name)?;
+        }
         if metadata_bytes(notice).is_none_or(|bytes| bytes > MOUNT_METADATA_BYTES) {
             return Err("Mount snapshot allocation exceeds its bounded reservation".into());
         }
@@ -243,8 +255,8 @@ pub(super) mod channel {
             if notice.volumes.iter().any(|volume| volume.tags.len() > 1) {
                 return Err("Mount notices allow at most one bounded role tag per volume".into());
             }
-        } else if !notice.volumes.is_empty() {
-            return Err("A revoked context cannot retain mounts".into());
+        } else if !notice.volumes.is_empty() || !notice.display_name.is_empty() {
+            return Err("A revoked context cannot retain guest metadata".into());
         }
         Ok(())
     }
@@ -301,10 +313,13 @@ pub(super) mod channel {
         fn partial_delivery_keeps_its_frame_and_coalesces_a_bounded_successor() {
             let (mut server, mut client) = UnixStream::pair().unwrap();
             let epoch = Id::from_bytes([4; 16]);
-            let mut channel = Channel::new(context(), Some((epoch, 0)), 0, volumes()).unwrap();
+            let mut channel =
+                Channel::new(context(), Some((epoch, 0)), 0, volumes(), String::new()).unwrap();
             assert!(channel.write(&mut server, &mut 1).unwrap());
             for revision in 1..100 {
-                channel.observe(Some((epoch, revision)), revision, 0, None, volumes()).unwrap();
+                channel
+                    .observe(Some((epoch, revision)), revision, 0, None, volumes(), String::new())
+                    .unwrap();
             }
             assert!(channel.allocated() < 4096);
             assert!(channel.write(&mut server, &mut (64 * 1024)).unwrap());
@@ -321,10 +336,11 @@ pub(super) mod channel {
         fn coalescing_an_unrelated_fence_retains_the_mounted_change_revision() {
             let (mut server, mut client) = UnixStream::pair().unwrap();
             let epoch = Id::from_bytes([4; 16]);
-            let mut channel = Channel::new(context(), Some((epoch, 0)), 0, volumes()).unwrap();
+            let mut channel =
+                Channel::new(context(), Some((epoch, 0)), 0, volumes(), String::new()).unwrap();
             channel.write(&mut server, &mut 1).unwrap();
-            channel.observe(Some((epoch, 1)), 1, 0, None, volumes()).unwrap();
-            channel.observe(Some((epoch, 2)), 1, 0, None, volumes()).unwrap();
+            channel.observe(Some((epoch, 1)), 1, 0, None, volumes(), String::new()).unwrap();
+            channel.observe(Some((epoch, 2)), 1, 0, None, volumes(), String::new()).unwrap();
             channel.write(&mut server, &mut (64 * 1024)).unwrap();
             let first = receive(&mut client);
             let last = receive(&mut client);
@@ -332,19 +348,22 @@ pub(super) mod channel {
             assert_eq!(last.revision, Some((epoch, 2)));
             assert_eq!(last.data_revision, 1);
             assert!(last.gap);
-            assert!(channel.observe(Some((epoch, 3)), 0, 0, None, volumes()).is_err());
+            assert!(
+                channel.observe(Some((epoch, 3)), 0, 0, None, volumes(), String::new()).is_err()
+            );
         }
         #[test]
         fn mount_edits_deliver_without_a_replicated_data_change() {
             let (mut server, mut client) = UnixStream::pair().unwrap();
             let revision = Some((Id::from_bytes([4; 16]), 7));
-            let mut channel = Channel::new(context(), revision, 0, volumes()).unwrap();
+            let mut channel =
+                Channel::new(context(), revision, 0, volumes(), String::new()).unwrap();
             channel.write(&mut server, &mut (64 * 1024)).unwrap();
             let first = receive(&mut client);
             assert!(channel.needs_update(revision, 1, None));
             let mut mounts = volumes();
             mounts[0].name = "Renamed".into();
-            channel.observe(revision, 7, 1, None, mounts.clone()).unwrap();
+            channel.observe(revision, 7, 1, None, mounts.clone(), String::new()).unwrap();
             channel.write(&mut server, &mut (64 * 1024)).unwrap();
             let next = receive(&mut client);
             assert_eq!(next.revision, first.revision);
@@ -353,15 +372,23 @@ pub(super) mod channel {
             assert_eq!(next.sequence, first.sequence + 1);
             assert_eq!(next.volumes, mounts);
             assert!(!next.gap);
-            assert!(channel.observe(revision, 7, 0, None, volumes()).is_err());
+            assert!(channel.observe(revision, 7, 0, None, volumes(), String::new()).is_err());
         }
         #[test]
         fn retired_context_delivers_an_ordered_terminal_before_closure() {
             let (mut server, mut client) = UnixStream::pair().unwrap();
             let epoch = Id::from_bytes([4; 16]);
-            let mut channel = Channel::new(context(), Some((epoch, 0)), 0, volumes()).unwrap();
+            let mut channel =
+                Channel::new(context(), Some((epoch, 0)), 0, volumes(), String::new()).unwrap();
             channel
-                .observe(Some((epoch, 1)), 1, 0, Some(StopReason::ContextUnavailable), vec![])
+                .observe(
+                    Some((epoch, 1)),
+                    1,
+                    0,
+                    Some(StopReason::ContextUnavailable),
+                    vec![],
+                    String::new(),
+                )
                 .unwrap();
             assert!(!channel.write(&mut server, &mut (64 * 1024)).unwrap());
             assert!(receive(&mut client).stop.is_none());
@@ -396,18 +423,22 @@ pub(super) mod channel {
             }
             let epoch = Id::from_bytes([4; 16]);
             let (mut server, mut client) = UnixStream::pair().unwrap();
-            let mut channel = Channel::new(context(), Some((epoch, 0)), 0, mounts.clone()).unwrap();
+            let name = "a".repeat(playbit_api::abi::environment::DISPLAY_NAME_BYTES);
+            let mut channel =
+                Channel::new(context(), Some((epoch, 0)), 0, mounts.clone(), name.clone()).unwrap();
             channel.write(&mut server, &mut 1).unwrap();
             mounts[2].rights = crate::runtime::host::VolumeRights::READ;
-            channel.observe(Some((epoch, 1)), 1, 0, None, mounts.clone()).unwrap();
+            channel.observe(Some((epoch, 1)), 1, 0, None, mounts.clone(), name.clone()).unwrap();
             mounts.remove(3);
-            channel.observe(Some((epoch, 2)), 2, 0, None, mounts.clone()).unwrap();
+            channel.observe(Some((epoch, 2)), 2, 0, None, mounts.clone(), "Zoë".into()).unwrap();
             assert!(channel.allocated() * MAX_CHANNELS <= MAX_PROFILE_BYTES);
             let receiver = std::thread::spawn(move || (receive(&mut client), receive(&mut client)));
             while channel.writing() {
                 channel.write(&mut server, &mut (64 * 1024)).unwrap();
             }
             let (first, last) = receiver.join().unwrap();
+            assert_eq!(first.display_name, name);
+            assert_eq!(last.display_name, "Zoë");
             assert_eq!(first.volumes.len(), playbit_api::abi::syscall::MAX_VOLUMES);
             assert_eq!(last.volumes, mounts);
             assert!(last.gap);
@@ -416,14 +447,17 @@ pub(super) mod channel {
         fn oversized_successor_is_rejected_before_coalesced_admission() {
             let epoch = Id::from_bytes([4; 16]);
             let (mut server, _client) = UnixStream::pair().unwrap();
-            let mut channel = Channel::new(context(), Some((epoch, 0)), 0, volumes()).unwrap();
+            let mut channel =
+                Channel::new(context(), Some((epoch, 0)), 0, volumes(), String::new()).unwrap();
             channel.write(&mut server, &mut 1).unwrap();
             let mut oversized = volumes();
             oversized[0].name.reserve(MOUNT_METADATA_BYTES);
-            assert!(channel.observe(Some((epoch, 1)), 1, 0, None, oversized).is_err());
+            assert!(
+                channel.observe(Some((epoch, 1)), 1, 0, None, oversized, String::new()).is_err()
+            );
             assert!(channel.successor.is_none());
             assert_eq!(channel.observed, Some((epoch, 0)));
-            channel.observe(Some((epoch, 1)), 1, 0, None, volumes()).unwrap();
+            channel.observe(Some((epoch, 1)), 1, 0, None, volumes(), String::new()).unwrap();
             assert_eq!(channel.successor.as_ref().unwrap().sequence, 2);
         }
     }

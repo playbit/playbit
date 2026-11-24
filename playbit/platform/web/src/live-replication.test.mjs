@@ -69,6 +69,22 @@ test('failure diagnostics distinguish subscription, catch-up, publication and ch
     assert.equal(replicationDiagnostic({ kind: 'failed', stage: 'delivery', code: 'private code', message: 'private data' }),
         'delivery: Synchronization failed (unknown)');
 });
+test('temporary server capacity during bootstrap retries with pending account changes intact', async () => {
+    let attempts = 0;
+    const f = fixture({ bootstrap() {
+        if (++attempts === 1) throw Object.assign(Error('AP request capacity exhausted'), { code: 'ap-capacity' });
+    } });
+    f.edit('index', 'account');
+    await f.actor.start([{ kind: 'account' }]);
+    assert.equal(f.states.at(-1).kind, 'reconnecting');
+    assert.equal(f.states.at(-1).stage, 'catch_up');
+    assert.equal(f.heads.length, 1);
+    await f.actor.start([{ kind: 'account' }]);
+    await f.actor.run.publisher;
+    assert.equal(f.states.at(-1).kind, 'live');
+    assert.equal(f.heads.length, 0);
+    await f.actor.stop();
+});
 test('file upload finishes before releasing its publication ticket while incoming changes continue', async () => {
     // Hold the immutable upload after metadata acknowledgment, then deliver
     // an incoming change. Neither upload completion nor a polling turn is faked.

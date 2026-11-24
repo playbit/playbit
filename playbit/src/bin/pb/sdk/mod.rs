@@ -582,9 +582,9 @@ pub(super) fn build_ocaml(directory: &Path, release: bool) -> Result<()> {
 }
 pub(super) fn update(args: &[String]) -> Result<serde_json::Value> {
     if args.len() != 2 || args[0] != "update" {
-        return Err("expected pb sdk update ocaml|rust".into());
+        return Err(crate::usage_error("expected pb sdk update ocaml|rust"));
     }
-    let language = language(&args[1])?;
+    let language = language(&args[1]).map_err(crate::usage_error)?;
     let tools = managed(language, true)?;
     Ok(serde_json::json!({"language":name(language), "sdk":tools.identity}))
 }

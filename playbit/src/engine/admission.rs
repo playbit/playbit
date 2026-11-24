@@ -54,6 +54,8 @@ impl Op {
                 | Self::OpenAutomaticVolume
                 | Self::DuplicateVolume
                 | Self::DuplicateEntry
+                | Self::AppRemovalImpact
+                | Self::RemoveApp
                 | Self::PayloadSize
         )
     }
@@ -116,6 +118,7 @@ request_routes! {
     InstanceLaunchFailed { .. } => None, Concurrent,
     LocalProtocol => None, Concurrent,
     Status => None, Concurrent,
+    DesktopLaunch => None, Concurrent,
     UiZoom { .. } => None, Concurrent,
     BrowserDrafts { .. } => None, Concurrent,
     DeleteVolume { .. } => None, Concurrent,
@@ -174,6 +177,8 @@ request_routes! {
     WorkOffline { .. } => None, Concurrent,
     Join { .. } => None, IdleOnly,
     PreviewInvitation { .. } => None, Concurrent,
+    PreviewDesktopInvitation { .. } => None, Concurrent,
+    RetainDesktopInvitation { .. } => None, Concurrent,
     WatchInvitation { .. } => None, Concurrent,
     ResumeInvitation { .. } => None, Concurrent,
     PauseInvitation { .. } => None, Concurrent,
@@ -186,6 +191,8 @@ request_routes! {
     InitializeRoot { .. } => None, Concurrent,
     InitializeApp { .. } => None, Concurrent,
     AppVolumes { .. } => None, Concurrent,
+    AppRemovalImpact { .. } => None, Concurrent,
+    RemoveApp { .. } => None, Concurrent,
     AutomaticVolumes { .. } => None, Concurrent,
     OpenAppVolume { .. } => None, Concurrent,
     OpenAutomaticVolume { .. } => None, Concurrent,
@@ -745,6 +752,10 @@ impl AdmissionQueue {
             let token = task.token;
             let changed = task.changes_state();
             self.bundle = None;
+            #[cfg(all(not(target_os = "ios"), feature = "process"))]
+            {
+                engine.purging_app = None;
+            }
             if changed {
                 engine.state_changed();
             }
@@ -967,6 +978,7 @@ impl AdmissionQueue {
                             volumes.is_err().then(|| engine.instance_stop_reason(channel.context))
                         }),
                         volumes.unwrap_or_default(),
+                        engine.services.store.guest_display_name().clone(),
                     )?;
                 }
                 bytes += channel.allocated();
@@ -1220,6 +1232,7 @@ impl AdmissionQueue {
                                 engine.services.store.delivery_revision(),
                                 engine.session_instances.mount_revision(context.instance),
                                 engine.instance_volumes(context)?,
+                                engine.services.store.guest_display_name().clone(),
                             )
                         })
                 };
@@ -1323,6 +1336,7 @@ impl AdmissionQueue {
             if matches!(
                 request,
                 Request::InstanceInspect { .. }
+                    | Request::PrepareSession { .. }
                     | Request::InstanceStopReason { .. }
                     | Request::InstanceList { .. }
                     | Request::InstanceConfigurations { .. }
@@ -1362,6 +1376,8 @@ impl AdmissionQueue {
                     | Request::OpenAppVolume { .. }
                     | Request::OpenAutomaticVolume { .. }
                     | Request::DuplicateVolume { .. }
+                    | Request::AppRemovalImpact { .. }
+                    | Request::RemoveApp { .. }
                     | Request::DuplicateEntry { .. }
                     | Request::PayloadSize { .. }
             ) {
@@ -1382,8 +1398,19 @@ impl AdmissionQueue {
                     )?;
                     return Ok(());
                 }
+                #[cfg(all(not(target_os = "ios"), feature = "process"))]
+                let purging = match &request {
+                    Request::RemoveApp {
+                        app, confirmed: true, delete_local_data: true, ..
+                    } => Some(app.clone()),
+                    _ => None,
+                };
                 match bundle::Task::start(engine, self.pending[index].token, request) {
                     Ok(task) => {
+                        #[cfg(all(not(target_os = "ios"), feature = "process"))]
+                        {
+                            engine.purging_app = purging;
+                        }
                         self.bundle = Some(task);
                         self.pending[index].state = State::LocalBundle { owned_bytes };
                         self.rearm(index)?;
@@ -1829,6 +1856,122 @@ mod tests {
             self.queue.pending.push_back(pending);
             self.queue.pending.len() - 1
         }
+    }
+
+    #[cfg(all(not(target_os = "ios"), feature = "process"))]
+    #[test]
+    fn app_removal_checks_account_and_prevents_an_earlier_reservation_from_launching() {
+        // A row and an unclaimed launch both predate removal of this app.
+        use crate::store::{AppRemovalImpact, Id};
+        let mut fixture = Fixture::new();
+        let root = fixture.engine.services.store.create_volume("Personal data", false).unwrap();
+        let session =
+            fixture.engine.create_session(crate::engine::tests::button_package(), root.id).unwrap();
+        let account = fixture.engine.services.store.account().id;
+        let app = session.app;
+        let Reply::Instance(reserved) = fixture.exchange(Request::InstanceReserve {
+            request: Id::generate().unwrap(),
+            incarnation: fixture.engine.session_instances.incarnation(),
+            session: session.id,
+            extra_volumes: Box::default(),
+            host_mounts: Box::default(),
+            restore_host_mounts: false,
+        }) else {
+            panic!("expected a launch reservation")
+        };
+        let remove = |account, confirmed| Request::RemoveApp {
+            account,
+            app: app.clone(),
+            confirmed,
+            delete_local_data: false,
+        };
+        assert!(matches!(
+            fixture.exchange(remove(Id::generate().unwrap(), true)),
+            Reply::Error { .. }
+        ));
+        let impact = AppRemovalImpact { user_volumes: true, local_data: false };
+        assert!(
+            matches!(fixture.exchange(Request::AppRemovalImpact { account, app: app.clone() }),
+            Reply::AppRemovalImpact { impact: found } if found == impact)
+        );
+        assert!(matches!(fixture.exchange(remove(account, false)),
+            Reply::AppRemoved(crate::store::AppRemovalResult::Confirmation(found)) if found == impact));
+        assert!(matches!(
+            fixture.exchange(remove(account, true)),
+            Reply::AppRemoved(crate::store::AppRemovalResult::Removed { cleanup_error: None, .. })
+        ));
+        assert!(matches!(
+            fixture.exchange(Request::InstanceClaim { instance: reserved.id }),
+            Reply::Error { .. }
+        ));
+        assert_eq!(fixture.engine.services.store.volume(root.id).unwrap(), root);
+        assert!(fixture.engine.services.store.retained_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn app_removal_purges_retained_data_for_a_new_pending_only_invitation() {
+        use crate::package::AutomaticVolumeRole;
+        use crate::store::{Access, BuildSelector, LocalStore};
+        let mut fixture = Fixture::new();
+        let store = fixture.engine.services.store.clone();
+        let package = crate::package::signature::testing::signed(
+            &store,
+            crate::engine::tests::button_package(),
+        )
+        .unwrap();
+        let bundle = fixture._directory.path().join("button.pbapp");
+        std::fs::write(&bundle, package.to_bytes().unwrap()).unwrap();
+        let Reply::Developer(crate::engine::reply::DeveloperReply::Session(local)) =
+            fixture.exchange(Request::CreateSession { bundle, root: None, user: None })
+        else {
+            panic!("local import creates a listed app");
+        };
+        let volume = store.open_app_volume(&local.app, AutomaticVolumeRole::Local).unwrap();
+        let owner = Access::owner(store.account().id);
+        let blob = store.create_blob(&owner, volume.id, "saved", b"keep").unwrap();
+        let remove = |delete_local_data| Request::RemoveApp {
+            account: store.account().id,
+            app: local.app.clone(),
+            confirmed: true,
+            delete_local_data,
+        };
+        assert!(matches!(
+            fixture.exchange(remove(false)),
+            Reply::AppRemoved(crate::store::AppRemovalResult::Removed { cleanup_error: None, .. })
+        ));
+        assert!(matches!(
+            fixture.exchange(remove(true)),
+            Reply::AppRemoved(crate::store::AppRemovalResult::Removed { cleanup_error: None, .. })
+        ));
+        assert_eq!(store.read_blob_entry(&owner, volume.id, blob.id).unwrap(), b"keep");
+
+        // A new invitation from another account lists this app again before joining.
+        let sender = LocalStore::open(fixture._directory.path().join("sender")).unwrap();
+        let root = sender.create_volume("Shared", true).unwrap();
+        let build = local.resolved_build_id;
+        let invitation = sender
+            .create_session(
+                &local.app,
+                BuildSelector::App { app: local.app.clone() },
+                &build,
+                root.id,
+            )
+            .unwrap();
+        let channel = fixture.engine.channel();
+        store
+            .preview_invitation(&sender.invitation(&invitation.id, channel).unwrap(), channel)
+            .unwrap();
+        store
+            .receive_invitation(&invitation.id, &sender.session_envelope(&invitation.id).unwrap())
+            .unwrap();
+        assert!(store.app_removed(&local.app).unwrap());
+        assert!(store.app_removal_impact(&local.app).unwrap().local_data);
+        assert!(matches!(
+            fixture.exchange(remove(true)),
+            Reply::AppRemoved(crate::store::AppRemovalResult::Removed { cleanup_error: None, .. })
+        ));
+        assert!(store.pending_invitations().unwrap().is_empty());
+        assert!(matches!(store.volume(volume.id), Err(crate::store::Error::NotFound(_))));
     }
 
     #[cfg(all(not(target_os = "ios"), feature = "process"))]

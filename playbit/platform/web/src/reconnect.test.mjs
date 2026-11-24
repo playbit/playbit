@@ -10,13 +10,14 @@ import { stripTypeScriptTypes } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { retryable, failure } from './errors.ts';
 import { AccountSignal } from './account-notices.ts';
+import { base64url } from './recovery.ts';
 const source = stripTypeScriptTypes(await readFile(new URL('./runtime-worker.ts', import.meta.url), 'utf8'), { mode: 'strip' });
 const turn = () => new Promise(resolve => setImmediate(resolve));
 function fixture() {
     const timers = new Map(), messages = [], calls = [];
     let id = 0, failConnect = 0, starts = 0, state, hold;
     class Replica {
-        constructor(options) { state = options.state; }
+        constructor(options) { state = options.state; this.local = options.local; }
         async start() { starts++; this.run = { stopped: false }; state({ kind: 'live' }); }
         async stop() { this.run = null; }
     }
@@ -45,7 +46,7 @@ function fixture() {
             unblock() { updateTask = null; if (recoveryPending) connectReplication(); },
         };
     `, context);
-    return { owner: context.owner, timers, messages, calls, starts: () => starts,
+    return { context, owner: context.owner, timers, messages, calls, starts: () => starts,
         fail(count) { failConnect = count; }, hold(promise) { hold = promise; },
         async fire() { assert.equal(timers.size,1); const [key,timer] = timers.entries().next().value; timers.delete(key); timer.callback(); await turn(); return timer.delay; } };
 }
@@ -81,7 +82,60 @@ test('a retry deferred by app update is retained until the update retires', asyn
     f.owner.unblock(); await turn(); assert.equal(f.starts(),2);
 });
 
-test('runtime AP replies preserve transport classification through the second worker boundary', async () => {
+test('central name retries leave account publication and guest renames live', async () => {
+    const f = fixture(), sent = [], delivered = [];
+    let started = Promise.withResolvers();
+    await f.owner.connectReplication();
+    Object.assign(f.context, { base64url, personalSelections: async () => ({}), deliver: name => delivered.push(name),
+        put: async (method, request) => {
+            const receipt = Promise.withResolvers(); sent.push({ method, request, receipt });
+            started.resolve(sent.at(-1)); started = Promise.withResolvers(); await receipt.promise;
+        } });
+    vm.runInContext(`
+        host.exports.pb_live_peek = () => 0;
+        let adopted;
+        accountReplica = { apply: async version => { adopted = version; return true; }, displayNameRecord: async () => adopted,
+            head: async () => ({ source: 'account' }) };
+        refreshPersonal = async () => { displayName = adopted.name; deliver(displayName); };
+        refreshScene = async () => {}; ap = put;
+        globalThis.receive = version => {
+            const run = replicas.run;
+            return replicas.local.apply('account', 'index', version, () => !run.stopped);
+        };
+        globalThis.publish = () => replicas.local.head(() => !replicas.run.stopped);
+        globalThis.retire = () => { replicas.run.stopped = true; replicas.local.retired(); };
+        globalThis.resume = () => { replicas.run = { stopped: false }; };
+    `, f.context);
+    const key = new Uint8Array(32).fill(7);
+    const version = i => ({ name: 'Name ' + i, key, clock: BigInt(i), ciphertext: Uint8Array.of(255, i) });
+    const first = started.promise; await f.context.receive(version(1));
+    const { method, request, receipt } = await first;
+    assert.equal(method, 'request'); assert.ok(validId(request.operation_id, 16));
+    assert.deepEqual({ ...request }, { op: 'put_account_display_name', operation_id: request.operation_id,
+        name: 'Name 1', record_key: encodeId(key), clock: '1', ciphertext: '_wE' });
+    await f.context.receive(version(2)); await f.context.receive(version(3));
+    assert.deepEqual(delivered, ['Name 1', 'Name 2', 'Name 3']); assert.equal(sent.length, 1);
+    assert.equal((await f.context.publish()).source, 'account');
+    receipt.reject(Object.assign(failure('ap-rejected', 'Profile store busy'), { serviceCode: 'operation_failed' }));
+    await turn(); assert.equal((await f.context.publish()).source, 'account');
+    const retry = started.promise; assert.equal(await f.fire(), 250);
+    const latest = await retry; assert.equal(latest.request.name, 'Name 3');
+    latest.receipt.reject(failure('ap-transport', 'Disconnected')); await turn();
+    const legacy = started.promise; assert.equal(await f.fire(), 500);
+    (await legacy).receipt.reject(Object.assign(failure('ap-rejected', 'Older service'), { serviceCode: 'unsupported_operation' }));
+    await turn(); await f.context.receive(version(4)); assert.equal(f.timers.size, 0);
+    assert.equal(sent.length, 3); assert.equal((await f.context.publish()).source, 'account');
+    f.context.retire(); f.context.resume();
+    const old = started.promise; await f.context.receive(version(5)); const retired = await old;
+    f.context.retire(); f.context.resume();
+    const next = started.promise; await f.context.receive(version(6)); assert.equal(sent.length, 4);
+    retired.receipt.reject(failure('ap-transport', 'Retired'));
+    const active = await next; assert.equal(active.request.name, 'Name 6'); assert.equal(f.timers.size, 0);
+    active.receipt.reject(failure('ap-transport', 'Unavailable')); await turn(); assert.equal(f.timers.size, 1);
+    f.context.retire(); assert.equal(f.timers.size, 0);
+});
+
+test('runtime AP replies preserve transport and service codes through the second worker boundary', async () => {
     const replies=[];
     const context=vm.createContext({ ...compatibleWorkerStorage(), workerChannel, encodeId, decodeId, validId, guestOperations,GuestWork:FixtureWork,AccountSignal,observeAccountMetadata(){},TextEncoder,TextDecoder,
         self: { location: { href: "https://playbit.app/runtime-worker.js?channel=public" },postMessage:message=>replies.push(message)}});
@@ -90,4 +144,13 @@ test('runtime AP replies preserve transport classification through the second wo
     const id=replies[0].ap.id;
     context.self.onmessage({data:{apReply:{id,error:'Connection lost',code:'ap-transport'}}});
     await assert.rejects(pending,error=>error.code==='ap-transport');
+    const unsupported=context.request('request');
+    context.self.onmessage({data:{apReply:{id:replies[1].ap.id,error:'Older service',code:'ap-rejected',serviceCode:'unsupported_operation'}}});
+    await assert.rejects(unsupported,error=>error.code==='ap-rejected' && error.serviceCode==='unsupported_operation');
+    const ordinary = Array.from({ length: 64 }, () => context.request('status'));
+    const profile = context.request('request', { op: 'put_account_display_name' }), discovery = context.request('describe');
+    const write = context.request('channelDisplayName', 7, new Uint8Array(256));
+    await assert.rejects(context.request('status'), /capacity/);
+    for (const { ap } of replies.slice(-67)) context.self.onmessage({data:{apReply:{id:ap.id,result:{}}}});
+    await Promise.all([...ordinary, profile, discovery, write]);
 });

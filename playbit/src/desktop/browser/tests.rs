@@ -428,7 +428,7 @@ pub(super) fn entry(byte: u8) -> VolumeEntry {
     }
 }
 
-fn summary(entry: &VolumeEntry) -> EntrySummary {
+pub(super) fn summary(entry: &VolumeEntry) -> EntrySummary {
     EntrySummary {
         id: entry.id,
         parent: entry.info.namespace.parent,

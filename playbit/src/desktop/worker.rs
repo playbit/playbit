@@ -81,6 +81,8 @@ fn run(
         watch_failed: !gate.accepts(0),
         gate,
         recovery_pending: false,
+        desktop_launch_deferred: false,
+        preview_session: None,
     }
     .run();
 }
@@ -149,6 +151,9 @@ struct Worker {
     watch_failed: bool,
     gate: std::sync::Arc<worker_queue::Gate>,
     recovery_pending: bool,
+    desktop_launch_deferred: bool,
+    // Only the GUI process that requested a preview can retain it after receiving its details.
+    preview_session: Option<String>,
 }
 
 impl Worker {
@@ -230,6 +235,9 @@ impl Worker {
         self.respond(response)
     }
     fn next_message(&mut self) -> Option<Message> {
+        if !self.watch_failed && std::mem::take(&mut self.desktop_launch_deferred) {
+            return Some(Message::Request(QueuedRequest::internal(Request::DesktopLaunch)));
+        }
         if self.refresh.is_empty()
             && let Some(after) = self.rearm_after.take()
             && let Err(error) = self.watch.rearm(Some(after))
@@ -297,6 +305,7 @@ impl Worker {
             return true;
         }
         if self.watch_failed {
+            self.desktop_launch_deferred |= matches!(queued.request, Request::DesktopLaunch);
             return true;
         }
         if matches!(
@@ -462,10 +471,11 @@ impl Worker {
         response: &mut WorkerResponse,
         internal: bool,
     ) -> bool {
-        if !matches!(request, Request::Status) {
+        if !matches!(request, Request::Status | Request::DesktopLaunch) {
             return false;
         }
-        let recover = self.recovery.observe_status(response, internal);
+        let recover =
+            self.recovery.observe_status(response, internal && matches!(request, Request::Status));
         if self.recovery.offline() {
             self.recovery_pending = false;
         }
@@ -495,6 +505,32 @@ impl Worker {
             &request,
             Some(launch_completion(self.responses.clone(), self.gate.clone(), epoch)),
         );
+        if let Some(hold) = credit.as_ref().and_then(|credit| credit.draft_erasure.as_ref())
+            && (response.result.is_ok() || !response.erased_app_volumes.is_empty())
+        {
+            let _ = hold.receipt.try_send(response.erased_app_volumes.clone());
+        }
+        if let Request::PreviewDesktopInvitation { .. } = &request
+            && let Some(preview) = &response.invitation_preview
+        {
+            self.preview_session = (!preview.retained).then(|| preview.session.clone());
+        }
+        // Reopening a link can deliver the verified envelope in the preview
+        // reply before the change observer delivers its first status snapshot.
+        let loaded = response.desktop_invitation.as_deref().or_else(|| {
+            response
+                .invitation_preview
+                .as_ref()
+                .and_then(|preview| preview.received.as_ref().map(|_| preview.session.as_str()))
+        });
+        if let Some(session) =
+            self.preview_session.take_if(|session| loaded == Some(session.as_str()))
+            && let Err(error) =
+                ipc::call_archive(&self.profile, &Request::RetainDesktopInvitation { session })
+        {
+            response.invitation_preview = None;
+            response.result = Err(error.to_string());
+        }
         response.sign_in = sign_in;
         // LabelVolume returns the same Volume reply as creation. Only fresh
         // identities enter the create-and-name journey.

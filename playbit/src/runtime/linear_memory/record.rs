@@ -19,6 +19,16 @@ pub(crate) fn outputs(regions: &[Region]) -> HostResult<()> {
     disjoint(regions)
 }
 impl Layout {
+    /// Validate output structure using the fields preceding an all-or-nothing extension.
+    /// The caller still admits the entire declared allocation and publishes with the full layout.
+    pub(crate) const fn before_output_tail(self, offset: usize) -> Self {
+        let Some((&(last, _), fields)) = self.fields.split_last() else {
+            panic!("empty ABI layout")
+        };
+        assert!(last == offset, "expected the declared output tail");
+        Self { fields, ..self }
+    }
+
     fn admit(self, size: u32, input: bool) -> HostResult<()> {
         if size > MAX_RECORD_BYTES {
             return Err(Error::LimitExceeded);

@@ -221,30 +221,50 @@ fn floating_session_button_preserves_guest_pointer_and_titlebar_drag_outside_its
     let beside = gpui::point(bounds.left() - px(2.), bounds.center().y);
     assert!(cx.window_can_drag_at(window.into(), beside));
     assert!(!cx.window_can_drag_at(window.into(), bounds.center()));
-    let canvas = |id| ViewNode::Canvas {
-        id,
-        width: 640,
-        height: 560,
-        frames: playbit_api::ui::CanvasFrames::Static,
-        extent: CanvasExtent::Window,
-        clear_color: None,
-        items: vec![],
-    };
-    window
-        .update(cx, |this, _, cx| {
-            assert!(this.apply(scene(None, canvas(0)), InputAck::default(), cx));
-        })
-        .unwrap();
-    cx.run_until_parked();
-    assert!(cx.window_can_drag_at(window.into(), beside));
-    assert!(!cx.window_can_drag_at(window.into(), bounds.center()));
-    for style in [None, Some(WindowStyle::NONE)] {
+    let set_canvas = |style, id, cx: &mut gpui::TestAppContext| {
+        let canvas = ViewNode::Canvas {
+            id,
+            width: 640,
+            height: 560,
+            frames: playbit_api::ui::CanvasFrames::Static,
+            extent: CanvasExtent::Window,
+            clear_color: None,
+            items: vec![],
+        };
         window
             .update(cx, |this, _, cx| {
-                assert!(this.apply(scene(style, canvas(1)), InputAck::default(), cx));
+                assert!(this.apply(scene(style, canvas), InputAck::default(), cx));
             })
             .unwrap();
         cx.run_until_parked();
+    };
+    set_canvas(None, 0, cx);
+    assert!(cx.window_can_drag_at(window.into(), beside));
+    assert!(!cx.window_can_drag_at(window.into(), bounds.center()));
+    set_canvas(Some(titled), 1, cx);
+    assert!(cx.window_can_drag_at(window.into(), beside));
+    assert!(!cx.window_can_drag_at(window.into(), bounds.center()));
+    while inputs.try_recv().is_ok() {}
+    visual.simulate_click(beside, Default::default());
+    assert!(inputs.is_empty(), "a titlebar press belongs to the window");
+
+    // A drag that starts on the pitch can cross the titlebar and finish there.
+    let pitch = gpui::point(beside.x, px(100.));
+    let left = gpui::MouseButton::Left;
+    visual.simulate_mouse_down(pitch, left, Default::default());
+    visual.simulate_mouse_move(beside, Some(left), Default::default());
+    visual.simulate_mouse_up(beside, left, Default::default());
+    for phase in [1, 0, 2] {
+        let input = inputs.try_recv().unwrap().input;
+        assert_eq!((input.kind, input.target), (EventKind::Pointer, 1));
+        assert_eq!(
+            playbit_api::abi::syscall::PointerInput::decode(&input.data).unwrap().phase,
+            phase
+        );
+    }
+    assert!(inputs.is_empty());
+    for style in [None, Some(WindowStyle::NONE)] {
+        set_canvas(style, 1, cx);
         let overlay =
             window.update(cx, |_, window, _| copy_button_bounds(window).unwrap()).unwrap();
         assert_eq!(overlay, bounds);
@@ -256,21 +276,14 @@ fn floating_session_button_preserves_guest_pointer_and_titlebar_drag_outside_its
     // Hide between down and up. A later drag from the canvas onto the
     // restored button must not complete the old press.
     visual.simulate_mouse_down(bounds.center(), gpui::MouseButton::Left, Default::default());
-    let set_style = |style, cx: &mut gpui::TestAppContext| {
-        window
-            .update(cx, |this, _, cx| {
-                assert!(this.apply(scene(Some(style), canvas(1)), InputAck::default(), cx));
-            })
-            .unwrap();
-        cx.run_until_parked();
-    };
-    set_style(WindowStyle::HIDE_SESSION_BUTTON, cx);
+    set_canvas(Some(WindowStyle::HIDE_SESSION_BUTTON), 1, cx);
     visual.simulate_mouse_up(bounds.center(), gpui::MouseButton::Left, Default::default());
-    set_style(WindowStyle::NONE, cx);
+    set_canvas(Some(WindowStyle::NONE), 1, cx);
     visual.simulate_mouse_down(beside, gpui::MouseButton::Left, Default::default());
     visual.simulate_mouse_up(bounds.center(), gpui::MouseButton::Left, Default::default());
     cx.run_until_parked();
     assert!(cx.read_from_clipboard().is_none());
+    set_canvas(Some(titled), 1, cx);
     while inputs.try_recv().is_ok() {}
     visual.simulate_click(bounds.center(), Default::default());
     cx.run_until_parked();
@@ -282,14 +295,14 @@ fn floating_session_button_preserves_guest_pointer_and_titlebar_drag_outside_its
     server.join().unwrap();
 
     // A menu-initiated copy can still be pending when the button reappears.
-    set_style(WindowStyle::HIDE_SESSION_BUTTON, cx);
+    set_canvas(Some(WindowStyle::HIDE_SESSION_BUTTON), 1, cx);
     window
         .update(cx, |this, _, _| {
             this.session_link.as_mut().unwrap().copying =
                 Some(Copying { _task: gpui::Task::ready(()), state: Default::default() });
         })
         .unwrap();
-    set_style(WindowStyle::NONE, cx);
+    set_canvas(Some(WindowStyle::NONE), 1, cx);
     window
         .update(cx, |this, window, cx| {
             this.focus.focus(window);

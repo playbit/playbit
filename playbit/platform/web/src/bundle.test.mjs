@@ -129,8 +129,9 @@ test('capability discovery does not authenticate a structurally admitted package
     // The scalar dispatcher provides clock.read even without a host callback.
     const installed = new Set(Object.keys(target.operations).filter(name => name.startsWith('pb_')));
     installed.add('pb_clock_read');
-    assert(names.includes('ui.canvas.clear.v1'));
-    assert.equal(names.length, installed.size + 1);
+    const features = ['ui.canvas.clear.v1', 'display-names.v1'];
+    for (const feature of features) assert(names.includes(feature), feature);
+    assert.equal(names.length, installed.size + features.length);
     for (const name of ['object.schema.read.begin', 'object.schema.read.take', 'object.schema.establish.begin',
         'kv.keys.begin', 'kv.read.begin', 'kv.put.begin', 'kv.delete.begin', 'entry.resolve.begin', 'session.read', 'session.channel', 'clock.read']) {
         assert(names.includes(name), name);

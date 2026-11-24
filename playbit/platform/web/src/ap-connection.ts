@@ -11,6 +11,7 @@ import { AP, SERVICE_PROTOCOL, MAX_SERVICE_REQUEST, MAX_SERVICE_DESCRIPTION, Fra
 import type { FrameInput, Frame } from "./ap-codec.ts";
 import { MAX_REPLICA_EVENT, replicaInteger, snapshotInteger, bloblogInteger, subscriptionAck, replicaEvent } from "./replication.ts";
 import type { ApMethods, ApOperation, ApResponse, ApDescription, ApStatus, ApReplicaSubscription, ApPublicationAck, ApInvitationEvent } from "./ap-protocol.ts";
+import { advisoryOperation, type AdvisoryOperation } from './ap-protocol.ts';
 
 // Web upload sources retain their 64 MiB admission ceiling. Package
 // downloads use bounded streaming in package-stream.ts.
@@ -47,7 +48,7 @@ export interface ApChannel { writer: WritableStreamDefaultWriter<Uint8Array>; re
 interface StreamState {
     operation: ApOperation; busy: boolean; closed: boolean; finished: boolean; handle: number;
     writer?: WritableStreamDefaultWriter<Uint8Array>; reader?: FrameReader;
-    timer?: ReturnType<typeof setTimeout>; replica?: boolean; channel?: boolean; checkpointWriting?: boolean;
+    timer?: ReturnType<typeof setTimeout>; replica?: boolean; channel?: Uint8Array; controlWriting?: boolean; advisory?: AdvisoryOperation;
     upload?: ReadableStreamDefaultReader<Uint8Array> | null;
 }
 
@@ -83,6 +84,8 @@ function deadline<T>(promise: Promise<T>, milliseconds: number, cancel: () => vo
 export class ApConnection {
     private channelTicket = 0;
     private channelBytes = 0;
+    private readonly advisory = new Set<AdvisoryOperation>();
+    private sessionDisplayNames?: boolean;
     private readonly channelSessions = new Map<string, number>();
     private readonly channelDeliveries = new Map<number, {session:string;bytes:number}>();
     onboardingTask: Promise<void> | null = null;
@@ -132,6 +135,7 @@ export class ApConnection {
             this.transport = transport;
             this.connectionCount++;
             this.description = null;
+            this.sessionDisplayNames = undefined;
             transport.closed.then(() => this.disconnected(transport), () => this.disconnected(transport));
         }
         const transport = this.transport;
@@ -377,6 +381,7 @@ export class ApConnection {
             this.ready = null;
             this.channels.clear();
             this.description = null;
+            this.sessionDisplayNames = undefined;
             for (const handle of this.streams.keys()) this.streamClose(handle);
         }
     }
@@ -458,7 +463,8 @@ export class ApConnection {
             // session-channel sources use the decoded fixed-width identity.
             caCertificate: this.identity?.caCertificate ? Array.from(this.identity.caCertificate) : undefined,
             instanceId: this.identity ? Array.from(decodeId(text.decode(this.identity.instanceId), 16)) : null,
-            connectionCount: this.connectionCount, activeStreams: this.active };
+            connectionCount: this.connectionCount, activeStreams: this.active,
+            ...(this.sessionDisplayNames !== undefined && { sessionDisplayNames: this.sessionDisplayNames }) };
     }
 
     async beginChannel(frame: FrameInput,device:Uint8Array,generation:number): Promise<number> {
@@ -471,7 +477,7 @@ export class ApConnection {
         if(!transport)throw failure('ap-transport','AP is disconnected');
         if (this.streams.size >= 1024) throw new Error("AP channel capacity exceeded");
         const handle=this.nextStream++;
-        const state: StreamState={operation:{op:"session_channel",operation_id:encodeId(crypto.getRandomValues(new Uint8Array(16)))},busy:false,closed:false,finished:false,handle,channel:true};
+        const state: StreamState={operation:{op:"session_channel",operation_id:encodeId(crypto.getRandomValues(new Uint8Array(16)))},busy:false,closed:false,finished:false,handle,channel:frame.destination.slice()};
         this.streams.set(handle,state);
         try {
             await deadline(this.streamStep(handle,async()=>{
@@ -488,9 +494,15 @@ export class ApConnection {
     channelRead(handle:number):Promise<Frame & {receipt?:number}> {
         return this.streamStep(handle,async state=>{
             if (!state.channel) throw new Error("Expected session channel stream");
-            const frame = await state.reader!.frame(32*1024+44);
+            const frame = await state.reader!.frame(state.channel.length === 32 ? 64 * 1024 : 32 * 1024 + 44);
             return this.retainChannel(frame);
         });
+    }
+    async channelDisplayName(handle: number, name: Uint8Array): Promise<void> {
+        const state = this.streams.get(handle);
+        if (state?.channel?.length !== 32 || state.closed) throw failure("ap-transport", "Session membership stream is closed");
+        if (!(name instanceof Uint8Array) || name.length > 256) throw Error('Invalid display name length');
+        await this.writeControl(state, { type: AP.SUBSCRIBE, flags: 1, destination: state.channel, body: name });
     }
     retainChannel(frame:Frame):Frame & {receipt?:number} {
         if (frame.type!==AP.PUBLISH || frame.source.length!==80) return frame;
@@ -535,6 +547,7 @@ export class ApConnection {
                             throw new Error("Invalid AP discovery limits");
                     }
                     if (transport !== this.transport) throw failure("ap-transport", "AP connection changed during discovery");
+                    this.sessionDisplayNames = value.features.includes('session.display-names.v1');
                     return value;
                 } finally { this.streamClose(handle); }
             })();
@@ -563,10 +576,13 @@ export class ApConnection {
         if (transport !== this.transport) throw failure(generation === undefined ? "ap-transport" : "bloblog-offline", "AP connection changed before admission");
         const body = utf8.encode(JSON.stringify(operation));
         if (body.length > MAX_SERVICE_REQUEST) throw new Error("AP request exceeds limit");
-        if (this.active >= 16) throw new Error("AP has too many concurrent operations");
+        const advisory = advisoryOperation('begin', operation);
+        if (advisory && this.advisory.has(advisory)) throw failure('ap-capacity', 'An advisory AP operation is already active');
+        if (!advisory && this.active - this.advisory.size >= 16) throw new Error("AP has too many concurrent operations");
         if (!validId(operation.operation_id, 16)) throw new Error("Invalid AP operation identity");
         const handle = this.nextStream++;
-        const state: StreamState = { operation, busy: false, closed: false, finished: false, handle };
+        const state: StreamState = { operation, busy: false, closed: false, finished: false, handle, advisory };
+        if (advisory) this.advisory.add(advisory);
         this.streams.set(handle, state);
         this.active++;
         try {
@@ -595,6 +611,7 @@ export class ApConnection {
         this.streams.delete(handle);
         clearTimeout(state.timer);
         state.closed = true;
+        if (state.advisory) this.advisory.delete(state.advisory);
         if (state.replica) this.replicaStreams--;
         else if (!state.channel) this.active--;
         this.abandonStream(state);
@@ -634,7 +651,9 @@ export class ApConnection {
         if (response.ok !== true) {
             if (typeof response.code !== "string" || !/^[a-z0-9_]{1,64}$/.test(response.code)) throw new Error("Invalid AP failure code");
             let code = "ap-rejected";
-            if (state.operation.op === 'publish_bloblog' && response.denial) {
+            if (response.denial == null && response.code === 'operation_failed' && response.error === 'AP request capacity exhausted') {
+                code = 'ap-capacity';
+            } else if (state.operation.op === 'publish_bloblog' && response.denial) {
                 const denied = response.denial;
                 if (response.code !== 'operation_failed' || denied.cause !== 'participant_revoked'
                     || Object.keys(denied).sort().join() !== 'account_id,build_id,cause,session_id,volume_id'
@@ -693,14 +712,17 @@ export class ApConnection {
     async checkpointReplica(handle: number): Promise<void> {
         const state = this.streams.get(handle);
         if (!state?.replica || state.closed) throw failure("ap-transport", "Replica stream is closed");
-        if (state.checkpointWriting) throw new Error("Replica checkpoint write already in progress");
-        state.checkpointWriting = true;
+        await this.writeControl(state, { type: AP.DIRECT, destination: utf8.encode("service"), body: new Uint8Array([1, 0]) });
+    }
+    private async writeControl(state: StreamState, frame: FrameInput): Promise<void> {
+        if (state.controlWriting) throw new Error("Control write already in progress");
+        state.controlWriting = true;
         try {
             // The single control writer is independent of an idle event read.
-            await deadline(admittedWrite(state.writer!, encodeFrame({ type: AP.DIRECT, destination: utf8.encode("service"),
-                body: new Uint8Array([1, 0]) })).catch(error => { throw transportFailure(error); }), this.operationTimeout, () => this.streamClose(handle));
-        } catch (error) { this.streamClose(handle); throw error; }
-        finally { state.checkpointWriting = false; }
+            await deadline(admittedWrite(state.writer!, encodeFrame(frame)).catch(error => { throw transportFailure(error); }),
+                this.operationTimeout, () => this.streamClose(state.handle));
+        } catch (error) { this.streamClose(state.handle); throw error; }
+        finally { state.controlWriting = false; }
     }
 
     async publishReplica(operation: ApOperation, bytes: Uint8Array, generation?: number): Promise<ApPublicationAck> {

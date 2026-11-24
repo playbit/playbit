@@ -299,10 +299,10 @@ fn delegated_self_removal_keeps_only_its_exact_acl_publication_after_restart() {
         );
         #[cfg(feature = "connected-engine")]
         assert!(
-            !store
+            store
                 .publication_delta(&manager, volume.id, DatabaseId::Index, &bytes)
                 .unwrap()
-                .is_empty()
+                .is_some_and(|delta| !delta.is_empty())
         );
         let projected = ScopedSnapshot::for_publication(
             &index,
@@ -502,6 +502,41 @@ fn configured_grants_survive_disable_save_reopen_and_explicit_replacement() {
     assert_eq!(
         store.entry_details(&owner, volume.id, entry).unwrap().retained_permissions,
         Some(Acl::default())
+    );
+}
+
+#[cfg(feature = "connected-engine")]
+#[test]
+fn owner_control_repair_with_only_a_receipt_leaves_initialization_to_the_capture() {
+    use crate::store::DatabaseId;
+    let (directory, store, volume, _) = setup();
+    let local = store.db(volume.id, DatabaseId::Index).unwrap();
+    let key = local.meta().hash_key;
+    let captured =
+        create_replica(&directory.path().join("captured.kvdb"), key, 512 * 1024).unwrap();
+    pull(&local, &captured);
+    let receipt = DurableRevision {
+        revision: captured.clock().as_u64(),
+        policy_revision: MetadataPolicy::read(&captured).unwrap().revision(),
+        root: captured.begin_read().unwrap().root_hash().unwrap(),
+    };
+    store.acknowledge_replica(volume.id, DatabaseId::Index, &receipt).unwrap();
+    drop(local);
+    drop(store);
+    let path = directory
+        .path()
+        .join(crate::paths::VOLUMES)
+        .join(volume.id.to_string())
+        .join(DatabaseId::Index.file_name());
+    fs::rename(&path, directory.path().join("prior-index.kvdb")).unwrap();
+    drop(create_replica(&path, key, 512 * 1024).unwrap());
+    let store = LocalStore::open(directory.path()).unwrap();
+    assert!(
+        !store
+            .restore_owner_service_read(volume.id, &captured, |_| panic!(
+                "empty index has no controls"
+            ))
+            .unwrap()
     );
 }
 

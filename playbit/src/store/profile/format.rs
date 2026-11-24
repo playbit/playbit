@@ -6,6 +6,8 @@ pub const MAX_BYTES: usize = 4096;
 pub const BASELINE: &[u8] = br#"{"format":"playbit.profile","revision":1,"required_read_features":[],"required_write_features":[]}"#;
 pub const LOCAL_APP_SCOPES: &str = "local-app-scopes.v1";
 pub const HOSTED_APP_SCOPES: &str = "hosted-app-scopes.v1";
+pub const WORLD_PROJECTION: &str = "world-projection.v1";
+pub const APP_LOCAL_ERASURE: &str = "app-local-erasure.v1";
 pub const SHARED_SESSION: &str = "shared-session.v1";
 pub const UPDATE_REQUIRED: &str = "This profile requires a different version of Playbit. Its saved data has been kept. Open it with a compatible version or choose a new empty profile.";
 
@@ -53,7 +55,10 @@ fn validate_supported(bytes: &[u8], supported: &[&str]) -> Result<()> {
     Ok(())
 }
 pub fn validate(bytes: &[u8]) -> Result<()> {
-    validate_supported(bytes, &[LOCAL_APP_SCOPES, HOSTED_APP_SCOPES, SHARED_SESSION])
+    validate_supported(
+        bytes,
+        &[LOCAL_APP_SCOPES, HOSTED_APP_SCOPES, SHARED_SESSION, WORLD_PROJECTION, APP_LOCAL_ERASURE],
+    )
 }
 /// Add the minimum capability needed to keep older clients from treating local
 /// app data as an ordinary replicable volume. Unknown requirements never vanish.
@@ -128,6 +133,13 @@ mod tests {
         assert_eq!(descriptor.required_write_features, [LOCAL_APP_SCOPES, SHARED_SESSION]);
         assert!(validate_supported(&shared, &[LOCAL_APP_SCOPES]).is_err());
         assert!(validate(&shared).is_ok());
+        let world =
+            promote_app_scopes(&shared, WORLD_PROJECTION).expect("promote World projection");
+        assert!(
+            validate_supported(&world, &[LOCAL_APP_SCOPES, HOSTED_APP_SCOPES, SHARED_SESSION])
+                .is_err()
+        );
+        assert!(validate(&world).is_ok());
         assert_eq!(
             promote_app_scopes(&shared, SHARED_SESSION).expect("promotion is idempotent"),
             shared

@@ -1,6 +1,7 @@
 //! Retained activity pages share the inspector's scroll viewport.
 use super::*;
 use crate::store::volume_index::{EntryAddress, EntryChange, EntryRevision, HistoryCursor};
+use crate::ui::desktop::typography::tabular_numerals;
 use crate::ui::desktop::zoom::{self, length as ui};
 use std::ops::Range;
 
@@ -292,7 +293,7 @@ impl Browser {
             );
         if !time.is_empty() {
             row = row.child(
-                self.text(&format!("history-time-{slot}"), time, cx)
+                tabular_numerals(self.text(&format!("history-time-{slot}"), time, cx))
                     .flex_none()
                     .whitespace_nowrap(),
             );

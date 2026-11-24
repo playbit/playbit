@@ -173,6 +173,19 @@ fn package_upgrade_required(details: &str) -> bool {
 }
 
 pub fn message(kind: Kind, details: &str, profile: &Path) -> (&'static str, String) {
+    #[cfg(feature = "app-host")]
+    if kind == Kind::Recoverable
+        && let Some((scope, cause)) = crate::engine::remote::sync_failure_parts(details)
+    {
+        // Labels and diagnostic paths can themselves contain words like “credentials”.
+        let reason = cause.lines().next().unwrap_or(cause);
+        let (title, guidance) = unscoped_message(kind, reason, profile);
+        return (title, format!("{scope}\n{guidance}"));
+    }
+    unscoped_message(kind, details, profile)
+}
+
+fn unscoped_message(kind: Kind, details: &str, profile: &Path) -> (&'static str, String) {
     match kind {
         Kind::DraftRetained => ("Local draft retained", bounded(details, MAX_DETAILS).into()),
         Kind::Recoverable if details.starts_with("Couldn’t save UI zoom.") => (
@@ -747,6 +760,21 @@ mod tests {
             assert_eq!(title, "This app needs to be rebuilt");
             assert_eq!(body, format!("{details} (#1015)"));
             assert_eq!(kind.modal_button(), None);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "app-host")]
+    fn scoped_sync_failure_keeps_its_target_and_classifies_only_the_cause() {
+        let scope = "Couldn’t sync database \"credentials\" in volume \"Shared\"";
+        for (cause, code) in [
+            ("waiting for initial database synchronization", "#1017"),
+            ("access denied: volume permission\nProfile: /profiles/credentials/.playbit", "#1007"),
+        ] {
+            let (_, body) =
+                message(Kind::Recoverable, &format!("{scope}\n{cause}"), Path::new("/profile"));
+            assert!(body.starts_with(scope));
+            assert!(body.contains(code));
         }
     }
 

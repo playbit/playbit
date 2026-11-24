@@ -31,6 +31,8 @@ pub struct Scene {
     active: bool,
     pointer: Rc<Cell<Option<u32>>>,
     activate: controls::Activate,
+    #[cfg(target_os = "macos")]
+    pub(super) prepare_menu: Option<super::popup::PrepareGuestMenu>,
     pub(crate) editors: BTreeMap<u32, Entity<text_editor::TextEditor>>,
     controls: BTreeMap<u32, Entity<controls::Control>>,
     segments: BTreeMap<u32, Entity<segmented::Segmented>>,
@@ -52,6 +54,8 @@ impl Scene {
             active: true,
             pointer: Rc::new(Cell::new(None)),
             activate,
+            #[cfg(target_os = "macos")]
+            prepare_menu: None,
             editors: BTreeMap::new(),
             controls: BTreeMap::new(),
             segments: BTreeMap::new(),
@@ -310,6 +314,10 @@ impl Scene {
                         .expect("context accessibility identity exhausted"),
                 );
                 self.context_index += 1;
+                #[cfg(target_os = "macos")]
+                let prepare = self.prepare_menu.clone();
+                #[cfg(target_os = "macos")]
+                let accessible_prepare = prepare.clone();
                 let accessible_items = items.clone();
                 let accessible_activate = activate.clone();
                 div()
@@ -328,13 +336,16 @@ impl Scene {
                             node.add_action(Action::Click);
                             let items = accessible_items.clone();
                             let activate = accessible_activate.clone();
+                            #[cfg(target_os = "macos")]
+                            let prepare = accessible_prepare.clone();
                             window.insert_accessibility_node(id, node, false,
                                 Some(Rc::new(move |request: &gpui::accesskit::ActionRequest, window: &mut Window, cx: &mut App| {
                                     if request.action == Action::Click {
                                         #[cfg(target_os = "macos")]
                                         {
-                                            let menu = super::popup::Request::context(window,
+                                            let mut menu = super::popup::Request::context(window,
                                                 bounds.origin, items.clone(), activate.clone(), cx);
+                                            menu.prepare_guest = prepare.clone();
                                             cx.defer(move |cx| super::popup::open(menu, cx));
                                         }
                                     }
@@ -345,9 +356,10 @@ impl Scene {
                         window.prevent_default();
                         #[cfg(target_os = "macos")]
                         {
-                            let request = super::popup::Request::context(
+                            let mut request = super::popup::Request::context(
                                 window, event.position, items.clone(), activate.clone(), cx,
                             );
+                            request.prepare_guest = prepare.clone();
                             cx.defer(move |cx| super::popup::open(request, cx));
                         }
                         #[cfg(not(target_os = "macos"))]
@@ -554,7 +566,13 @@ impl Scene {
                 let control = self.controls.entry(*id).or_insert_with(|| {
                     cx.new(|cx| controls::Control::new(*id, properties, activate, cx))
                 });
-                control.update(cx, |control, cx| control.set_popup_items(items, cx));
+                control.update(cx, |control, cx| {
+                    #[cfg(target_os = "macos")]
+                    {
+                        control.prepare_guest_menu = self.prepare_menu.clone();
+                    }
+                    control.set_popup_items(items, cx)
+                });
                 controls::element(control, window, cx)
             }
             ViewNode::Canvas { id, width, height, clear_color, items, .. } => {

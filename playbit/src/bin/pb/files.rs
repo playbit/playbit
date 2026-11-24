@@ -29,13 +29,12 @@ pub(super) fn run(
     if (args[0] == "file-write" && args.len() != 4)
         || (args[0] == "file-read" && !(4..=5).contains(&args.len()))
     {
-        return Err(
-            "expected pb file-write VOLUME ENTRY PATH or file-read VOLUME ENTRY PATH [SESSION]"
-                .into(),
-        );
+        return Err(crate::usage_error(
+            "expected pb file-write VOLUME ENTRY PATH or file-read VOLUME ENTRY PATH [SESSION]",
+        ));
     }
-    let volume = *Id::parse(&args[1])?.as_bytes();
-    let entry = *playbit::store::EntryId::parse(&args[2])?.as_bytes();
+    let volume = *Id::parse(&args[1]).map_err(crate::usage_error)?.as_bytes();
+    let entry = *playbit::store::EntryId::parse(&args[2]).map_err(crate::usage_error)?.as_bytes();
     let session = args.get(4).map(|s| super::session_argument(s, channel)).transpose()?;
     let mut context = DataContext::open(session, call)?;
     let result: Result<serde_json::Value> = (|| {

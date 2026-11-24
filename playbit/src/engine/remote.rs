@@ -9,7 +9,9 @@ mod entry;
 mod initialization;
 mod onboarding;
 mod publisher;
+pub(super) mod sync_failure;
 mod synchronization;
+pub(super) mod world;
 use super::completion::Wake;
 use crate::engine::{
     Result,
@@ -23,7 +25,7 @@ use crate::network::ap::{
     service_client as wire,
 };
 use crate::store::{
-    Access, DurableRevision, Id, LocalStore, PendingKind, ReplicaReader, Session,
+    Access, DurableRevision, Id, LocalStore, PendingKind, ReceivedVolume, ReplicaReader, Session,
     object_contract::Permission,
 };
 use kvdb::{Lww, SyncReceiver, SyncSender, sync::SyncStatus};
@@ -36,6 +38,8 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+#[cfg(feature = "app-host")]
+pub(crate) use sync_failure::sync_failure_parts;
 pub(super) use synchronization::Synchronization;
 
 /// Private automatic scope credentials never enter AP replication.
@@ -46,9 +50,27 @@ fn remote_volumes(store: &LocalStore) -> Result<Vec<crate::store::Volume>> {
         .filter_map(|volume| match store.replication_supported(volume.id) {
             Ok(false) => None,
             Ok(true) => Some(Ok(volume)),
-            Err(error) => Some(Err(error.into())),
+            Err(error) => Some(Err(sync_failure::volume(store, volume.id, error))),
         })
         .collect()
+}
+
+/// A recovered owner descriptor precedes its index. An invited publisher World
+/// uses separate AP admission after the Shared session is ready.
+#[cfg(feature = "app-host")]
+pub(super) fn world_needs_recovery(store: &LocalStore, session: &Session) -> Result<bool> {
+    if session.is_distinct_world(session.root_volume) && session.app.publisher != store.account().id
+    {
+        return Ok(false);
+    }
+    match store.volume(session.root_volume) {
+        Ok(world) if session.shared_volume.is_some() && world.owner != store.account().id => {
+            Ok(false)
+        }
+        Ok(world) => Ok(!store.has_volume_index(world.id)?),
+        Err(crate::store::Error::NotFound(_)) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 // Every admitted app process and embedded guest can own a different session.
@@ -84,6 +106,8 @@ pub(crate) struct NetworkHandles {
     onboarding_connection: Arc<Mutex<Option<Arc<ApConnection>>>>,
     #[cfg(feature = "app-host")]
     sync_connection: Arc<Mutex<Option<Arc<ApConnection>>>>,
+    #[cfg(feature = "app-host")]
+    missing_owner_backings: Arc<parking_lot::Mutex<BTreeSet<Id>>>,
     onboarding_account: Arc<Mutex<Option<Id>>>,
     pub(crate) progress: Arc<Progress>,
     #[cfg(feature = "app-host")]
@@ -104,6 +128,13 @@ pub(crate) struct NetworkHandles {
 }
 
 impl NetworkHandles {
+    /// This observation affects scheduling only. Shared admission and World access
+    /// still use the current store policies. It survives network worker handoffs.
+    #[cfg(feature = "app-host")]
+    pub(super) fn owner_backing_missing(&self, volume: Id) -> bool {
+        self.missing_owner_backings.lock().contains(&volume)
+    }
+
     #[cfg(feature = "app-host")]
     pub(crate) fn refresh_builds(&self, store: Arc<LocalStore>, wake: Arc<Wake>) -> Result<()> {
         let connection =
@@ -215,6 +246,8 @@ pub struct Remote {
     channel: crate::release_channel::ReleaseChannel,
     #[cfg(feature = "app-host")]
     builds: Arc<super::builds::Builds>,
+    #[cfg(feature = "app-host")]
+    missing_owner_backings: Arc<parking_lot::Mutex<BTreeSet<Id>>>,
     onboarding_account: Arc<Mutex<Option<Id>>>,
     onboarding: Arc<std::sync::atomic::AtomicU8>,
     gauges: gauges::Gauges,
@@ -288,9 +321,19 @@ impl PullReceipt {
         }
     }
 }
-enum BackingReceipt {
+enum StagedBacking {
+    Unreadable,
+    Missing(crate::store::EntryId),
     Remote(PullReceipt),
     Local(crate::store::SnapshotToken),
+}
+enum ControlRepair<'a> {
+    ServiceRead,
+    CheckRetirement(crate::store::EntryId),
+    MissingBackings {
+        entries: &'a [crate::store::EntryId],
+        first_unrepaired: &'a mut crate::store::EntryId,
+    },
 }
 #[derive(Clone, Copy)]
 enum ReceivedPull {
@@ -348,6 +391,8 @@ impl Remote {
         NetworkHandles {
             #[cfg(feature = "app-host")]
             builds: self.builds.clone(),
+            #[cfg(feature = "app-host")]
+            missing_owner_backings: self.missing_owner_backings.clone(),
             onboarding: self.onboarding.clone(),
             onboarding_connection: self.authenticated_connection.clone(),
             #[cfg(feature = "app-host")]
@@ -475,16 +520,28 @@ impl Remote {
                 continue;
             }
             let required = if volume.owner == store.account().id {
-                self.service_covers_reader(store, volume.id, None)?
+                self.service_covers_reader(store, volume.id, None)
+                    .map_err(|error| sync_failure::volume(store, volume.id, error))?
             } else {
                 let mut required = false;
                 for session in store.sessions()? {
-                    if session.replica_volume() != volume.id
+                    if (session.replica_volume() != volume.id
+                        && !session.is_distinct_world(volume.id))
                         || unavailable_sessions.is_some_and(|ids| ids.contains(&session.id))
                     {
                         continue;
                     }
-                    if self.service_covers_reader(store, volume.id, Some(&session))? {
+                    if session.is_distinct_world(volume.id)
+                        && !store
+                            .invited_world_ready(&session.id, volume.id)
+                            .map_err(|error| sync_failure::volume(store, volume.id, error))?
+                    {
+                        continue;
+                    }
+                    if self
+                        .service_covers_reader(store, volume.id, Some(&session))
+                        .map_err(|error| sync_failure::volume(store, volume.id, error))?
+                    {
                         required = true;
                         break;
                     }
@@ -496,11 +553,21 @@ impl Remote {
             }
             // Eligibility is independent of stream health: a failed required
             // scope must fail the fence, never disappear from its target set.
-            if !self.has_live_volume(store, volume.id)? {
-                return Err(
-                    "required live replica needs recovery before synchronization can complete"
-                        .into(),
-                );
+            if !self
+                .has_live_volume(store, volume.id)
+                .map_err(|error| sync_failure::volume(store, volume.id, error))?
+            {
+                if let Some(cause) = live.failed_receive(volume.id) {
+                    return Err(cause);
+                }
+                if let Some(cause) = live.publisher().failed_publication(volume.id) {
+                    return Err(live.resolve_failure(cause));
+                }
+                return Err(sync_failure::volume(
+                    store,
+                    volume.id,
+                    "required live replica needs recovery before synchronization can complete",
+                ));
             }
             if volumes.len() == super::live::SCOPE_LIMIT {
                 return Err("live replica scope capacity exceeded".into());
@@ -508,8 +575,9 @@ impl Remote {
             volumes.push(volume.id);
         }
         self.runtime.block_on(async {
-            let fenced = live.publisher().fence(&volumes).await?;
-            live.checkpoint(&fenced).await?;
+            let fenced =
+                live.publisher().fence(&volumes).await.map_err(|e| live.resolve_failure(e))?;
+            live.checkpoint(&fenced).await.map_err(|e| live.resolve_failure(e))?;
             if self.scope.read().provider() || account_dependencies_deferred {
                 // Selected work can finish while independent account records
                 // wait in the durable outbox for their own volume dependencies.
@@ -1011,6 +1079,8 @@ impl Remote {
             connection_watch: None,
             reconnect: None,
             initializations: Default::default(),
+            #[cfg(feature = "app-host")]
+            missing_owner_backings: Default::default(),
             authenticated_connection: Arc::new(Mutex::new(None)),
             sync_connection: Arc::new(Mutex::new(None)),
             blob_transfers: Arc::new(Default::default()),
@@ -1484,6 +1554,8 @@ impl Remote {
         self.account_ready.store(false, std::sync::atomic::Ordering::Release);
         self.reconnect = None;
         self.initializations.clear();
+        #[cfg(feature = "app-host")]
+        self.missing_owner_backings.lock().clear();
         self.connection_watch = None;
         self.connection_status.set(
             ApConnectionState::Offline,
@@ -1691,7 +1763,9 @@ impl Remote {
         Ok(Some(Synchronization::new(store, self.scope.read().clone(), timing)?))
     }
     fn begin_synchronization(&mut self, store: &Arc<LocalStore>) -> Result<()> {
-        self.initializations.clear();
+        self.initializations.restart(Instant::now(), |volume| {
+            self.live.as_ref().is_some_and(|live| live.installed_scope(volume).is_some())
+        });
         // Before the first live driver exists, there is no connection watcher
         // to schedule recovery. Retain only a failed establishment attempt;
         // storage/authentication and bootstrap failures must not be replayed.
@@ -1939,6 +2013,7 @@ impl Remote {
         kind: crate::engine::live::RecoveryKind,
     ) -> Result<()> {
         self.recover_scope_with(store, scope, kind, Self::recover_scope_once)
+            .map_err(|error| sync_failure::recovery(store, scope, error))
     }
 
     fn recover_scope_with(
@@ -1958,29 +2033,31 @@ impl Remote {
             crate::engine::live::RecoveryKind::Gap => "replication.recover_gap_scope",
             crate::engine::live::RecoveryKind::Transport => "replication.recover_transport_scope",
         });
-        let mut gaps = self
+        let Some(mut gaps) = self
             .live
             .as_mut()
             .ok_or("live replication is unavailable")?
-            .start_readiness(scope, Instant::now())?;
+            .start_readiness(scope, Instant::now())?
+        else {
+            return Ok(());
+        };
         while gaps < crate::engine::live::GAP_CAPTURE_LIMIT {
             let result = capture(self, store, scope, kind);
             match result {
                 Err(error)
-                    if error.is::<crate::engine::live::LiveGap>()
+                    if sync_failure::reason(error.as_ref())
+                        .is::<crate::engine::live::LiveGap>()
                         && self.live.as_ref().is_some_and(|live| {
                             live.recovery_is_current(scope, crate::engine::live::RecoveryKind::Gap)
                         }) =>
                 {
                     gaps += 1;
                     if gaps == crate::engine::live::GAP_CAPTURE_LIMIT {
-                        let message =
-                            "replica bootstrap kept losing its live boundary after three captures";
                         self.live
                             .as_mut()
                             .expect("account binding initialized live replication")
                             .exhaust_recovery(scope);
-                        return Err(message.into());
+                        return Err(sync_failure::exhausted_gap(error));
                     }
                     crate::trace::mark("replication.bootstrap_gap_restart");
                     kind = crate::engine::live::RecoveryKind::Gap;
@@ -1994,12 +2071,15 @@ impl Remote {
                     return Ok(());
                 }
                 Err(error)
-                    if matches!(kind, crate::engine::live::RecoveryKind::Gap)
-                        && matches!(
-                            error.to_string().as_str(),
-                            "waiting for initial database synchronization"
-                                | "waiting for initial volume synchronization"
-                        ) =>
+                    if matches!(kind, crate::engine::live::RecoveryKind::Gap) && {
+                        let reason = sync_failure::reason(error.as_ref());
+                        !reason.is::<crate::engine::live::LiveGap>()
+                            && matches!(
+                                reason.to_string().as_str(),
+                                "waiting for initial database synchronization"
+                                    | "waiting for initial volume synchronization"
+                            )
+                    } =>
                 {
                     let scheduled = self
                         .live
@@ -2007,7 +2087,9 @@ impl Remote {
                         .expect("live recovery owns its entry")
                         .defer_readiness(scope, gaps, Instant::now())?;
                     return Err(if scheduled {
-                        Box::new(initialization::Pending(error))
+                        Box::new(initialization::Pending(sync_failure::recovery(
+                            store, scope, error,
+                        )))
                     } else {
                         error
                     });
@@ -2045,48 +2127,86 @@ impl Remote {
         if !volume.share_key_with_service {
             return Err("replica requires an authorized private peer".into());
         }
-        if let Some(entry) = scope.entry {
-            let session = scope
-                .session
-                .as_ref()
-                .map(|(id, version)| {
-                    let mut session = store.session(&crate::identifier::encode(id))?;
-                    session.resolved_build_id = crate::identifier::encode(version);
-                    Ok::<_, Box<dyn std::error::Error + Send + Sync>>(session)
-                })
-                .transpose()?;
-            return self.synchronize_entry(
-                store,
-                crate::store::volume_index::EntryAddress { volume: scope.volume, entry },
-                session.as_ref(),
-            );
-        }
-        match scope.session.as_ref() {
-            None => {
-                let _attempt = crate::trace::Span::new("replication.recover_owner_attempt");
-                if volume.owner != store.account().id {
-                    return Err("replica owner scope changed".into());
-                }
-                self.bootstrap_owner_volume(store, volume)?;
-            }
-            Some((id, version)) => {
+        let session = scope
+            .session
+            .as_ref()
+            .map(|(id, version)| {
                 let mut session = store.session(&crate::identifier::encode(id))?;
-                if session.replica_volume() != volume.id {
+                if scope.entry.is_none()
+                    && session.replica_volume() != volume.id
+                    && !session.is_distinct_world(volume.id)
+                {
                     return Err("replica root changed before recovery".into());
                 }
-                // Recover the stream's authority, not the running app's build.
-                // Both AP admission and local replica policy recheck it below.
+                // Recover the captured stream's authority, including its build.
                 session.resolved_build_id = crate::identifier::encode(version);
-                let _attempt = crate::trace::Span::new("replication.recover_root_attempt");
-                self.recover_bound_volume(store, &session, volume.id, connection)?;
+                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(session)
+            })
+            .transpose()?;
+        if let Some(session) = &session {
+            let invited_world =
+                session.is_distinct_world(volume.id) && session.app.publisher != store.account().id;
+            if invited_world || scope.entry.is_none() {
+                self.admit(store, session).map_err(|error| {
+                    sync_failure::volume(store, session.replica_volume(), error)
+                })?;
+            }
+            if invited_world {
+                return self.with_invited_world(store, session, |remote| {
+                    remote
+                        .capture_recovery(store, scope, volume, Some(session), connection)
+                        .map_err(|error| sync_failure::recovery(store, scope, error))
+                });
             }
         }
+        self.capture_recovery(store, scope, volume, session.as_ref(), connection)
+    }
+
+    fn capture_recovery(
+        &mut self,
+        store: &Arc<LocalStore>,
+        scope: &crate::engine::live::ScopeKey,
+        volume: crate::store::Volume,
+        session: Option<&Session>,
+        connection: Arc<ApConnection>,
+    ) -> Result<()> {
+        if let Some(entry) = scope.entry {
+            return self.synchronize_entry(
+                store,
+                crate::store::volume_index::EntryAddress { volume: volume.id, entry },
+                session,
+            );
+        }
+        let pending = if let Some(session) = session {
+            let _attempt = crate::trace::Span::new("replication.recover_root_attempt");
+            self.recover_bound_volume(store, session, volume.id, connection)?
+        } else {
+            let _attempt = crate::trace::Span::new("replication.recover_owner_attempt");
+            if volume.owner != store.account().id {
+                return Err("replica owner scope changed".into());
+            }
+            self.bootstrap_owner_volume(store, volume)?
+        };
         let live = self.live.as_mut().expect("account binding initialized live replication");
         self.runtime.block_on(async {
             let fenced = live.publisher().fence(&[scope.volume]).await?;
-            live.checkpoint(&fenced).await
+            live.checkpoint(&fenced)
+                .await
+                .and_then(|()| live.complete_recovery(scope))
+                .map_err(|error| sync_failure::captured_backing_gap(scope.volume, pending, error))
         })?;
-        live.complete_recovery(scope)
+        if session.is_none() {
+            if pending.is_some() {
+                self.initializations.failed(
+                    scope.volume,
+                    "waiting for initial database synchronization",
+                    Instant::now(),
+                )?;
+            } else {
+                self.initializations.forget(scope.volume);
+            }
+        }
+        Ok(())
     }
 
     fn recover_bound_volume(
@@ -2095,8 +2215,7 @@ impl Remote {
         session: &Session,
         volume: Id,
         connection: Arc<ApConnection>,
-    ) -> Result<()> {
-        self.admit(store, session)?;
+    ) -> Result<Option<crate::store::DatabaseId>> {
         if store.authority_refresh_required(volume)? {
             self.pull_bound_volume(store, session, volume)?;
         }
@@ -2110,7 +2229,7 @@ impl Remote {
             ),
         )?;
         // Root recovery receives current revocations before admitting data.
-        self.pull_bound_volume(store, session, volume)?;
+        let received = self.pull_bound_volume(store, session, volume)?;
         let access =
             Access::session_version(store.account().id, &session.id, &session.resolved_build_id);
         store.authorize_replication(&access, volume, Permission::Read)?;
@@ -2123,7 +2242,7 @@ impl Remote {
                 .expect("account binding initialized live replication")
                 .rebase(&mut prepared),
         )?;
-        if self.push_bootstrap_participant(store, session, volume)? {
+        if self.push_bootstrap_participant(store, session, received)? {
             self.runtime.block_on(
                 self.live.as_mut().expect("live replication initialized").rebase(&mut prepared),
             )?;
@@ -2134,8 +2253,18 @@ impl Remote {
                 .expect("account binding initialized live replication")
                 .subscribe(&mut prepared),
         )?;
-        self.pull_bound_volume(store, session, volume)?;
-        self.finish_captured_live(store, Some(session), volume, prepared)
+        let received = self.pull_bound_volume(store, session, volume)?;
+        let pending = received.pending_backing;
+        self.finish_captured_live(store, Some((session, received)), volume, prepared)?;
+        if pending.is_some() {
+            // The installed stream can serve its ready siblings during bounded recovery.
+            self.initializations.failed(
+                volume,
+                "waiting for initial database synchronization",
+                Instant::now(),
+            )?;
+        }
+        Ok(pending)
     }
 
     /// Non-replica facts are inspected only by the network worker. The owner
@@ -2148,17 +2277,26 @@ impl Remote {
             if !self.scope.read().admits(volume.id) {
                 continue;
             }
-            if store.replica_root(volume.id, crate::store::DatabaseId::Index)?.is_none() {
+            let scope_error = |error| sync_failure::volume(store, volume.id, error);
+            if store
+                .replica_root(volume.id, crate::store::DatabaseId::Index)
+                .map_err(scope_error)?
+                .is_none()
+            {
                 // Credentials may arrive before authorization/data. Do not
                 // inspect blob policy or fail unrelated initialized sessions.
                 pending = true;
                 private |= !volume.share_key_with_service;
                 continue;
             }
-            private |=
-                !volume.share_key_with_service || store.has_service_excluded_data(volume.id)?;
+            private |= !volume.share_key_with_service
+                || store.has_service_excluded_data(volume.id).map_err(scope_error)?;
             let access = Access::owner(store.account().id);
-            pending |= !store.pending_entry_blobs(&access, volume.id, None)?.versions.is_empty();
+            pending |= !store
+                .pending_entry_blobs(&access, volume.id, None)
+                .map_err(scope_error)?
+                .versions
+                .is_empty();
         }
         self.pending_availability = pending;
         self.private_availability = private;
@@ -2238,8 +2376,8 @@ impl Remote {
         // Fence the supported replicas. Keep account records that depend on a
         // deferred Shared volume in their durable outbox until it can be admitted.
         let owners = self.sync_registered_owners(store, None, &mut deferred);
-        if target.is_some_and(|id| deferred.contains(&id)) {
-            return Err(wire::SharedServiceUpgradeRequired.into());
+        if let Some(id) = target.filter(|id| deferred.contains(id)) {
+            return Err(sync_failure::volume(store, id, wire::SharedServiceUpgradeRequired));
         }
         owners?;
         let supported = if deferred.is_empty() {
@@ -2307,22 +2445,36 @@ impl Remote {
                         crate::store::Error::AccessDenied("bloblog preparation scope").into()
                     );
                 }
+                if let Some(session) = &request.session
+                    && session.is_distinct_world(request.volume)
+                {
+                    // The ready log already has a local World binding. Its AP
+                    // request checks the current entry grant under this session.
+                    // Unrelated backings retain their own initialization retries.
+                    return self.admit(store, session);
+                }
                 self.sync_owned(store, &volumes)?;
                 if let Some(session) = &request.session {
-                    self.sync_session(store, session)?;
+                    self.sync_required_session(store, session)?;
                 }
                 Ok(())
             })();
             request.finish(&calls, result);
         }
         let publisher = self.live.as_ref().ok_or("live replication is unavailable")?.publisher();
+        let controls = self.retry_world_controls(store);
+        if controls.is_err()
+            && self.connection.as_ref().is_none_or(|connection| connection.is_closed())
+        {
+            return controls.map(|_| ());
+        }
         let mut volumes = publisher.take_initializations();
         self.initializations.select(&mut volumes, Instant::now());
         volumes.retain(|volume| self.scope.read().admits(*volume));
-        if volumes.is_empty() {
+        if volumes.is_empty() && matches!(controls, Ok(false)) {
             return Ok(());
         }
-        let mut first_error = None;
+        let mut first_error = controls.err();
         for (index, volume) in volumes.iter().enumerate() {
             self.initializations.start(*volume);
             // Discovery can precede a tombstone in the same account journal.
@@ -2336,20 +2488,22 @@ impl Remote {
                 let descriptor = store.volume(*volume)?;
                 if descriptor.owner == store.account().id {
                     self.sync_owned(store, std::slice::from_ref(volume))
-                } else if self.has_live_volume(store, *volume)? {
+                } else if self.has_live_volume(store, *volume)?
+                    && !self.initializations.tracked(*volume)
+                {
                     Ok(())
                 } else {
-                    let session = store
-                        .sessions()?
-                        .into_iter()
-                        .find(|session| {
-                            (session.replica_volume() == *volume)
-                                && store
-                                    .session_denial(&session.id)
-                                    .is_ok_and(|denial| denial.is_none())
-                        })
-                        .ok_or("received volume has no authorized invitation")?;
-                    self.sync_session(store, &session)
+                    let captured = self
+                        .live
+                        .as_ref()
+                        .and_then(|live| live.installed_scope(*volume))
+                        .and_then(|scope| scope.session);
+                    let session = Self::initialization_session(store, *volume, captured)?;
+                    if session.is_distinct_world(*volume) {
+                        self.sync_optional_world(store, &session)
+                    } else {
+                        self.sync_required_session(store, &session)
+                    }
                 }
             })();
             if let Err(error) = result {
@@ -2360,15 +2514,23 @@ impl Remote {
                     continue;
                 }
                 if self.connection.as_ref().is_none_or(|connection| connection.is_closed())
-                    && error
+                    && sync_failure::reason(error.as_ref())
                         .downcast_ref::<ClientError>()
                         .is_some_and(ClientError::is_transport_lost)
                 {
                     publisher.retry_initializations_after_transport_loss(&volumes[index..]);
                     return Err(error);
                 }
-                self.runtime
-                    .block_on(publisher.fail_initialization(*volume, &error.to_string()))?;
+                let error = sync_failure::volume(store, *volume, error);
+                if !self
+                    .has_live_volume(store, *volume)
+                    .map_err(|error| sync_failure::volume(store, *volume, error))?
+                {
+                    self.runtime.block_on(publisher.fail_initialization(
+                        *volume,
+                        &sync_failure::reason(error.as_ref()).to_string(),
+                    ))?;
+                }
                 initialization::retain_error(&mut first_error, error);
             } else {
                 self.initializations.forget(*volume);
@@ -2382,11 +2544,51 @@ impl Remote {
         }
         first_error.map_or(Ok(()), Err)
     }
+    fn initialization_session(
+        store: &LocalStore,
+        volume: Id,
+        captured: Option<([u8; 32], [u8; 32])>,
+    ) -> Result<Session> {
+        // A missing named backing shares its already installed World's exact authority.
+        // A second session can open the same World with a different, unprovisioned build.
+        if let Some((id, version)) = captured {
+            let mut session = store.session(&crate::identifier::encode(&id))?;
+            session.resolved_build_id = crate::identifier::encode(&version);
+            let access = Access::session_version(
+                store.account().id,
+                &session.id,
+                &session.resolved_build_id,
+            );
+            if store.authorize_replication(&access, volume, Permission::Read).is_ok() {
+                return Ok(session);
+            }
+        }
+        let mut uncaptured = None;
+        for session in store.sessions()? {
+            if store.session_denial(&session.id)?.is_some() {
+                continue;
+            }
+            if session.replica_volume() == volume {
+                return Ok(session);
+            }
+            if session.is_distinct_world(volume) && !store.world_denied(&session)? {
+                if store.invited_world_ready(&session.id, volume)? {
+                    return Ok(session);
+                }
+                // Account discovery can precede the initial World catalog. Open
+                // will authorize this route if no previously qualified one exists.
+                uncaptured.get_or_insert(session);
+            }
+        }
+        uncaptured.ok_or_else(|| "received volume has no authorized invitation".into())
+    }
     fn sync_owned(&mut self, store: &Arc<LocalStore>, selected: &[Id]) -> Result<()> {
         let connection = self.connection.as_ref().ok_or("AP disconnected")?.clone();
         let mut deferred = self.sync_registrations(store, &connection, Some(selected))?;
         self.sync_registered_owners(store, Some(selected), &mut deferred)?;
-        if deferred.is_empty() { Ok(()) } else { Err(wire::SharedServiceUpgradeRequired.into()) }
+        deferred.first().map_or(Ok(()), |&id| {
+            Err(sync_failure::volume(store, id, wire::SharedServiceUpgradeRequired))
+        })
     }
     fn sync_registered_owners(
         &mut self,
@@ -2422,7 +2624,10 @@ impl Remote {
                     deferred.insert(id);
                     continue;
                 }
-                initialization::retain_error(&mut first_error, error);
+                initialization::retain_error(
+                    &mut first_error,
+                    sync_failure::volume(store, id, error),
+                );
             }
             ready.push(id);
         }
@@ -2440,19 +2645,68 @@ impl Remote {
         store: &Arc<LocalStore>,
         volume: crate::store::Volume,
     ) -> Result<()> {
+        #[cfg(feature = "app-host")]
+        let id = volume.id;
+        let result = self.capture_owned_volume(store, volume);
+        #[cfg(feature = "app-host")]
+        {
+            let mut missing = self.missing_owner_backings.lock();
+            if result
+                .as_ref()
+                .is_err_and(|error| sync_failure::missing_entry_backing(id, error.as_ref()))
+            {
+                // Overflow falls back to a scoped bootstrap at launch.
+                if missing.len() < crate::engine::publisher::VOLUME_LIMIT {
+                    missing.insert(id);
+                }
+            } else {
+                missing.remove(&id);
+            }
+        }
+        result
+    }
+
+    fn capture_owned_volume(
+        &mut self,
+        store: &Arc<LocalStore>,
+        volume: crate::store::Volume,
+    ) -> Result<()> {
         let id = volume.id;
         store.require_replication_supported(id)?;
         self.sync_registration_dependencies(store, id, None)?;
         let result = (|| -> Result<()> {
-            if volume.share_key_with_service && !self.has_live_volume(store, id)? {
-                self.bootstrap_owner_volume(store, volume)?;
+            if volume.share_key_with_service {
+                let pending = if !self.has_live_volume(store, id)? {
+                    self.bootstrap_owner_volume(store, volume)?
+                } else if self.initializations.tracked(id) {
+                    self.pull_owner_volume(store, id)?
+                } else {
+                    None
+                };
+                if let Some(database) = pending {
+                    return Err(sync_failure::database(
+                        store,
+                        &Access::owner(store.account().id),
+                        id,
+                        database,
+                        "waiting for initial database synchronization",
+                    ));
+                }
             }
             Ok(())
         })();
         if let Err(error) = result {
-            self.initializations.failed(id, &error.to_string(), Instant::now())?;
+            let receiving = self.live.as_ref().is_some_and(|live| live.has_receiver(id));
+            self.initializations.failed_capture(
+                id,
+                &sync_failure::reason(error.as_ref()).to_string(),
+                Instant::now(),
+                receiving,
+            )?;
             if self.initializations.scheduled(id) {
-                return Err(Box::new(initialization::Pending(error)));
+                return Err(Box::new(initialization::Pending(sync_failure::volume(
+                    store, id, error,
+                ))));
             }
             return Err(error);
         }
@@ -2575,15 +2829,26 @@ impl Remote {
             let known = matches!(&op.operation, PendingKind::UploadBuild { build_id, .. }
                 if store.build_uploaded(build_id)?);
             if !known && let Err(error) = self.publish_registration(connection, op) {
-                if error.is::<wire::SharedServiceUpgradeRequired>()
-                    && let Some(deferred) = deferred.as_deref_mut()
-                    && let PendingKind::RegisterSession { session, .. } = &op.operation
-                    && let Some(volume) = session.shared_volume
-                {
-                    deferred.insert(volume);
-                    continue;
+                if error.is::<wire::SharedServiceUpgradeRequired>() {
+                    if let Some(deferred) = deferred.as_deref_mut()
+                        && let PendingKind::RegisterSession { session, .. } = &op.operation
+                        && let Some(volume) = session.shared_volume
+                    {
+                        deferred.insert(volume);
+                        continue;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
+                // A build upload has no unique volume, even when sessions share the build.
+                return Err(match &op.operation {
+                    PendingKind::RegisterVolume { volume } => {
+                        sync_failure::volume(store, volume.id, error)
+                    }
+                    PendingKind::RegisterSession { session, .. } => {
+                        sync_failure::volume(store, session.replica_volume(), error)
+                    }
+                    PendingKind::UploadBuild { .. } => error,
+                });
             }
             store.acknowledge_pending(op)?;
         }
@@ -2711,7 +2976,7 @@ impl Remote {
         &mut self,
         store: &Arc<LocalStore>,
         volume: crate::store::Volume,
-    ) -> Result<()> {
+    ) -> Result<Option<crate::store::DatabaseId>> {
         store.require_replication_supported(volume.id)?;
         if store.authority_refresh_required(volume.id)? {
             self.pull_owner_volume(store, volume.id)?;
@@ -2757,6 +3022,7 @@ impl Remote {
                     ReplicaReader::Service,
                     |source| {
                         self.transfer_database(
+                            store,
                             None,
                             volume.id,
                             database,
@@ -2784,12 +3050,13 @@ impl Remote {
         // The service cannot serve this volume's own reader. Abandon the
         // preparation explicitly; dropping it would report a lost owner.
         if !self.service_covers_reader(store, volume.id, None)? {
-            return self.runtime.block_on(
+            self.runtime.block_on(
                 self.live
                     .as_mut()
                     .expect("account binding initialized live replication")
                     .abandon(prepared),
-            );
+            )?;
+            return Ok(None);
         }
         self.runtime.block_on(
             self.live
@@ -2797,9 +3064,9 @@ impl Remote {
                 .expect("account binding initialized live replication")
                 .subscribe(&mut prepared),
         )?;
-        self.pull_owner_volume(store, volume.id)?;
+        let pending = self.pull_owner_volume(store, volume.id)?;
         self.finish_captured_live(store, None, volume.id, prepared)?;
-        Ok(())
+        Ok(pending)
     }
     fn sync_blob_selected<'a>(
         &self,
@@ -2866,7 +3133,9 @@ impl Remote {
             let page = store.pending_entry_blobs(&access, volume, after)?;
             if !page.versions.is_empty() {
                 let live = self.live.as_ref().ok_or("live replication is unavailable")?;
-                self.runtime.block_on(live.publisher().fence(&[volume]))?;
+                self.runtime
+                    .block_on(live.publisher().fence(&[volume]))
+                    .map_err(|e| live.resolve_failure(e))?;
                 self.blob_transport().upload_pending(
                     store,
                     &access,
@@ -2889,7 +3158,9 @@ impl Remote {
                 .checkpoint_pending_changes(),
         );
         match result {
-            Err(error) if error.is::<crate::engine::live::LiveGap>() => {
+            Err(error)
+                if sync_failure::reason(error.as_ref()).is::<crate::engine::live::LiveGap>() =>
+            {
                 // Only a confirmed delivery gap starts a fresh authority capture.
                 // Already acknowledged publications and uncertain effects never replay.
                 self.recover_gaps(store)?;
@@ -2998,11 +3269,14 @@ impl Remote {
         self.ensure_live(store)?;
         let account = self.begin_account_sync(store)?;
         self.finish_account_sync(store, account)?;
-        self.sync_session(store, session)?;
+        self.sync_required_session(store, session)?;
         self.live_fence(store, Some(&[session.replica_volume()]), None, false)
     }
 
-    fn sync_session(&mut self, store: &Arc<LocalStore>, session: &Session) -> Result<()> {
+    fn sync_required_session(&mut self, store: &Arc<LocalStore>, session: &Session) -> Result<()> {
+        store
+            .provision_local_session_world(session)
+            .map_err(|error| sync_failure::volume(store, session.root_volume, error))?;
         if (store.is_local_session(&session.id)? && session.shared_volume.is_none())
             || (session.shared_volume.is_some()
                 && !store.shared_session_initialized(&session.id)?)
@@ -3025,23 +3299,94 @@ impl Remote {
                 self.admit(store, session)?;
             }
         }
-        if store.authority_refresh_required(session.replica_volume())? {
-            self.pull_bound_volume(store, session, session.replica_volume())?;
+        self.sync_session_volume(store, session, session.replica_volume(), private_root)
+    }
+
+    fn sync_optional_world(&mut self, store: &Arc<LocalStore>, session: &Session) -> Result<()> {
+        if session.is_distinct_world(session.root_volume)
+            && session.app.publisher != store.account().id
+            && store.shared_session_initialized(&session.id)?
+        {
+            self.sync_invited_world(store, session)?;
         }
-        let mut prepared = self.prepare_session_root(store, session)?;
+        Ok(())
+    }
+
+    fn sync_session_volume(
+        &mut self,
+        store: &Arc<LocalStore>,
+        session: &Session,
+        volume: Id,
+        private_root: bool,
+    ) -> Result<()> {
+        let result = self.capture_session_volume(store, session, volume, private_root);
+        // Only an actual admitted World capture owns its volume's source-readiness
+        // episode. Open returning unavailable for another room/build must leave it alone.
+        if session.is_distinct_world(volume) {
+            if let Err(error) = result {
+                let error = sync_failure::volume(store, volume, error);
+                self.initializations.failed(
+                    volume,
+                    &sync_failure::reason(error.as_ref()).to_string(),
+                    Instant::now(),
+                )?;
+                return Err(if self.initializations.scheduled(volume) {
+                    Box::new(initialization::Pending(error))
+                } else {
+                    error
+                });
+            }
+            self.initializations.forget(volume);
+        }
+        result
+    }
+
+    fn capture_session_volume(
+        &mut self,
+        store: &Arc<LocalStore>,
+        session: &Session,
+        volume: Id,
+        private_root: bool,
+    ) -> Result<()> {
+        let pending_error = |database| {
+            let access = Access::session_version(
+                store.account().id,
+                &session.id,
+                &session.resolved_build_id,
+            );
+            sync_failure::database(
+                store,
+                &access,
+                volume,
+                database,
+                "waiting for initial database synchronization",
+            )
+        };
+        if store.authority_refresh_required(volume)? {
+            self.pull_bound_volume(store, session, volume)?;
+        }
+        let mut prepared = self.prepare_session_volume(store, session, volume)?;
         if prepared.is_none() && !private_root {
+            if session.is_distinct_world(volume)
+                && self.initializations.tracked(volume)
+                && let Some(database) =
+                    self.pull_bound_volume(store, session, volume)?.pending_backing
+            {
+                return Err(pending_error(database));
+            }
             self.runtime.block_on(
                 self.live
                     .as_ref()
                     .expect("live replication initialized")
                     .publisher()
-                    .account_volume_ready(session.replica_volume()),
+                    .account_volume_ready(volume),
             )?;
             return Ok(());
         }
         // Establish current authority before any queued participant write leaves this device.
-        self.pull_bound_volume(store, session, session.replica_volume())?;
-        self.seed_session_root(store, session, private_root, &mut prepared)?;
+        let received = self.pull_bound_volume(store, session, volume)?;
+        let mut pending = received.pending_backing;
+        self.seed_session_volume(store, session, received, private_root, &mut prepared)?;
         if let Some(mut preparation) = prepared {
             self.runtime.block_on(
                 self.live
@@ -3050,24 +3395,28 @@ impl Remote {
                     .subscribe(&mut preparation),
             )?;
             // Close the gap between the root seed snapshot and its live subscription.
-            self.pull_bound_volume(store, session, session.replica_volume())?;
-            self.finish_captured_live(store, Some(session), session.replica_volume(), preparation)?;
+            let received = self.pull_bound_volume(store, session, volume)?;
+            pending = received.pending_backing;
+            self.finish_captured_live(store, Some((session, received)), volume, preparation)?;
         }
         self.runtime.block_on(
             self.live
                 .as_ref()
                 .expect("live replication initialized")
                 .publisher()
-                .account_volume_ready(session.replica_volume()),
+                .account_volume_ready(volume),
         )?;
+        if let Some(database) = pending {
+            return Err(pending_error(database));
+        }
         Ok(())
     }
-    fn prepare_session_root(
+    fn prepare_session_volume(
         &mut self,
         store: &Arc<LocalStore>,
         session: &Session,
+        volume: Id,
     ) -> Result<Option<crate::engine::live::PreparedLive>> {
-        let volume = session.replica_volume();
         let descriptor = store.volume(volume)?;
         if !descriptor.share_key_with_service || self.has_live_volume(store, volume)? {
             return Ok(None);
@@ -3082,14 +3431,15 @@ impl Remote {
             ))
             .map(Some)
     }
-    fn seed_session_root(
+    fn seed_session_volume(
         &mut self,
         store: &Arc<LocalStore>,
         session: &Session,
+        received: ReceivedVolume,
         private_root: bool,
         prepared: &mut Option<crate::engine::live::PreparedLive>,
     ) -> Result<()> {
-        let volume = session.replica_volume();
+        let volume = received.volume();
         let access = Access::session(store.account().id, &session.id);
         store.authorize_replication(&access, volume, Permission::Read)?;
         if let Some(preparation) = prepared.as_mut() {
@@ -3098,7 +3448,7 @@ impl Remote {
             )?;
         }
         if (prepared.is_some() || private_root)
-            && self.push_bootstrap_participant(store, session, volume)?
+            && self.push_bootstrap_participant(store, session, received)?
             && let Some(preparation) = prepared.as_mut()
         {
             self.runtime.block_on(
@@ -3141,8 +3491,9 @@ impl Remote {
                 continue;
             }
             let id = session.id.clone();
+            let volume = session.replica_volume();
             let result = self
-                .sync_registration_dependencies(store, session.replica_volume(), Some(&session.id))
+                .sync_registration_dependencies(store, volume, Some(&session.id))
                 .and_then(|()| {
                     self.runtime.block_on(crate::engine::peer::listen(
                         connection.clone(),
@@ -3154,9 +3505,12 @@ impl Remote {
                 Ok(task) => {
                     self.listeners.lock().expect("mutex is not poisoned").insert(id, task);
                 }
-                Err(error) if SessionBuildUnavailable::reported_by(error.as_ref()) => {}
+                Err(error)
+                    if SessionBuildUnavailable::reported_by(sync_failure::reason(
+                        error.as_ref(),
+                    )) => {}
                 Err(error) => {
-                    first_error.get_or_insert(error);
+                    first_error.get_or_insert_with(|| sync_failure::volume(store, volume, error));
                 }
             }
         }
@@ -3283,15 +3637,15 @@ impl Remote {
         self.completion.notify();
         Ok(())
     }
-    /// Resolve the authoritative selector before a cold device runs any guest.
-    /// The caller adopts only after local permission and runtime validation.
+    /// Resolve a hosted selector before a cold device runs its guest. A lazy
+    /// creator session retains its local selection. Both require local validation.
     #[cfg(feature = "app-host")]
     pub(crate) fn bootstrap_current(
         &mut self,
         store: &Arc<LocalStore>,
         id: &str,
         apps: &Path,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<Option<serde_json::Value>> {
         self.check_cancellation()?;
         let mut candidate = store.session(id)?;
         if candidate.creator == store.account().id {
@@ -3301,6 +3655,12 @@ impl Remote {
             self.ensure_live(store)?;
             let account = self.begin_account_sync(store)?;
             self.finish_account_sync(store, account)?;
+            self.recover_shared_world(store, &candidate)?;
+            if candidate.shared_volume.is_some() && !store.shared_session_initialized(id)? {
+                // Only a locally allocated lazy Shared lacks a stored invitation.
+                // Its first access registers it. Until then validate the local build.
+                return Ok(None);
+            }
             self.sync_owned(store, &[candidate.replica_volume()])?;
             // A local session waiting for recovered World could not publish
             // before the owner bootstrap. Register that same session now.
@@ -3313,7 +3673,26 @@ impl Remote {
         candidate.resolved_build_id =
             resolution["resolved_build_id"].as_str().ok_or("missing resolved version")?.into();
         self.bootstrap(store, &candidate, &apps.join(&candidate.resolved_build_id))?;
-        Ok(resolution)
+        Ok(Some(resolution))
+    }
+    #[cfg(feature = "app-host")]
+    fn recover_shared_world(&mut self, store: &Arc<LocalStore>, session: &Session) -> Result<()> {
+        if session.shared_volume.is_some() && world_needs_recovery(store, session)? {
+            if let Err(error) = self.sync_owned(store, &[session.root_volume]) {
+                // A missing World backing stays in normal recovery. The existing
+                // room still has to pass its own Shared admission and build checks.
+                if sync_failure::missing_entry_backing(session.root_volume, error.as_ref())
+                    && store.shared_session_initialized(&session.id)?
+                {
+                    return Ok(());
+                }
+                return Err(error);
+            }
+            if !store.has_volume_index(session.root_volume)? {
+                return Err("World data is unavailable on this device".into());
+            }
+        }
+        Ok(())
     }
     #[cfg(feature = "app-host")]
     fn bootstrap(
@@ -3333,8 +3712,11 @@ impl Remote {
             {
                 return Err(error);
             }
+            if session.creator != store.account().id {
+                self.recover_shared_world(store, session)?;
+            }
             if store.session(&session.id)?.resolved_build_id == session.resolved_build_id {
-                self.sync_session(store, session)?;
+                self.sync_required_session(store, session)?;
                 self.live_fence(store, Some(&[session.replica_volume()]), None, false)?;
             } else {
                 // Candidate data may be prepared, but candidate live authority
@@ -3346,6 +3728,15 @@ impl Remote {
             // existing peer bootstrap proves possession and current access on
             // this connection before the package download requires admission.
             self.ensure_build(store, session, app_path)?;
+            if store.session(&session.id)?.resolved_build_id == session.resolved_build_id {
+                // The room is admitted and its build is ready. World failures remain
+                // observable via synchronization and never invalidate this room.
+                if let Err(error) = self.sync_optional_world(store, session)
+                    && (canceled(error.as_ref()) || store.session_denial(&session.id)?.is_some())
+                {
+                    return Err(error);
+                }
+            }
             self.check_cancellation()
         })();
         if let Err(error) = &result
@@ -3377,7 +3768,14 @@ impl Remote {
             .is_some_and(|root| !root.share_key_with_service);
         let service = store.volume(volume)?.share_key_with_service && !private_root;
         if service {
-            match self.transfer_database(session, volume, database, SyncDirection::Pull, target) {
+            match self.transfer_database(
+                store,
+                session,
+                volume,
+                database,
+                SyncDirection::Pull,
+                target,
+            ) {
                 Ok(receipt) => {
                     return Ok(PullReceipt {
                         ap_source: true,
@@ -3443,33 +3841,69 @@ impl Remote {
                     self.pull_into(store, session, volume, database, target).map(Some)
                 }
             },
-            |index| {
-                if session.is_some() {
-                    return Ok(false);
-                }
-                store
-                    .restore_owner_service_read(volume, index, |bytes| {
-                        let request = ServiceRequest::PublishReplica {
-                            operation_id: Id::generate()?.to_string(),
-                            session_id: None,
-                            build_id: None,
-                            volume_id: volume.to_string(),
-                            database_id: crate::store::DatabaseId::Index,
-                        };
-                        let connection = self
-                            .connection
-                            .as_ref()
-                            .ok_or(crate::store::Error::System("AP disconnected".into()))?;
-                        self.runtime
-                            .block_on(wire::publish_replica(connection, &request, bytes))
-                            .map_err(|error| crate::store::Error::System(error.to_string()))?;
-                        // The acknowledgment covers this ACL delta, not a complete
-                        // local Index root. Only the new full capture clears fences.
-                        Ok(())
-                    })
-                    .map_err(Into::into)
-            },
+            |index, repair| self.repair_received_controls(store, session, volume, index, repair),
         )
+    }
+
+    fn repair_received_controls(
+        &self,
+        store: &LocalStore,
+        session: Option<&Session>,
+        volume: Id,
+        index: &crate::store::Database,
+        repair: ControlRepair<'_>,
+    ) -> Result<bool> {
+        match repair {
+            ControlRepair::ServiceRead if session.is_some() => Ok(false),
+            ControlRepair::ServiceRead => store
+                .restore_owner_service_read(volume, index, |bytes| {
+                    let request = ServiceRequest::PublishReplica {
+                        operation_id: Id::generate()?.to_string(),
+                        session_id: None,
+                        build_id: None,
+                        volume_id: volume.to_string(),
+                        database_id: crate::store::DatabaseId::Index,
+                    };
+                    let connection = self
+                        .connection
+                        .as_ref()
+                        .ok_or(crate::store::Error::System("AP disconnected".into()))?;
+                    self.runtime
+                        .block_on(wire::publish_replica(connection, &request, bytes))
+                        .map_err(|error| crate::store::Error::System(error.to_string()))?;
+                    Ok(())
+                })
+                .map_err(Into::into),
+            ControlRepair::CheckRetirement(entry) => {
+                Ok(store.retirement_for_capture(session, volume, index, entry)?.is_some())
+            }
+            ControlRepair::MissingBackings { entries, first_unrepaired } => {
+                let mut complete = true;
+                for &entry in entries {
+                    let Some(retirement) =
+                        store.retirement_for_capture(session, volume, index, entry)?
+                    else {
+                        if complete {
+                            *first_unrepaired = entry;
+                        }
+                        complete = false;
+                        continue;
+                    };
+                    let source = store.project_retirement(index, &retirement)?;
+                    // A scoped receipt covers only the replayed retirement.
+                    // Re-capture the controls before acknowledging an Index.
+                    self.transfer_scoped_database(
+                        store,
+                        session,
+                        volume,
+                        (crate::store::DatabaseId::Index, Some(entry)),
+                        SyncDirection::Push,
+                        source.database(),
+                    )?;
+                }
+                Ok(complete)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -3485,7 +3919,7 @@ impl Remote {
             volume,
             None,
             |database, target, _| pull(database, target).map(Some),
-            |_| Ok(false),
+            |_, _| Ok(false),
         )
     }
 
@@ -3499,9 +3933,9 @@ impl Remote {
             &crate::store::Database,
             ReceivedPull,
         ) -> Result<Option<PullReceipt>>,
-        mut restore_controls: impl FnMut(&crate::store::Database) -> Result<bool>,
+        mut restore_controls: impl FnMut(&crate::store::Database, ControlRepair<'_>) -> Result<bool>,
     ) -> Result<crate::store::ReceivedVolume> {
-        use crate::store::{DatabaseId, SnapshotCut};
+        use crate::store::DatabaseId;
         let _timing = crate::trace::Span::new("replication.receive_volume");
         let access = session.map_or_else(
             || Access::owner(store.account().id),
@@ -3520,51 +3954,118 @@ impl Remote {
                 }
                 None => store.prepare_received_volume(volume)?,
             };
-            let index = stage
-                .with_database(DatabaseId::Index, |db| {
-                    pull(DatabaseId::Index, db, ReceivedPull::Control)
-                        .map_err(|error| crate::store::Error::System(error.to_string()))
-                })?
-                .ok_or("index source changed before capture")?;
-            let cut = SnapshotCut::new(index.source, index.revision.policy_revision)?;
-            if index.hosted && entry.is_none() {
-                stage.record_receipt(DatabaseId::Index, &index.revision)?;
-            }
-            let revocations = stage
-                .with_database(DatabaseId::Revocations, |db| {
-                    pull(DatabaseId::Revocations, db, ReceivedPull::Control)
-                        .map_err(|error| crate::store::Error::System(error.to_string()))
-                })?
-                .ok_or("revocation source changed before capture")?;
-            if !cut.accepts(revocations.source, revocations.revision.policy_revision) {
+            let scope_error =
+                |database, error| sync_failure::database(store, &access, volume, database, error);
+            let Some((cut, controls)) = Self::pull_controls(store, &access, &stage, &mut pull)?
+            else {
                 crate::trace::mark("replication.bootstrap_source_changed");
                 continue;
-            }
-            if revocations.hosted && entry.is_none() {
-                stage.record_receipt(DatabaseId::Revocations, &revocations.revision)?;
-            }
-            let mut ap_source = index.ap_source && revocations.ap_source;
-            let controls = CapturedControls { index, revocations };
-            if Self::restore_captured_controls(&stage, controls, &mut restore_controls)? {
+            };
+            let mut ap_source = controls.index.ap_source && controls.revocations.ap_source;
+            let world = entry.is_none() && session.is_some_and(|s| s.is_distinct_world(volume));
+            let mut repair = |stage: &crate::store::ReceivedVolume, request| {
+                Self::restore_captured_controls(stage, &controls, |index| {
+                    restore_controls(index, request)
+                })
+            };
+            if !world
+                && repair(&stage, ControlRepair::ServiceRead)
+                    .map_err(|error| scope_error(DatabaseId::Index, error))?
+            {
                 continue;
             }
-            if Self::pull_received_backings(store, &access, &stage, cut, &mut ap_source, &mut pull)?
-                && (!ap_source || Self::qualify_received_authority(&mut stage, cut, &mut pull)?)
+            let missing = Self::pull_received_backings(
+                store,
+                &access,
+                &mut stage,
+                (cut, world),
+                &mut ap_source,
+                &mut pull,
+                |stage, entry| repair(stage, ControlRepair::CheckRetirement(entry)),
+            )?;
+            let Some(missing) = missing else {
+                crate::trace::mark("replication.bootstrap_source_changed");
+                continue;
+            };
+            if let Some(&first) = missing.first() {
+                // When a partial repair succeeds for earlier entries, report the one
+                // still missing. An ineligible capture retains its first missing entry.
+                let mut waiting = first;
+                if repair(
+                    &stage,
+                    ControlRepair::MissingBackings {
+                        entries: &missing,
+                        first_unrepaired: &mut waiting,
+                    },
+                )
+                .map_err(|error| scope_error(DatabaseId::Index, error))?
+                {
+                    continue;
+                }
+                return Err(scope_error(
+                    DatabaseId::Entry(waiting),
+                    "waiting for initial database synchronization".into(),
+                ));
+            }
+            if !ap_source
+                || Self::qualify_received_authority(&mut stage, cut, &mut pull)
+                    .map_err(|error| scope_error(DatabaseId::Index, error))?
             {
                 crate::trace::mark("replication.bootstrap_snapshot_accepted");
                 return Ok(stage);
             }
             crate::trace::mark("replication.bootstrap_source_changed");
         }
-        Err("volume source kept changing during bootstrap; no received stage was adopted".into())
+        Err(initialization::CHANGING_CUT.into())
+    }
+
+    fn pull_controls(
+        store: &LocalStore,
+        access: &Access,
+        stage: &crate::store::ReceivedVolume,
+        pull: &mut BootstrapPull<'_>,
+    ) -> Result<Option<(crate::store::SnapshotCut, CapturedControls)>> {
+        use crate::store::{DatabaseId, SnapshotCut};
+        let scope_error = |database, error: sync_failure::Cause| {
+            sync_failure::database(store, access, stage.volume(), database, error)
+        };
+        let mut control = |database, missing: &'static str| -> Result<PullReceipt> {
+            stage
+                .with_database(database, |db| {
+                    pull(database, db, ReceivedPull::Control)
+                        .map_err(|error| crate::store::Error::System(error.to_string()))
+                })
+                .map_err(|error| scope_error(database, error.into()))?
+                .ok_or_else(|| scope_error(database, missing.into()))
+        };
+        let index = control(DatabaseId::Index, "index source changed before capture")?;
+        let cut = SnapshotCut::new(index.source, index.revision.policy_revision)
+            .map_err(|error| scope_error(DatabaseId::Index, error.into()))?;
+        let revocations =
+            control(DatabaseId::Revocations, "revocation source changed before capture")?;
+        if !cut.accepts(revocations.source, revocations.revision.policy_revision) {
+            return Ok(None);
+        }
+        if stage.entry_scope().is_none() {
+            for (database, receipt) in
+                [(DatabaseId::Index, &index), (DatabaseId::Revocations, &revocations)]
+            {
+                if receipt.hosted {
+                    stage
+                        .record_receipt(database, &receipt.revision)
+                        .map_err(|error| scope_error(database, error.into()))?;
+                }
+            }
+        }
+        Ok(Some((cut, CapturedControls { index, revocations })))
     }
 
     /// The caller has matched both control receipts to one source cut. A true
-    /// result requires discarding that stage before reading or adopting backings.
+    /// result requires discarding that stage and recapturing before adoption.
     fn restore_captured_controls(
         stage: &crate::store::ReceivedVolume,
-        controls: CapturedControls,
-        restore: &mut impl FnMut(&crate::store::Database) -> Result<bool>,
+        controls: &CapturedControls,
+        restore: impl FnOnce(&crate::store::Database) -> Result<bool>,
     ) -> Result<bool> {
         if !controls.index.ap_source
             || !controls.revocations.ap_source
@@ -3611,66 +4112,140 @@ impl Remote {
         Ok(true)
     }
 
+    /// One stable cut identifies every missing backing before any repair changes
+    /// AP. Keep at most 1024 entry IDs and project one retirement at a time.
     fn pull_received_backings(
         store: &LocalStore,
         access: &Access,
-        stage: &crate::store::ReceivedVolume,
-        cut: crate::store::SnapshotCut,
+        stage: &mut crate::store::ReceivedVolume,
+        (cut, world): (crate::store::SnapshotCut, bool),
         ap_source: &mut bool,
         pull: &mut BootstrapPull<'_>,
-    ) -> Result<bool> {
-        use crate::store::{DatabaseId, DatabasePolicy};
+        mut can_retire: impl FnMut(&crate::store::ReceivedVolume, crate::store::EntryId) -> Result<bool>,
+    ) -> Result<Option<Vec<crate::store::EntryId>>> {
         let mut after = None;
         let mut local_cut = None;
+        let mut missing = Vec::new();
+        let volume = stage.volume();
+        let owner_capture = access.session_id().is_none() && *ap_source;
+        let retained_owner = owner_capture
+            && stage.entry_scope().is_none()
+            && store
+                .durable_revision(volume, crate::store::DatabaseId::Index)
+                .map_err(|error| {
+                    sync_failure::database(
+                        store,
+                        access,
+                        volume,
+                        crate::store::DatabaseId::Index,
+                        error,
+                    )
+                })?
+                .is_some();
+        let service_only = world || owner_capture;
         loop {
-            let page = stage.database_page(after)?;
+            let page = stage.database_page(after).map_err(|error| {
+                sync_failure::database(
+                    store,
+                    access,
+                    stage.volume(),
+                    crate::store::DatabaseId::Index,
+                    error,
+                )
+            })?;
             for database in page.databases {
-                let readable = stage.with_database(DatabaseId::Index, |index| {
-                    let policy = DatabasePolicy::read_source(index, database)?;
-                    let actor = store.data_actor(access, policy.volume.volume())?;
-                    policy.authorize_reader(ReplicaReader::SessionParticipant(actor))
-                });
-                if matches!(readable, Err(crate::store::Error::AccessDenied(_))) {
-                    continue;
-                }
-                readable?;
-                let Some(receipt) =
-                    Self::pull_staged_backing(store, access, stage, database, cut, pull)?
+                let scope_error =
+                    |error| sync_failure::database(store, access, volume, database, error);
+                let Some(receipt) = Self::pull_staged_backing(
+                    store,
+                    access,
+                    stage,
+                    database,
+                    (cut, world || retained_owner),
+                    service_only,
+                    pull,
+                )
+                .map_err(scope_error)?
                 else {
-                    return Ok(false);
+                    return Ok(None);
                 };
-                stage.finish_database(database)?;
                 match receipt {
-                    BackingReceipt::Remote(receipt) => {
+                    StagedBacking::Unreadable => continue,
+                    StagedBacking::Missing(_) if world || retained_owner => {
+                        // Adopt ready entries together. A pending retirement can depend
+                        // on an edit to a different entry in this capture.
+                        stage
+                            .discard_pending_backing(database)
+                            .map_err(|error| scope_error(error.into()))?;
+                        continue;
+                    }
+                    StagedBacking::Missing(entry) => {
+                        // A cold replica with no retirement must retain the readiness
+                        // retry, even if later databases change their source cut.
+                        if !can_retire(stage, entry).map_err(scope_error)? {
+                            if missing.is_empty() {
+                                return Err(scope_error(
+                                    "waiting for initial database synchronization".into(),
+                                ));
+                            }
+                            // Publish earlier eligible retirements before the next wait.
+                            return Ok(Some(missing));
+                        }
+                        if missing.len() == crate::store::volume_index::namespace::MAX_ENTRIES {
+                            return Err(crate::store::Error::LimitExceeded.into());
+                        }
+                        missing.push(entry);
+                        continue;
+                    }
+                    StagedBacking::Remote(receipt) => {
                         *ap_source &= receipt.ap_source;
                         if !cut.accepts(receipt.source, receipt.revision.policy_revision) {
-                            return Ok(false);
+                            return Ok(None);
                         }
                         if receipt.hosted {
-                            stage.record_receipt(database, &receipt.revision)?;
+                            stage
+                                .record_receipt(database, &receipt.revision)
+                                .map_err(|error| scope_error(error.into()))?;
                         }
                     }
-                    BackingReceipt::Local(token) => {
+                    StagedBacking::Local(token) => {
                         *ap_source = false;
                         if local_cut.is_some_and(|cut| cut != token) {
-                            return Ok(false);
+                            return Ok(None);
                         }
                         local_cut = Some(token);
                     }
                 }
+                stage.finish_database(database).map_err(|error| scope_error(error.into()))?;
             }
             let Some(next) = page.next else { break };
             after = Some(next);
         }
-        local_cut.map_or(Ok(true), |cut| {
-            Ok(store.with_authorized_replica(
+        if let Some(token) = local_cut
+            && !Self::local_backing_cut_is_current(store, access, stage, token)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(missing))
+    }
+
+    fn local_backing_cut_is_current(
+        store: &LocalStore,
+        access: &Access,
+        stage: &crate::store::ReceivedVolume,
+        token: crate::store::SnapshotToken,
+    ) -> Result<bool> {
+        use crate::store::DatabaseId;
+        let scope = stage.entry_scope().map_or(DatabaseId::Index, DatabaseId::Entry);
+        store
+            .with_authorized_replica(
                 access,
                 stage.volume(),
-                stage.entry_scope().map_or(DatabaseId::Index, DatabaseId::Entry),
+                scope,
                 Some(Permission::Read),
-                |_, _| Ok(store.source_snapshot_token(stage.volume())? == cut),
-            )?)
-        })
+                |_, _| Ok(store.source_snapshot_token(stage.volume())? == token),
+            )
+            .map_err(|error| sync_failure::database(store, access, stage.volume(), scope, error))
     }
 
     fn pull_staged_backing(
@@ -3678,25 +4253,46 @@ impl Remote {
         access: &Access,
         stage: &crate::store::ReceivedVolume,
         database: crate::store::DatabaseId,
-        cut: crate::store::SnapshotCut,
+        (cut, defer_missing): (crate::store::SnapshotCut, bool),
+        service_only: bool,
         pull: &mut BootstrapPull<'_>,
-    ) -> Result<Option<BackingReceipt>> {
+    ) -> Result<Option<StagedBacking>> {
         let protocol = stage.with_database(crate::store::DatabaseId::Index, |index| {
-            crate::store::DatabasePolicy::read_source(index, database)?
+            let policy = crate::store::DatabasePolicy::read_source(index, database)?;
+            let actor = store.data_actor(access, policy.volume.volume())?;
+            if service_only {
+                policy.authorize_reader(ReplicaReader::Service)?;
+            }
+            policy.authorize_reader(ReplicaReader::SessionParticipant(actor))?;
+            policy
                 .entry
                 .and_then(|entry| entry.protocol)
                 .ok_or(crate::store::Error::InvalidInput("staged entry is not a database"))
-        })?;
+        });
+        let protocol = match protocol {
+            Ok(protocol) => protocol,
+            Err(crate::store::Error::AccessDenied(_)) => {
+                return Ok(Some(StagedBacking::Unreadable));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let result = stage.with_database(database, |db| {
             pull(database, db, ReceivedPull::Backing { cut, protocol })
                 .map_err(|error| crate::store::Error::System(error.to_string()))
         });
         match result {
-            Ok(receipt) => Ok(receipt.map(BackingReceipt::Remote)),
+            Ok(receipt) => Ok(receipt.map(StagedBacking::Remote)),
             Err(error) if error.to_string() == "waiting for initial database synchronization" => {
-                let token =
-                    store.stage_local_backing(access, stage, database).map_err(|_| error)?;
-                Ok(Some(BackingReceipt::Local(token)))
+                let crate::store::DatabaseId::Entry(entry) = database else {
+                    return Err(error.into());
+                };
+                if defer_missing {
+                    return Ok(Some(StagedBacking::Missing(entry)));
+                }
+                Ok(Some(match store.stage_local_backing(access, stage, database) {
+                    Ok(token) => StagedBacking::Local(token),
+                    Err(_) => StagedBacking::Missing(entry),
+                }))
             }
             Err(error) => Err(error.into()),
         }
@@ -3705,26 +4301,57 @@ impl Remote {
     fn acknowledge_received(
         &self,
         store: &LocalStore,
+        access: &Access,
         stage: &crate::store::ReceivedVolume,
     ) -> Result<()> {
         let mut after = None;
         loop {
-            let page = stage.receipt_page(after)?;
+            let page = stage.receipt_page(after).map_err(|error| {
+                sync_failure::database(
+                    store,
+                    access,
+                    stage.volume(),
+                    crate::store::DatabaseId::Index,
+                    error,
+                )
+            })?;
             for (database, receipt) in page.receipts {
+                let scope_error =
+                    |error| sync_failure::database(store, access, stage.volume(), database, error);
                 if database == crate::store::DatabaseId::Index {
-                    stage.with_database(database, |source| {
-                        store.acknowledge_provider_received(stage.volume(), source, receipt.root)
-                    })?;
+                    stage
+                        .with_database(database, |source| {
+                            store.acknowledge_provider_received(
+                                stage.volume(),
+                                source,
+                                receipt.root,
+                            )
+                        })
+                        .map_err(scope_error)?;
+                }
+                if matches!(database, crate::store::DatabaseId::Entry(_))
+                    && store.has_world_attachment(stage.volume()).map_err(scope_error)?
+                {
+                    stage
+                        .with_database(database, |source| {
+                            store.acknowledge_world_append_snapshot(
+                                stage.volume(),
+                                database,
+                                source,
+                                receipt.root,
+                            )
+                        })
+                        .map_err(scope_error)?;
                 }
                 match store.projection_root(stage.volume(), database, ReplicaReader::Service) {
-                    Ok(root) if root == receipt.root => {
-                        store.acknowledge_replica(stage.volume(), database, &receipt)?
-                    }
+                    Ok(root) if root == receipt.root => store
+                        .acknowledge_replica(stage.volume(), database, &receipt)
+                        .map_err(scope_error)?,
                     Ok(_)
                     | Err(
                         crate::store::Error::NotFound(_) | crate::store::Error::AccessDenied(_),
                     ) => (),
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(scope_error(error)),
                 }
             }
             let Some(next) = page.next else { return Ok(()) };
@@ -3732,44 +4359,82 @@ impl Remote {
         }
     }
 
-    fn pull_owner_volume(&self, store: &LocalStore, volume: Id) -> Result<()> {
+    fn pull_owner_volume(
+        &self,
+        store: &LocalStore,
+        volume: Id,
+    ) -> Result<Option<crate::store::DatabaseId>> {
         let _timing = crate::trace::Span::new("replication.pull_owner_volume");
-        let stage = self.receive_volume(store, None, volume)?;
-        store.adopt_received_volume(&Access::owner(store.account().id), &stage)?;
-        self.acknowledge_received(store, &stage)?;
-        Ok(())
+        let baseline = if self.live.as_ref().is_some_and(|live| live.has_receiver(volume)) {
+            match store.source_snapshot_token(volume) {
+                Ok(token) => Some(token),
+                Err(crate::store::Error::Store(kvdb::Error::Busy)) => {
+                    return Err(initialization::CHANGING_CUT.into());
+                }
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            None
+        };
+        let mut stage = self.receive_volume(store, None, volume)?;
+        stage.owner_baseline = baseline;
+        let access = Access::owner(store.account().id);
+        match store.adopt_received_volume(&access, &stage) {
+            Err(crate::store::Error::LocalContention(
+                crate::store::Error::OWNER_CAPTURE_CHANGED,
+            )) => {
+                return Err(initialization::CHANGING_CUT.into());
+            }
+            result => result?,
+        };
+        self.acknowledge_received(store, &access, &stage)?;
+        Ok(stage.pending_backing)
     }
 
-    fn pull_bound_volume(&self, store: &LocalStore, session: &Session, volume: Id) -> Result<()> {
-        if volume != session.replica_volume() {
+    fn pull_bound_volume(
+        &self,
+        store: &LocalStore,
+        session: &Session,
+        volume: Id,
+    ) -> Result<ReceivedVolume> {
+        if volume != session.replica_volume() && !session.is_distinct_world(volume) {
             return Err("volume does not belong to replica session".into());
         }
         let _timing = crate::trace::Span::new("replication.pull_bound_volume");
         let access =
             Access::session_version(store.account().id, &session.id, &session.resolved_build_id);
         let stage = self.receive_volume(store, Some(session), volume)?;
-        store.adopt_received_revocations(&access, &stage)?;
+        store.adopt_received_revocations(&access, &stage).map_err(|error| {
+            sync_failure::database(
+                store,
+                &access,
+                volume,
+                crate::store::DatabaseId::Revocations,
+                error,
+            )
+        })?;
         store.adopt_received_volume(&access, &stage)?;
-        self.acknowledge_received(store, &stage)?;
-        Ok(())
+        self.acknowledge_received(store, &access, &stage)?;
+        Ok(stage)
     }
     fn transfer_database(
         &self,
+        store: &LocalStore,
         session: Option<&Session>,
         volume: Id,
         database: crate::store::DatabaseId,
         direction: SyncDirection,
         db: &crate::store::Database,
     ) -> crate::store::Result<crate::store::ReplicaReceipt> {
-        self.transfer_scoped_database(session, volume, database, None, direction, db)
+        self.transfer_scoped_database(store, session, volume, (database, None), direction, db)
     }
 
     fn transfer_scoped_database(
         &self,
+        store: &LocalStore,
         session: Option<&Session>,
         volume: Id,
-        database: crate::store::DatabaseId,
-        entry_scope: Option<crate::store::EntryId>,
+        target: (crate::store::DatabaseId, Option<crate::store::EntryId>),
         direction: SyncDirection,
         db: &crate::store::Database,
     ) -> crate::store::Result<crate::store::ReplicaReceipt> {
@@ -3777,14 +4442,37 @@ impl Remote {
             SyncDirection::Pull => "replication.pull_database",
             SyncDirection::Push => "replication.push_database",
         });
-        let request = ServiceRequest::SyncDatabase {
-            entry_scope,
-            operation_id: Id::generate()?.to_string(),
-            session_id: session.map(|s| s.id.clone()),
-            build_id: session.map(|s| s.resolved_build_id.clone()),
-            volume_id: volume.to_string(),
-            database_id: database,
-            direction,
+        let (database, entry_scope) = target;
+        let route = store.world_replica_route(volume, session)?;
+        let wire_key = if route == crate::store::WorldReplicaRoute::CredentialedRoot {
+            Some(store.replica_hash_key(volume, database)?)
+        } else {
+            None
+        };
+        let request = if route == crate::store::WorldReplicaRoute::PublisherWorld {
+            let session = session
+                .ok_or(crate::store::Error::AccessDenied("World projection requires a session"))?;
+            ServiceRequest::WorldReplica {
+                operation_id: Id::generate()?.to_string(),
+                session_id: session.id.clone(),
+                build_id: session.resolved_build_id.clone(),
+                volume_id: volume.to_string(),
+                request: crate::network::ap::operation::WorldReplicaRequest::Sync {
+                    database_id: database,
+                    direction,
+                    entry_scope,
+                },
+            }
+        } else {
+            ServiceRequest::SyncDatabase {
+                entry_scope,
+                operation_id: Id::generate()?.to_string(),
+                session_id: session.map(|s| s.id.clone()),
+                build_id: session.map(|s| s.resolved_build_id.clone()),
+                volume_id: volume.to_string(),
+                database_id: database,
+                direction,
+            }
         };
         let connection = self
             .connection
@@ -3804,12 +4492,14 @@ impl Remote {
                             &mut stream,
                             db,
                             request.operation_id(),
+                            wire_key,
                         )
                         .await?;
                     }
                     SyncDirection::Push => {
                         wire::response(&mut stream, request.operation_id()).await?;
-                        push_database_stream(&mut stream, db, request.operation_id()).await?;
+                        push_database_stream(&mut stream, db, request.operation_id(), wire_key)
+                            .await?;
                     }
                 }
                 let evidence = if direction == SyncDirection::Pull
@@ -3821,8 +4511,19 @@ impl Remote {
                 };
                 stream.finish()?;
                 let response = wire::response(&mut stream, request.operation_id()).await?;
-                let durable: crate::store::ReplicaReceipt =
+                let mut durable: crate::store::ReplicaReceipt =
                     serde_json::from_value(response.data.ok_or("missing durable revision")?)?;
+                if let Some(key) = wire_key
+                    && direction == SyncDirection::Pull
+                {
+                    // The receipt names the credentialed server tree. Verify that
+                    // exact root before binding its evidence to the local tree.
+                    let sender = SyncSender::new(db)?;
+                    if world::wire_root(&sender, key).await? != durable.durable.root {
+                        return Err("credentialed World receipt differs from delivered data".into());
+                    }
+                    durable.durable.root = sender.root_hash()?;
+                }
                 if let Some(evidence) = evidence {
                     crate::store::volume_index::namespace::receipt::retain(
                         db,
@@ -3833,7 +4534,18 @@ impl Remote {
                 }
                 Ok::<_, Box<dyn std::error::Error + Send + Sync>>(durable)
             })
-            .map_err(|e| crate::store::Error::System(e.to_string()))
+            .map_err(|error| {
+                if entry_scope.is_some()
+                    && direction == SyncDirection::Push
+                    && error
+                        .downcast_ref::<ServiceFailure>()
+                        .is_some_and(ServiceFailure::is_kv_append_conflict)
+                {
+                    crate::store::Error::AlreadyExists("World KV append")
+                } else {
+                    crate::store::Error::System(error.to_string())
+                }
+            })
     }
     fn pull_received_log(
         &self,
@@ -3890,7 +4602,13 @@ impl Remote {
             }
         }
     }
-    fn push_volume(&self, store: &LocalStore, session: Option<&Session>, volume: Id) -> Result<()> {
+    fn push_volume(
+        &self,
+        store: &LocalStore,
+        participant: Option<(&Session, &ReceivedVolume)>,
+        volume: Id,
+    ) -> Result<()> {
+        let session = participant.map(|(session, _)| session);
         let descriptor = store.volume(volume)?;
         let access = session.map_or_else(
             || Access::owner(store.account().id),
@@ -3898,13 +4616,68 @@ impl Remote {
                 Access::session_version(store.account().id, &session.id, &session.resolved_build_id)
             },
         );
+        let world = match session {
+            Some(session) => store.world_append_scope(session, volume)?,
+            None => false,
+        };
         let mut after = None;
         let mut service = descriptor.share_key_with_service;
         loop {
             let page = store.replication_database_page(volume, after)?;
             for database in page.databases {
-                if !store.replica_upload_allowed(&access, volume, database)? {
+                let scope_error =
+                    |error| sync_failure::database(store, &access, volume, database, error);
+                if !store.replica_upload_allowed(&access, volume, database).map_err(scope_error)? {
                     continue;
+                }
+                if world && let crate::store::DatabaseId::Entry(entry) = database {
+                    let details =
+                        store.entry_details(&access, volume, entry).map_err(scope_error)?;
+                    if !details.backing_ready {
+                        continue;
+                    }
+                    if details.readable
+                        && let Some((_, received)) = participant
+                        && received
+                            .hosted_backing_matches(
+                                entry,
+                                store.replica_root(volume, database).map_err(scope_error)?,
+                            )
+                            .map_err(scope_error)?
+                    {
+                        // The freshly pulled AP cut already contains this exact local
+                        // Merkle tree. The rebased live feed covers later local writes.
+                        continue;
+                    }
+                    if !details.readable {
+                        let submit = |source: &crate::store::Database| {
+                            self.transfer_scoped_database(
+                                store,
+                                session,
+                                volume,
+                                (database, Some(entry)),
+                                SyncDirection::Push,
+                                source,
+                            )
+                            .map(|_| ())
+                        };
+                        let result = if !details.writable
+                            && details.appendable
+                            && matches!(
+                                details.entry.info.kind,
+                                crate::store::volume_index::EntryKind::KvDb {}
+                            ) {
+                            store.publish_pending_world_appends(volume, database, submit)
+                        } else {
+                            store.publish_pending_world_backing(volume, database, submit)
+                        };
+                        match result {
+                            Ok(()) | Err(crate::store::Error::AccessDenied("entry permission")) => {
+                                continue;
+                            }
+                            Err(error) => return Err(scope_error(error)),
+                        }
+                    }
                 }
                 if service {
                     let result = store.with_outbound_replica(
@@ -3912,19 +4685,41 @@ impl Remote {
                         database,
                         ReplicaReader::Service,
                         |source| {
-                            self.transfer_database(
-                                session,
-                                volume,
-                                database,
-                                SyncDirection::Push,
-                                source,
-                            )
-                            .map_err(|error| crate::store::Error::System(error.to_string()))
+                            let receipt = self
+                                .transfer_database(
+                                    store,
+                                    session,
+                                    volume,
+                                    database,
+                                    SyncDirection::Push,
+                                    source,
+                                )
+                                .map_err(|error| crate::store::Error::System(error.to_string()))?;
+                            if matches!(database, crate::store::DatabaseId::Entry(_))
+                                && store.has_world_attachment(volume)?
+                            {
+                                store.acknowledge_world_append_snapshot(
+                                    volume,
+                                    database,
+                                    source,
+                                    receipt.durable.root,
+                                )?;
+                            }
+                            Ok(receipt)
                         },
                     );
                     match result {
                         Ok(receipt) => {
-                            store.acknowledge_replica(volume, database, &receipt.durable)?;
+                            // A concurrently merged server tree can differ from
+                            // this upload. The verified follow-up pull records
+                            // its durable acknowledgment in the local hash context.
+                            if store.world_replica_route(volume, session).map_err(scope_error)?
+                                != crate::store::WorldReplicaRoute::CredentialedRoot
+                            {
+                                store
+                                    .acknowledge_replica(volume, database, &receipt.durable)
+                                    .map_err(scope_error)?;
+                            }
                             continue;
                         }
                         Err(crate::store::Error::AccessDenied("entry permission")) => continue,
@@ -3934,7 +4729,7 @@ impl Remote {
                         {
                             service = false
                         }
-                        Err(error) => return Err(error.into()),
+                        Err(error) => return Err(scope_error(error)),
                     }
                 }
                 let session = session.ok_or("private synchronization requires a session")?;
@@ -3945,7 +4740,8 @@ impl Remote {
                     session,
                     volume,
                     database,
-                )?;
+                )
+                .map_err(|error| sync_failure::database(store, &access, volume, database, error))?;
             }
             let Some(next) = page.next else { break };
             after = Some(next);
@@ -3962,18 +4758,20 @@ impl Remote {
     fn finish_captured_live(
         &mut self,
         store: &Arc<LocalStore>,
-        session: Option<&Session>,
+        participant: Option<(&Session, ReceivedVolume)>,
         volume: Id,
         mut prepared: crate::engine::live::PreparedLive,
     ) -> Result<()> {
         self.runtime.block_on(
             self.live.as_mut().ok_or("live replication is unavailable")?.rebase(&mut prepared),
         )?;
-        if let Some(session) = session {
-            self.push_bootstrap_participant(store, session, volume)?;
+        let session = if let Some((session, received)) = participant {
+            self.push_bootstrap_participant(store, session, received)?;
+            Some(session)
         } else {
             self.push_volume(store, None, volume)?;
-        }
+            None
+        };
         self.runtime.block_on(
             self.live.as_ref().ok_or("live replication is unavailable")?.activate(&mut prepared),
         )?;
@@ -3989,12 +4787,18 @@ impl Remote {
         &mut self,
         store: &Arc<LocalStore>,
         session: &Session,
-        volume: Id,
+        received: ReceivedVolume,
     ) -> Result<bool> {
-        let Err(error) = self.push_volume(store, Some(session), volume) else {
+        let volume = received.volume();
+        let result = self.push_volume(store, Some((session, &received)), volume);
+        drop(received);
+        let Err(error) = result else {
             return Ok(false);
         };
-        if !error.to_string().starts_with("unauthorized replica entry: access denied:") {
+        if !sync_failure::reason(error.as_ref())
+            .to_string()
+            .starts_with("unauthorized replica entry: access denied:")
+        {
             return Err(error);
         }
         self.pull_bound_volume(store, session, volume)?;
@@ -4063,8 +4867,8 @@ fn stable_operation(kind: &str, identity: &str) -> String {
     crate::identifier::encode(&blake3::hash(&bytes).as_bytes()[..16])
 }
 
-fn waiting_peer(error: &(dyn std::error::Error + Send + Sync)) -> bool {
-    error.to_string().contains("waiting for an authorized peer")
+fn waiting_peer(error: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    sync_failure::reason(error).to_string().contains("waiting for an authorized peer")
 }
 
 async fn pull_database_stream(
@@ -4072,10 +4876,14 @@ async fn pull_database_stream(
     stream: &mut crate::network::ap::ApStream,
     database: &crate::store::Database,
     operation: &str,
+    wire_key: Option<[u8; 32]>,
 ) -> Result<()> {
     let mut output = Vec::new();
-    let mut receiver =
-        SyncReceiver::new(database, Lww, crate::store::sync_staging(scratch)?, now(), &mut output)?;
+    let staging = crate::store::sync_staging(scratch)?;
+    let mut receiver = match wire_key {
+        Some(key) => SyncReceiver::new_projection(database, key, Lww, staging, now(), &mut output)?,
+        None => SyncReceiver::new(database, Lww, staging, now(), &mut output)?,
+    };
     // Queue the initial root with the AP request. The server still authorizes
     // the operation before processing it, and we check its response before
     // accepting any sync data. Waiting first adds a round trip to every pull.
@@ -4100,8 +4908,13 @@ async fn push_database_stream(
     stream: &mut crate::network::ap::ApStream,
     database: &crate::store::Database,
     operation: &str,
+    wire_key: Option<[u8; 32]>,
 ) -> Result<()> {
     let mut sender = SyncSender::new(database)?;
+    if let Some(key) = wire_key {
+        let root = world::wire_root(&sender, key).await?;
+        sender.use_projection(key, root)?;
+    }
     let mut output = vec![0; 256 * 1024];
     loop {
         let input = sync_payload(wire::receive_transfer(stream).await?, operation)?;
@@ -4110,7 +4923,11 @@ async fn push_database_stream(
         loop {
             let length = {
                 let _timing = crate::trace::Span::new("replication.sender_output");
-                sender.write_output(&mut output)?
+                sender.try_write_output(&mut output)?
+            };
+            let Some(length) = length else {
+                tokio::task::yield_now().await;
+                continue;
             };
             if length == 0 {
                 break;
@@ -4134,13 +4951,8 @@ async fn push_database_stream(
 // parsing, and never mistake an early success response for a completed transfer.
 fn sync_payload(bytes: Vec<u8>, operation_id: &str) -> Result<Vec<u8>> {
     if let Ok(response) = serde_json::from_slice::<ServiceResponse>(&bytes) {
-        if response.operation_id != operation_id {
-            return Err("AP response operation identity differs".into());
-        }
-        if response.ok {
-            return Err("AP ended database transfer before synchronization completed".into());
-        }
-        return Err(response.error.unwrap_or_else(|| "service operation failed".into()).into());
+        crate::network::ap::service::validated_response(response, operation_id)?;
+        return Err("AP ended database transfer before synchronization completed".into());
     }
     Ok(bytes)
 }
@@ -4167,9 +4979,17 @@ mod tests {
         let waiting = "waiting for initial database synchronization";
         for waiting in [waiting, "AP request capacity exhausted"] {
             engine.remote.as_mut().unwrap().initializations.clear();
+            let mut now = Instant::now();
             for attempt in 0..=6 {
                 let (send, mut remote) = transfer(&mut engine);
-                remote.initializations.failed(volume, waiting, Instant::now()).unwrap();
+                if attempt != 0 {
+                    now += remote.initializations.wake_after(now).unwrap();
+                    let mut due = Vec::new();
+                    remote.initializations.select(&mut due, now);
+                    assert_eq!(due, [volume]);
+                    remote.initializations.start(volume);
+                }
+                remote.initializations.failed(volume, waiting, now).unwrap();
                 let pending = initialization::Pending(waiting.into());
                 assert_eq!(remote.initialization_retrying(&pending), attempt < 6);
                 let result = if attempt < 6 {
@@ -4344,48 +5164,77 @@ mod tests {
         use crate::engine::live::{LiveGap, RecoveryKind, tests::observed_entry};
         use crate::engine::publisher::PublishState;
         use crate::engine::replication::ReplicaState;
-        let (_directory, mut engine, scope, neighbor) = gap_fixture();
-        let store = engine.services.store.clone();
-        let remote = engine.remote.as_mut().unwrap();
-        let mut captures = 0;
-        let error = remote
-            .recover_scope_with(&store, &scope, RecoveryKind::Gap, |remote, _, key, _| {
-                assert_eq!(*key, scope);
-                captures += 1;
-                let live = remote.live.as_mut().unwrap();
-                // Each replacement has new identities but belongs to the same
-                // admitted episode. Its checkpoint again reports a current Gap.
-                observed_entry(
-                    live,
-                    scope,
-                    captures + 1,
-                    [captures as u8 + 1; 16],
-                    PublishState::Ready,
-                    ReplicaState::Gap,
+        let entry = crate::store::EntryId::from_bytes([6; 15]).unwrap();
+        let database = crate::store::DatabaseId::Entry(entry);
+        let waiting = "replica bootstrap kept losing its live boundary after three captures\nAlso waiting for initial database synchronization";
+        for (pending, apply, expected) in [
+            (None, false, None),
+            (Some(database), false, Some(waiting)),
+            (Some(crate::store::DatabaseId::Index), true, Some("pending backing")),
+        ] {
+            let (_directory, mut engine, scope, neighbor) = gap_fixture();
+            let store = engine.services.store.clone();
+            let remote = engine.remote.as_mut().unwrap();
+            let mut captures = 0;
+            let error = remote
+                .recover_scope_with(&store, &scope, RecoveryKind::Gap, |remote, _, key, _| {
+                    assert_eq!(*key, scope);
+                    captures += 1;
+                    let live = remote.live.as_mut().unwrap();
+                    // Each replacement has new identities but belongs to the same
+                    // admitted episode. Its checkpoint again reports a current Gap.
+                    observed_entry(
+                        live,
+                        scope,
+                        captures + 1,
+                        [captures as u8 + 1; 16],
+                        PublishState::Ready,
+                        ReplicaState::Gap,
+                    );
+                    assert!(live.recovery_is_current(&scope, RecoveryKind::Gap));
+                    assert!(!live.needs_gap_recovery());
+                    assert!(live.is_installed(neighbor.volume, None));
+                    let gap = if apply {
+                        sync_failure::apply_gap(sync_failure::target_database(
+                            scope.volume,
+                            database,
+                            "pending backing",
+                        ))
+                    } else {
+                        live.complete_recovery(&scope).unwrap_err()
+                    };
+                    Err(sync_failure::captured_backing_gap(scope.volume, pending, gap))
+                })
+                .unwrap_err();
+            assert_eq!(captures, 3);
+            if let Some(reason) = expected {
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "Couldn’t sync database {database} in volume {}\n{reason}",
+                        scope.volume
+                    )
                 );
-                assert!(live.recovery_is_current(&scope, RecoveryKind::Gap));
-                assert!(!live.needs_gap_recovery());
-                assert!(live.is_installed(neighbor.volume, None));
-                Err(LiveGap.into())
-            })
-            .unwrap_err();
-        assert_eq!(captures, 3);
-        assert!(error.to_string().contains("after three captures"));
-        let live = remote.live.as_mut().unwrap();
-        assert!(!live.needs_gap_recovery());
-        assert!(live.take_recoveries(RecoveryKind::Gap).is_empty());
-        assert!(!live.is_installed(scope.volume, None));
-        assert!(live.is_installed(neighbor.volume, None));
-        assert_eq!(
-            live.availability(store.change_status(), store.pending_change_count()),
-            "Synchronization failed; local data is retained"
-        );
-        // Consuming notification payloads must not erase terminal health.
-        remote.received.drain();
-        assert_eq!(
-            live.availability(store.change_status(), store.pending_change_count()),
-            "Synchronization failed; local data is retained"
-        );
+                assert!(!sync_failure::reason(error.as_ref()).is::<LiveGap>());
+            } else {
+                assert!(error.to_string().contains("after three captures"));
+            }
+            let live = remote.live.as_mut().unwrap();
+            assert!(!live.needs_gap_recovery());
+            assert!(live.take_recoveries(RecoveryKind::Gap).is_empty());
+            assert!(!live.is_installed(scope.volume, None));
+            assert!(live.is_installed(neighbor.volume, None));
+            assert_eq!(
+                live.availability(store.change_status(), store.pending_change_count()),
+                "Synchronization failed; local data is retained"
+            );
+            // Consuming notification payloads must not erase terminal health.
+            remote.received.drain();
+            assert_eq!(
+                live.availability(store.change_status(), store.pending_change_count()),
+                "Synchronization failed; local data is retained"
+            );
+        }
     }
 
     #[test]
@@ -4430,13 +5279,27 @@ mod tests {
         use crate::engine::live::{LiveGap, RecoveryKind, tests::observed_entry};
         use crate::engine::publisher::PublishState;
         use crate::engine::replication::{ReplicaSource, ReplicaState};
-        for outcome in ["live", "revoked", "failed publisher", "stale epoch", "storage failed"] {
+        let database = crate::store::DatabaseId::Entry(
+            crate::store::EntryId::from_bytes([6; 15]).expect("valid fixture entry"),
+        );
+        for outcome in [
+            "live",
+            "revoked",
+            "failed publisher",
+            "stale epoch",
+            "stale pending backing",
+            "stale apply wait",
+            "storage failed",
+        ] {
             let (_directory, mut engine, scope, neighbor) = gap_fixture();
             let store = engine.services.store.clone();
             let remote = engine.remote.as_mut().unwrap();
             let mut captures = 0;
-            let result =
-                remote.recover_scope_with(&store, &scope, RecoveryKind::Gap, |remote, _, _, _| {
+            let result = remote.recover_scope_with(
+                &store,
+                &scope,
+                RecoveryKind::Gap,
+                |remote, store, _, _| {
                     captures += 1;
                     let live = remote.live.as_mut().unwrap();
                     observed_entry(
@@ -4448,7 +5311,11 @@ mod tests {
                         ReplicaState::Gap,
                     );
                     if captures == 1 {
-                        return Err(LiveGap.into());
+                        return Err(super::sync_failure::volume(
+                            store,
+                            scope.volume,
+                            LiveGap::Delivery,
+                        ));
                     }
                     match outcome {
                         "live" => {
@@ -4465,26 +5332,56 @@ mod tests {
                                 [3; 16],
                                 ReplicaState::Revoked,
                             );
-                            Err(LiveGap.into())
+                            Err(LiveGap::Delivery.into())
                         }
                         "failed publisher" => {
                             live.publisher().test_state(scope.volume, 3, PublishState::Failed);
-                            Err(LiveGap.into())
+                            Err(LiveGap::Delivery.into())
                         }
-                        "stale epoch" => {
+                        "stale epoch" | "stale pending backing" | "stale apply wait" => {
+                            let gap = live.complete_recovery(&scope).unwrap_err();
                             remote.received.test_state(
                                 ReplicaSource::Volume(scope.volume),
                                 [4; 16],
                                 ReplicaState::Gap,
                             );
-                            Err(LiveGap.into())
+                            Err(match outcome {
+                                "stale pending backing" => sync_failure::captured_backing_gap(
+                                    scope.volume,
+                                    Some(database),
+                                    gap,
+                                ),
+                                "stale apply wait" => {
+                                    sync_failure::apply_gap(sync_failure::target_database(
+                                        scope.volume,
+                                        database,
+                                        "waiting for initial database synchronization",
+                                    ))
+                                }
+                                _ => gap,
+                            })
                         }
                         _ => Err("storage failed".into()),
                     }
-                });
+                },
+            );
             assert_eq!(captures, 2, "{outcome}");
             assert_eq!(result.is_ok(), outcome == "live");
             let live = remote.live.as_mut().unwrap();
+            if matches!(outcome, "stale pending backing" | "stale apply wait") {
+                let error = result.unwrap_err();
+                assert!(!error.is::<initialization::Pending>());
+                assert!(live.readiness_wake_after(Instant::now()).is_none());
+                let gap = sync_failure::reason(error.as_ref()).downcast_ref::<LiveGap>().unwrap();
+                if outcome == "stale pending backing" {
+                    assert!(matches!(gap, LiveGap::PendingBacking));
+                    assert!(error.to_string().contains(
+                        "replica subscription requires gap recovery\nAlso waiting for initial database synchronization"
+                    ));
+                } else {
+                    assert!(matches!(gap, LiveGap::Apply(_)));
+                }
+            }
             assert!(!live.needs_gap_recovery());
             assert!(live.is_installed(neighbor.volume, None));
             if outcome == "live" {
@@ -4789,6 +5686,23 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        // A different failure cannot take the missing-backing fallback. Name the
+        // admitted local entry and keep its exact address through any outer volume pass.
+        let cause = Remote::receive_volume_with(&store, None, volume, |database, target| {
+            if database == named {
+                return Err("database transfer failed".into());
+            }
+            receive_snapshot(&store, &access, volume, database, target, true)
+        })
+        .err()
+        .unwrap();
+        let cause = sync_failure::volume(&store, volume, cause);
+        assert_eq!(
+            cause.to_string(),
+            format!(
+                "Couldn’t sync database \"data\" ({named}) in volume \"Receive race\" ({volume})\ndatabase transfer failed"
+            ),
+        );
         let page = received.receipt_page(None).unwrap();
         let receipts = page.receipts;
         let next = page.next;
@@ -4805,6 +5719,97 @@ mod tests {
                 })
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn retirement_repair_only_requests_backings_missing_from_ap() {
+        // Freeze the hosted replicas before deleting both entries offline. Only
+        // an actual missing-backing response may trigger a scoped retirement.
+        use crate::store::{DatabaseId, volume_index::EntryKind};
+        let (_directory, store, volume, first, _, access) = receive_fixture();
+        let second = store.create_database(&access, volume, "scratch", EntryKind::KvDb {}).unwrap();
+        let ap = Remote::receive_volume_with(&store, None, volume, |database, target| {
+            receive_snapshot(&store, &access, volume, database, target, true)
+        })
+        .unwrap();
+        let receipts = ap.receipt_page(None).unwrap().receipts;
+        let source = store.source_snapshot_token(volume).unwrap();
+        for entry in [first.entry, second.id] {
+            store.remove_entry(&access, volume, entry).unwrap();
+        }
+
+        for (missing, can_retire, partial) in
+            [(false, true, false), (true, true, false), (true, false, false), (true, true, true)]
+        {
+            let blocked = first.entry.min(second.id);
+            let last = first.entry.max(second.id);
+            let mut waited = false;
+            let mut repairs = Vec::new();
+            let received = Remote::receive_volume_using(
+                &store,
+                None,
+                volume,
+                None,
+                |database, target, _| {
+                    if missing
+                        && (database == DatabaseId::Entry(blocked)
+                            || partial && database == DatabaseId::Entry(last))
+                    {
+                        waited = true;
+                        return Err("waiting for initial database synchronization".into());
+                    }
+                    assert!(!waited || can_retire, "an unrepairable missing entry ends the pull");
+                    ap.with_database(database, |db| {
+                        crate::store::merge_replica(&std::env::temp_dir(), db, target, Lww, |_| {
+                            Ok(())
+                        })
+                    })?;
+                    let (_, revision) = receipts.iter().find(|(id, _)| *id == database).unwrap();
+                    Ok(Some(PullReceipt {
+                        source,
+                        revision: revision.clone(),
+                        hosted: true,
+                        ap_source: true,
+                    }))
+                },
+                |_, repair| match repair {
+                    ControlRepair::CheckRetirement(_) => Ok(can_retire),
+                    ControlRepair::MissingBackings { entries, first_unrepaired } => {
+                        repairs.extend_from_slice(entries);
+                        if partial {
+                            *first_unrepaired = last;
+                        }
+                        Ok(false)
+                    }
+                    ControlRepair::ServiceRead => Ok(false),
+                },
+            );
+            if missing {
+                assert_eq!(
+                    repairs,
+                    if partial {
+                        vec![blocked, last]
+                    } else if can_retire {
+                        vec![blocked]
+                    } else {
+                        vec![]
+                    }
+                );
+                let blocked = if partial { last } else { blocked };
+                let error = received.err().unwrap();
+                let waiting = "waiting for initial database synchronization";
+                assert_eq!(super::sync_failure::reason(error.as_ref()).to_string(), waiting);
+                assert_eq!(
+                    error.to_string(),
+                    format!(
+                        "Couldn’t sync database {blocked} in volume \"Receive race\" ({volume})\n{waiting}"
+                    )
+                );
+            } else {
+                received.unwrap();
+                assert!(repairs.is_empty());
+            }
+        }
     }
 
     // Use an unchanged remote cut, mutate the first retained local backing while
@@ -5029,7 +6034,7 @@ mod tests {
                     }
                     receive_snapshot(&store, &access, volume, database, target, true).map(Some)
                 },
-                |_| Ok(false),
+                |_, _| Ok(false),
             );
             if mode == 2 {
                 assert_eq!(attempts, 3);
@@ -5085,15 +6090,46 @@ mod tests {
     }
 
     #[test]
+    fn a_transferred_database_names_its_backing_when_local_validation_fails() {
+        let (_directory, store, volume, address, _, access) = receive_fixture();
+        let named = crate::store::DatabaseId::Entry(address.entry);
+        let result = Remote::receive_volume_with(&store, None, volume, |database, target| {
+            let receipt = receive_snapshot(&store, &access, volume, database, target, true)?;
+            if database == named {
+                let mut write = target.begin_write(now())?;
+                write.put(b"object/x", b"malformed creation")?;
+                write.commit()?;
+            }
+            Ok(receipt)
+        });
+        let error = result.err().expect("invalid transferred backing must not be adopted");
+        let message = error.to_string();
+        let (scope, cause) = sync_failure_parts(&message).expect("database scope");
+        assert_eq!(
+            scope,
+            format!(
+                "Couldn’t sync database \"data\" ({named}) in volume \"Receive race\" ({volume})"
+            )
+        );
+        assert!(cause.contains("object creation key has the wrong ID width"), "{cause}");
+    }
+
+    #[test]
     fn bootstrap_does_not_retry_an_authorization_or_storage_error() {
         let (_directory, store, volume, _address, _type_id, _access) = receive_fixture();
         for message in ["access denied", "storage failed"] {
             let mut calls = 0;
-            let result = Remote::receive_volume_with(&store, None, volume, |_, _| {
+            let result = Remote::receive_volume_with(&store, None, volume, |database, _| {
+                assert_eq!(database, crate::store::DatabaseId::Index);
                 calls += 1;
                 Err(message.into())
             });
-            assert_eq!(result.err().unwrap().to_string(), message);
+            assert_eq!(
+                result.err().unwrap().to_string(),
+                format!(
+                    "Couldn’t sync database index in volume \"Receive race\" ({volume})\n{message}"
+                ),
+            );
             assert_eq!(calls, 1);
         }
     }
@@ -5701,6 +6737,74 @@ mod tests {
                 .to_string()
                 .contains("required live replica needs recovery")
         );
+    }
+
+    #[test]
+    fn final_fence_reports_a_failed_publication_after_its_notice_was_drained() {
+        use crate::engine::live::{ScopeKey, tests::observed_entry};
+        use crate::engine::publisher::{PublishKey, PublishState};
+        use crate::engine::replication::ReplicaState;
+        let (directory, store, volume, address, _, _) = receive_fixture();
+        // Open an empty change feed so the fixture setup cannot schedule a
+        // bootstrap over the live generation installed below.
+        drop(store);
+        let store = Arc::new(LocalStore::open(directory.path()).unwrap());
+        let (_reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let mut remote = Remote::open(directory.path(), Arc::new(Wake::unix(writer))).unwrap();
+        remote.identity = preissued_identity(&store);
+        remote.ensure_live(&store).unwrap();
+        let live = remote.live.as_mut().unwrap();
+        let catalog = ScopeKey { volume, session: None, entry: None };
+        observed_entry(live, catalog, 7, [1; 16], PublishState::Ready, ReplicaState::Live);
+        let database = crate::store::DatabaseId::Entry(address.entry);
+        live.publisher().test_database_failure(volume, 7, database, "write rejected");
+        remote.consume_publisher_failures().unwrap();
+        let error = remote.live_fence(&store, Some(&[volume]), None, false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Couldn’t sync database \"data\" ({database}) in volume \"Receive race\" ({volume})\nwrite rejected"
+            )
+        );
+
+        // An independent selected stream must read labels with its own captured grant.
+        let live = remote.live.as_mut().unwrap();
+        let selected =
+            ScopeKey { volume, entry: Some(address.entry), session: Some(([8; 32], [9; 32])) };
+        observed_entry(live, selected, 8, [2; 16], PublishState::Ready, ReplicaState::Live);
+        let cause = sync_failure::target_database(
+            PublishKey { volume, entry: selected.entry },
+            database,
+            "selected failure",
+        );
+        assert_eq!(
+            live.resolve_failure(cause).to_string(),
+            format!(
+                "Couldn’t sync database {database} in volume \"Receive race\" ({volume})\nselected failure"
+            )
+        );
+        live.publisher().test_state(volume, 8, PublishState::Ready);
+        assert!(live.publisher().failed_publication(volume).is_none());
+        let pending =
+            crate::store::Error::NotFound(crate::store::Error::PENDING_BACKING).to_string();
+        crate::engine::live::tests::observed_apply_failure(
+            live,
+            catalog,
+            9,
+            [3; 16],
+            ReplicaState::Gap,
+            database,
+            &pending,
+        );
+        let error = remote.live_fence(&store, Some(&[volume]), None, false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Couldn’t sync database \"data\" ({database}) in volume \"Receive race\" ({volume})\n{pending}"
+            )
+        );
+        assert!(sync_failure::reason(error.as_ref()).is::<crate::engine::live::LiveGap>());
     }
 
     #[test]

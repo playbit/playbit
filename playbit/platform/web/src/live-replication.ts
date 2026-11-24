@@ -35,6 +35,7 @@ export interface ReplicaHead<Ticket = unknown> {
 }
 // The local store: outbound head/ack and inbound apply of a decoded replica delta.
 export interface LiveReplicationLocal<Ticket = unknown> {
+    retired?(): void;
     head(current: LiveReplicationCurrent): Promise<ReplicaHead<Ticket> | null | undefined>;
     ack(ticket: Ticket, current: LiveReplicationCurrent): Promise<unknown>;
     published?(head: ReplicaHead<Ticket>, current: LiveReplicationCurrent): Promise<unknown>;
@@ -52,6 +53,7 @@ export interface ReplicationState { kind: ReplicationStateKind; message?: string
 export function replicationDiagnostic(state: ReplicationState): string {
     const reasons: Record<string, string> = {
         'ap-transport': 'The connection was interrupted or exceeded its deadline',
+        'ap-capacity': 'The service is temporarily at capacity',
         'replica-gap': 'The replica requires catch-up',
         'authentication-required': 'Sign-in is required',
         'ap-rejected': 'The service rejected the operation',
@@ -141,6 +143,7 @@ export class LiveReplication<Ticket = unknown> {
         if (!this.current(run)) return;
         this.report(run, retryable(error) ? 'reconnecting' : (['authentication-required', 'ap-rejected', 'access-revoked'] as readonly unknown[]).includes((error as Errorish)?.code) ? 'action_required' : 'failed', error, stage);
         run.stopped = true;
+        this.local.retired?.();
         for (const stream of run.streams) {
             stream.checkpoint?.reject(error);
             if (stream.handle) void this.ap('streamClose', stream.handle).catch(() => {});
@@ -167,6 +170,7 @@ export class LiveReplication<Ticket = unknown> {
         const run = this.run;
         if (!run) return;
         this.run = null; run.stopped = true;
+        this.local.retired?.();
         for (const stream of run.streams) {
             stream.checkpoint?.reject(new Error('Replica subscription retired'));
             if (stream.handle) void this.ap('streamClose', stream.handle).catch(() => {});

@@ -1,6 +1,8 @@
 //! Session log rows, timestamps, run markers, history, and scrolling.
 use super::*;
+use crate::store::Id;
 use crate::ui::desktop::scrollbar::Scrollbars;
+use crate::ui::desktop::typography::tabular_numerals;
 use crate::ui::desktop::zoom::length as ui;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -31,13 +33,16 @@ struct Snapshot {
     lines: Arc<Vec<crate::ui::app_control::LogEntry>>,
     cursor: Option<crate::ui::app_control::LogCursor>,
     markers: Arc<Vec<RunMarker>>,
+    last_owner: Option<Id>,
 }
 
 pub(super) struct LogView {
     pub(super) session: Option<String>,
     pub(super) lines: Arc<Vec<crate::ui::app_control::LogEntry>>,
     pub(super) log_cursor: Option<crate::ui::app_control::LogCursor>,
-    history: BTreeMap<String, Snapshot>,
+    history: BTreeMap<(String, Option<Id>), Snapshot>,
+    instance: Option<Id>,
+    last_owner: Option<Id>,
     pub(super) running: Option<bool>,
     markers: Arc<Vec<RunMarker>>,
     pub(super) notice: Option<&'static str>,
@@ -57,6 +62,8 @@ impl LogView {
             lines: Arc::new(Vec::new()),
             log_cursor: None,
             history: BTreeMap::new(),
+            instance: None,
+            last_owner: None,
             running: None,
             markers: Arc::new(Vec::new()),
             notice: None,
@@ -68,8 +75,8 @@ impl LogView {
             height: 0.,
         }
     }
-    pub(super) fn select(&mut self, session: &str, cx: &mut Context<Self>) {
-        if self.session.as_deref() == Some(session) {
+    pub(super) fn select(&mut self, session: &str, instance: Option<Id>, cx: &mut Context<Self>) {
+        if self.session.as_deref() == Some(session) && self.instance == instance {
             return;
         }
         if let Some(previous) = self.session.take() {
@@ -78,16 +85,19 @@ impl LogView {
                 self.history.pop_first();
             }
             self.history.insert(
-                previous,
+                (previous, self.instance),
                 Snapshot {
                     lines: self.lines.clone(),
                     cursor: self.log_cursor,
                     markers: self.markers.clone(),
+                    last_owner: self.last_owner,
                 },
             );
         }
-        let saved = self.history.remove(session).unwrap_or_default();
+        let saved = self.history.remove(&(session.into(), instance)).unwrap_or_default();
         self.session = Some(session.into());
+        self.instance = instance;
+        self.last_owner = saved.last_owner;
         self.running = None;
         self.notice = None;
         self.log_cursor = saved.cursor;
@@ -142,6 +152,10 @@ impl LogView {
         }
     }
 
+    pub(super) fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
     pub(super) fn clear(&mut self, cx: &mut Context<Self>) {
         self.lines = Arc::new(Vec::new());
         self.text_ids = Arc::new(Vec::new());
@@ -158,7 +172,16 @@ impl LogView {
         let handle = self.scroll.clone();
         let follow = handle.offset().y + handle.max_offset().height <= px(0.5);
         match update {
-            log::Update::Running => {
+            log::Update::Running(owner) => {
+                if self.last_owner != Some(owner) && self.lines.is_empty() {
+                    self.markers = Arc::new(vec![RunMarker {
+                        before: 0,
+                        kind: MarkerKind::Started,
+                        timestamp: start_time(owner),
+                    }]);
+                    self.rebuild_rows(cx);
+                }
+                self.last_owner = Some(owner);
                 self.running = Some(true);
                 self.notice = None;
             }
@@ -187,23 +210,28 @@ impl LogView {
             log::Update::Batch(batch) => {
                 self.running = Some(true);
                 self.notice = None;
-                let new_run = self.log_cursor.is_none_or(|cursor| {
-                    cursor.instance != batch.cursor.instance
-                        || cursor.generation != batch.cursor.generation
-                }) || self.markers.last().is_some_and(|marker| {
+                let new_run = self.log_cursor.map_or(
+                    self.last_owner != Some(batch.cursor.instance),
+                    |cursor| {
+                        cursor.instance != batch.cursor.instance
+                            || cursor.generation != batch.cursor.generation
+                    },
+                ) || self.markers.last().is_some_and(|marker| {
                     marker.kind == MarkerKind::Stopped && marker.before == self.lines.len()
                 });
                 if new_run && (!batch.lines.is_empty() || batch.dropped > 0) {
-                    let time = batch
-                        .lines
-                        .iter()
-                        .find_map(|entry| entry.timestamp_micros)
-                        .unwrap_or_else(wall_time_micros);
-                    Arc::make_mut(&mut self.markers).push(RunMarker {
-                        before: self.lines.len(),
-                        kind: MarkerKind::Started,
-                        timestamp: calendar_time((time / 1_000_000) as libc::time_t),
-                    });
+                    let already_marked = self.last_owner == Some(batch.cursor.instance)
+                        && self.markers.last().is_some_and(|marker| {
+                            marker.kind == MarkerKind::Started && marker.before == self.lines.len()
+                        });
+                    if !already_marked {
+                        Arc::make_mut(&mut self.markers).push(RunMarker {
+                            before: self.lines.len(),
+                            kind: MarkerKind::Started,
+                            timestamp: start_time(batch.cursor.instance),
+                        });
+                    }
+                    self.last_owner = Some(batch.cursor.instance);
                 }
                 let mut lines = self.lines.as_ref().clone();
                 let removed =
@@ -252,6 +280,13 @@ impl LogView {
     }
 }
 
+fn start_time(owner: Id) -> String {
+    formatted_time(
+        crate::engine::session_instance::reserved_unix_secs(owner).into(),
+        c"%b %e at %H:%M",
+    )
+}
+
 fn wall_time_micros() -> u64 {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -265,7 +300,7 @@ fn message_time(time: u64) -> String {
 }
 
 #[allow(unsafe_code, reason = "Formats source wall time with POSIX reentrant calendar APIs.")]
-fn calendar_time(now: libc::time_t) -> String {
+pub(super) fn formatted_time(now: libc::time_t, format: &std::ffi::CStr) -> String {
     let mut calendar = std::mem::MaybeUninit::<libc::tm>::uninit();
     let mut buffer = [0u8; 64];
     // SAFETY: All pointers refer to initialized or output storage valid for each call.
@@ -273,14 +308,13 @@ fn calendar_time(now: libc::time_t) -> String {
         if libc::localtime_r(&now, calendar.as_mut_ptr()).is_null() {
             return String::new();
         }
-        libc::strftime(
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            c"%b %e, %H:%M:%S".as_ptr(),
-            calendar.as_ptr(),
-        )
+        libc::strftime(buffer.as_mut_ptr().cast(), buffer.len(), format.as_ptr(), calendar.as_ptr())
     };
-    String::from_utf8_lossy(&buffer[..length]).into_owned()
+    String::from_utf8_lossy(&buffer[..length]).replace("  ", " ")
+}
+
+fn calendar_time(now: libc::time_t) -> String {
+    formatted_time(now, c"%b %e, %H:%M:%S")
 }
 
 impl Render for LogView {
@@ -321,12 +355,12 @@ impl Render for LogView {
                                 .text_color(rgba(0x0000004d))
                                 .child(rule())
                                 .child(
-                                    host_text::element(
+                                    tabular_numerals(host_text::element(
                                         format!("Started {}", marker.timestamp).into(),
                                         id,
                                         false,
                                         false,
-                                    )
+                                    ))
                                     .flex_none()
                                     .whitespace_nowrap(),
                                 )
@@ -412,29 +446,25 @@ mod tests {
         // Reattach after a selection change without resurrecting a cleared prefix.
         let view = cx.new(LogView::new);
         view.update(cx, |view, cx| {
-            view.select("one", cx);
+            view.select("one", None, cx);
             view.receive("one", batch(1, "first"), cx);
             assert!(view.markers[0].kind == MarkerKind::Started);
             assert_eq!(view.markers[0].before, 0);
-            assert_eq!(
-                view.markers[0].timestamp,
-                calendar_time(
-                    (view.lines[0].timestamp_micros.unwrap() / 1_000_000) as libc::time_t
-                )
-            );
+            assert_eq!(view.markers[0].timestamp, start_time(Id::from_bytes([1; 16])));
             view.receive("one", log::Update::Notice("Connection lost"), cx);
-            view.receive("one", log::Update::Running, cx);
+            view.receive("one", log::Update::Running(Id::from_bytes([1; 16])), cx);
             assert_eq!(view.markers.len(), 1, "reattaching keeps the same start divider");
             view.clear(cx);
             assert_eq!(view.log_cursor.map(|c| c.next), Some(1));
             view.receive("one", batch(2, "second"), cx);
             view.receive("one", log::Update::Stopped, cx);
             let stopped = view.markers[0].timestamp.clone();
-            view.select("two", cx);
+            let sibling = Some(Id::from_bytes([2; 16]));
+            view.select("one", sibling, cx);
             assert!(view.lines.is_empty());
-            view.receive("two", log::Update::Stopped, cx);
-            assert!(view.markers.is_empty(), "never-run session has an empty surface");
-            view.select("one", cx);
+            view.receive("one", log::Update::Stopped, cx);
+            assert!(view.markers.is_empty(), "a sibling instance has its own history");
+            view.select("one", None, cx);
             assert_eq!(
                 view.lines.iter().map(|entry| entry.message.as_str()).collect::<Vec<_>>(),
                 ["second"]
@@ -450,7 +480,7 @@ mod tests {
             let mut restarted = batch(1, "after restart");
             let log::Update::Batch(ref mut data) = restarted else { unreachable!() };
             data.cursor.instance = crate::store::Id::from_bytes([2; 16]);
-            view.receive("one", log::Update::Running, cx);
+            view.receive("one", log::Update::Running(Id::from_bytes([1; 16])), cx);
             view.receive("one", restarted, cx);
             assert_eq!(
                 view.lines.iter().map(|entry| entry.message.as_str()).collect::<Vec<_>>(),
@@ -468,12 +498,12 @@ mod tests {
     fn run_markers_are_bounded_and_clear_with_the_log(cx: &mut gpui::TestAppContext) {
         let view = cx.new(LogView::new);
         view.update(cx, |view, cx| {
-            view.select("one", cx);
+            view.select("one", None, cx);
             for next in 1..=300 {
                 view.receive("one", batch(next, "message"), cx);
                 view.receive("one", log::Update::Stopped, cx);
                 view.receive("one", log::Update::Stopped, cx);
-                view.receive("one", log::Update::Running, cx);
+                view.receive("one", log::Update::Running(Id::from_bytes([1; 16])), cx);
                 view.receive("one", log::Update::Stopped, cx);
             }
             assert_eq!(view.lines.len(), 256);
@@ -521,7 +551,7 @@ mod tests {
         visual.simulate_resize(size(px(600.), px(200.)));
         let handle = window
             .update(&mut visual, |view, _, cx| {
-                view.select("one", cx);
+                view.select("one", None, cx);
                 // Multiple updates before layout must follow the latest batch.
                 for next in 1..=40 {
                     view.receive("one", batch(next, &format!("message {next}")), cx);
@@ -535,7 +565,7 @@ mod tests {
         window
             .update(&mut visual, |view, _, cx| {
                 view.receive("one", log::Update::Stopped, cx);
-                view.receive("one", log::Update::Running, cx);
+                view.receive("one", log::Update::Running(Id::from_bytes([1; 16])), cx);
                 view.receive("one", batch(41, "after restart"), cx);
             })
             .unwrap();

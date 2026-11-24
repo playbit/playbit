@@ -1,4 +1,5 @@
-//! Device-local launch permissions. Drafts grant nothing until Open is accepted.
+//! Device-local directory permissions take effect when the user starts a session.
+mod review;
 use super::*;
 use crate::engine::host_mount::{HostMount, MAX_LABEL_BYTES, MAX_MOUNTS, MAX_PATH_BYTES};
 use crate::ui::desktop::scrollbar::Scrollbars;
@@ -7,19 +8,21 @@ use playbit_api::ui::CheckState;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub(super) const FOLDER_ACCESS_TITLE: &str = "Folder access";
+
 /// One preparation per shell, including across form replacement and worker restarts.
 /// A stalled file provider cannot accumulate jobs on the shared background executor.
 #[derive(Default)]
 pub(super) struct Preparation(Arc<AtomicBool>);
 
-struct PreparationCredit(Arc<AtomicBool>);
+pub(super) struct PreparationCredit(Arc<AtomicBool>);
 
 // A stalled provider must not accumulate folder checks across closed/replaced forms.
 static FOLDER_SELECTION: std::sync::LazyLock<Preparation> =
     std::sync::LazyLock::new(Preparation::default);
 
 impl Preparation {
-    fn acquire(&self) -> Result<PreparationCredit, &'static str> {
+    pub(super) fn acquire(&self) -> Result<PreparationCredit, &'static str> {
         self.0
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .map(|_| PreparationCredit(self.0.clone()))
@@ -33,10 +36,25 @@ impl Drop for PreparationCredit {
     }
 }
 
+pub(super) struct Example {
+    pub app_id: &'static str,
+    pub name: &'static str,
+    pub seal_key: &'static str,
+}
+
+pub(super) const EXAMPLES: &[Example] = &[
+    Example {
+        app_id: "little-list",
+        name: "Little List",
+        seal_key: "PlaybitLittleListTemplateSHA256",
+    },
+    Example { app_id: "football", name: "Football", seal_key: "PlaybitFootballTemplateSHA256" },
+];
+
 #[derive(Clone)]
 pub(super) enum Target {
     Bundle(PathBuf),
-    Template(crate::store::Id),
+    Template { account: crate::store::Id, example: &'static Example },
     Document(String),
     Session(String),
     Folders { session: String, index: Option<usize> },
@@ -74,6 +92,8 @@ pub(super) struct Queued {
     pub reply: async_channel::Sender<Completion>,
 }
 pub(super) enum FormEvent {
+    Cancel,
+    Ready,
     Started,
     Reveal(std::time::Instant),
     Error(String),
@@ -180,65 +200,77 @@ fn prepare_bundle(profile: &Path, bundle: &Path) -> crate::engine::Result<()> {
     }
 }
 
-fn prepare_template(profile: &Path, account: crate::store::Id) -> crate::engine::Result<PathBuf> {
+fn prepare_template(
+    profile: &Path,
+    account: crate::store::Id,
+    example: &Example,
+) -> crate::engine::Result<(PathBuf, review::AppReview)> {
     use crate::engine::reply::DeveloperReply;
     use crate::package::Package;
     use std::fs;
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 
     const MAX_TEMPLATE_BYTES: usize = 1024 * 1024;
-    let executable = std::env::current_exe()?;
-    let contents = executable
-        .parent()
-        .and_then(Path::parent)
-        .filter(|path| path.file_name().is_some_and(|name| name == "Contents"))
-        .ok_or("Open the example from a complete Playbit.app installation")?;
-    let bundle = contents.join("Resources/examples/little-list/little-list.pbapp");
+    let channel = crate::engine::profile::for_profile(profile)?;
+    let (suffix, seal_suffix) = match channel {
+        crate::release_channel::ReleaseChannel::Public => ("", ""),
+        crate::release_channel::ReleaseChannel::Testing => ("-testing", "Testing"),
+        _ => ("-personal", "Personal"),
+    };
+    let filename = format!("{}{suffix}.pbapp", example.app_id);
+    let bundle = crate::ui::desktop::bundled_example_dir(example.app_id)?.join(&filename);
     let mut bytes = Vec::new();
     file_document::open_regular(&bundle)?
         .take((MAX_TEMPLATE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_TEMPLATE_BYTES {
-        return Err("Bundled Little List template exceeds 1 MiB".into());
+        return Err(format!("Bundled {} template exceeds 1 MiB", example.name).into());
     }
     let package = Package::from_bytes(&bytes)?;
-    if package.app_id() != "little-list" {
-        return Err("The bundled Little List template is invalid.".into());
+    if package.app_id() != example.app_id {
+        return Err(format!("The bundled {} template is invalid.", example.name).into());
     }
-    if package.publisher_certificate().is_some_and(|cert| cert.claims.publisher == account) {
-        prepare_bundle(profile, &bundle)?;
-        return Ok(profile.join(crate::paths::BUILDS).join(package.id()?));
+    super::guest_runtime::verify_template(example, seal_suffix, &bytes)?;
+    if !channel.is_personal() && package.publisher_certificate().is_none() {
+        return Err("The bundled example has no publisher certificate.".into());
     }
-
-    // The package retains an immutable copy of the same bytes this verifies.
-    super::guest_runtime::verify_little_list_template(&bytes)?;
-    drop(bytes);
 
     let staging = crate::paths::private_directory(profile, crate::paths::STAGING)?;
     let temporary = staging.join(format!("template-{}", crate::store::Id::generate()?));
     fs::DirBuilder::new().mode(0o700).create(&temporary)?;
-    let result = (|| -> crate::engine::Result<PathBuf> {
-        let bundle = temporary.join("little-list.pbapp");
+    let result = (|| -> crate::engine::Result<_> {
+        let bundle = temporary.join(filename);
         let mut file =
             fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&bundle)?;
-        package.write_unsigned_template(&mut file)?;
+        file.write_all(&bytes)?;
         drop(file);
-        let reply = ipc::call_archive(profile, &Request::SignPackage { bundle: bundle.clone() })?
-            .into_owned()?;
-        let build_id = match reply {
-            Reply::Developer(DeveloperReply::PackageSigned { build_id }) => build_id,
-            Reply::Error { error } => return Err(error.into()),
-            _ => return Err("Unexpected template signing response".into()),
+        drop(bytes);
+        let signed = if package.publisher_certificate().is_some() {
+            package
+        } else {
+            // Previously shipped unsigned templates become a private source build.
+            let reply =
+                ipc::call_archive(profile, &Request::SignPackage { bundle: bundle.clone() })?
+                    .into_owned()?;
+            let build_id = match reply {
+                Reply::Developer(DeveloperReply::PackageSigned { build_id }) => build_id,
+                Reply::Error { error } => return Err(error.into()),
+                _ => return Err("Unexpected template signing response".into()),
+            };
+            let signed = Package::open(&bundle)?;
+            if signed.id()? != build_id
+                || signed
+                    .publisher_certificate()
+                    .is_none_or(|cert| cert.claims.publisher != account)
+            {
+                return Err("The signed template differs from the requested app or account.".into());
+            }
+            signed
         };
-        let signed = Package::open(&bundle)?;
-        if signed.id()? != build_id
-            || signed.publisher_certificate().is_none_or(|cert| cert.claims.publisher != account)
-        {
-            return Err("The signed template differs from the requested app or account.".into());
-        }
         prepare_bundle(profile, &bundle)?;
-        Ok(profile.join(crate::paths::BUILDS).join(build_id))
+        let review = review::AppReview::from_package(&signed)?;
+        Ok((profile.join(crate::paths::BUILDS).join(&review.build), review))
     })();
     let cleanup = fs::remove_dir_all(temporary);
     result.and_then(|bundle| {
@@ -375,7 +407,7 @@ pub(super) fn execute(
                 }
             }
             Target::Session(session) => session,
-            Target::Folders { .. } | Target::Configuration(_) | Target::Template(_) => {
+            Target::Folders { .. } | Target::Configuration(_) | Target::Template { .. } => {
                 unreachable!("only prepared app targets enter launch")
             }
         };
@@ -446,13 +478,17 @@ struct Row {
 pub(super) struct Form {
     target: Target,
     template_account: Option<crate::store::Id>,
+    review: Option<review::AppReview>,
+    join: Option<review::Join>,
     owner: Option<gpui::WeakEntity<Shell>>,
     send: RequestSender,
     rows: Vec<Row>,
     next: u32,
     picker: bool,
+    focus_add_folder: bool,
     busy: bool,
     prepared: bool,
+    preparing: Option<review::PreparationState>,
     opened: bool,
     launched: Option<guest_app::LaunchReceipt>,
     progress: Option<super::launch_progress::Progress>,
@@ -481,13 +517,44 @@ impl Shell {
 
     pub(super) fn show_session_form(&mut self, form: Entity<Form>, cx: &mut Context<Self>) {
         let owner = cx.weak_entity();
-        form.update(cx, |form, _| form.owner = Some(owner));
+        form.update(cx, |form, _| {
+            if let Target::Session(session) = &form.target
+                && form.review.is_none()
+                && let Some(row) = self.sessions.iter().find(|row| &row.id == session)
+            {
+                let app = self
+                    .applications
+                    .sessions()
+                    .iter()
+                    .find(|entry| &entry.id == session)
+                    .map(|entry| entry.app.clone());
+                form.review = Some(review::AppReview {
+                    name: row.app_name.clone().unwrap_or_else(|| "App unavailable".into()),
+                    build: row.resolved_build_id.clone(),
+                    app,
+                    icon: self.session_icons.get(&row.resolved_build_id),
+                });
+            }
+            form.owner = Some(owner);
+        });
         let send = self.send.clone();
         cx.subscribe(&form, move |host, form, event, cx| {
             if host.signing_out || !host.send.same_worker(&send) {
                 return;
             }
             match event {
+                FormEvent::Cancel => {
+                    if host.new_session.as_ref() == Some(&form) && form.read(cx).can_cancel() {
+                        host.dismiss_launch_dialog(cx);
+                    }
+                }
+                FormEvent::Ready => {
+                    if host.new_session.as_ref() == Some(&form)
+                        && let Target::Session(session) = &form.read(cx).target
+                    {
+                        host.select_sidebar_session(session.clone(), cx);
+                    }
+                }
                 FormEvent::Started => {
                     if matches!(
                         form.read(cx).target,
@@ -538,6 +605,9 @@ impl Shell {
             cx.notify();
         })
         .detach();
+        if form.read(cx).reviewed_invitation().is_none() {
+            self.leave_invitation();
+        }
         self.new_session = Some(form);
         cx.notify();
     }
@@ -610,6 +680,9 @@ impl Form {
         self.opened = error.is_none();
         self.uncertain = error.is_some();
         self.error = error.unwrap_or_default();
+        if self.opened {
+            cx.emit(FormEvent::Ready);
+        }
         cx.notify();
     }
 
@@ -622,12 +695,24 @@ impl Form {
                 return;
             }
         };
+        self.preparing = Some(review::PreparationState::Reading);
         let profile = profile_path();
         let work = cx.background_executor().spawn(async move {
             let result = match target {
-                Target::Template(account) => prepare_template(&profile, account).map(Some),
-                target => with_bundle(target, move |bundle| prepare_bundle(&profile, bundle))
-                    .map(|()| None),
+                Target::Template { account, example } => {
+                    prepare_template(&profile, account, example)
+                }
+                target => with_bundle(target, move |bundle| {
+                    let review =
+                        review::AppReview::from_package(&crate::package::Package::open(bundle)?)?;
+                    prepare_bundle(&profile, bundle)?;
+                    // Launch from the immutable build reviewed here, even if the source file moves.
+                    let cached = profile.join(crate::paths::BUILDS).join(&review.build);
+                    if !cached.is_file() {
+                        return Err("The app changed during preparation. Open it again.".into());
+                    }
+                    Ok((cached, review))
+                }),
             }
             .map_err(|error| error.to_string());
             // Keep admission through foreground completion, even for a dropped form.
@@ -636,12 +721,26 @@ impl Form {
         cx.spawn(async move |form, cx| {
             let (result, _credit) = work.await;
             let _ = form.update(cx, |form, cx| {
+                let start = form.preparing.take() == Some(review::PreparationState::StartWhenReady);
                 match result {
-                    Ok(bundle) => {
-                        if let Some(bundle) = bundle {
-                            form.target = Target::Bundle(bundle);
-                        }
+                    Ok((bundle, review)) => {
+                        form.target = Target::Bundle(bundle);
+                        form.review = Some(review);
                         form.prepared = true;
+                        if start
+                            && form.owner.as_ref().and_then(gpui::WeakEntity::upgrade).is_some_and(
+                                |owner| {
+                                    let host = owner.read(cx);
+                                    !host.signing_out
+                                        && host.send.same_worker(&form.send)
+                                        && host.new_session.as_ref().is_some_and(|current| {
+                                            current.entity_id() == cx.entity_id()
+                                        })
+                                },
+                            )
+                        {
+                            form.open(cx);
+                        }
                         if let Some(progress) = &mut form.progress {
                             progress.phase =
                                 crate::engine::session_instance::StartupPhase::CreatingSession;
@@ -655,34 +754,31 @@ impl Form {
         })
         .detach();
     }
-    pub fn title(&self) -> &'static str {
-        match self.target {
-            Target::Bundle(_) | Target::Template(_) | Target::Document(_) => "New session",
-            Target::Session(_) => "Open session",
-            _ => "Folder access",
-        }
-    }
     pub(super) fn creates_session(&self) -> bool {
-        matches!(self.target, Target::Bundle(_) | Target::Template(_) | Target::Document(_))
+        matches!(self.target, Target::Bundle(_) | Target::Template { .. } | Target::Document(_))
     }
     pub(super) fn scrollbars(&mut self, cx: &mut Context<Self>) -> Entity<Scrollbars> {
         self.scrollbars.get_or_insert_with(|| cx.new(|_| Scrollbars::new(false))).clone()
     }
     pub fn new(target: Target, send: RequestSender) -> Self {
         let template_account = match &target {
-            Target::Template(account) => Some(*account),
+            Target::Template { account, .. } => Some(*account),
             _ => None,
         };
         Self {
             target,
             template_account,
+            review: None,
+            join: None,
             owner: None,
             send,
             rows: Vec::new(),
             next: 1,
             picker: false,
+            focus_add_folder: false,
             busy: false,
             prepared: false,
+            preparing: None,
             opened: false,
             launched: None,
             progress: None,
@@ -756,20 +852,33 @@ impl Form {
         action: impl Fn(&mut Self, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) -> Entity<controls::Control> {
+        self.control(
+            key,
+            controls::Kind::Button(playbit_api::ui::ButtonStyle::Default),
+            label,
+            disabled,
+            move |_, this, cx| action(this, cx),
+            cx,
+        )
+    }
+    fn control(
+        &mut self,
+        key: (u32, u8),
+        kind: controls::Kind,
+        label: &str,
+        disabled: bool,
+        action: impl Fn(u32, &mut Self, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> Entity<controls::Control> {
         let weak = cx.weak_entity();
-        let activate: controls::Activate = Rc::new(move |_, cx| {
+        let activate: controls::Activate = Rc::new(move |id, cx| {
             let _ = weak.update(cx, |this, cx| {
-                action(this, cx);
+                action(id, this, cx);
                 cx.notify();
             });
         });
         let theme = theme();
-        let properties = controls::Properties {
-            kind: controls::Kind::Button(playbit_api::ui::ButtonStyle::Default),
-            label,
-            disabled,
-            theme: &theme,
-        };
+        let properties = controls::Properties { kind, label, disabled, theme: &theme };
         let control = self.controls.entry(key).or_insert_with(|| {
             cx.new(|cx| controls::Control::new(0, properties, activate.clone(), cx))
         });
@@ -779,6 +888,12 @@ impl Form {
         });
         control.clone()
     }
+    fn remove_folder(&mut self, id: u32) {
+        self.rows.retain(|row| row.id != id);
+        self.controls.retain(|key, _| key.0 != id);
+        self.texts.retain(|key, _| key.0 != id);
+    }
+
     fn access(
         &mut self,
         id: u32,
@@ -906,10 +1021,12 @@ impl Form {
         };
         let label = path.file_name().and_then(|name| name.to_str()).unwrap_or("host");
         let label = if label.len() <= MAX_LABEL_BYTES { label } else { "" };
+        let launch = self.is_launch_dialog();
         let editor = cx.new(|cx| {
-            text_editor::TextEditor::new(label, cx)
+            let editor = text_editor::TextEditor::new(label, cx)
                 .placeholder("Folder label")
-                .bound_edits(MAX_LABEL_BYTES)
+                .bound_edits(MAX_LABEL_BYTES);
+            if launch { editor.inspector_field() } else { editor }
         });
         self.rows.push(Row {
             id: self.next,
@@ -927,11 +1044,11 @@ impl Form {
             || self.picker
             || self.opened
             || self.uncertain
-            || matches!(self.target, Target::Template(_))
+            || matches!(self.target, Target::Template { .. })
         {
             return;
         }
-        if (self.creates_session() || matches!(self.target, Target::Session(_)))
+        if self.is_launch_dialog()
             && let Some(owner) = self.owner.as_ref().and_then(gpui::WeakEntity::upgrade)
         {
             let host = owner.read(cx);
@@ -1040,13 +1157,13 @@ impl Form {
 }
 impl Render for Form {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let editing = matches!(self.target, Target::Folders { .. } | Target::Configuration(_));
-        let title = self.title();
+        if self.is_launch_dialog() {
+            return self.launch_review(window, cx);
+        }
         let mut body = div().flex().flex_col().flex_none().w_full().min_w_0().gap_3()
-            .child(self.text((0, 0), title.into(), true, false, cx).text_2xl())
+            .child(self.text((0, 0), FOLDER_ACCESS_TITLE.into(), true, false, cx).text_2xl())
             .child(self.text((0, 1), "Choose folders this session window can read on this Mac. Each window has its own folder access. Allow changes to let the app edit files. The app may share folder contents with other people in the session.".into(), false, false, cx));
         let disabled = self.busy
-            || self.opened
             || self.picker
             || self.uncertain
             || matches!(self.target, Target::Folders { .. });
@@ -1113,10 +1230,8 @@ impl Render for Form {
                 "Remove",
                 disabled,
                 move |this, _| {
-                    if !this.busy && !this.opened && !this.uncertain {
-                        this.rows.retain(|row| row.id != id);
-                        this.controls.retain(|key, _| key.0 != id);
-                        this.texts.retain(|key, _| key.0 != id);
+                    if !this.busy && !this.picker && !this.uncertain {
+                        this.remove_folder(id);
                     }
                 },
                 cx,
@@ -1172,19 +1287,7 @@ impl Render for Form {
             |this, cx| this.pick(None, cx),
             cx,
         );
-        let open = self.button(
-            (0, 2),
-            if editing {
-                "Save folders"
-            } else if matches!(self.target, Target::Template(_)) && self.error.is_empty() {
-                "Preparing app…"
-            } else {
-                "Open session"
-            },
-            disabled || matches!(self.target, Target::Template(_)),
-            |this, cx| this.open(cx),
-            cx,
-        );
+        let open = self.button((0, 2), "Save folders", disabled, |this, cx| this.open(cx), cx);
         let mut actions = div().flex().flex_wrap().items_center().gap_2().child(add).child(open);
         if self.busy {
             window.request_animation_frame();
@@ -1206,9 +1309,6 @@ impl Render for Form {
             }
         }
         body = body.child(actions);
-        if self.opened {
-            body = body.child(self.text((0, 4), "Session opened".into(), false, true, cx));
-        }
         if !self.error.is_empty() {
             body = body.child(
                 self.text((0, 2), self.error.clone(), false, true, cx).text_color(rgb(0xa32820)),
@@ -1233,7 +1333,7 @@ mod tests {
                 assert!(
                     matches!(&form.target, super::Target::Document(url) if url.ends_with(".pbapp"))
                 );
-                assert_eq!(form.title(), "New session");
+                assert!(form.is_launch_dialog());
                 assert!(host.pending_database.is_none());
                 assert!(!host.initial_link, "file opens must reveal the session form");
             });
@@ -1243,7 +1343,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn template_copy_preserves_package_content_without_the_original_signature() {
+    fn example_review_keeps_its_signed_build_and_publisher() {
         let original = crate::package::Package::new(
             "little-list".into(),
             "Little List".into(),
@@ -1257,16 +1357,64 @@ mod tests {
             10,
         )
         .unwrap();
-        let mut bytes = Vec::new();
-        signed.write_unsigned_template(&mut bytes).unwrap();
-        assert_eq!(bytes, original.to_bytes().unwrap());
+        let review = review::AppReview::from_package(&signed).unwrap();
+        assert_eq!(review.name, "Little List");
+        assert_eq!(review.build, signed.id().unwrap());
+        assert_eq!(review.app.unwrap().publisher, crate::store::Id::from_bytes([7; 16]));
+    }
+
+    #[gpui::test]
+    fn original_invitation_names_only_its_certified_example_publisher(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::release_channel::ReleaseChannel;
+        use crate::store::{BuildSelector, Id, ReceivedInvitation, Session, UpdateAuthority};
+        let (host, _, _) = test_support::host(cx);
+        let build = "HfGyXEJgBcfzT6d4S4wS35ZNCaiUypjP4vTfYWaQKsN6";
+        let publisher = Id::parse("R8UTnVVXKZeS5FLfoLmwVt").unwrap();
+        let mut invitation = ReceivedInvitation {
+            session: Session {
+                id: crate::identifier::encode(&[3; 32]),
+                selector: BuildSelector::Exact { build_id: build.into() },
+                resolved_build_id: build.into(),
+                app: crate::package::AppIdentity { app_id: "football".into(), publisher },
+                root_volume: Id::from_bytes([1; 16]),
+                shared_volume: None,
+                creator: Id::from_bytes([2; 16]),
+                update_authority: UpdateAuthority::Creator,
+            },
+            root_name: "Playbit".into(),
+        };
+        let label = |invitation: &ReceivedInvitation, realm| {
+            host.read_with(cx, |host, _| {
+                Form::invitation(invitation, host.send.clone())
+                    .review
+                    .unwrap()
+                    .published_name(realm)
+            })
+        };
+        assert_eq!(label(&invitation, ReleaseChannel::Testing), Some("Playbit"));
+        assert_eq!(label(&invitation, ReleaseChannel::Public), None);
+        invitation.session.app.app_id = "pretender".into();
+        assert_eq!(label(&invitation, ReleaseChannel::Testing), None);
+        invitation.session.app.app_id = "football".into();
+        invitation.session.app.publisher = Id::from_bytes([4; 16]);
+        assert_eq!(label(&invitation, ReleaseChannel::Testing), None);
+        invitation.session.app.publisher = publisher;
+        invitation.session.resolved_build_id = crate::identifier::encode(&[5; 32]);
+        assert_eq!(label(&invitation, ReleaseChannel::Testing), None);
     }
 
     #[gpui::test]
     fn template_launch_waits_for_its_prepared_bundle_and_account(cx: &mut gpui::TestAppContext) {
         let (host, _, requests) = test_support::host(cx);
         let form = host.update(cx, |host, cx| {
-            let form = cx.new(|_| Form::new(Target::Template(host.account.id), host.send.clone()));
+            let form = cx.new(|_| {
+                Form::new(
+                    Target::Template { account: host.account.id, example: &EXAMPLES[0] },
+                    host.send.clone(),
+                )
+            });
             host.show_session_form(form.clone(), cx);
             form
         });
@@ -1828,10 +1976,8 @@ mod tests {
     }
 
     #[gpui::test]
-    fn creation_form_hides_unrelated_selection_and_restores_it_on_back(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        // Creation has no selected session; another window keeps the session it belongs to selected.
+    fn dismissing_launch_review_restores_the_selected_session(cx: &mut gpui::TestAppContext) {
+        // Canceling either kind of launch returns to the selected session.
         let (host, window, _requests) = test_support::host(cx);
         let session = crate::identifier::encode(&[4; 32]);
         host.update(cx, |host, _| {
@@ -1845,23 +1991,18 @@ mod tests {
             host.sidebar_session = Some(session.clone());
         });
         for target in [Target::Bundle("/tmp/TODO.pbapp".into()), Target::Session(session)] {
-            let creating = matches!(target, Target::Bundle(_));
             host.update(cx, |host, cx| {
                 let form = cx.new(|_| Form::new(target, host.send.clone()));
                 host.show_session_form(form, cx);
             });
             cx.run_until_parked();
             window
-                .update(cx, |_, window, _| {
-                    assert!(
-                        window
-                            .accessibility_nodes_for_test()
-                            .any(|(_, node)| node.label() == Some("TODO")
-                                && node.is_selected() == Some(!creating))
-                    );
+                .update(cx, |host, window, cx| {
+                    assert!(host.session_dialog_open(cx));
+                    let form = host.new_session.as_ref().unwrap().read(cx);
+                    form.controls[&(0, 6)].read(cx).focus(window);
                 })
                 .unwrap();
-            test_support::focus_button(window, "close-new-session", cx);
             test_support::press(window, "enter", cx);
             window
                 .update(cx, |host, window, _| {
@@ -1878,10 +2019,10 @@ mod tests {
     }
 
     #[gpui::test]
-    fn permission_checkbox_preserves_editor_width_and_submits_only_on_open(
+    fn permission_popup_preserves_editor_width_and_submits_only_on_start(
         cx: &mut gpui::TestAppContext,
     ) {
-        // Keyboard changes remain drafts, expose checked state, and do not resize the label editor.
+        // Selecting a permission updates the draft and preserves the label editor's width.
         let (host, window, requests) = test_support::host(cx);
         let form = host.update(cx, |host, cx| {
             let form = cx.new(|_| {
@@ -1905,9 +2046,17 @@ mod tests {
             })
             .unwrap();
         window
-            .update(cx, |_, window, cx| form.read(cx).controls[&(1, 1)].read(cx).focus(window))
+            .update(cx, |_, _, cx| {
+                let popup = form.read(cx).controls[&(1, 1)].read(cx);
+                let (items, _, choose) = popup.popup_for_test();
+                assert!(matches!(
+                    &items[0],
+                    crate::runtime::MenuEntry::Action { checked: Some(true), .. }
+                ));
+                choose(1, cx);
+            })
             .unwrap();
-        test_support::press(window, "space", cx);
+        cx.run_until_parked();
         assert!(form.read_with(cx, |form, _| form.rows[0].write));
         assert!(requests.try_recv().is_err());
         window
@@ -1915,8 +2064,8 @@ mod tests {
                 assert!(
                     window
                         .accessibility_nodes_for_test()
-                        .any(|(_, node)| node.role() == gpui::accesskit::Role::CheckBox
-                            && node.toggled() == Some(gpui::accesskit::Toggled::True))
+                        .any(|(_, node)| node.role() == gpui::accesskit::Role::ComboBox
+                            && node.label() == Some("Read + Write"))
                 );
                 let changed = window
                     .accessibility_nodes_for_test()
@@ -1929,8 +2078,25 @@ mod tests {
                 assert_eq!(bounds.x1 - bounds.x0, changed.x1 - changed.x0);
             })
             .unwrap();
+        form.update(cx, |form, cx| {
+            form.add("/tmp/Second".into(), cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        window
+            .update(cx, |_, window, cx| form.read(cx).controls[&(2, 2)].read(cx).focus(window))
+            .unwrap();
+        test_support::press(window, "enter", cx);
+        window
+            .update(cx, |_, window, cx| {
+                let draft = form.read(cx);
+                assert_eq!(draft.rows.len(), 1);
+                assert!(draft.controls[&(0, 1)].read(cx).focused(window));
+            })
+            .unwrap();
         form.update(cx, |form, cx| form.open(cx));
         let Message::Launch(queued) = requests.try_recv().unwrap() else { panic!("launch") };
+        assert_eq!(queued.launch.mounts.len(), 1);
         assert!(queued.launch.mounts[0].write);
         cx.executor().advance_clock(std::time::Duration::from_millis(200));
         cx.run_until_parked();
@@ -1940,7 +2106,7 @@ mod tests {
                     window
                         .accessibility_nodes_for_test()
                         .any(|(_, node)| node.role() == gpui::accesskit::Role::Button
-                            && node.label() == Some("Open session"))
+                            && node.label() == Some("Start Session"))
                 );
                 assert!(
                     window
@@ -1953,7 +2119,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn form_actions_stay_above_back_when_resizing(cx: &mut gpui::TestAppContext) {
+    fn launch_actions_share_a_footer_when_resizing(cx: &mut gpui::TestAppContext) {
         // Measure actual controls across the width cap, UI scales, and folder drafts.
         use crate::ui::desktop::zoom;
         cx.update(zoom::install);
@@ -1990,15 +2156,12 @@ mod tests {
                                     })
                                     .expect("rendered button")
                             };
-                            let back = button("Back");
-                            for label in ["Add folder…", "Open session"] {
-                                let action = button(label);
-                                assert!(
-                                    back.y0 >= action.y1 + f64::from(16. * scale) - 1.,
-                                    "{label} overlaps Back at width {width}, scale {scale}, \
-                                     {folders} folders: {action:?}, {back:?}",
-                                );
-                            }
+                            let cancel = button("Cancel");
+                            let start = button("Start Session");
+                            let add = button("Add folder…");
+                            assert!((cancel.y0 - start.y0).abs() <= 1.);
+                            assert!(cancel.x1 + f64::from(8. * scale) - 1. <= start.x0);
+                            assert!(add.y1 <= start.y0, "overlap at {width}, {scale}, {folders}");
                         })
                         .unwrap();
                 }
@@ -2073,13 +2236,16 @@ mod tests {
                 let nodes =
                     window.accessibility_nodes_for_test().map(|(_, node)| node).collect::<Vec<_>>();
                 assert!(nodes.iter().any(
-                    |node| node.role() == Role::Heading && node.label() == Some("Open session")
+                    |node| node.role() == Role::Heading && node.label() == Some("New Session")
                 ));
                 assert!(nodes.iter().any(|node| node.value() == Some("/tmp/Café")));
-                assert!(nodes.iter().any(|node| node.label() == Some("Show in Finder")));
-                assert!(nodes.iter().any(|node| node.role() == Role::CheckBox
-                    && node.label() == Some("Allow changes")
-                    && node.toggled() == Some(gpui::accesskit::Toggled::False)));
+                assert!(nodes.iter().any(|node| node.label() == Some("Remove folder")));
+                assert!(
+                    nodes
+                        .iter()
+                        .any(|node| node.role() == Role::ComboBox
+                            && node.label() == Some("Read only"))
+                );
                 assert!(
                     nodes.iter().any(|node| node.value() == Some("Choose unique folder labels.")
                         && node.live() == Some(Live::Polite))

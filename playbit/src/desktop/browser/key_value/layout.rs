@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::desktop::typography::tabular_numerals;
 use crate::ui::desktop::zoom::length as ui;
 
 impl Browser {
@@ -17,11 +18,11 @@ impl Browser {
         } else {
             self.kv.chunk.as_ref().map(|chunk| chunk.total_bytes)
         };
-        let size = self.text(
+        let size = tabular_numerals(self.text(
             "kv-metadata-size",
             bytes.map(files::format_byte_size).unwrap_or_else(|| "—".into()),
             cx,
-        );
+        ));
         div()
             .flex()
             .flex_col()
@@ -51,6 +52,7 @@ impl Browser {
             control.set_sidebar_icon(controls::SidebarIcon::Glyph("add"), false, false, cx);
         });
         let header = crate::ui::desktop::table::header(labels, window)
+            .debug_selector(|| "kv-header".into())
             .child(div().flex_none().occlude().child(add));
         let content = if self.kv.page.is_none() && self.kv_is_loading() {
             self.loading_panel(cx)

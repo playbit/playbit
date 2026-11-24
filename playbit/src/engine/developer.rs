@@ -148,7 +148,6 @@ pub(super) fn cache_package(
                 .map_err(std::io::Error::from)?;
         }
         store.queue_build_upload(&build, &path)?;
-        store.remember_imported_app(&package)?;
         Ok(package)
     })();
     if temporary.exists() {
@@ -233,21 +232,39 @@ pub(super) fn create_session(
     user: Option<Id>,
 ) -> Result<crate::store::Session> {
     let package = cache_package(store, runtime, profile, bundle)?;
+    let selector = BuildSelector::Exact { build_id: package.id()? };
+    create_package_session(store, &package, selector, root, user)
+}
+
+fn create_package_session(
+    store: &LocalStore,
+    package: &Package,
+    selector: BuildSelector,
+    root: Option<Id>,
+    user: Option<Id>,
+) -> Result<crate::store::Session> {
     let app = package.identity()?.clone();
     let sync_shared = root.is_none()
         && package.initializers().declares(crate::package::AutomaticVolumeRole::Session);
-    let root = select_root(store, &app, &package, root)?;
+    let root = match root {
+        Some(root) => store.volume(root)?.id,
+        None => app.volume_id(crate::package::AutomaticVolumeRole::Root, None, None, None)?,
+    };
     let build = package.id()?;
     provision_owned_root(store, root, &build)?;
     store
-        .create_session_binding(crate::store::SessionCreation {
-            app,
-            selector: BuildSelector::Exact { build_id: build.clone() },
-            resolved_build_id: build,
-            root_volume: root,
-            sync_shared,
-            user_volume: user,
-        })
+        .bind_automatic_session(
+            crate::store::SessionCreation {
+                app,
+                selector,
+                resolved_build_id: build,
+                root_volume: root,
+                sync_shared,
+                user_volume: user,
+            },
+            None,
+            Some(package),
+        )
         .map_err(Into::into)
 }
 
@@ -274,6 +291,9 @@ pub(super) fn update_session(
     }
     let build = package.id()?;
     provision_owned_root(store, old.replica_volume(), &build)?;
+    if old.is_distinct_world(old.root_volume) {
+        provision_owned_root(store, old.root_volume, &build)?;
+    }
     if store.is_local_session(&session)?
         && (old.shared_volume.is_none() || !store.shared_session_initialized(&session)?)
     {
@@ -291,21 +311,8 @@ pub(super) fn update_session(
             current["revision"].as_u64().ok_or("missing session revision")?,
         )?;
     }
+    store.refresh_imported_app(&package)?;
     Ok(DeveloperReply::Updated { session, build_id: build, update: None, resolved_build_id: None })
-}
-
-fn select_root(
-    store: &LocalStore,
-    app: &crate::package::AppIdentity,
-    _package: &Package,
-    root: Option<Id>,
-) -> Result<Id> {
-    if let Some(root) = root {
-        store.volume(root)?;
-        return Ok(root);
-    }
-    let root = app.volume_id(crate::package::AutomaticVolumeRole::Root, None, None, None)?;
-    Ok(root)
 }
 
 fn authenticate_package(
@@ -377,14 +384,16 @@ pub(super) fn execute(
             }
             remote.prepare_publication(store, None)?;
             let current: AppResponse = serde_json::from_value(remote.get_app(store, app)?)?;
-            DeveloperReply::App(serde_json::from_value(remote.publish_app(
+            let published = serde_json::from_value(remote.publish_app(
                 store,
                 Id::generate()?,
                 app,
                 &package.id()?,
                 &notes,
                 current.revision,
-            )?)?)
+            )?)?;
+            store.refresh_imported_app(&package)?;
+            DeveloperReply::App(published)
         }
         Request::CreateAppSession { app, root, user } => {
             let current: AppResponse = serde_json::from_value(remote.get_app(store, &app)?)?;
@@ -401,19 +410,13 @@ pub(super) fn execute(
             if package.identity()? != &app {
                 return Err("published build app identity differs".into());
             }
-            store.remember_imported_app(&package)?;
-            let sync_shared = root.is_none()
-                && package.initializers().declares(crate::package::AutomaticVolumeRole::Session);
-            let root = select_root(store, &app, &package, root)?;
-            let session = store.create_session_binding(crate::store::SessionCreation {
-                selector: BuildSelector::App { app: app.clone() },
-                app,
-                resolved_build_id: selected.build_id,
-                root_volume: root,
-                sync_shared,
-                user_volume: user,
-            })?;
-            DeveloperReply::Session(session)
+            DeveloperReply::Session(create_package_session(
+                store,
+                &package,
+                BuildSelector::App { app },
+                root,
+                user,
+            )?)
         }
         Request::CreateBuildSession { build, root, user } => {
             let cached = profile.join(crate::paths::BUILDS).join(&build);
@@ -422,25 +425,18 @@ pub(super) fn execute(
             if package.id()? != build {
                 return Err("cached build identity differs".into());
             }
-            let app = package.identity()?.clone();
-            store.remember_imported_app(&package)?;
-            let sync_shared = root.is_none()
-                && package.initializers().declares(crate::package::AutomaticVolumeRole::Session);
-            let root = select_root(store, &app, &package, root)?;
-            provision_owned_root(store, root, &build)?;
-            let session = store.create_session_binding(crate::store::SessionCreation {
-                app,
-                selector: BuildSelector::Exact { build_id: build.clone() },
-                resolved_build_id: build,
-                root_volume: root,
-                sync_shared,
-                user_volume: user,
-            })?;
-            DeveloperReply::Session(session)
+            DeveloperReply::Session(create_package_session(
+                store,
+                &package,
+                BuildSelector::Exact { build_id: build },
+                root,
+                user,
+            )?)
         }
         Request::PrepareApp { bundle } => {
             authenticate_package(remote, store, &bundle)?;
-            cache_package(store, runtime, profile, &bundle)?;
+            let package = cache_package(store, runtime, profile, &bundle)?;
+            store.remember_imported_app(&package)?;
             DeveloperReply::AppPrepared
         }
         Request::AuthenticatePackage { bundle } => {
@@ -781,6 +777,69 @@ mod tests {
         );
         assert!(engine.services.store.sessions().unwrap().is_empty());
         assert_eq!(engine.services.store.volumes().unwrap(), vec![root]);
+    }
+
+    #[test]
+    fn watched_updates_preserve_removal_until_a_successful_import() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(directory.path()).unwrap();
+        let store = &engine.services.store;
+        let mut remote = engine.remote.take().unwrap();
+        let bundle = directory.path().join("watch.pbapp");
+        let guest = crate::engine::tests::button_package();
+        let write = |candidate: Package| {
+            let signed = crate::package::signature::testing::signed(store, candidate).unwrap();
+            fs::write(&bundle, signed.to_bytes().unwrap()).unwrap();
+            signed
+        };
+        let package = write(guest.clone());
+        let app = package.identity().unwrap();
+        let create =
+            |user| create_session(store, &engine.runtime, directory.path(), &bundle, None, user);
+        let session = create(None).unwrap();
+        store
+            .save_recovery_state(&crate::store::RecoveryState {
+                secret: [7; 16],
+                acknowledged: true,
+                revision: 1,
+                synchronized_digest: None,
+                pending: None,
+            })
+            .unwrap();
+        store.remove_app(app, true, false).unwrap();
+        let removal = store.pending_account_record(None).unwrap().unwrap();
+        let mut update = || {
+            update_session(
+                &mut remote,
+                store,
+                &engine.runtime,
+                directory.path(),
+                session.id.clone(),
+                &bundle,
+            )
+        };
+        let updated = write(guest.renamed("New title").unwrap());
+        update().unwrap();
+        assert_eq!(store.session(&session.id).unwrap().resolved_build_id, updated.id().unwrap());
+        assert!(create(Some(Id::generate().unwrap())).is_err(), "invalid User volume");
+        write(
+            Package::new(
+                "another-app".into(),
+                "Other".into(),
+                guest.wasm().unwrap(),
+                Default::default(),
+            )
+            .unwrap(),
+        );
+        assert!(update().is_err(), "wrong app identity");
+        assert!(store.imported_apps().unwrap().is_empty());
+        assert!(store.retained_sessions().unwrap().is_empty());
+        assert_eq!(store.pending_account_record(None).unwrap(), Some(removal));
+
+        fs::write(&bundle, updated.to_bytes().unwrap()).unwrap();
+        create(None).unwrap();
+        assert_eq!(store.imported_apps().unwrap()[0].name, "New title");
+        assert!(!store.app_removed(app).unwrap());
     }
 
     #[test]

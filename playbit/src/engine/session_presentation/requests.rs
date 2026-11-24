@@ -13,6 +13,7 @@ pub fn normalize_request(request: &mut Request, channel: ReleaseChannel) -> Resu
         | Request::RetrySessionInfo { session }
         | Request::WatchInvitation { session }
         | Request::ResumeInvitation { session }
+        | Request::RetainDesktopInvitation { session }
         | Request::PauseInvitation { session }
         | Request::UpdateSession { session, .. }
         | Request::AutomaticVolumes { session }

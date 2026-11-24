@@ -40,6 +40,10 @@ registry to change production behavior.
 
 ## Local changes
 
+The Metal color sprite shader clamps samples to the texel centers at the edges
+of each atlas tile. Magnified images can share a texture without bleeding into
+one another.
+
 macOS windows expose a mutable native minimum content size. Updates defer AppKit
 mutation until the GPUI window borrow ends and grow undersized windows without
 shrinking them when constraints relax. Test windows can simulate backing-scale

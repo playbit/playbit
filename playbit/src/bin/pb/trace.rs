@@ -107,7 +107,7 @@ pub(super) fn control_arguments(
     Ok((selector, clean))
 }
 pub(super) fn tail(profile: &Path, args: &[String]) -> Result<()> {
-    let (selector, since) = tail_arguments(args)?;
+    let (selector, since) = tail_arguments(args).map_err(crate::usage_error)?;
     let mut stream = trace::tail::connect(profile, since, selector)?;
     let mut output = io::stdout().lock();
     render(&mut stream, &mut output)

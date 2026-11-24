@@ -45,7 +45,6 @@ impl Drop for OperationGuard<'_> {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum TryLockError {
     WouldBlock,
@@ -116,7 +115,6 @@ impl OperationGate {
         })
     }
 
-    #[cfg(test)]
     pub(super) fn try_lock(&self) -> std::result::Result<OperationGuard<'_>, TryLockError> {
         let admission = self.admit().map_err(|error| match error {
             Error::LocalContention(_) => TryLockError::WouldBlock,

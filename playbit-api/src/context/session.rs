@@ -55,6 +55,9 @@ impl Context<'_> {
         let key_secret = has_secret.then_some(record.key_secret);
         Ok(Some(SessionInfo { internal_id: record.internal_id, key_secret }))
     }
+    /// Start or reuse live membership in the current session. A roster-only app can call
+    /// this once at startup, read [Self::presence], and refresh on [EventKind::PresenceChanged].
+    /// Membership arrives asynchronously, so the initial snapshot can be empty.
     pub fn session(&mut self) -> Result<Session, Error> {
         let identity = self.identity()?;
         // SAFETY: the operation has no pointer arguments and borrows this callback.
@@ -154,12 +157,11 @@ impl<'a> Event<'a> {
         Ok(ChannelMessage {
             channel: Channel::new(generation, slot),
             sender: super::Participant {
-                size: core::mem::size_of::<super::Participant>() as u32,
-                written: 0,
                 account_id: self.data[8..24].try_into().expect("account"),
                 device_id: self.data[24..40].try_into().expect("device"),
                 instance_id: self.data[40..56].try_into().expect("instance"),
                 build_id: self.data[56..88].try_into().expect("build"),
+                ..Default::default()
             },
             message_id: self.data[88..104].try_into().expect("message"),
             data: &self.data[104..],

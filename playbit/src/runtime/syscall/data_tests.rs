@@ -81,6 +81,7 @@ fn fixture() -> (State, VolumeHandle, Arc<Mutex<Calls>>) {
             app_name: "Test app".into(),
             app_build: None,
             identity: Identity {
+                display_name: String::new(),
                 account_id: [9; 16],
                 is_service: false,
                 device_id: [8; 16],

@@ -1,5 +1,5 @@
 //! Parsing and validation of device-local mount configuration, without grants.
-use super::Result;
+use super::{Result, failure::usage_error};
 use std::{
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
@@ -33,7 +33,7 @@ impl HostMount {
     /// for a management worker. This configuration does not grant guest access.
     pub fn from_cli(argument: &str, cwd: &Path) -> Result<Self> {
         if argument.len() > 2 * (MAX_PATH_BYTES + MAX_LABEL_BYTES) + 4 {
-            return Err("Host mount argument is too long".into());
+            return Err(usage_error("Host mount argument is too long"));
         }
         let mut fields = vec![String::new()];
         let mut chars = argument.chars();
@@ -41,20 +41,24 @@ impl HostMount {
             match ch {
                 '\\' => match chars.next() {
                     Some(ch @ (':' | '\\')) => fields.last_mut().expect("one mount field").push(ch),
-                    _ => return Err("Host mount escapes must be \\: or \\\\".into()),
+                    _ => {
+                        return Err(usage_error("Host mount escapes must be \\: or \\\\"));
+                    }
                 },
                 ':' if fields.len() < 3 => fields.push(String::new()),
-                ':' => return Err("Host mount expects PATH[:LABEL[:ro|rw]]".into()),
+                ':' => {
+                    return Err(usage_error("Host mount expects PATH[:LABEL[:ro|rw]]"));
+                }
                 ch => fields.last_mut().expect("one mount field").push(ch),
             }
         }
         if fields[0].is_empty() {
-            return Err("Host mount path is empty".into());
+            return Err(usage_error("Host mount path is empty"));
         }
         let write = match fields.get(2).map(String::as_str) {
             None | Some("ro") => false,
             Some("rw") => true,
-            _ => return Err("Host mount mode must be ro or rw".into()),
+            _ => return Err(usage_error("Host mount mode must be ro or rw")),
         };
         Self::resolve(&cwd.join(&fields[0]), fields.get(1).map(String::as_str), write)
     }

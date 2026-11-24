@@ -6,6 +6,9 @@ use crate::package::signature::{
     PackageAdmission, PackageSigner, PublisherCertificate, PublisherTrust, TrustedSigner,
 };
 
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+use crate::package::bundled_examples::Evidence;
+
 const CERTIFICATE: &[u8] = b"publisher/certificate";
 const ISSUER_PREFIX: &str = "publisher/issuer/";
 const STATUS_PREFIX: &str = "publisher/status/";
@@ -131,8 +134,13 @@ impl LocalStore {
             &package.publisher_certificate().ok_or("missing publisher certificate")?.claims;
         let key = status_key(claims.publisher, &claims.signer);
         let snapshot = self.metadata.begin_read()?;
-        let bytes = snapshot.get(key.as_bytes())?.ok_or("missing publisher-key status")?;
-        let status = KeyStatus::from_bytes(&bytes)?;
+        let cached =
+            snapshot.get(key.as_bytes())?.map(|bytes| KeyStatus::from_bytes(&bytes)).transpose()?;
+        #[cfg(all(target_os = "macos", feature = "desktop"))]
+        if let Some(evidence) = Evidence::for_profile(&self.path, &package.id()?)? {
+            return evidence.status(cached, now);
+        }
+        let status = cached.ok_or("missing publisher-key status")?;
         verify_status(&status, &self.publisher_issuers()?, now)?;
         if status.claims.issuer != claims.issuer
             || status.claims.publisher != package.identity()?.publisher
@@ -207,9 +215,16 @@ impl LocalStore {
         package: crate::package::Package,
         now: u64,
     ) -> crate::package::Result<crate::package::Package> {
+        let build = package.id()?;
+        #[cfg(all(target_os = "macos", feature = "desktop"))]
+        if let Some(evidence) = Evidence::for_profile(&self.path, &build)? {
+            self.require_account_authority()?;
+            let status = self.package_publisher_status(&package, now)?;
+            return evidence.authenticate(package, Self::trusted_signer(&status), now);
+        }
         let (issuers, signers) = self.publisher_trust(now)?;
         let trust = PublisherTrust { issuers: &issuers, signers: &signers };
-        let key = format!("{ADMISSION_PREFIX}{}", package.id()?);
+        let key = format!("{ADMISSION_PREFIX}{build}");
         let saved = {
             let snapshot = self.metadata.begin_read()?;
             snapshot
@@ -388,6 +403,52 @@ mod admission_tests {
         store.cache_publisher_status(issuer, &revoked.to_bytes(), 22).unwrap();
         assert!(store.package_publisher_status(&authenticated, 22).is_err());
         assert!(store.authenticate_package(package, 22).is_err());
+    }
+
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    #[test]
+    fn bundled_examples_open_offline_only_for_the_published_bytes() {
+        let now = now_unix_secs();
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(directory.path()).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let other = LocalStore::open(other.path()).unwrap();
+        let _registered = signed(&other, b"provision signer");
+        for (channel, suffix, publisher) in [
+            ("public", "", "BQuhAXnZ9znNKiaapEyVNo"),
+            ("testing", "-testing", "R8UTnVVXKZeS5FLfoLmwVt"),
+        ] {
+            for name in ["little-list", "football"] {
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("platform/macos/examples")
+                    .join(format!("{name}{suffix}.pbapp"));
+                let package = Package::open(&path).unwrap();
+                let marker = directory.path().join(crate::engine::profile::PROFILE_MARKER);
+                std::fs::write(&marker, if channel == "public" { "testing" } else { "public" })
+                    .unwrap();
+                assert!(store.authenticate_package(package.clone(), now).is_err());
+                std::fs::write(&marker, channel).unwrap();
+                let accepted = store.authenticate_package(package.clone(), now).unwrap();
+                assert_eq!(accepted.identity().unwrap().publisher.to_string(), publisher);
+                assert_eq!(accepted.app_id(), name);
+                // A replacement signer and the same app ID do not inherit this admission.
+                let replacement = Package::new(
+                    name.to_owned(),
+                    accepted.name().to_owned(),
+                    package.wasm().unwrap(),
+                    std::collections::BTreeMap::new(),
+                )
+                .unwrap();
+                let mut bytes = Vec::new();
+                replacement
+                    .write_signed(&other.publisher_signer(15).unwrap(), 15, &mut bytes)
+                    .unwrap();
+                assert!(
+                    store.authenticate_package(Package::from_bytes(&bytes).unwrap(), now).is_err()
+                );
+            }
+        }
+        assert!(store.publisher_issuers().unwrap().is_empty());
     }
 
     #[test]

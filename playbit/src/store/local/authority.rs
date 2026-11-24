@@ -169,6 +169,7 @@ impl LocalStore {
         }
         if cause == TerminalCause::ParticipantDenied
             && let Some(session) = session
+            && !session.is_distinct_world(changed)
         {
             if access.build_id().is_some_and(|build| build != session.resolved_build_id) {
                 return Ok(false);
@@ -311,8 +312,6 @@ impl LocalStore {
                 &key,
                 &EntryBarrier { volume_generation: generation, barrier: selected }.encode(),
             )?;
-            tx.local_indexes().put(&catalog_key(self.account.id), &[1])?;
-            tx.local_indexes().put(&ceiling_entry_key(self.account.id, entry), &[1])?;
             tx.local_indexes()
                 .put(&entry_key(self.account.id, entry), &generation.to_le_bytes())?;
             tx.local_indexes().put(&binding_key(self.account.id), &generation.to_le_bytes())?;
@@ -326,6 +325,18 @@ impl LocalStore {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// A selected capture can preserve an authenticated full catalog, but cannot
+    /// establish one. A missing barrier is the initial, unqualified generation.
+    pub(super) fn has_qualified_catalog(&self, volume: Id, generation: u64) -> Result<bool> {
+        let db = self.db(volume, DatabaseId::Index)?;
+        let tx = db.begin_read()?;
+        let Some(marker) = tx.local_get(&barrier_key(self.account.id))? else { return Ok(false) };
+        let barrier = Barrier::decode(Some(&marker))?;
+        Ok(!barrier.fenced
+            && barrier.accepts(generation)
+            && tx.local_get(&catalog_key(self.account.id))?.is_none())
     }
 
     pub(super) fn restrict_catalog_locked(&self, volume: Id, entry: EntryId) -> Result<()> {
@@ -379,6 +390,15 @@ impl LocalStore {
             return Err(Error::AccessDenied("current authority requires authenticated catch-up"));
         }
         Ok(())
+    }
+
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn entry_capture_required(&self, volume: Id, entry: EntryId) -> Result<bool> {
+        match self.check_authority_marker(self.account.id, volume, Some(entry)) {
+            Ok(()) => Ok(false),
+            Err(Error::AccessDenied(_)) => Ok(true),
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn check_dependency_authority(&self, account: Id, volume: Id) -> Result<()> {

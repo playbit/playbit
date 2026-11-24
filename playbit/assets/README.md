@@ -59,15 +59,14 @@ and control-state opacity. The popup glyph uses a full 16-point slot.
 | `menu-signature.svg` | `signature.svg` |
 | `menu-talk.svg` | `talk.svg` |
 | `popup-glyph.svg` | `pop-up.svg` |
-| `session-clear.svg` | `trash.svg` |
 | `session-icon.svg`, `session-share.svg`, `sidebar-session.svg` | `session.svg` |
-| `session-overflow.svg` | `drop-down.svg` |
 | `session-start.svg` | `play.svg` |
 | `sidebar-volume.svg` | `volume.svg` |
 | `progress-spinner.svg` | `progress-spinner.svg` |
 | `upgrade.svg` | `upgrade.svg` |
 
-The other glyphs are unmodified exports. `progress-spinner.svg` embeds its
+The session log clear button uses the 16-point paths from the Sessions design
+with an SVG linear gradient for the sweep. `progress-spinner.svg` embeds its
 gradient as a PNG so GPUI can render it as a tinted mask. Sign-in and app-launch
 progress share this asset and rotate it at display cadence while visible.
 

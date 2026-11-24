@@ -752,6 +752,26 @@ pub enum Request {
         session: String,
         grants: Vec<crate::store::PersonalVolumeGrant>,
     },
+    /// First management snapshot of a new desktop process.
+    DesktopLaunch,
+    /// Keep a desktop link in memory until its authenticated envelope arrives.
+    PreviewDesktopInvitation {
+        invitation: String,
+    },
+    /// The desktop received this session's verified preview during this launch.
+    RetainDesktopInvitation {
+        session: String,
+    },
+    AppRemovalImpact {
+        account: Id,
+        app: crate::package::AppIdentity,
+    },
+    RemoveApp {
+        account: Id,
+        app: crate::package::AppIdentity,
+        confirmed: bool,
+        delete_local_data: bool,
+    },
 }
 /// A process-generation cursor for observing local state, never an authority.
 #[cfg(feature = "app-host")]
@@ -824,6 +844,7 @@ pub enum GuestRenderer {
 impl GuestRenderer {
     fn features(self) -> &'static [&'static str] {
         use playbit_api::abi::data::{AUTOMATIC_VOLUMES_FEATURE, SESSION_VOLUME_FEATURE};
+        use playbit_api::abi::environment::DISPLAY_NAMES_FEATURE;
         #[cfg(target_os = "macos")]
         {
             use playbit_api::ui;
@@ -837,6 +858,7 @@ impl GuestRenderer {
                 ui::WINDOW_STYLE_FEATURE,
                 AUTOMATIC_VOLUMES_FEATURE,
                 SESSION_VOLUME_FEATURE,
+                DISPLAY_NAMES_FEATURE,
             ];
             match self {
                 Self::Embedded => &MAC[1..],
@@ -851,11 +873,12 @@ impl GuestRenderer {
                 ui::CANVAS_PIXELS_FEATURE,
                 AUTOMATIC_VOLUMES_FEATURE,
                 SESSION_VOLUME_FEATURE,
+                DISPLAY_NAMES_FEATURE,
             ]
         }
         #[cfg(not(any(target_os = "macos", target_os = "ios")))]
         {
-            &[AUTOMATIC_VOLUMES_FEATURE, SESSION_VOLUME_FEATURE]
+            &[AUTOMATIC_VOLUMES_FEATURE, SESSION_VOLUME_FEATURE, DISPLAY_NAMES_FEATURE]
         }
     }
 }

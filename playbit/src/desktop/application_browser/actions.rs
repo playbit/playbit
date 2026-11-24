@@ -2,6 +2,55 @@
 use super::*;
 
 impl Shell {
+    pub(in crate::desktop) fn dismiss_invitation(&mut self, cx: &mut Context<Self>) {
+        let Some(mut preview) = self.invitation.take() else { return };
+        self.join_dialog = None;
+        self.invitation_resume = None;
+        self.joining = false;
+        if self.invitation_link.as_ref().is_none_or(|link| link.internal_id() == preview.session) {
+            self.invitation_link = None;
+            self.join_preview = None;
+        }
+        let saved =
+            self.saved_invitations.iter_mut().find(|saved| saved.session == preview.session);
+        let app = preview
+            .received
+            .as_ref()
+            .or_else(|| saved.as_deref().and_then(|saved| saved.received.as_ref()))
+            .map(|received| received.session.app.clone())
+            .or_else(|| {
+                self.applications
+                    .catalog
+                    .iter()
+                    .find(|row| row.id == preview.session)
+                    .map(|row| row.app.clone())
+            });
+        let Some(app) = app else { return };
+        // The explicit preview can carry the envelope before the catalog notification arrives.
+        if preview.received.is_some() {
+            if let Some(saved) = saved {
+                if saved.received.is_none() {
+                    saved.received = preview.received;
+                    self.rebuild_application_list();
+                }
+            } else if self.saved_invitations.len() < MAX_SESSIONS {
+                preview.paused = true;
+                self.saved_invitations.push(preview);
+                self.rebuild_application_list();
+            } else {
+                self.error = "The invitation list exceeds its 256-session display limit.".into();
+                return;
+            }
+        }
+        // Returning to the previous app must preserve a newer link already
+        // admitted while this invitation was still onscreen.
+        let pending_link = self.invitation_link.take();
+        if self.select_application_target(Target::Application(app), cx) {
+            self.sidebar_volumes = false;
+        }
+        self.invitation_link = pending_link;
+    }
+
     pub(super) fn select_application_target(
         &mut self,
         target: Target,
@@ -11,38 +60,81 @@ impl Shell {
             self.applications.pending_scope = None;
         }
         match target {
+            Target::Volume(id) => {
+                let Some(volume) = self.volumes.iter().find(|volume| volume.id == id).cloned()
+                else {
+                    return false;
+                };
+                return self.select_volume(volume, cx);
+            }
             Target::Application(identity) => {
                 if !self.prepare_browser_navigation(cx) {
                     return false;
                 }
+                self.applications.clear_selection();
                 self.applications.selected = Some(identity);
-                self.applications.instance = None;
-                self.applications.root_open = false;
-                self.applications.selected_role = None;
-                self.applications.log_open = false;
-                self.sidebar_volumes = false;
                 self.sidebar_session = None;
                 self.selected = None;
                 self.browser = None;
                 self.new_session = None;
                 self.personal = None;
-                self.invitation = None;
+                self.leave_invitation();
                 self.opening = None;
                 self.refresh_logs(cx);
                 self.applications.scope_refresh_needed = true;
                 self.refresh_application_scopes(cx);
             }
             Target::Session(id) => {
-                return self.select_sidebar_session(id, cx);
+                return self.select_browser_session(id, self.sidebar_volumes, cx);
+            }
+            Target::Invitation(id) => {
+                if !self.prepare_browser_navigation(cx)
+                    || self.applications.catalog.iter().any(|session| session.id == id)
+                {
+                    return false;
+                }
+                let Some(mut preview) = self
+                    .saved_invitations
+                    .iter()
+                    .find(|preview| {
+                        preview.session == id && !preview.retained && preview.received.is_some()
+                    })
+                    .cloned()
+                else {
+                    return false;
+                };
+                let admission = match self.send.enqueue(Request::ResumeInvitation { session: id }) {
+                    Ok(admission) => admission,
+                    Err(error) => {
+                        self.error = error.into();
+                        cx.notify();
+                        return false;
+                    }
+                };
+                self.invitation_resume = Some(admission);
+                self.invitation_link = None;
+                preview.paused = true;
+                self.open_join_entry(&preview.session, cx);
+                self.invitation = Some(preview);
+                self.join_status = InvitationState::Checking;
+                self.joining = false;
+                self.opening = None;
+                self.selected = None;
+                self.sidebar_session = None;
+                self.browser = None;
+                self.new_session = None;
+                self.personal = None;
+                self.error.clear();
+                self.refresh_logs(cx);
             }
             Target::Instance(id) => {
                 if !self.prepare_browser_navigation(cx) {
                     return false;
                 }
                 self.applications.instance = Some(id);
+                self.refresh_logs(cx);
                 self.applications.root_open = false;
                 self.applications.selected_role = None;
-                self.applications.log_open = false;
                 self.browser = None;
             }
             Target::Scope { role, volume, session } => {
@@ -74,22 +166,10 @@ impl Shell {
                     return false;
                 }
                 self.applications.pending_scope = None;
-                self.sidebar_volumes = false;
                 self.applications.root_open = true;
                 self.applications.selected_role = Some(role);
                 self.applications.scope_in_session = session;
-                self.applications.log_open = false;
                 self.applications.instance = None;
-            }
-            Target::Log => {
-                if !self.prepare_browser_navigation(cx) {
-                    return false;
-                }
-                self.browser = None;
-                self.applications.root_open = false;
-                self.applications.selected_role = None;
-                self.applications.log_open = true;
-                self.refresh_logs(cx);
             }
         }
         cx.notify();
@@ -184,11 +264,9 @@ impl Shell {
                 match result {
                     Ok(opened) if current => {
                         if host.select_scope_volume(opened, role, in_session, cx) {
-                            host.sidebar_volumes = false;
                             host.applications.root_open = true;
                             host.applications.selected_role = Some(role);
                             host.applications.scope_in_session = in_session;
-                            host.applications.log_open = false;
                             host.applications.instance = None;
                             let slots = if in_session {
                                 &mut host.applications.session_slots
@@ -216,30 +294,16 @@ impl Shell {
         true
     }
 
-    pub(super) fn application_running_owners(&self) -> impl Iterator<Item = &LaunchOwner> {
-        self.applications.owners.iter().filter(|owner| {
-            Some(owner.instance.session.as_str()) == self.selected_session_id() && is_running(owner)
-        })
-    }
-
     pub(super) fn application_stop_target(&self) -> Option<Id> {
-        if let Some(id) = self.applications.instance {
-            return self
-                .application_running_owners()
-                .find(|owner| owner.instance.id == id)
-                .map(|_| id);
-        }
-        let mut owners = self.application_running_owners();
-        let owner = owners.next()?;
-        owners.next().is_none().then_some(owner.instance.id)
+        let owner = self.applications.highlighted_instance()?;
+        (Some(owner.instance.session.as_str()) == self.selected_session_id() && is_running(owner))
+            .then_some(owner.instance.id)
     }
 
     pub(super) fn toggle_application(&mut self, cx: &mut Context<Self>) {
         if let Some(session) = self.selected_session_id().map(str::to_owned) {
             if let Some(instance) = self.application_stop_target() {
                 self.stop_application_instance(session, instance, cx);
-            } else if self.application_running_owners().count() > 1 {
-                self.show_visual_bell("Select the instance to stop", "app-browser-instance", cx);
             } else {
                 self.open_retained_session(session, cx);
             }
@@ -251,7 +315,7 @@ impl Shell {
             .iter()
             .find(|app| Some(&app.identity) == self.applications.selected.as_ref())
             .cloned();
-        if let Some(app) = app {
+        if let Some(app) = app.filter(|app| app.can_open) {
             if let Some(session) = app.sessions.first() {
                 self.open_retained_session(session.clone(), cx);
             } else {
@@ -345,13 +409,14 @@ impl Shell {
                     }
                     if !host.applications.catalog.iter().any(|row| row.id == session.id) && host.applications.catalog.len() < MAX_SESSIONS { host.applications.catalog.push(session.clone()); }
                     if select { host.sidebar_session = Some(session.id); }
-                    host.applications.rebuild(&host.sessions, &host.recent_sessions);
+                    host.rebuild_application_list();
                     if select { host.select_application_session(cx); }
                 }
                 match result {
                     Ok((prepared, instance)) if select => {
                         host.selected = Some(prepared);
                         host.applications.instance = Some(instance.instance);
+                        host.refresh_logs(cx);
                     }
                     Ok(_) => {}
                     Err(error) => host.error = if uncertain {
@@ -446,6 +511,7 @@ impl Shell {
                 match result {
                     Ok(instance) if host.selected_session_id() == session.as_deref() => {
                         host.applications.instance = instance;
+                        host.refresh_logs(cx);
                     }
                     Ok(_) => {}
                     Err(error) => host.error = error.to_string(),

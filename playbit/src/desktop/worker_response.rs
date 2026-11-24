@@ -9,6 +9,24 @@ const VOLUME_ACL_BYTES_MAX: usize = crate::store::catalog::record::MAX_ITEMS
         + 128);
 const _: () = assert!(VOLUME_ACL_BYTES_MAX <= crate::store::MetadataPolicy::MAX_MATERIALIZED_BYTES);
 
+// An explicitly opened session must remain available for consent and dismissal
+// even if the ordinary list is full. Keep catalog order when it fits.
+fn selected_invitation_index<T>(
+    rows: &[T],
+    selected: Option<&InvitationStatus>,
+    session: impl Fn(&T) -> &str,
+) -> usize {
+    if rows.len() > application_browser::MAX_SESSIONS
+        && let Some(selected) = selected
+        && let Some(index) = rows[application_browser::MAX_SESSIONS..]
+            .iter()
+            .position(|row| session(row) == selected.session)
+    {
+        return application_browser::MAX_SESSIONS + index;
+    }
+    0
+}
+
 /// A session summary used by the sidebar and recent-app view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct SessionRow {
@@ -46,10 +64,13 @@ pub(super) struct WorkerResponse {
     pub(super) status_recovery: Option<RecoveryStatus>,
     pub(super) account_response: Option<AccountResponse>,
     pub(super) invitation_preview: Option<crate::store::InvitationPreview>,
+    pub(super) desktop_invitation: Option<String>,
     pub(super) saved_invitations: Option<Vec<crate::store::InvitationPreview>>,
     pub(super) status_volumes: Option<Vec<crate::store::Volume>>,
     pub(super) status_scoped_volumes: Vec<crate::store::Volume>,
     pub(super) volume_created: Option<crate::store::Volume>,
+    pub(super) app_removal_impact: Option<crate::store::AppRemovalImpact>,
+    pub(super) erased_app_volumes: Vec<crate::store::Id>,
     pub(super) volume_label: Option<crate::store::Id>,
     pub(super) browser_reply: Option<Reply>,
     pub(super) data_reply: Option<worker_data::DataReply>,
@@ -58,6 +79,7 @@ pub(super) struct WorkerResponse {
     pub(super) status_account_profile: Option<AccountProfile>,
     pub(super) account_key_backup: Option<crate::store::AccountKeyBackup>,
     pub(super) session_rows: Option<Vec<SessionRow>>,
+    pub(super) session_activity: Option<BTreeMap<String, crate::store::SessionActivity>>,
     pub(super) application_catalog: Option<Vec<crate::store::Session>>,
     pub(super) imported_apps: Option<Vec<crate::store::ImportedApp>>,
     pub(super) session_created: Option<(gpui::EntityId, SessionRow)>,
@@ -107,6 +129,8 @@ impl WorkerResponse {
                 }
                 R::Status(status) => Self::from_status_archive(status).map_err(|e| e.to_string()),
                 R::SessionPrepared(_)
+                | R::AppRemovalImpact { .. }
+                | R::AppRemoved(_)
                 | R::PersonalVolumes { .. }
                 | R::PersonalVolumesSelected { .. }
                 | R::Transfer { .. }
@@ -218,6 +242,20 @@ impl WorkerResponse {
         {
             return Err("Session list exceeds its 256-session display limit".into());
         }
+        if status.session_activity.len() > 256
+            || status.session_activity.iter().any(|(id, row)| {
+                !crate::identifier::valid(id.as_str(), 32)
+                    || row.participants.len() > 256
+                    || row
+                        .participants
+                        .iter()
+                        .any(|p| p.name.len() > crate::session_channel::DISPLAY_NAME_BYTES)
+            })
+            || status.session_activity.iter().map(|(_, r)| r.participants.len()).sum::<usize>()
+                > 256
+        {
+            return Err("Session activity exceeds its display limits".into());
+        }
         if status.session_references.iter().any(|(session, code)| {
             !crate::identifier::valid(session.as_str(), 32)
                 || crate::store::parse_session_code(code.as_str()).is_err()
@@ -249,7 +287,31 @@ impl WorkerResponse {
         response.status_ui_zoom = Some(status.ui_zoom.to_native());
         response.status_recovery = deserialize::<_, Error>(&status.recovery)?;
         response.invitation_status = Some(deserialize::<_, Error>(&status.invitation_status)?);
-        response.saved_invitations = Some(deserialize::<_, Error>(&status.invitations)?);
+        if let Some(preview) = status.desktop_invitation.as_ref() {
+            if !crate::identifier::valid(preview.session.as_str(), 32) {
+                return Err("Invalid desktop invitation in engine status".into());
+            }
+            response.desktop_invitation = Some(preview.session.as_str().to_owned());
+        }
+        // Read one extra displayable row so the shell can report overflow
+        // while still opening the user's apps. Seed-only previews have no row.
+        let rows = status.invitations.as_slice();
+        let selected = selected_invitation_index(
+            rows,
+            response.invitation_status.as_ref().and_then(Option::as_ref),
+            |row| row.session.as_str(),
+        );
+        let (before, rest) = rows.split_at(selected);
+        response.saved_invitations = Some(
+            rest.iter()
+                .take(1)
+                .chain(before)
+                .chain(rest.iter().skip(1))
+                .filter(|preview| preview.retained || preview.received.is_some())
+                .take(application_browser::MAX_SESSIONS + 1)
+                .map(deserialize::<_, Error>)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         response.set_status_volumes(
             deserialize::<_, Error>(&status.volumes)?,
             &deserialize::<Vec<crate::store::Id>, Error>(&status.automatic_volume_ids)?,
@@ -257,6 +319,7 @@ impl WorkerResponse {
         response.status_account = Some(deserialize::<_, Error>(&status.account)?);
         response.status_account_profile = Some(deserialize::<_, Error>(&status.account_profile)?);
         response.account_key_backup = Some(deserialize::<_, Error>(&status.account_key_backup)?);
+        response.session_activity = Some(deserialize::<_, Error>(&status.session_activity)?);
         response.application_catalog = Some(deserialize::<_, Error>(&status.sessions)?);
         response.imported_apps = Some(deserialize::<_, Error>(&status.imported_apps)?);
         response.session_rows = Some(
@@ -317,6 +380,19 @@ impl WorkerResponse {
             | Reply::Schema { .. }
             | Reply::Diagnostic(_)
             | Reply::VolumeEntry { .. }) => response.browser_reply = Some(reply),
+            Reply::AppRemovalImpact { impact } => response.app_removal_impact = Some(impact),
+            Reply::AppRemoved(crate::store::AppRemovalResult::Confirmation(impact)) => {
+                response.app_removal_impact = Some(impact);
+            }
+            Reply::AppRemoved(crate::store::AppRemovalResult::Removed {
+                erased_volumes,
+                cleanup_error,
+            }) => {
+                response.erased_app_volumes = erased_volumes;
+                if let Some(error) = cleanup_error {
+                    response.result = Err(error);
+                }
+            }
             Reply::SessionPrepared(prepared) => response.prepared = Some(prepared),
             Reply::PersonalVolumes { session, volumes, grants } => {
                 response.personal_snapshot = Some(personal::Snapshot { session, volumes, grants });
@@ -400,7 +476,7 @@ impl WorkerResponse {
         response
     }
 
-    fn apply_status(&mut self, status: Box<crate::engine::reply::Status>) {
+    fn apply_status(&mut self, mut status: Box<crate::engine::reply::Status>) {
         if status.sessions.len() > 256
             || status.imported_apps.len() > 256
             || status.session_references.len() > 256
@@ -429,8 +505,20 @@ impl WorkerResponse {
         self.status_ui_zoom = Some(status.ui_zoom);
         self.status_recovery = status.recovery;
         self.invitation_status = Some(status.invitation_status);
+        self.desktop_invitation = status.desktop_invitation.map(|preview| preview.session);
+        let selected = selected_invitation_index(
+            &status.invitations,
+            self.invitation_status.as_ref().and_then(Option::as_ref),
+            |row| row.session.as_str(),
+        );
+        if selected != 0 {
+            status.invitations[..=selected].rotate_right(1);
+        }
+        status.invitations.retain(|preview| preview.retained || preview.received.is_some());
+        status.invitations.truncate(application_browser::MAX_SESSIONS + 1);
         self.saved_invitations = Some(status.invitations);
         self.set_status_volumes(status.volumes, &status.automatic_volume_ids);
+        self.session_activity = Some(status.session_activity);
         self.application_catalog = Some(status.sessions.clone());
         self.imported_apps = Some(status.imported_apps);
         self.session_rows = Some(
@@ -483,10 +571,13 @@ impl WorkerResponse {
             status_recovery: None,
             account_response: None,
             invitation_preview: None,
+            desktop_invitation: None,
             saved_invitations: None,
             status_volumes: None,
             status_scoped_volumes: Vec::new(),
             volume_created: None,
+            app_removal_impact: None,
+            erased_app_volumes: Vec::new(),
             volume_label: None,
             browser_reply: None,
             data_reply: None,
@@ -495,6 +586,7 @@ impl WorkerResponse {
             status_account_profile: None,
             account_key_backup: None,
             session_rows: None,
+            session_activity: None,
             application_catalog: None,
             imported_apps: None,
             session_created: None,
@@ -796,6 +888,61 @@ mod tests {
         assert!(matches!(response.invitation_status, Some(Some(InvitationStatus {
             state: InvitationState::Denied { message }, ..
         })) if message == "Retained λ\0tail"));
+    }
+
+    #[test]
+    fn a_full_app_list_keeps_the_explicitly_opened_invitation_visible() {
+        use crate::store::{BuildSelector, InvitationPreview, ReceivedInvitation};
+        let directory = tempfile::tempdir().unwrap();
+        let mut engine = crate::engine::Engine::open(directory.path()).unwrap();
+        let Reply::Status(mut status) = engine.dispatch_reply(Request::Status).unwrap() else {
+            panic!("expected status");
+        };
+        let limit = application_browser::MAX_SESSIONS;
+        let store = &engine.services.store;
+        let root = store.create_volume("Shared list", true).unwrap();
+        let build = crate::identifier::encode(&[9; 32]);
+        let session = store
+            .create_session(
+                &crate::package::AppIdentity {
+                    publisher: store.account().id,
+                    app_id: "list".into(),
+                },
+                BuildSelector::Exact { build_id: build.clone() },
+                &build,
+                root.id,
+            )
+            .unwrap();
+        status.invitations = (0..limit + 2)
+            .map(|index| {
+                let mut session = session.clone();
+                let mut identity = [0; 32];
+                identity[..8].copy_from_slice(&(index as u64).to_be_bytes());
+                session.id = crate::identifier::encode(&identity);
+                InvitationPreview {
+                    session: session.id.clone(),
+                    retained: false,
+                    paused: false,
+                    received: Some(ReceivedInvitation { session, root_name: "Shared list".into() }),
+                }
+            })
+            .collect();
+        let selected = status.invitations.last().unwrap().session.clone();
+        status.invitation_status = Some(InvitationStatus {
+            session: selected.clone(),
+            state: InvitationState::Ready { build_id: build },
+        });
+        let reply = Reply::Status(status);
+        let archive =
+            ipc::Response::new(ipc::codec::encode(&reply, ipc::codec::MAX_ARCHIVE).unwrap())
+                .unwrap();
+        for response in
+            [WorkerResponse::from_archive(Ok(archive)), WorkerResponse::from_reply(Ok(reply))]
+        {
+            let rows = response.saved_invitations.unwrap();
+            assert_eq!(rows.len(), limit + 1);
+            assert_eq!(rows[0].session, selected);
+        }
     }
 
     #[test]

@@ -22,7 +22,6 @@ if [ -z "${RUNNER_TEMP:-}" ]; then
     temporary=1
 fi
 export RUNNER_TEMP
-export GITHUB_STEP_SUMMARY=${GITHUB_STEP_SUMMARY:-$RUNNER_TEMP/summary.md}
 started=$SECONDS
 cleanup() {
     result=$?

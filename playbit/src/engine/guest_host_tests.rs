@@ -27,6 +27,19 @@ fn call(operation: DataOperation) -> Arc<DataCall> {
 fn read() -> Arc<DataCall> {
     call(DataOperation::Read { entry_id: [5; 15], object_id: [5; 16], fields: vec![[6; 16]] })
 }
+impl Inbox {
+    pub(in crate::engine) fn complete_test_roster(&self) {
+        let mut state = self.0.state.lock().unwrap();
+        let (_, receive) = state
+            .data_iter_mut()
+            .find(|(_, entry)| entry.kind == DataKind::ChannelEvents)
+            .expect("guest has a pending membership receive");
+        assert!(receive.result.is_none());
+        receive.result = Some(Ok(Arc::new(DataResult::ChannelEvents(vec![
+            crate::session_channel::Event::Presence { participants: vec![] },
+        ]))));
+    }
+}
 fn fixture() -> (tempfile::TempDir, UnixListener, GuestHost, Inbox, mpsc::Receiver<()>) {
     let directory = tempfile::tempdir().unwrap();
     crate::paths::private_directory(directory.path(), "control").unwrap();
@@ -61,6 +74,7 @@ fn scoped_notice(
 ) {
     let bytes = codec::encode(
         &Reply::InstanceEvents(super::super::service_events::Notice {
+            display_name: String::new(),
             mount_revision: 0,
             data_revision,
             context: context(),
@@ -143,6 +157,7 @@ fn wait(receive: &mpsc::Receiver<()>, inbox: &Inbox, ready: impl Fn(&State) -> b
     loop {
         if ready(&inbox.0.state.lock().unwrap()) {
             inbox.take_volumes(); // This fixture acts as the metadata delivery owner.
+            inbox.take_display_name();
             return;
         }
         receive.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -351,6 +366,7 @@ fn accepted_receipt_never_waits_for_a_later_context_notice() {
         stopping.recv().unwrap();
         let bytes = codec::encode(
             &Reply::InstanceEvents(super::super::service_events::Notice {
+                display_name: String::new(),
                 mount_revision: 0,
                 context: context(),
                 sequence: 2,
@@ -467,6 +483,7 @@ fn ordered_selected_build_stop_reports_its_cause_and_closes_admission() {
         notice(&mut stream, 1, 1);
         let bytes = codec::encode(
             &Reply::InstanceEvents(Notice {
+                display_name: String::new(),
                 mount_revision: 0,
                 context: context(),
                 sequence: 2,
@@ -677,6 +694,7 @@ fn disposal_keeps_accepted_mutations_and_credit_until_completion() {
                     if uncertain {
                         marking.recv().unwrap();
                         let notice = Reply::InstanceEvents(super::super::service_events::Notice {
+                            display_name: String::new(),
                             context: context(),
                             sequence: 2,
                             revision: Some((context().incarnation, 2)),
@@ -1154,6 +1172,7 @@ fn revocation_withholds_ready_file_data_and_recovery_but_preserves_close_outcome
         );
         stopping.recv().unwrap();
         let notice = Reply::InstanceEvents(super::super::service_events::Notice {
+            display_name: String::new(),
             mount_revision: 0,
             context: context(),
             sequence: 2,
@@ -1265,6 +1284,7 @@ fn file_recovery_waits_for_its_delivery_fence_and_mismatched_epochs_fail() {
                 epoch = Id::from_bytes([99; 16]);
             }
             let notice = Reply::InstanceEvents(super::super::service_events::Notice {
+                display_name: String::new(),
                 mount_revision: 0,
                 context: context(),
                 sequence: 1,

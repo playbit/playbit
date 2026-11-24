@@ -20,6 +20,42 @@ impl Drop for EngineProcess {
 }
 
 #[test]
+fn command_syntax_errors_report_the_problem_without_asking_for_support() {
+    let directory = tempfile::tempdir().unwrap();
+    let pb = directory.path().join("pb");
+    fs::copy(env!("CARGO_BIN_EXE_pb"), &pb).unwrap();
+    let profile = directory.path().join("absent-profile");
+    let working_directory = directory.path().join("workspace");
+    fs::create_dir(&working_directory).unwrap();
+
+    for (args, diagnostic) in [
+        (&["typo"][..], "unknown command; run pb help"),
+        (&["usage"][..], "missing argument; run pb help"),
+        (&["hash-file", "one", "two"][..], "expected pb hash-file PATH"),
+        (&["init", "--name"][..], "missing --name value"),
+        (&["build", "--unknown"][..], "unexpected or repeated argument: --unknown"),
+        (&["volume", "create", "--unknown"][..], "expected pb volume create"),
+        (&["cache-budget", "not-a-number"][..], "invalid digit"),
+        (&["run", "--fs", "files::invalid"][..], "Host mount mode must be ro or rw"),
+    ] {
+        let result = Command::new(&pb)
+            .args(args)
+            .current_dir(&working_directory)
+            .env("PLAYBIT_PROFILE", &profile)
+            .env_remove("PLAYBIT_CHANNEL")
+            .output()
+            .unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        assert!(result.stdout.is_empty());
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(stderr.contains(&format!("pb: error: {diagnostic}")), "{stderr}");
+        assert!(!stderr.contains("support@playbit.app"), "{stderr}");
+        assert!(!profile.exists());
+        assert!(fs::read_dir(&working_directory).unwrap().next().is_none());
+    }
+}
+
+#[test]
 fn template_commands_ignore_profile_discovery_and_require_no_engine() {
     // Real CLI dispatch must bypass even invalid profile/channel inputs before packaging source.
     let directory = tempfile::tempdir().unwrap();

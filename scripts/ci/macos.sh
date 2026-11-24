@@ -105,11 +105,10 @@ swiftc -target "$swift_target" -O playbit/platform/ios/Host/Identifier.swift pla
 clang -std=c17 -Wall -Wextra -Werror -O2 scripts/process-resources.c -o "$RUNNER_TEMP"/process-resources
 "$RUNNER_TEMP"/process-resources 0
 
-# Build examples with an explicit isolated offline fixture signer, not a real account.
-signer_work=$(mktemp -d "$RUNNER_TEMP/pb-offline.XXXXXX")
-python3 scripts/offline_fixture.py "$signer_work/profile"
-# Run build.sh (documented contributor helper script).
-PLAYBIT_PROFILE="$signer_work/profile" ./build.sh
+# The contributor kit must build with a signed-out profile and no Testing credentials.
+PLAYBIT_CHANNEL=testing PLAYBIT_PROFILE="$RUNNER_TEMP/unused-build-profile" \
+    PLAYBIT_TESTING_CREDENTIALS="$RUNNER_TEMP/missing-testing-credentials" ./build.sh
+test ! -e "$RUNNER_TEMP/unused-build-profile"
 swiftc -target "$swift_target" -O -warnings-as-errors -parse-as-library \
     -module-cache-path "$RUNNER_TEMP/thumbnail-swift-cache" \
     -import-objc-header playbit/platform/macos/QuickLook/ThumbnailBridge.h \

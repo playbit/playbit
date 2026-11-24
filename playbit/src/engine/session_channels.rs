@@ -149,7 +149,7 @@ impl SessionChannels {
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self> {
         let app_updates_only = Self::needs_public_app_observer(&store, &session)?;
-        let (stream, destination, key) =
+        let (stream, destination, display_names) =
             control_subscription(&connection, &store, &session, instance, app_updates_only).await?;
         let (send, receive) = mpsc::channel(EVENT_LIMIT);
         let (control_send, control) = watch::channel(None);
@@ -159,7 +159,6 @@ impl SessionChannels {
             stream,
             destination,
             None,
-            key,
             send.clone(),
             control_send.clone(),
             failure_send.clone(),
@@ -168,6 +167,9 @@ impl SessionChannels {
             session_bytes.clone(),
             account_bytes.clone(),
             instance.is_none(),
+            #[cfg(feature = "app-host")]
+            instance.map(|_| (store.clone(), session.id.clone())),
+            display_names,
         );
         Ok(Self {
             connection,
@@ -230,8 +232,7 @@ impl SessionChannels {
         let task = receiver(
             stream,
             destination,
-            Some(name.into()),
-            self.store.session_message_key(&self.session.id)?,
+            Some((name.into(), self.store.session_message_key(&self.session.id)?)),
             self.send.clone(),
             self.control_send.clone(),
             self.failure_send.clone(),
@@ -240,6 +241,9 @@ impl SessionChannels {
             self.session_bytes.clone(),
             self.account_bytes.clone(),
             false,
+            #[cfg(feature = "app-host")]
+            None,
+            None,
         );
         self.tasks.insert(name.into(), task);
         Ok(())
@@ -347,16 +351,66 @@ impl Drop for SessionChannels {
         }
     }
 }
+struct DisplayNames {
+    names: watch::Receiver<String>,
+    discover: Option<Arc<ApConnection>>,
+}
+impl DisplayNames {
+    fn field(&mut self) -> Result<[u8; channel::DISPLAY_NAME_BYTES]> {
+        let name = self.names.borrow_and_update();
+        channel::display_name(name.as_bytes())?;
+        let mut field = [0; channel::DISPLAY_NAME_BYTES];
+        field[..name.len()].copy_from_slice(name.as_bytes());
+        Ok(field)
+    }
+
+    async fn announce(
+        mut self,
+        mut writer: crate::network::ap::ApSendStream,
+        destination: &[u8],
+    ) -> Result<()> {
+        if let Some(connection) = self.discover.take() {
+            if !connection.discover_session_names().await {
+                return std::future::pending().await;
+            }
+            let opt_in = crate::network::ap::Frame::new(
+                frame_type::SUBSCRIBE,
+                channel::SESSION,
+                [],
+                destination,
+                self.field()?,
+            )?;
+            writer.send(&opt_in).await?;
+        }
+        // The watch coalesces renames during discovery and bounded stream writes.
+        loop {
+            self.names.changed().await?;
+            let frame = {
+                let name = self.names.borrow_and_update();
+                let name = channel::display_name(name.as_bytes())?;
+                crate::network::ap::Frame::new(
+                    frame_type::SUBSCRIBE,
+                    channel::SESSION,
+                    [],
+                    destination,
+                    name.as_bytes(),
+                )?
+            };
+            writer.send(&frame).await?;
+        }
+    }
+}
+
 /// Reuse the control stream for public app changes without joining a local
 /// session to AP. Named/instance channels still require the session proof.
 async fn control_subscription(
-    connection: &ApConnection,
+    connection: &Arc<ApConnection>,
     store: &LocalStore,
     session: &Session,
     instance: Option<([u8; 16], [u8; 32])>,
     app_updates_only: bool,
-) -> Result<(ApStream, Vec<u8>, [u8; 32])> {
-    let (frame, key) = if app_updates_only {
+) -> Result<(ApStream, Vec<u8>, Option<DisplayNames>)> {
+    let mut frame = if app_updates_only {
         if instance.is_some() {
             return Err("sharing app sessions requires encrypted synchronization, which is not supported yet".into());
         }
@@ -367,16 +421,13 @@ async fn control_subscription(
             return Err("app update subscription differs from retained identity".into());
         }
         let destination = crate::network::ap::operation::app_update_channel(app)?;
-        (
-            crate::network::ap::Frame::new(
-                frame_type::SUBSCRIBE,
-                channel::SESSION,
-                [],
-                destination,
-                [],
-            )?,
-            [0; 32],
-        )
+        crate::network::ap::Frame::new(
+            frame_type::SUBSCRIBE,
+            channel::SESSION,
+            [],
+            destination,
+            [],
+        )?
     } else {
         let destination = crate::identifier::decode::<32>(&session.id)?;
         let proof = store.session_proof(&session.id, store.account().id)?;
@@ -386,16 +437,30 @@ async fn control_subscription(
             }
             _ => vec![],
         };
-        (
-            channel::first_frame(
-                frame_type::SUBSCRIBE,
-                destination.to_vec(),
-                &proof,
-                instance,
-                &app_updates,
-            )?,
-            store.session_message_key(&session.id)?,
-        )
+        channel::first_frame(
+            frame_type::SUBSCRIBE,
+            destination.to_vec(),
+            &proof,
+            instance,
+            &app_updates,
+        )?
+    };
+    let display_names = if instance.is_some() {
+        match connection.cached_session_names() {
+            Some(false) => None,
+            known => {
+                let mut names = DisplayNames {
+                    names: store.subscribe_display_name(),
+                    discover: known.is_none().then(|| connection.clone()),
+                };
+                if known == Some(true) {
+                    frame.body.extend(names.field()?);
+                }
+                Some(names)
+            }
+        }
+    } else {
+        None
     };
     let destination = frame.destination.clone();
     let mut stream = connection.open_stream().await?;
@@ -404,7 +469,7 @@ async fn control_subscription(
         tokio::time::timeout(connection.response_timeout(), stream.receive_with_body_limit(0))
             .await??;
     channel::acknowledgement(&ack, frame_type::SUBSCRIBE, &destination)?;
-    Ok((stream, destination, key))
+    Ok((stream, destination, display_names))
 }
 
 #[allow(
@@ -412,10 +477,9 @@ async fn control_subscription(
     reason = "A receiver owns its bounded queue credits and immutable authentication context."
 )]
 fn receiver(
-    mut stream: ApStream,
+    stream: ApStream,
     destination: Vec<u8>,
-    name: Option<String>,
-    key: [u8; 32],
+    named_channel: Option<(String, [u8; 32])>,
     send: mpsc::Sender<Result<Queued>>,
     control: watch::Sender<Option<Event>>,
     failure: watch::Sender<Option<playbit_api::abi::syscall::Error>>,
@@ -424,13 +488,21 @@ fn receiver(
     session_bytes: Arc<Semaphore>,
     account_bytes: Arc<Semaphore>,
     observer: bool,
+    #[cfg(feature = "app-host")] roster: Option<(Arc<LocalStore>, String)>,
+    display_names: Option<DisplayNames>,
 ) -> Receiver {
     let stopped = Arc::new(AtomicBool::new(false));
     let terminal = stopped.clone();
     let task = tokio::spawn(async move {
-        let result = async {
+        let (writer, mut reader) = stream.split();
+        let read = async {
+            let limit = if named_channel.is_none() {
+                channel::MAX_CONTROL_BYTES
+            } else {
+                channel::MAX_MESSAGE_BYTES + 44
+            };
             loop {
-                let frame = stream.receive_with_body_limit(channel::MAX_MESSAGE_BYTES + 44).await?;
+                let frame = reader.receive_with_body_limit(limit).await?;
                 let event = match channel::incoming(
                     &destination,
                     frame.frame_type,
@@ -447,15 +519,21 @@ fn receiver(
                         let source =
                             frame.source.as_slice().try_into().expect("validated source width");
                         let aad = channel::associated_data(&destination, source, &message)?;
-                        let data = open(key, &aad, sealed.to_vec())?;
+                        let (name, key) =
+                            named_channel.as_ref().expect("named message destination");
+                        let data = open(*key, &aad, sealed.to_vec())?;
                         Event::Message {
-                            channel: name.clone().expect("named message destination"),
+                            channel: name.clone(),
                             sender,
                             message_id: crate::identifier::encode(&message),
                             data,
                         }
                     }
                     channel::Incoming::Control(Control::Presence { participants }) => {
+                        #[cfg(feature = "app-host")]
+                        if let Some((store, session)) = &roster {
+                            store.observe_session_participants(session, &participants);
+                        }
                         Event::Presence { participants }
                     }
                     channel::Incoming::Control(Control::UpdateAvailable) => {
@@ -468,7 +546,7 @@ fn receiver(
                     wake();
                     continue;
                 }
-                if name.is_none() {
+                if named_channel.is_none() {
                     control.send_replace(Some(event));
                     wake();
                     continue;
@@ -490,9 +568,14 @@ fn receiver(
             }
             #[allow(unreachable_code)]
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-        }
-        .await;
-        if let Err(error) = result {
+        };
+        let write = async {
+            match display_names {
+                Some(names) => names.announce(writer, &destination).await,
+                None => std::future::pending().await,
+            }
+        };
+        if let Err(error) = tokio::try_join!(read, write) {
             report_receiver_failure(&terminal, &updates, &failure, error);
             wake();
         }

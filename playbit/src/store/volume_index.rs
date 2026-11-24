@@ -12,6 +12,8 @@ use kvdb::sync::{Delta, EntState, Resolution};
 use kvdb::{LocalIndexes, ReadTxn, Resolver, Storage, WriteTxn};
 use serde::{Deserialize, Serialize};
 mod current;
+#[cfg(feature = "connected-engine")]
+pub(crate) use current::Retirement;
 mod directory;
 mod headers;
 mod history;
@@ -544,17 +546,27 @@ fn validate_deletion(
 ) -> Result<bool> {
     let Some((clock, bytes)) = deletion else { return Ok(false) };
     source_charge(&[Some(declaration), heads[0], heads[1], heads[2], deletion])?;
-    let birth = namespace::source::Declaration::decode(id, declaration.0, declaration.1)?;
-    let decoded = birth.revision(clock, bytes)?.ok_or(Error::corrupt("invalid deletion"))?;
-    if !matches!(decoded.fact.change, namespace::Change::Delete { .. }) {
-        return Err(Error::corrupt("entry deletion register has the wrong change kind"));
-    }
+    let witness = deletion_witness(id, declaration, (clock, bytes))?;
     for (_, bytes) in heads.into_iter().flatten() {
-        if revision(bytes)?.revision == decoded.witness.revision {
+        if revision(bytes)?.revision == witness.revision {
             return Err(Error::AccessDenied("entry revision ID reused across registers"));
         }
     }
     Ok(true)
+}
+
+fn deletion_witness(
+    id: EntryId,
+    declaration: SourceValue<'_>,
+    deletion: SourceValue<'_>,
+) -> Result<namespace::observations::Witness> {
+    let birth = namespace::source::Declaration::decode(id, declaration.0, declaration.1)?;
+    let decoded =
+        birth.revision(deletion.0, deletion.1)?.ok_or(Error::corrupt("invalid deletion"))?;
+    if !matches!(decoded.fact.change, namespace::Change::Delete { .. }) {
+        return Err(Error::corrupt("entry deletion register has the wrong change kind"));
+    }
+    Ok(decoded.witness)
 }
 
 pub fn entry_key(id: EntryId) -> [u8; 16] {
@@ -1247,7 +1259,7 @@ impl<'db, S: Storage> IndexSnapshot<'db, S> {
         }
     }
 
-    fn source_granted(
+    pub(super) fn source_granted(
         &self,
         volume: &Volume,
         defaults: &Acl,

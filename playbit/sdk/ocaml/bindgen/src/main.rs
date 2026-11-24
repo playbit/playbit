@@ -109,7 +109,13 @@ fn enums(
                     None => next,
                 };
                 values.insert(format!("{name}::{}", v.ident), n);
-                writeln!(ml, "    let {} = {n}", snake(&v.ident.to_string()))?;
+                let field = snake(&v.ident.to_string());
+                if name == "EventKind" && n & (1 << 31) != 0 {
+                    // Advisory event kinds exceed a wasm OCaml int's 31-bit range.
+                    writeln!(ml, "    let {field} = 0x{n:08x}l")?;
+                } else {
+                    writeln!(ml, "    let {field} = {n}")?;
+                }
                 next = n + 1;
             }
             if name == "ThemeColor" {
@@ -409,7 +415,7 @@ fn run() -> Result<()> {
     }
     wat.push_str(")\n");
     fs::write(out.join("playbit_generated.ml"), &ml)?;
-    // Generated values have only int/string types; produce an explicit interface.
+    // Classify the generated literals for the explicit interface.
     let mut interface = String::from("(* Generated from playbit-api. *)\n");
     for line in ml.lines() {
         if let Some(name) = line.strip_prefix("module ").and_then(|s| s.strip_suffix(" = struct")) {
@@ -421,7 +427,13 @@ fn run() -> Result<()> {
             writeln!(
                 interface,
                 "    val {name} : {}",
-                if value.starts_with('"') { "string" } else { "int" }
+                if value.starts_with('"') {
+                    "string"
+                } else if value.ends_with('l') {
+                    "int32"
+                } else {
+                    "int"
+                }
             )?;
         }
     }

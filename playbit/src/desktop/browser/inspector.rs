@@ -1,5 +1,6 @@
 //! Upper metadata remains separate from the lower data editor.
 use super::*;
+use crate::ui::desktop::typography::tabular_numerals;
 use crate::ui::desktop::zoom::length as ui;
 
 impl Browser {
@@ -123,12 +124,12 @@ impl Browser {
             .pr(ui(12. + self.scrolling.inspector_clearance(cx)))
             .pb(ui(8.))
             .child(self.metadata_row("volume-id", "ID", id, cx));
-        let size = self.text("volume-size", self.payload_size_label(), cx);
+        let size = tabular_numerals(self.text("volume-size", self.payload_size_label(), cx));
         metadata = metadata.child(self.metadata_row("volume-size", "Size", size, cx));
         if let Some(details) = &self.volume_details {
             let created = history::history_time(details.created_clock);
             if !created.is_empty() {
-                let value = self.text("volume-created", created, cx).truncate();
+                let value = tabular_numerals(self.text("volume-created", created, cx)).truncate();
                 metadata =
                     metadata.child(self.metadata_row("volume-created", "Created", value, cx));
             }
@@ -196,7 +197,11 @@ impl Browser {
             .font_weight(gpui::FontWeight::MEDIUM)
             .text_color(gpui::black().alpha(0.7))
             .child(self.text(key, title, cx).flex_1().min_w_0().truncate())
-            .child(self.text(&format!("{key}-time"), time, cx).flex_none().whitespace_nowrap())
+            .child(
+                tabular_numerals(self.text(&format!("{key}-time"), time, cx))
+                    .flex_none()
+                    .whitespace_nowrap(),
+            )
     }
 
     fn inspector_column(&self, header: gpui::Div, body: gpui::Div) -> gpui::Div {
@@ -228,11 +233,12 @@ impl Browser {
             .pr(ui(12. + self.scrolling.inspector_clearance(cx)))
             .pb(ui(8.))
             .child(self.metadata_row("inspector-id", "ID", id, cx));
-        let size = self.text("inspector-size", self.payload_size_label(), cx).truncate();
+        let size =
+            tabular_numerals(self.text("inspector-size", self.payload_size_label(), cx)).truncate();
         metadata = metadata.child(self.metadata_row("inspector-size", "Size", size, cx));
         let created = history::history_time(details.created_clock);
         if !created.is_empty() {
-            let created = self.text("inspector-created", created, cx).truncate();
+            let created = tabular_numerals(self.text("inspector-created", created, cx)).truncate();
             metadata =
                 metadata.child(self.metadata_row("inspector-created", "Created", created, cx));
         }

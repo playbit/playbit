@@ -33,6 +33,15 @@ pub(in crate::runtime) fn capabilities(state: &State) -> HostResult<&[String]> {
     require_supported(state, Opcode::Capabilities)?;
     Ok(&state.capability_names)
 }
+/// Context admission and metadata updates bound every name to one ABI field.
+pub(in crate::runtime) fn display_name_field(
+    name: &str,
+) -> [u8; playbit_api::abi::environment::DISPLAY_NAME_BYTES] {
+    let mut field = [0; playbit_api::abi::environment::DISPLAY_NAME_BYTES];
+    field[..name.len()].copy_from_slice(name.as_bytes());
+    field
+}
+
 pub(in crate::runtime) fn identity(state: &State) -> HostResult<(u64, &Identity)> {
     require_supported(state, Opcode::Identity)?;
     Ok((u64::from(state.generation), &state.context.identity))

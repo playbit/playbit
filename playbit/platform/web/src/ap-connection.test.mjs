@@ -158,6 +158,32 @@ test("a timed out operation abandons its own stream, not the account connection"
     assert.equal(state.closed, false);
 });
 
+test('stalled profile publication and discovery leave all 16 ordinary streams available to the shared account', async () => {
+    const connection = connectedTo({ transport: { async createBidirectionalStream() {
+        let incoming;
+        return { readable: new ReadableStream({ start(controller) { incoming = controller; } }),
+            writable: new WritableStream({ write(bytes) {
+                const request = JSON.parse(new TextDecoder().decode(decodeFrame(bytes).body));
+                if (request.op === 'sync_database') incoming.enqueue(encodeFrame({ type: AP.DIRECT, flags: SERVICE_PROTOCOL,
+                    source: utf8.encode('service'), destination: utf8.encode('device'),
+                    body: utf8.encode(JSON.stringify({ operation_id: request.operation_id, timing: [], ok: true })) }));
+            } }) };
+    } } });
+    connection.operationTimeout = 5000;
+    const op = (op, i) => ({ op, operation_id: encodeId(new Uint8Array(16).fill(i)) });
+    try {
+        await Promise.all(Array.from({ length: 15 }, (_, i) => connection.begin(op('get_blob', i))));
+        for (const advisory of ['put_account_display_name', 'describe']) {
+            await connection.begin(op(advisory, 20));
+            await assert.rejects(connection.begin(op(advisory, 21)), { code: 'ap-capacity' });
+        }
+        const push = await connection.begin({ ...op('sync_database', 22), direction: 'push', database_id: 'index' });
+        await assert.rejects(connection.begin(op('get_blob', 23)), /too many concurrent/);
+        assert.equal((await connection.streamResponse(push)).ok, true);
+    } finally { for (const handle of connection.streams.keys()) connection.streamClose(handle); }
+    assert.equal(connection.active, 0);
+});
+
 test("a stream that arrives after the deadline is abandoned unsent", async () => {
     const state = silentTransport({ defer: true });
     const connection = connectedTo(state);
@@ -865,19 +891,26 @@ test('channel admission fences ciphertext to the authenticated device before ope
     assert.equal(f.streams,0);assert.equal(connection.streams.size,0);
 });
 
-test('channel admission decodes the enrolled base58 instance identity', async () => {
+test('membership authenticates the device and sends a rename during an outstanding roster read', async () => {
     const device = new Uint8Array(16).fill(0xab), destination = new Uint8Array(32).fill(7);
     const connection = new ApConnection('public');
     connection.identity = { instanceId: utf8.encode(encodeId(device)) };
     connection.ready = Promise.resolve();
-    let written = 0;
+    const writes = [];
+    let incoming;
     connection.transport = { createBidirectionalStream: async () => ({
-        writable: new WritableStream({ write() { written++; } }),
-        readable: new ReadableStream({ start(controller) { controller.enqueue(encodeFrame({ type: AP.SUBSCRIBE, destination })); } }),
+        writable: new WritableStream({ write(bytes) { writes.push(decodeFrame(bytes)); } }),
+        readable: new ReadableStream({ start(controller) { incoming = controller; controller.enqueue(encodeFrame({ type: AP.SUBSCRIBE, destination })); } }),
     }) };
     assert.deepEqual(connection.status().instanceId, Array.from(device));
     const handle = await connection.beginChannel({ type: AP.SUBSCRIBE, flags: 1, destination }, device, connection.connectionCount);
-    assert.equal(written, 1);
+    const waiting = connection.channelRead(handle), name = utf8.encode('Robin 雨');
+    await connection.channelDisplayName(handle, name);
+    assert.equal(writes.length, 2);
+    assert.deepEqual(writes[1], { type: AP.SUBSCRIBE, flags: 1, destination, source: new Uint8Array(), body: name });
+    const roster = new Uint8Array(40 * 1024);
+    incoming.enqueue(encodeFrame({ type: AP.PUBLISH, destination, body: roster }));
+    assert.deepEqual((await waiting).body, roster);
     connection.streamClose(handle);
 });
 
@@ -891,8 +924,8 @@ test('a late channel stream is closed without sending a retired publication',asy
 
 test('discovery is lazy, bounded, cached per connection and preserves optional metadata', async () => {
     const connection = new ApConnection('public');
-    connection.ready = Promise.resolve(); connection.identity = { instanceId: utf8.encode('instance') };
-    const description = {protocol:SERVICE_PROTOCOL,operations:['describe','get_credential_vault','future_operation'],features:[],
+    connection.ready = Promise.resolve(); connection.identity = { instanceId: utf8.encode(encodeId(new Uint8Array(16))) };
+    const description = {protocol:SERVICE_PROTOCOL,operations:['describe','get_credential_vault','future_operation'],features:['session.display-names.v1'],
         algorithms:{kvdb_pull:'kvdb.pull.v1',kvdb_delta:'kvdb.delta.v1',replica_events:'ap.replica.v1'},
         limits:{frame_bytes:1048576,request_bytes:262144,required_features:16,feature_name_bytes:64},future_metadata:true};
     let requests = 0;
@@ -907,11 +940,14 @@ test('discovery is lazy, bounded, cached per connection and preserves optional m
     }};
     connection.transport=transport;
     assert.equal(requests,0);
+    assert.equal(connection.status().sessionDisplayNames, undefined);
     const [one,two]=await Promise.all([connection.describe(),connection.describe()]);
     assert.equal(one,two);assert.equal(requests,1);
+    assert.equal(connection.status().sessionDisplayNames, true);
     await assert.rejects(connection.begin({op:'upload_build',operation_id:operation.operation_id,required_features:['future.format.v1']}),/unavailable/);
     assert.equal(requests,1,'unsupported features open no mutation stream');
     connection.disconnected(transport);assert.equal(connection.description,null);
+    assert.equal(connection.status().sessionDisplayNames, undefined);
 });
 
 test('future failure codes and incompatible major never erase identity or grant retry', () => {
@@ -926,6 +962,19 @@ test('future failure codes and incompatible major never erase identity or grant 
     for (const flags of [0, SERVICE_PROTOCOL + 1, 255])
         assert.throws(()=>connection.responseBody({operation},{flags,body:utf8.encode('not JSON')}),/compatible updates/);
     assert.equal(connection.identity,identity);
+});
+
+test('only a correlated capacity refusal without denial evidence admits retry', () => {
+    const connection = connectedTo(silentTransport());
+    const response = { timing: [], operation_id: operation.operation_id, ok: false,
+        code: 'operation_failed', error: 'AP request capacity exhausted' };
+    const check = overrides => connection.responseBody({ operation }, { flags: SERVICE_PROTOCOL,
+        body: utf8.encode(JSON.stringify({ ...response, ...overrides })) });
+    assert.throws(() => check({}), { code: 'ap-capacity', serviceCode: 'operation_failed' });
+    assert.throws(() => check({ operation_id: 'other' }), /identity differs/);
+    assert.throws(() => check({ denial: { cause: 'participant_revoked' } }), { code: 'ap-rejected' });
+    assert.throws(() => check({ code: 'unsupported_operation' }), { code: 'ap-rejected' });
+    assert.throws(() => check({ error: 'Permission removed' }), { code: 'ap-rejected' });
 });
 
 test('web client authenticates and performs baseline operations with the independent public peer', async () => {

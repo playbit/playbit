@@ -156,7 +156,163 @@ pub(super) fn source_body(tx: &impl Sources, id: EntryId) -> Result<EntryKind> {
     .kind)
 }
 
+#[cfg(feature = "connected-engine")]
+pub(crate) struct Retirement {
+    entry: EntryId,
+    revision: EntryId,
+    clock: kvdb::Clock,
+    bytes: Vec<u8>,
+}
+
+#[cfg(feature = "connected-engine")]
+impl Retirement {
+    pub(crate) fn copy_into(&self, tx: &mut WriteTxn<'_, impl Storage>) -> Result<()> {
+        tx.put_with_clock(&meta_key(RETIRED, self.entry), &self.bytes, self.clock)?;
+        tx.put_with_clock(&revision_key(self.entry, self.revision), &self.bytes, self.clock)?;
+        Ok(())
+    }
+}
+
 impl<S: Storage> IndexSnapshot<'_, S> {
+    /// A selected replay can reach AP before a sibling edit in its observed
+    /// context. Match the raw head to the exact locally authored deletion
+    /// without qualifying its namespace event.
+    #[cfg(any(feature = "local-store", test))]
+    pub(crate) fn matches_authored_retirement(
+        &self,
+        entry: EntryId,
+        record: Record,
+        captured: &Self,
+        confirmed: &[EntryId],
+    ) -> Result<bool> {
+        let Some(deletion) = record.deletion else { return Ok(false) };
+        let key = meta_key(RETIRED, entry);
+        let Some((clock, bytes)) = captured.tx.get_with_clock(&key)? else { return Ok(false) };
+        let local = deletion.read(&self.tx)?;
+        if clock != local.0 || bytes.as_ref() != local.1 {
+            return Ok(false);
+        }
+        drop(bytes);
+        let birth = record.birth.read(&self.tx)?;
+        source_charge(&[Some((birth.0, &birth.1)), Some((clock, &local.1))])?;
+        let witness = deletion_witness(entry, (birth.0, &birth.1), (clock, &local.1))?;
+        drop(birth);
+        if witness.id()? != deletion.event_id()
+            || namespace::observations::source_status(&self.tx, &witness, local.1.len())?
+                != Some(namespace::observations::Status::Authored)
+        {
+            return Ok(false);
+        }
+        drop(witness);
+        drop(local);
+        // A raw head may supersede a different AP-confirmed deletion. That
+        // deletion's immutable history copy is part of the authenticated cut.
+        let prefix = meta_key(REVISION, entry);
+        let mut cursor = prefix.to_vec();
+        let mut scan = namespace::source::cut::Scan::default();
+        while let Some(key) = captured.tx.next_source_key(&cursor, true)? {
+            if !key.starts_with(&prefix) {
+                break;
+            }
+            if let Some((_, bytes)) = scan.read(&captured.tx, &key)? {
+                let candidate = revision(&bytes)?;
+                if matches!(candidate.change, EntryChange::Delete {}) {
+                    let digest = *blake3::hash(&bytes).as_bytes();
+                    let event = namespace::event_id(entry, candidate.revision, digest)?;
+                    if confirmed.binary_search(&event).is_ok() {
+                        return Ok(false);
+                    }
+                }
+            }
+            cursor = key;
+        }
+        Ok(true)
+    }
+
+    /// Selected replicas may lack the other entries observed by a local edit.
+    /// Only an exact Authored deletion can supplement a qualified local head.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn selected_retirement(
+        &self,
+        id: EntryId,
+    ) -> Result<Option<([EntryId; 2], Retirement)>> {
+        use namespace::observations::{Status, source_status};
+        let Some(current) = Record::read(&self.tx, id)? else { return Ok(None) };
+        let (clock, bytes) = if let Some(deletion) = current.deletion {
+            deletion.read(&self.tx)?
+        } else {
+            let Some((clock, bytes)) = self.tx.get_with_clock(&meta_key(RETIRED, id))? else {
+                return Ok(None);
+            };
+            (clock, bytes.to_vec())
+        };
+        let birth = current.birth.read(&self.tx)?;
+        source_charge(&[Some((birth.0, &birth.1)), Some((clock, &bytes))])?;
+        let source = deletion_witness(id, (birth.0, &birth.1), (clock, &bytes))?;
+        if current.deletion.is_none()
+            && (source_status(&self.tx, &source, bytes.len())? != Some(Status::Authored)
+                || !self.tx.get_with_clock(&revision_key(id, source.revision))?.is_some_and(
+                    |(other_clock, other)| other_clock == clock && other.as_ref() == bytes,
+                ))
+        {
+            return Ok(None);
+        }
+        let events = [current.birth.event_id(), source.id()?];
+        Ok(Some((events, Retirement { entry: id, revision: source.revision, clock, bytes })))
+    }
+
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn source_birth_event(&self, id: EntryId) -> Result<EntryId> {
+        let (clock, bytes) =
+            self.tx.get_with_clock(&entry_key(id))?.ok_or(Error::NotFound("entry birth"))?;
+        namespace::source::Declaration::decode(id, clock, &bytes)?.witness().id()
+    }
+
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn source_retirement_event(&self, id: EntryId) -> Result<EntryId> {
+        let key = meta_key(RETIRED, id);
+        let (clock, bytes) =
+            self.tx.get_with_clock(&key)?.ok_or(Error::NotFound("entry deletion"))?;
+        let (birth_clock, birth) =
+            self.tx.get_with_clock(&entry_key(id))?.ok_or(Error::NotFound("entry birth"))?;
+        source_charge(&[Some((birth_clock, &birth)), Some((clock, &bytes))])?;
+        deletion_witness(id, (birth_clock, &birth), (clock, &bytes))?.id()
+    }
+
+    /// A local deletion can precede its backing's first upload. Only the
+    /// qualified deletion for the captured birth can retire that AP backing.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn retirement_for(
+        &self,
+        id: EntryId,
+        volume: &Volume,
+        actor: DataActor,
+        local_defaults: &Acl,
+        captured: &IndexSnapshot<'_, S>,
+        captured_defaults: &Acl,
+    ) -> Result<Option<Retirement>> {
+        let Some(current) = Record::read(&self.tx, id)? else { return Ok(None) };
+        let Some(deletion) = current.deletion else { return Ok(None) };
+        // Retirement is a Write. A fresh AP contraction takes precedence over
+        // retained control bytes, even on the owner's device.
+        if !self.source_granted(volume, local_defaults, actor, id, Permission::Write)?
+            || !captured.source_granted(volume, captured_defaults, actor, id, Permission::Write)?
+        {
+            return Ok(None);
+        }
+        let birth = current.birth.read(&self.tx)?;
+        if !captured
+            .tx
+            .get_with_clock(&entry_key(id))?
+            .is_some_and(|(clock, value)| clock == birth.0 && value.as_ref() == birth.1)
+        {
+            return Ok(None);
+        }
+        let (clock, bytes) = deletion.read(&self.tx)?;
+        validate_deletion(id, (birth.0, &birth.1), [None; 3], Some((clock, &bytes)))?;
+        Ok(Some(Retirement { entry: id, revision: deletion.revision, clock, bytes }))
+    }
+
     /// The exact qualified sources of the displayed reference and location.
     /// Directory coalescence may select another original entry's name/parent.
     #[cfg(any(feature = "local-store", test))]

@@ -1,5 +1,6 @@
 //! Permission drafts replace volume defaults only after an explicit save.
 use super::*;
+use crate::ui::desktop::typography::tabular_numerals;
 use crate::ui::desktop::zoom::length as ui;
 
 const FULL_ACCESS: [Permission; 4] =
@@ -291,7 +292,7 @@ impl Browser {
                     .text_color(rgba(0x000000e6)),
             )
             .child(
-                self.text("permission-owner-id", owner, cx)
+                tabular_numerals(self.text("permission-owner-id", owner, cx))
                     .min_w_0()
                     .max_w(gpui::relative(0.4))
                     .truncate()

@@ -151,10 +151,9 @@ impl<'a> Initialization<'a> {
                 return Err("invalid initialization file path".into());
             }
         }
-        for required in ["icon.svg", ".gitignore"] {
-            self.bytes(required)?;
-        }
+        self.bytes(".gitignore")?;
         let manifest = self.original_manifest()?;
+        self.bytes(manifest.icon.as_deref().ok_or("project template is missing its icon path")?)?;
         if manifest.lang == Some(playbit::package::Language::Ocaml) {
             self.bytes("src/app.ml")?;
         } else {

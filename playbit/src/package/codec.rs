@@ -645,14 +645,6 @@ impl Package {
         write_signed(self.sources(), signer, signed_at, output)
     }
 
-    /// Copy an installed macOS template after the caller validates its app bundle seal.
-    #[cfg(all(target_os = "macos", feature = "desktop"))]
-    pub(crate) fn write_unsigned_template(&self, output: &mut impl Write) -> Result<()> {
-        let mut sources = self.sources();
-        sources.remove(SIGNATURE);
-        write(&sources, output)
-    }
-
     fn sources(&self) -> BTreeMap<String, Source> {
         self.index
             .entries

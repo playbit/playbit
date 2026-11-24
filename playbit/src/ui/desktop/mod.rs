@@ -11,12 +11,25 @@ pub mod segmented;
 mod surface;
 pub(crate) mod table;
 pub mod text_editor;
+pub(crate) mod typography;
 #[cfg(all(target_os = "macos", feature = "local-store"))]
 pub(crate) mod visual_bell;
 pub mod zoom;
 pub const UI_FONT_FAMILY: &str = "Inter Variable";
 pub(crate) static UI_FONT_DATA: &[u8] = include_bytes!("../../../assets/InterVariable.ttf");
 pub const UI_CONTROL_TRACKING: f32 = 0.11;
+
+pub(crate) fn bundled_example_dir(app_id: &str) -> std::io::Result<std::path::PathBuf> {
+    let executable = std::env::current_exe()?;
+    let contents = executable
+        .parent()
+        .and_then(std::path::Path::parent)
+        .filter(|path| path.ends_with("Contents"))
+        .ok_or_else(|| {
+            std::io::Error::other("Open the example from a complete Playbit.app installation")
+        })?;
+    Ok(contents.join("Resources/examples").join(app_id))
+}
 
 #[cfg(all(target_os = "macos", feature = "local-store", feature = "native-runtime"))]
 pub mod native;

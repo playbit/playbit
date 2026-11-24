@@ -37,8 +37,14 @@ pub fn hash_key(account: Id) -> [u8; 32] {
 /// the contents. Plain kvdb tombstones are forbidden: deletion must itself be
 /// represented by an authenticated encrypted record at the application layer.
 pub fn validate_envelope(key: &[u8], clock: Clock, value: &[u8]) -> Result<()> {
-    if key.len() != 32
-        || clock.is_zero()
+    if key.len() != 32 {
+        return Err(Error::InvalidInput("invalid encrypted account record"));
+    }
+    validate_envelope_value(clock, value)
+}
+
+pub(crate) fn validate_envelope_value(clock: Clock, value: &[u8]) -> Result<()> {
+    if clock.is_zero()
         || clock.as_u64() > u64::MAX - 3
         || !(ENVELOPE_OVERHEAD + 1..=MAX_ENVELOPE_BYTES).contains(&value.len())
         || value[0] != 1

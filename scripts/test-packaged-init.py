@@ -5,10 +5,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import plistlib
+import re
 import socket
 import subprocess
 import tempfile
 import time
+import tomllib
 from identifier import decode as decode_identifier
 
 repo = Path(__file__).resolve().parents[1]
@@ -72,6 +75,19 @@ try:
     with (icon / "Assets.car").open("rb") as assets:
         digest = hashlib.file_digest(assets, "sha256").digest()
     assert decode_identifier(version, 32) == digest, "guest icon version must identify Assets.car"
+    # The launcher uses separate icon files so it can display cards before opening a package.
+    contents = app / "Contents"
+    info = plistlib.loads((contents / "Info.plist").read_bytes())
+    for app_id, seal in [("little-list", "PlaybitLittleListTemplateSHA256"),
+                         ("football", "PlaybitFootballTemplateSHA256")]:
+        example = contents / "Resources/examples" / app_id
+        icon = (example / "icon.png").read_bytes()
+        assert icon.startswith(b"\x89PNG\r\n\x1a\n"), app_id
+        for suffix, key in [("", seal), ("-testing", seal + "Testing"), ("-personal", seal + "Personal")]:
+            package = (example / (app_id + suffix + ".pbapp")).read_bytes()
+            assert decode_identifier(info[key], 32) == hashlib.sha256(package).digest(), key
+            assert icon in package, key
+            assert not re.search(rb"/Users/[A-Za-z0-9_-]+/", package), key
     # Keep PATH empty of Git, Cargo, rustc and OCaml throughout initialization
     # and recovery. These operations must only need the installed app.
     with (work / "engine.log").open("wb") as log:
@@ -90,6 +106,8 @@ try:
         assert (source / ".git").is_dir()
         assert (source / ".git/HEAD").read_text() == "ref: refs/heads/main\n"
         assert (source / "src/app.rs").is_file(), "Rust remains the default language"
+        icon = tomllib.loads((source / "playbit.toml").read_text())["icon"]
+        assert (source / icon).read_bytes() == (repo / "guests/little-list/icon.png").read_bytes()
         assert "volume =" not in (source / "playbit.toml").read_text()
         assert (source / "playbit-volumes.json").is_file()
         volumes = pb("volume", "list")
@@ -106,6 +124,8 @@ try:
         assert initialized_ocaml.returncode == 0, initialized_ocaml.stderr
         ocaml = json.loads(initialized_ocaml.stdout)
         assert (source / "src/app.ml").is_file()
+        icon = tomllib.loads((source / "playbit.toml").read_text())["icon"]
+        assert (source / icon).read_bytes() == (repo / "playbit/assets/check-on.svg").read_bytes()
         assert 'app_id = "custom.ocaml"' in (source / "playbit.toml").read_text()
         assert (source / ".git/HEAD").read_text() == "ref: refs/heads/main\n"
         assert "volume =" not in (source / "playbit.toml").read_text()

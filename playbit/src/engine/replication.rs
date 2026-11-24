@@ -10,13 +10,15 @@ use super::completion::Wake;
 use crate::engine::Result;
 use crate::network::ap::{
     ApConnection, ApReceiveStream, ApSendStream, ApStream,
-    operation::ServiceRequest,
+    operation::{ServiceRequest, SyncDirection},
     replication::{
         Cursor, CursorError, ReplicaEvent, ReplicaEventKind, SubscriptionAck, TerminalCause,
     },
     service_client as wire,
 };
-use crate::store::{Access, Id, LocalStore, Session, volume_index::EntryAddress};
+use crate::store::{
+    Access, DatabaseId, Id, LocalStore, Session, WorldReplicaRoute, volume_index::EntryAddress,
+};
 use std::{
     fmt::{self, Write as _},
     future::{Future, poll_fn},
@@ -69,6 +71,7 @@ impl ReplicaScope {
 pub struct PreparedSubscription {
     connection: Arc<ApConnection>,
     scope: ReplicaScope,
+    route: WorldReplicaRoute,
     stream: ApStream,
     ack: SubscriptionAck,
 }
@@ -78,26 +81,45 @@ pub async fn subscribe(
     connection: &Arc<ApConnection>,
     scope: ReplicaScope,
 ) -> Result<PreparedSubscription> {
+    subscribe_scoped(connection, scope, WorldReplicaRoute::Ordinary).await
+}
+
+fn subscribe_request(scope: &ReplicaScope, route: WorldReplicaRoute) -> Result<ServiceRequest> {
     let operation_id = Id::generate()?.to_string();
-    let request = match &scope {
-        ReplicaScope::Account => ServiceRequest::SubscribeAccount { operation_id },
-        ReplicaScope::Volume { volume, session } => ServiceRequest::SubscribeReplica {
-            entry_scope: None,
-            operation_id,
-            session_id: session.as_ref().map(|s| s.id.clone()),
-            build_id: session.as_ref().map(|s| s.resolved_build_id.clone()),
-            volume_id: volume.to_string(),
-        },
-        ReplicaScope::Entry { address, session } => ServiceRequest::SubscribeReplica {
-            entry_scope: Some(address.entry),
-            operation_id,
-            session_id: session.as_ref().map(|s| s.id.clone()),
-            build_id: session.as_ref().map(|s| s.resolved_build_id.clone()),
-            volume_id: address.volume.to_string(),
-        },
+    let (volume, session, entry_scope) = match scope {
+        ReplicaScope::Account => return Ok(ServiceRequest::SubscribeAccount { operation_id }),
+        ReplicaScope::Volume { volume, session } => (*volume, session.as_ref(), None),
+        ReplicaScope::Entry { address, session } => {
+            (address.volume, session.as_ref(), Some(address.entry))
+        }
     };
+    if route == WorldReplicaRoute::PublisherWorld {
+        let session = session.ok_or("publisher World projection requires its session")?;
+        return Ok(ServiceRequest::WorldReplica {
+            operation_id,
+            session_id: session.id.clone(),
+            build_id: session.resolved_build_id.clone(),
+            volume_id: volume.to_string(),
+            request: crate::network::ap::operation::WorldReplicaRequest::Subscribe { entry_scope },
+        });
+    }
+    Ok(ServiceRequest::SubscribeReplica {
+        operation_id,
+        entry_scope,
+        volume_id: volume.to_string(),
+        session_id: session.map(|s| s.id.clone()),
+        build_id: session.map(|s| s.resolved_build_id.clone()),
+    })
+}
+
+pub(super) async fn subscribe_scoped(
+    connection: &Arc<ApConnection>,
+    scope: ReplicaScope,
+    route: WorldReplicaRoute,
+) -> Result<PreparedSubscription> {
+    let request = subscribe_request(&scope, route)?;
     let (stream, ack) = wire::subscribe_replica(connection, &request).await?;
-    Ok(PreparedSubscription { connection: connection.clone(), scope, stream, ack })
+    Ok(PreparedSubscription { connection: connection.clone(), scope, route, stream, ack })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,9 +153,11 @@ pub struct ReplicaNotice {
 }
 struct NoticeSlot {
     notice: ReplicaNotice,
+    pending_apply: Option<Arc<ApplyFailure>>,
     pending: bool,
     receiving: bool,
     applies: usize,
+    retired: bool,
 }
 
 /// Fixed account-level capacity; drain moves bounded errors instead of copying them.
@@ -177,9 +201,11 @@ impl ReplicaNotices {
             slot.notice.epoch = epoch;
             slot.notice.state = ReplicaState::CatchingUp;
             slot.notice.error = None;
+            slot.pending_apply = None;
 
             slot.pending = true;
             slot.receiving = true;
+            slot.retired = false;
         } else {
             if slots.len() == NOTICE_LIMIT {
                 return Err("replica notice capacity exceeded".into());
@@ -192,9 +218,11 @@ impl ReplicaNotices {
                     state: ReplicaState::CatchingUp,
                     error: None,
                 },
+                pending_apply: None,
                 pending: true,
                 receiving: true,
                 applies: 0,
+                retired: false,
             });
         }
         Ok(())
@@ -282,6 +310,36 @@ impl ReplicaNotices {
         }
     }
 
+    /// The controller has joined the final receiver and apply. Preserve its
+    /// last dirty notice for the renderer, then release its bounded slot.
+    pub(crate) fn retire_entry(&self, address: crate::store::volume_index::EntryAddress) {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(index) =
+            slots.iter().position(|s| s.notice.source == ReplicaSource::Entry(address))
+        {
+            let slot = &mut slots[index];
+            assert!(!slot.receiving && slot.applies == 0, "terminal entry receiver has joined");
+            if slot.notice.dirty {
+                slot.retired = true;
+            } else {
+                slots.swap_remove(index);
+            }
+        }
+    }
+
+    /// A persistent authority withdrawal supersedes this source's pending render
+    /// notice. Other sources keep their pending data and receive generations.
+    pub(super) fn forget_withdrawn(&self, source: ReplicaSource) -> Result<()> {
+        let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(index) = slots.iter().position(|s| s.notice.source == source) {
+            if slots[index].receiving || slots[index].applies != 0 {
+                return Err("World replica still active during retirement".into());
+            }
+            slots.swap_remove(index);
+        }
+        Ok(())
+    }
+
     fn stop_receiving(&self, source: ReplicaSource, epoch: [u8; 16]) {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(slot) =
@@ -354,10 +412,15 @@ impl ReplicaNotices {
                 epoch: slot.notice.epoch,
                 dirty: std::mem::take(&mut slot.notice.dirty),
                 state: slot.notice.state,
-                error: slot.notice.error.take(),
+                error: slot
+                    .pending_apply
+                    .take()
+                    .map(|failure| failure.cause.as_str().to_owned())
+                    .or_else(|| slot.notice.error.take()),
             });
             slot.pending = false;
         }
+        slots.retain(|slot| !slot.retired);
         output
     }
 
@@ -367,7 +430,7 @@ impl ReplicaNotices {
         epoch: [u8; 16],
         dirty: bool,
         state: Option<ReplicaState>,
-        error: Option<&dyn fmt::Display>,
+        error: Option<NoticeError<'_>>,
     ) -> bool {
         let mut slots = self.slots.lock().unwrap_or_else(|e| e.into_inner());
         let Some(slot) = slots.iter_mut().find(|s| s.notice.source == source) else {
@@ -389,10 +452,19 @@ impl ReplicaNotices {
                 );
                 slot.notice.state = state;
             }
-            if let Some(error) = error {
-                #[cfg(feature = "test-support")]
-                crate::diagnostic!("replica {source:?} {state:?}: {error}");
-                slot.notice.error = Some(bounded_error(error));
+            match &error {
+                Some(NoticeError::Diagnostic(error)) => {
+                    #[cfg(feature = "test-support")]
+                    crate::diagnostic!("replica {source:?} {state:?}: {error}");
+                    slot.notice.error = Some(bounded_error(*error));
+                }
+                Some(NoticeError::Apply(failure)) => {
+                    #[cfg(feature = "test-support")]
+                    crate::diagnostic!("replica {source:?} {state:?}: {}", failure.cause);
+                    slot.notice.error = None;
+                    slot.pending_apply = Some(failure.clone());
+                }
+                None => {}
             }
         }
         let accepted = dirty || (current && (state.is_some() || error.is_some()));
@@ -443,11 +515,17 @@ pub(crate) fn notice_allocation_bytes() -> usize {
         + NOTICE_LIMIT
             * (std::mem::size_of::<NoticeSlot>()
                 + std::mem::size_of::<ReplicaNotice>()
-                + 2 * ERROR_LIMIT)
+                + ERROR_LIMIT // Drained text.
+                + std::mem::size_of::<ApplyFailure>() + 2 * std::mem::size_of::<usize>()) // Largest current diagnostic, including Arc counts.
         + ERROR_LIMIT
         + std::mem::size_of_val(
             &notices.wait_inactive(ReplicaSource::Volume(Id::from_bytes([0; 16])), [0; 16]),
         )
+}
+
+enum NoticeError<'a> {
+    Diagnostic(&'a dyn fmt::Display),
+    Apply(Arc<ApplyFailure>),
 }
 
 struct RunNotice {
@@ -459,6 +537,9 @@ struct RunNotice {
 }
 impl RunNotice {
     fn state(&mut self, state: ReplicaState, error: Option<&dyn fmt::Display>) {
+        self.report(state, error.map(NoticeError::Diagnostic));
+    }
+    fn report(&mut self, state: ReplicaState, error: Option<NoticeError<'_>>) {
         assert!(!self.terminal, "a receiver publishes its terminal transition only once");
         self.terminal = matches!(
             state,
@@ -494,8 +575,42 @@ impl Drop for ApplyNotice {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ApplyFailure {
+    scope: Option<super::publisher::PublishKey>,
+    cause: super::publisher::PublisherError,
+}
+impl ApplyFailure {
+    fn into_error(self) -> super::remote::sync_failure::Cause {
+        match self.scope {
+            Some(scope) => self.cause.at_scope(scope),
+            None => self.cause.into(),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum CheckpointFailure {
+    Control(&'static str),
+    Apply(ApplyFailure),
+}
+impl From<&'static str> for CheckpointFailure {
+    fn from(cause: &'static str) -> Self {
+        Self::Control(cause)
+    }
+}
+impl CheckpointFailure {
+    fn into_error(self) -> super::remote::sync_failure::Cause {
+        match self {
+            Self::Control(cause) => cause.into(),
+            Self::Apply(failure) => failure.into_error(),
+        }
+    }
+}
+type CheckpointReply = std::result::Result<(), CheckpointFailure>;
+
 struct CheckpointRequest {
-    reply: Option<oneshot::Sender<std::result::Result<(), &'static str>>>,
+    reply: Option<oneshot::Sender<CheckpointReply>>,
     _credit: OwnedSemaphorePermit,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -512,6 +627,7 @@ struct CheckpointSlot {
     phase: CheckpointPhase,
     issued: bool,
     applying: bool,
+    failed_apply: Option<Arc<ApplyFailure>>,
     waker: Option<std::task::Waker>,
 }
 struct CheckpointMailbox {
@@ -519,16 +635,25 @@ struct CheckpointMailbox {
     slot: Mutex<CheckpointSlot>,
     credits: Arc<Semaphore>,
 }
+/// The account-wide command credits may be held by unrelated replicas.
+#[derive(Debug)]
+pub(super) struct CheckpointCapacity;
+impl fmt::Display for CheckpointCapacity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("replica control capacity exceeded")
+    }
+}
+impl std::error::Error for CheckpointCapacity {}
+
 impl CheckpointMailbox {
-    fn request(&self) -> Result<oneshot::Receiver<std::result::Result<(), &'static str>>> {
-        let credit = self
-            .credits
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| "replica control capacity exceeded")?;
+    fn request(&self) -> Result<oneshot::Receiver<CheckpointReply>> {
+        let credit = self.credits.clone().try_acquire_owned().map_err(|_| CheckpointCapacity)?;
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         if slot.phase == CheckpointPhase::Closed {
-            return Err("replica subscription disconnected".into());
+            return Err(slot.failed_apply.as_deref().cloned().map_or_else(
+                || "replica subscription disconnected".into(),
+                ApplyFailure::into_error,
+            ));
         }
         if slot.request.is_some() {
             return Err("replica checkpoint already outstanding".into());
@@ -578,7 +703,7 @@ impl CheckpointMailbox {
         let slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         slot.phase == CheckpointPhase::Open && !slot.issued && slot.request.is_some()
     }
-    fn settle(&self, result: std::result::Result<(), &'static str>) {
+    fn settle(&self, result: CheckpointReply) {
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         assert!(!slot.applying, "a checkpoint cannot overtake its preceding durable apply");
         assert_eq!(
@@ -604,14 +729,22 @@ impl CheckpointMailbox {
             waker.wake();
         }
     }
-    fn close(&self, error: &'static str) {
+    fn remember_apply_failure(&self, failure: Arc<ApplyFailure>) {
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).failed_apply = Some(failure);
+    }
+    fn close(&self, reason: &'static str) {
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         slot.phase = CheckpointPhase::Closed;
+        let cause = slot.failed_apply.clone();
         if let Some(request) = slot.request.as_mut()
             && let Some(reply) = request.reply.take()
         {
             crate::trace::mark("replica.checkpoint.failed");
-            let _ = reply.send(Err(error));
+            let failure = cause
+                .as_deref()
+                .cloned()
+                .map_or(CheckpointFailure::Control(reason), CheckpointFailure::Apply);
+            let _ = reply.send(Err(failure));
         }
         // An abort or timeout cannot free this command's credit while its
         // preceding admitted disk write is still executing.
@@ -650,13 +783,37 @@ pub struct ReplicaControl {
     mailbox: Arc<CheckpointMailbox>,
 }
 impl ReplicaControl {
+    pub(super) fn failed_apply(&self) -> Option<super::remote::sync_failure::Cause> {
+        self.mailbox
+            .slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failed_apply
+            .as_deref()
+            .cloned()
+            .map(ApplyFailure::into_error)
+    }
+    #[cfg(test)]
+    pub(super) fn test_failed_apply(
+        scope: super::publisher::PublishKey,
+        database: DatabaseId,
+        reason: &str,
+        credits: Arc<Semaphore>,
+    ) -> Self {
+        let checkpoints = Checkpoints::new(Duration::from_secs(1), credits);
+        checkpoints.mailbox.remember_apply_failure(Arc::new(ApplyFailure {
+            scope: Some(scope),
+            cause: super::publisher::PublisherError::for_database(Some(database), reason),
+        }));
+        Self { mailbox: checkpoints.mailbox.clone() }
+    }
     pub async fn checkpoint(&self) -> Result<()> {
         let _interval = crate::trace::Interval::new("replica.checkpoint");
         self.mailbox
             .request()?
             .await
             .map_err(|_| "replica subscription disconnected")?
-            .map_err(Into::into)
+            .map_err(CheckpointFailure::into_error)
     }
 }
 struct Checkpoints {
@@ -834,7 +991,7 @@ impl PreparedSubscription {
         notice: RunNotice,
         checkpoints: Checkpoints,
     ) -> impl Future<Output = Result<()>> + Send {
-        let PreparedSubscription { connection, scope, stream, ack } = self;
+        let PreparedSubscription { connection, scope, route, stream, ack } = self;
         let access = scope.access(store.account().id);
         let cursor =
             Cursor::new(&ack).expect("subscription acknowledgment validated before installation");
@@ -842,6 +999,7 @@ impl PreparedSubscription {
         SubscriptionReceiver {
             connection,
             scope,
+            route,
             store,
             apply_slots,
             access,
@@ -861,6 +1019,7 @@ impl PreparedSubscription {
 struct SubscriptionReceiver {
     connection: Arc<ApConnection>,
     scope: ReplicaScope,
+    route: WorldReplicaRoute,
     store: Arc<LocalStore>,
     apply_slots: Arc<Semaphore>,
     access: Access,
@@ -935,13 +1094,19 @@ impl SubscriptionReceiver {
                 | ReplicaEventKind::Namespace { .. }
                 | ReplicaEventKind::Bloblog { .. }
                 | ReplicaEventKind::Terminal { .. } => {
-                    let terminal = match event.kind {
-                        ReplicaEventKind::Terminal { cause, .. } => Some(cause),
-                        _ => None,
+                    let (database, terminal) = match event.kind {
+                        ReplicaEventKind::Changes { database, .. } => (Some(database), None),
+                        ReplicaEventKind::Bloblog { log, .. } => {
+                            (Some(DatabaseId::Entry(log)), None)
+                        }
+                        ReplicaEventKind::Namespace { .. } => (Some(DatabaseId::Index), None),
+                        ReplicaEventKind::Terminal { cause, .. } => (None, Some(cause)),
+                        _ => unreachable!("only durable frames reach apply"),
                     };
                     let sequence = event.sequence;
                     let revision = event.policy_revision;
-                    self.apply_frame(bytes, sequence, revision, terminal, timer.as_mut()).await?
+                    self.apply_frame(bytes, sequence, revision, database, terminal, timer.as_mut())
+                        .await?
                 }
             }
         }
@@ -968,6 +1133,7 @@ impl SubscriptionReceiver {
         bytes: Vec<u8>,
         sequence: u64,
         revision: u64,
+        database: Option<DatabaseId>,
         terminal: Option<TerminalCause>,
         mut timer: std::pin::Pin<&mut tokio::time::Sleep>,
     ) -> Result<()> {
@@ -980,6 +1146,7 @@ impl SubscriptionReceiver {
         .await??;
         self.apply = Some(start_apply(
             bytes,
+            self.route,
             &self.store,
             &self.access,
             permit,
@@ -1010,14 +1177,40 @@ impl SubscriptionReceiver {
                 Ok(())
             }
             Ok(Err(error)) => {
-                self.notice.state(ReplicaState::Failed, Some(&error));
-                Err(error.into())
+                use crate::store::Error;
+                let state = match error {
+                    Error::NotFound(Error::PENDING_BACKING) => ReplicaState::Gap,
+                    _ => ReplicaState::Failed,
+                };
+                Err(self.fail_apply(database, state, error.into()))
             }
-            Err(error) => {
-                self.notice.state(ReplicaState::Failed, Some(&error));
-                Err(error.into())
-            }
+            Err(error) => Err(self.fail_apply(database, ReplicaState::Failed, error.into())),
         }
+    }
+    fn fail_apply(
+        &mut self,
+        database: Option<DatabaseId>,
+        state: ReplicaState,
+        error: super::remote::sync_failure::Cause,
+    ) -> super::remote::sync_failure::Cause {
+        let scope = match self.notice.source {
+            ReplicaSource::Account => None,
+            ReplicaSource::Volume(id) => Some(id.into()),
+            ReplicaSource::Entry(address) => Some(super::publisher::PublishKey {
+                volume: address.volume,
+                entry: Some(address.entry),
+            }),
+        };
+        let failure = Arc::new(ApplyFailure {
+            scope,
+            cause: super::publisher::PublisherError::for_database(database, &error),
+        });
+        // Install the cause before the terminal state is observable, then wake waiting
+        // checkpoints after the terminal disposition has been published.
+        self.checkpoints.mailbox.remember_apply_failure(failure.clone());
+        self.notice.report(state, Some(NoticeError::Apply(failure)));
+        self.checkpoints.mailbox.close("replica subscription disconnected");
+        error
     }
     fn finish_receive(&mut self, result: &Result<()>) {
         if result.is_err()
@@ -1067,7 +1260,8 @@ fn accept_event(
 }
 
 fn start_apply(
-    bytes: Vec<u8>,
+    mut bytes: Vec<u8>,
+    route: WorldReplicaRoute,
     store: &Arc<LocalStore>,
     access: &Access,
     permit: OwnedSemaphorePermit,
@@ -1087,8 +1281,62 @@ fn start_apply(
         let _checkpoint_apply = checkpoint_apply;
         let _activity = activity;
         let _permit = permit;
+        if route == WorldReplicaRoute::CredentialedRoot {
+            rekey_received_frame(&store, source, &mut bytes)?;
+        }
         apply_event(&bytes, &store, &access, &changes, &completion, source, epoch)
     }))
+}
+
+/// An independent Root invitation can use the ordinary AP wire for a World
+/// already stored with the public Merkle context. Translate the original bounded
+/// frame in place. Namespace evidence and bloblog payloads retain their bytes.
+fn rekey_received_frame(
+    store: &LocalStore,
+    source: ReplicaSource,
+    bytes: &mut [u8],
+) -> crate::store::Result<()> {
+    let volume = match source {
+        ReplicaSource::Volume(volume) => volume,
+        ReplicaSource::Entry(address) => address.volume,
+        ReplicaSource::Account => {
+            return Err(crate::store::Error::InvalidInput(
+                "account stream cannot use a World credential",
+            ));
+        }
+    };
+    let event = ReplicaEvent::decode(bytes).map_err(crate::store::Error::InvalidInput)?;
+    let (database, count, trailing) = match event.kind {
+        ReplicaEventKind::Changes { database, delta } => (database, delta.len(), 0),
+        ReplicaEventKind::Namespace { delta, evidence, .. } => {
+            (DatabaseId::Index, delta.len(), evidence.len())
+        }
+        _ => return Ok(()),
+    };
+    let end = bytes.len() - trailing;
+    rekey_credentialed_root_delta(
+        store,
+        volume,
+        database,
+        SyncDirection::Pull,
+        &mut bytes[end - count..end],
+    )
+}
+
+pub(super) fn rekey_credentialed_root_delta(
+    store: &LocalStore,
+    volume: Id,
+    database: DatabaseId,
+    direction: SyncDirection,
+    bytes: &mut [u8],
+) -> crate::store::Result<()> {
+    let local = database.hash_key(&DatabaseId::world_projection_key(volume), volume);
+    let wire = store.replica_hash_key(volume, database)?;
+    let (from, to) = match direction {
+        SyncDirection::Pull => (&wire, &local),
+        SyncDirection::Push => (&local, &wire),
+    };
+    Ok(kvdb::sync::rekey_delta(bytes, crate::network::ap::replication::MAX_DELTA_BYTES, from, to)?)
 }
 
 async fn send_checkpoint(
@@ -1297,6 +1545,122 @@ async fn receive_bloblog(
 mod tests {
     use super::*;
 
+    #[test]
+    fn credentialed_root_translates_live_entry_and_namespace_without_changing_their_contents() {
+        use crate::store::{
+            change_feed::CommittedChangeKind,
+            volume_index::{EntryKind, namespace},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(directory.path()).unwrap();
+        let owner = Access::owner(store.account().id);
+        let volume = store.create_volume("Plaza", true).unwrap().id;
+        let entry = store.create_database(&owner, volume, "state", EntryKind::KvDb {}).unwrap().id;
+        let address = EntryAddress { volume, entry };
+        let mut changes = store.take_change_receiver().unwrap();
+        while !changes.drain().records.is_empty() {}
+        store.rename_entry(&owner, volume, entry, "world-state").unwrap();
+        store.kv_put(&owner, address, b"player", b"outdoors").unwrap();
+        let records = changes.drain().records;
+        assert_eq!(records.len(), 2);
+        for record in records {
+            let CommittedChangeKind::Database(database) = record.kind() else {
+                panic!("expected a committed database change")
+            };
+            let canonical = record.bytes();
+            let evidence;
+            let (source, kind) = if database == DatabaseId::Index {
+                evidence = store
+                    .with_replica(volume, database, |db| {
+                        let mut tx = db.begin_write(crate::store::now_unix_secs())?;
+                        namespace::source::cut::retain_accepted(&mut tx.local_indexes())?;
+                        tx.commit()?;
+                        namespace::live::evidence(&db.begin_read()?, entry, canonical)
+                    })
+                    .unwrap();
+                assert!(!evidence.is_empty(), "the selected rename has an accepted source");
+                (
+                    ReplicaSource::Entry(address),
+                    ReplicaEventKind::Namespace { entry, delta: canonical, evidence: &evidence },
+                )
+            } else {
+                assert_eq!(database, DatabaseId::Entry(entry));
+                (
+                    ReplicaSource::Volume(volume),
+                    ReplicaEventKind::Changes { database, delta: canonical },
+                )
+            };
+            let event = ReplicaEvent { epoch: [1; 16], sequence: 1, policy_revision: 1, kind };
+            let mut bytes = event.encode().unwrap();
+            rekey_received_frame(&store, source, &mut bytes).unwrap();
+            let delta = match (kind, ReplicaEvent::decode(&bytes).unwrap().kind) {
+                (
+                    ReplicaEventKind::Namespace { evidence: expected, .. },
+                    ReplicaEventKind::Namespace { delta, evidence: received, .. },
+                ) => {
+                    assert_eq!(expected, received);
+                    delta
+                }
+                (ReplicaEventKind::Changes { .. }, ReplicaEventKind::Changes { delta, .. }) => {
+                    delta
+                }
+                _ => panic!("live event kind changed"),
+            };
+            assert_ne!(delta, canonical);
+            let mut outbound = delta.to_vec();
+            rekey_credentialed_root_delta(
+                &store,
+                volume,
+                database,
+                SyncDirection::Push,
+                &mut outbound,
+            )
+            .unwrap();
+            assert_eq!(
+                outbound, canonical,
+                "clocks, values and the ordinary wire fingerprint round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_world_subscription_keeps_the_session_build_and_entry() {
+        use crate::store::{BuildSelector, EntryId, UpdateAuthority};
+        use crate::{network::ap::operation::WorldReplicaRequest, package::AutomaticVolumeRole};
+        let app = crate::package::AppIdentity {
+            publisher: Id::from_bytes([1; 16]),
+            app_id: "plaza".into(),
+        };
+        let session_id = [2; 32];
+        let build = crate::identifier::encode(&[3; 32]);
+        let world = app.volume_id(AutomaticVolumeRole::Root, None, None, None).unwrap();
+        let shared =
+            app.volume_id(AutomaticVolumeRole::Session, Some(session_id), None, None).unwrap();
+        let creator = app.publisher;
+        let session = Session {
+            id: crate::identifier::encode(&session_id),
+            app,
+            resolved_build_id: build.clone(),
+            selector: BuildSelector::Exact { build_id: build.clone() },
+            root_volume: world,
+            shared_volume: Some(shared),
+            creator,
+            update_authority: UpdateAuthority::Creator,
+        };
+        let address = EntryAddress { volume: world, entry: EntryId::from_bytes([4; 15]).unwrap() };
+        let scope = ReplicaScope::Entry { address, session: Some(session.clone()) };
+        assert!(matches!(subscribe_request(&scope, WorldReplicaRoute::PublisherWorld).unwrap(),
+            ServiceRequest::WorldReplica { volume_id, session_id, build_id,
+                request: WorldReplicaRequest::Subscribe { entry_scope: Some(selected) }, .. }
+            if volume_id == world.to_string() && session_id == session.id && build_id == build && selected == address.entry));
+        for route in [WorldReplicaRoute::Ordinary, WorldReplicaRoute::CredentialedRoot] {
+            assert!(matches!(subscribe_request(&scope, route).unwrap(),
+            ServiceRequest::SubscribeReplica { volume_id, session_id: Some(session_id), build_id: Some(build_id),
+                entry_scope: Some(selected), .. }
+            if volume_id == world.to_string() && session_id == session.id && build_id == build && selected == address.entry));
+        }
+    }
+
     #[cfg(all(target_os = "macos", feature = "process"))]
     #[test]
     fn late_append_echo_refreshes_checkpoint_size_without_replaying_data() {
@@ -1455,7 +1819,7 @@ mod tests {
         let notices = ReplicaNotices::new();
         let source = ReplicaSource::Volume(Id::from_bytes([1; 16]));
         notices.test_state(source, [1; 16], ReplicaState::Gap);
-        notices.update(source, [1; 16], true, None, Some(&"gap detected"));
+        notices.update(source, [1; 16], true, None, Some(NoticeError::Diagnostic(&"gap detected")));
         assert!(!notices.fail_gap(source, [2; 16]));
         assert!(notices.fail_gap(source, [1; 16]));
         let drained = notices.drain();
@@ -1522,7 +1886,13 @@ mod tests {
         notices.update(id(1), [1; 16], true, None, None);
         notices.update(id(1), [1; 16], false, Some(ReplicaState::Live), None);
         let error = "é".repeat(1000);
-        notices.update(id(1), [1; 16], false, Some(ReplicaState::Gap), Some(&error));
+        notices.update(
+            id(1),
+            [1; 16],
+            false,
+            Some(ReplicaState::Gap),
+            Some(NoticeError::Diagnostic(&error)),
+        );
         let mut batch = notices.drain();
         assert_eq!(batch.len(), 1);
         let entry = batch.pop().unwrap();
@@ -1578,7 +1948,13 @@ mod tests {
         notices.register(id(1), [2; 16]).unwrap();
         // Late diagnostics cannot overwrite the replacement's state. Real
         // durable applies must finish before register admits this generation.
-        notices.update(id(1), [1; 16], true, Some(ReplicaState::Gap), Some(&"old failure"));
+        notices.update(
+            id(1),
+            [1; 16],
+            true,
+            Some(ReplicaState::Gap),
+            Some(NoticeError::Diagnostic(&"old failure")),
+        );
         let entry = notices.drain().pop().unwrap();
         assert_eq!(entry.epoch, [2; 16]);
         assert_eq!(entry.state, ReplicaState::CatchingUp);
@@ -1617,7 +1993,13 @@ mod tests {
             assert_eq!(notices.state(id(1)), Some(([1; 16], state)));
             assert!(notices.drain().is_empty());
             notices.register(id(1), [2; 16]).unwrap();
-            notices.update(id(1), [1; 16], false, Some(state), Some(&"late failure"));
+            notices.update(
+                id(1),
+                [1; 16],
+                false,
+                Some(state),
+                Some(NoticeError::Diagnostic(&"late failure")),
+            );
             let replacement = notices.drain().pop().unwrap();
             assert_eq!(replacement.state, ReplicaState::CatchingUp);
             assert!(replacement.error.is_none());
@@ -1647,7 +2029,13 @@ mod tests {
         let (completion, mut read) = sockets();
         while completion.socket().unwrap().write(&[1; 1024]).is_ok() {}
         notices.register(id(1), [1; 16]).unwrap();
-        notices.update(id(1), [1; 16], true, Some(ReplicaState::Gap), Some(&"gap"));
+        notices.update(
+            id(1),
+            [1; 16],
+            true,
+            Some(ReplicaState::Gap),
+            Some(NoticeError::Diagnostic(&"gap")),
+        );
         completion.notify();
         assert!(read.read(&mut [0; 1]).unwrap() > 0);
         let entry = notices.drain().pop().unwrap();
@@ -1668,6 +2056,106 @@ mod checkpoint_tests {
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
     }
+    #[test]
+    fn receive_apply_failure_reaches_pending_checkpoint_with_its_database() {
+        for pending in [true, false] {
+            check_receive_apply_failure(pending);
+        }
+    }
+
+    fn check_receive_apply_failure(pending: bool) {
+        use crate::network::ap::{
+            ClientIdentity, Frame, frame_type, operation::SERVICE_DESTINATION, testing,
+        };
+        use crate::store::volume_index::EntryKind;
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalStore::open(directory.path()).unwrap());
+        let owner = Access::owner(store.account().id);
+        let volume = store.create_volume("Results", true).unwrap().id;
+        let entry = store.create_database(&owner, volume, "Scores", EntryKind::KvDb {}).unwrap().id;
+        let ack = SubscriptionAck { epoch: [2; 16], sequence: 0, policy_revision: 1 };
+        let event = ReplicaEvent {
+            epoch: ack.epoch,
+            sequence: 1,
+            policy_revision: 1,
+            kind: ReplicaEventKind::Changes {
+                database: DatabaseId::Entry(entry),
+                delta: b"incomplete delta",
+            },
+        }
+        .encode()
+        .unwrap();
+        let (runtime, endpoint, config) = testing::loopback_ap();
+        runtime.block_on(async {
+            let server = tokio::spawn(async move {
+                let connection = endpoint.accept().await.unwrap().await.unwrap();
+                let (mut auth, _hello) = connection.accept_bi().await.unwrap();
+                let valid = Frame::new(frame_type::HELLO, 0, [], [], []).unwrap();
+                auth.write_all(&testing::authentication_wire(valid)).await.unwrap();
+                auth.finish().unwrap();
+                let (mut send, mut receive) = connection.accept_bi().await.unwrap();
+                // The failing frame either precedes an explicit checkpoint, or
+                // follows its admission. No scheduler timing selects the ordering.
+                for _ in 0..=usize::from(pending) {
+                    let request = testing::read_frame(&mut receive).await.unwrap();
+                    assert_eq!(request.body, crate::network::ap::replication::CHECKPOINT);
+                }
+                let frame =
+                    Frame::new(frame_type::DIRECT, 0, SERVICE_DESTINATION, [1], event).unwrap();
+                send.write_all(&frame.encode().unwrap()).await.unwrap();
+                connection.closed().await;
+            });
+            let mut identity = ClientIdentity::new("replica@testing.invalid", "Checkpoint");
+            identity.auth_token = vec![1; 72];
+            identity.instance_id = Id::from_bytes([1; 16]).to_string().into_bytes();
+            let connection = Arc::new(ApConnection::connect(&config, &mut identity).await.unwrap());
+            let subscription = PreparedSubscription {
+                stream: connection.open_stream().await.unwrap(),
+                connection: connection.clone(),
+                scope: ReplicaScope::Volume { volume, session: None },
+                route: WorldReplicaRoute::Ordinary,
+                ack,
+            };
+            let notices = Arc::new(ReplicaNotices::new());
+            let (socket, _reader) = UnixStream::pair().unwrap();
+            socket.set_nonblocking(true).unwrap();
+            let (control, receiver) = subscription
+                .start(
+                    store,
+                    Arc::new(Wake::unix(socket)),
+                    notices.clone(),
+                    Arc::new(Semaphore::new(2)),
+                )
+                .unwrap();
+            let (reply, receive) = if pending {
+                let (reply, receive) = tokio::join!(control.checkpoint(), receiver);
+                (Some(reply), receive)
+            } else {
+                (None, receiver.await)
+            };
+            let cause = receive.unwrap_err();
+            assert!(cause.is::<crate::store::Error>(), "{cause}");
+            let expected = format!("Couldn’t sync database {entry} in volume {volume}\n{cause}");
+            if let Some(reply) = reply {
+                assert_eq!(reply.unwrap_err().to_string(), expected);
+            }
+            let source = ReplicaSource::Volume(volume);
+            assert_eq!(notices.state(source), Some(([2; 16], ReplicaState::Failed)));
+            let drained = notices.drain().pop().unwrap();
+            assert_eq!(drained.error.unwrap(), cause.to_string());
+            assert_eq!(control.checkpoint().await.unwrap_err().to_string(), expected);
+            assert_eq!(control.failed_apply().unwrap().to_string(), expected);
+            // A replacement has a separate epoch mailbox and cannot inherit this failure.
+            let replacement = Checkpoints::new(Duration::from_secs(60), notices.control_slots());
+            assert!(
+                ReplicaControl { mailbox: replacement.mailbox.clone() }.failed_apply().is_none()
+            );
+            assert!(!connection.is_closed());
+            drop(connection);
+            server.await.unwrap();
+        });
+    }
+
     #[test]
     fn checkpoint_requested_during_terminal_drain_waits_for_its_disposition() {
         // Stop the startup write before admitting an explicit checkpoint. Poll
@@ -1850,7 +2338,7 @@ mod checkpoint_tests {
                 );
                 checkpoints.fail_timeout();
                 if let Some(reply) = reply {
-                    assert_eq!(reply.await.unwrap(), Err(CHECKPOINT_TIMEOUT));
+                    assert_eq!(reply.await.unwrap(), Err(CHECKPOINT_TIMEOUT.into()));
                 }
                 assert_eq!(credits.available_permits(), 8);
                 assert!(checkpoints.caught_up().is_err());
@@ -2010,7 +2498,7 @@ mod checkpoint_tests {
                 Err(CHECKPOINT_TIMEOUT)
             );
             checkpoints.fail_timeout();
-            assert_eq!(reply.try_recv().unwrap(), Err(CHECKPOINT_TIMEOUT));
+            assert_eq!(reply.try_recv().unwrap(), Err(CHECKPOINT_TIMEOUT.into()));
             assert_eq!(credits.available_permits(), 8);
             assert!(checkpoints.caught_up().is_err());
             assert!(checkpoints.mailbox.request().is_err());
@@ -2036,7 +2524,7 @@ mod checkpoint_tests {
             );
             assert!(!polled.get(), "expired marker was processed");
             checkpoints.fail_timeout();
-            assert_eq!(reply.try_recv().unwrap(), Err(CHECKPOINT_TIMEOUT));
+            assert_eq!(reply.try_recv().unwrap(), Err(CHECKPOINT_TIMEOUT.into()));
         });
     }
 
@@ -2138,7 +2626,7 @@ mod checkpoint_tests {
         // and two Wakers; its Arc has two additional usize counters. Charge
         // 256 bytes per admitted reply, including alignment/allocation slack.
         let reply_layout = std::mem::size_of::<usize>() * 3
-            + std::mem::size_of::<Option<std::result::Result<(), &'static str>>>()
+            + std::mem::size_of::<Option<CheckpointReply>>()
             + 2 * std::mem::size_of::<std::task::Waker>();
         assert!(reply_layout <= 256);
         // Include mailbox Arc counters and the shared semaphore's Arc. The
@@ -2361,7 +2849,13 @@ mod regression_tests {
                 "stop" => {
                     let error = error(w[4]);
                     let display = error.as_ref().map(|error| error as &dyn fmt::Display);
-                    notices.update(source(w[1]), epoch(w[2]), false, state(w[3]), display);
+                    notices.update(
+                        source(w[1]),
+                        epoch(w[2]),
+                        false,
+                        state(w[3]),
+                        display.map(NoticeError::Diagnostic),
+                    );
                     notices.stop_receiving(source(w[1]), epoch(w[2]));
                 }
                 "update" => {
@@ -2372,7 +2866,7 @@ mod regression_tests {
                         epoch(w[2]),
                         w[3] == "true",
                         state(w[4]),
-                        display,
+                        display.map(NoticeError::Diagnostic),
                     );
                     assert_eq!(pending.to_string(), w[6], "{line}");
                 }

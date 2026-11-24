@@ -19,7 +19,7 @@ fn segment_input_accepts(
     !disabled && !segment_disabled && id == target && kind == EventKind::Click
 }
 
-fn menu_contains(items: &[MenuEntry], id: u32) -> bool {
+pub(crate) fn menu_contains(items: &[MenuEntry], id: u32) -> bool {
     items.iter().any(|item| match item {
         MenuEntry::Action { id: item, disabled, .. } => *item == id && !disabled,
         MenuEntry::Submenu { items, disabled, .. } => !disabled && menu_contains(items, id),
@@ -197,5 +197,6 @@ pub(in crate::runtime) fn take_event(state: &mut State) -> HostResult<Event> {
     assert_eq!(state.queued_bytes, bytes - event_bytes);
     let _timing = crate::trace::Span::new("guest.event.consume");
     super::control::queue_volume_change(state);
+    state.queue_name_changes();
     Ok(event.event)
 }

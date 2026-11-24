@@ -615,6 +615,59 @@ fn shutdown_drains_admitted_edits_even_with_full_ui_output() {
     worker.shutdown(); // Idempotent; no second callback or join.
 }
 #[test]
+fn rejected_close_drains_another_windows_accepted_edit_before_returning_failure() {
+    // Drive two actual TODO instances after queuing their input. The rejected
+    // close occurs while the sibling save is still behind its typing event.
+    let directory = tempfile::tempdir().unwrap();
+    let services = Services::open(directory.path(), || {}).unwrap();
+    let mut launches = prepare(&services).unwrap();
+    launches.push(Launch {
+        title: "Second window".into(),
+        root: launches[0].root,
+        app: playbit_api::native_app(),
+    });
+    let (wake, wake_events) = mpsc::sync_channel(1);
+    let storage_wake = wake.clone();
+    let mut apps = Apps::new(Arc::new(move || {
+        let _ = storage_wake.try_send(());
+    }));
+    let (output, events) = async_channel::bounded(OUTPUT_CAPACITY);
+    let slots = unsafe { attach(&mut apps, &services, launches, &wake, &output) }.unwrap();
+    let failed = slots[0].handle.clone();
+    let sibling = slots[1].handle.clone();
+    settle_native(&mut apps, failed.generation);
+    settle_native(&mut apps, sibling.generation);
+    assert!(
+        failed.send(
+            Input { kind: EventKind::Click, target: 999, data: vec![], revision: None },
+            None
+        )
+    );
+    failed.close();
+    let mut typing = submit("Saved by sibling");
+    typing.kind = EventKind::TextChanged;
+    typing.data = playbit_api::abi::text::TextInput::encode("Saved by sibling", &[]).unwrap();
+    assert!(sibling.send(typing, None));
+    assert!(sibling.send(submit("Saved by sibling"), None));
+
+    let error =
+        drive(&mut apps, slots, wake_events, &output, &AtomicBool::new(false), |_| Ok(false))
+            .unwrap_err();
+    assert!(error.details.contains("InvalidArgument"), "{}", error.details);
+    let mut closed = Vec::new();
+    while let Ok(output) = events.try_recv() {
+        if let Output::Closed(generation) = output.resolve() {
+            closed.push(generation);
+        }
+    }
+    assert_eq!(closed, [sibling.generation], "only the successful window confirmed its close");
+    assert!(!sibling.send(submit("After fatal close"), None));
+    drop(apps);
+    drop(services);
+    assert_eq!(rows(directory.path()), 2);
+}
+
+#[test]
 fn window_close_rejects_new_input_and_confirms_after_durable_drain() {
     // The close barrier is ordered after admitted input, including input whose
     // UI response is still queued. It closes every sender clone atomically.
@@ -828,6 +881,18 @@ fn slow_ui_does_not_stop_native_input_execution_and_receipts_remain_ordered() {
 }
 
 #[test]
+fn a_missing_owner_scene_keeps_its_menu_input_for_normal_error_handling() {
+    let (handle, queue) = Handle::fixture(1);
+    let action = Input { kind: EventKind::Click, target: 7, data: Vec::new(), revision: None };
+    assert!(handle.send_menu(action, 0, crate::ui::desktop::popup::menu_digest(&[])));
+    let message =
+        queue.try_recv().unwrap().if_current(|| None).expect("only a known newer scene cancels");
+    assert_eq!(message.input.target, 7);
+    drop(message);
+    assert!(!handle.input_pending());
+}
+
+#[test]
 fn failed_input_invalidates_already_queued_effects_without_replay() {
     // Force an invalid input before a queued submission. It must invalidate that
     // submission's epoch; only a later explicit action may create the object.
@@ -835,7 +900,7 @@ fn failed_input_invalidates_already_queued_effects_without_replay() {
     let services = Services::open(directory.path(), || {}).unwrap();
     let launches = prepare(&services).unwrap();
     let mut apps = Apps::new(std::sync::Arc::new(|| {}));
-    let (wake, _) = mpsc::sync_channel(1);
+    let (wake, wake_events) = mpsc::sync_channel(1);
     let (output, receive) = async_channel::bounded(1);
     let slots = unsafe { attach(&mut apps, &services, launches, &wake, &output) }.unwrap();
     assert!(matches!(receive.try_recv().unwrap(), Output::Opened { .. }));
@@ -889,7 +954,25 @@ fn failed_input_invalidates_already_queued_effects_without_replay() {
             .len(),
         2
     );
-    apps.clear();
+    // Closing also drains an obsolete menu choice queued before that failure.
+    // Its admission credit is released even though no window takes a receipt.
+    let count = slot.handle.pending.clone();
+    let digest = crate::ui::desktop::popup::menu_digest(&[]);
+    let selection = Input { kind: EventKind::Click, target: 999, data: Vec::new(), revision: None };
+    assert!(slot.handle.send_menu(selection, 0, digest));
+    slot.handle.close();
+    let (closing, closed) = async_channel::bounded(OUTPUT_CAPACITY);
+    drive(&mut apps, slots, wake_events, &closing, &AtomicBool::new(false), |_| Ok(false)).unwrap();
+    assert_eq!(count.load(Ordering::Acquire), 0);
+    let mut confirmed = false;
+    while let Ok(output) = closed.try_recv() {
+        match output.resolve() {
+            Output::Closed(_) => confirmed = true,
+            Output::Frame { result: Ok(_), pending: None, .. } => {}
+            _ => panic!("unexpected close output"),
+        }
+    }
+    assert!(confirmed);
 }
 
 #[cfg(feature = "connected-engine")]
@@ -1324,7 +1407,7 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
         assert!(matches!(call(&owner, operation).unwrap(), Reply::Accepted { .. }));
         awakened.recv_timeout(Duration::from_secs(5)).unwrap();
         let message = admitted.try_recv().unwrap();
-        assert!(message.source == InputSource::Tool);
+        assert!(matches!(message.source, InputSource::Tool));
         let input = message.input;
         assert_eq!((input.kind as u32, input.target, input.data), (kind, target, expected));
     }
@@ -1832,6 +1915,7 @@ fn owner_teardown_drains_data_through_a_late_context_stop_and_uncertain_reply() 
             );
             let bytes = codec::encode(
                 &Reply::InstanceEvents(crate::engine::service_events::Notice {
+                    display_name: String::new(),
                     context,
                     sequence: 1,
                     revision: Some((context.incarnation, 1)),

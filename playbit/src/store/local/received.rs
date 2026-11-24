@@ -67,6 +67,10 @@ pub struct ReceivedVolume {
     authority_generation: u64,
     authority_entry_generation: u64,
     authority_qualified: bool,
+    #[cfg(feature = "connected-engine")]
+    pub(crate) pending_backing: Option<DatabaseId>,
+    #[cfg(feature = "connected-engine")]
+    pub(crate) owner_baseline: Option<SnapshotToken>,
     entry_scope: Option<EntryId>,
     metadata: Database,
     revocations: Database,
@@ -145,12 +149,24 @@ impl ReceivedVolume {
             .collect();
         Ok(ReplicationDatabasePage { databases, next: page.next })
     }
+    /// A missing AP backing has no accepted contents, even if the receiver opened
+    /// its scratch file. A qualified AP capture may still publish ready siblings.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn discard_pending_backing(&mut self, database: DatabaseId) -> Result<()> {
+        assert!(matches!(database, DatabaseId::Entry(_)) && self.entry_scope.is_none());
+        fs::remove_file(self._directory.0.join(database.file_name())).map_err(io)?;
+        let mut tx = self.metadata.begin_write(now_unix_secs())?;
+        tx.local_indexes().put(format!("received-pending/{database}").as_bytes(), &[1])?;
+        tx.commit()?;
+        self.pending_backing.get_or_insert(database);
+        Ok(())
+    }
     /// Finish only after the complete backing transfer is durable and verified.
     pub fn finish_database(&self, database: DatabaseId) -> Result<()> {
         let DatabaseId::Entry(id) = database else { return Ok(()) };
         let policy = DatabasePolicy::read_source(&self.metadata, database)?;
         self.with_database(database, |db| {
-            validate_named_backing(&self._directory.0.join("scratch"), db, &policy)
+            validate_named_backing(&self._directory.0.join("scratch"), db, &policy, None)
         })?;
         sync_directory(&self._directory.0)?;
         let mut tx = self.metadata.begin_write(now_unix_secs())?;
@@ -262,7 +278,7 @@ impl LocalStore {
 
     pub fn prepare_received_volume(&self, volume: Id) -> Result<ReceivedVolume> {
         let credit = ReceiveCredit::enter(&self.received)?;
-        let credentials = self.credentials(volume)?;
+        let database_key = self.local_database_key(volume)?;
         let identity = self.volume(volume)?;
         let operation = Id::generate()?;
         let parent = self.path.join(crate::paths::RECEIVED);
@@ -271,22 +287,26 @@ impl LocalStore {
         fs::DirBuilder::new().mode(0o700).create(&directory.0).map_err(io)?;
         let metadata = create_replica(
             &directory.0.join(DatabaseId::Index.file_name()),
-            DatabaseId::Index.hash_key(&credentials.database_key, volume),
+            DatabaseId::Index.hash_key(&database_key, volume),
             STAGED_CACHE_BYTES,
         )?;
         let revocations = create_replica(
             &directory.0.join(DatabaseId::Revocations.file_name()),
-            DatabaseId::Revocations.hash_key(&credentials.database_key, volume),
+            DatabaseId::Revocations.hash_key(&database_key, volume),
             STAGED_CACHE_BYTES,
         )?;
         Ok(ReceivedVolume {
             operation,
             volume,
             identity,
-            database_key: credentials.database_key,
+            database_key,
             authority_generation: self.authority_generation(volume)?,
             authority_entry_generation: 0,
             authority_qualified: false,
+            #[cfg(feature = "connected-engine")]
+            pending_backing: None,
+            #[cfg(feature = "connected-engine")]
+            owner_baseline: None,
             entry_scope: None,
             metadata,
             revocations,
@@ -306,6 +326,75 @@ impl LocalStore {
         Ok(stage)
     }
 
+    /// Seal only the two qualified sources. A retirement witness carries no
+    /// current ACL or revocations and cannot clear a data-access fence.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn confirm_entry_retirement(
+        &self,
+        access: &Access,
+        stage: &ReceivedVolume,
+        events: [EntryId; 2],
+    ) -> Result<()> {
+        use volume_index::namespace::{observations::Ledger, payloads, receipt, source::cut};
+        let entry = stage.entry_scope.ok_or(Error::InvalidInput("selected retirement required"))?;
+        let captured = stage.metadata.begin_read()?;
+        let rows = receipt::capture(&captured, Some(entry))?;
+        let witnessed = rows.iter().map(|row| row.source.id()).collect::<Result<Vec<_>>>()?;
+        let remote = volume_index::IndexSnapshot::new(stage.metadata.begin_read()?);
+        let winner = remote.source_retirement_event(entry)?;
+        if remote.source_birth_event(entry)? != events[0]
+            || witnessed.len() != 2
+            || !witnessed.contains(&events[0])
+            || !witnessed.contains(&winner)
+        {
+            return Err(Error::AccessDenied("AP retirement differs from selected sources"));
+        }
+        let operations = self.access_operations(access, stage.volume)?;
+        let _guards = operations.lock()?;
+        if self.entry_authority_generations(stage.volume, entry)?
+            != (stage.authority_generation, stage.authority_entry_generation)
+            || self.local_database_key(stage.volume)? != stage.database_key
+        {
+            return Err(Error::AccessDenied("entry retirement capture was superseded"));
+        }
+        let index = self.db(stage.volume, DatabaseId::Index)?;
+        let policy = MetadataPolicy::read(&index)?;
+        let snapshot = volume_index::IndexSnapshot::new(index.begin_read()?);
+        if snapshot.selected_retirement(entry)?.is_none_or(|(current, _)| current[0] != events[0])
+            || !policy.volume().same_identity(&stage.identity)
+        {
+            return Err(Error::AccessDenied("entry retirement binding changed"));
+        }
+        self.admit_retirement_writer(access, entry, &policy, &snapshot)?;
+        drop(snapshot);
+        let mut tx = index.begin_write(now_unix_secs())?;
+        let mut local = tx.local_indexes();
+        let before = Ledger::load(&local)?;
+        let mut after = before.clone();
+        after.apply_receipt(&rows)?;
+        let mut changed = before != after;
+        if changed {
+            after.write_changes(&before, &mut local)?;
+        }
+        drop(after);
+        drop(before);
+        let retained =
+            2 * 1024 + rows.iter().map(|row| row.source.observed.heap_bytes()).sum::<usize>();
+        payloads::Usage::validate_local(&local)?;
+        let mut scan = cut::Scan::materializing(retained)?;
+        for row in &rows {
+            let bytes = payloads::capture(&captured, &row.source, &mut scan, retained)?;
+            changed |= payloads::retain_new(&mut local, row, &bytes, retained)?;
+        }
+        if !changed {
+            return Ok(());
+        }
+        cut::project(&tx)?.write_current(&mut tx.local_indexes())?;
+        tx.commit()?;
+        self.changes.observed_changed(Some(stage.volume));
+        Ok(())
+    }
+
     /// Revocation-first bootstrap accepts only contraction before root admission.
     pub fn adopt_received_revocations(
         &self,
@@ -319,10 +408,11 @@ impl LocalStore {
         let operations = self.access_operations(access, received.volume)?;
         let _guards = operations.lock()?;
         let session = self.session(id)?;
-        if session.replica_volume() != received.volume
+        if (session.replica_volume() != received.volume
+            && !session.is_distinct_world(received.volume))
             || access.account != self.account.id
             || !received.identity.same_identity(&self.volume(received.volume)?)
-            || self.credentials(received.volume)?.database_key != received.database_key
+            || self.local_database_key(received.volume)? != received.database_key
         {
             return Err(Error::AccessDenied("revocation stage binding"));
         }
@@ -350,6 +440,14 @@ impl LocalStore {
             self.check_publication_binding(access, received, &pending)?;
             pending
         } else {
+            // A ready sibling may have applied newer AP data through its own
+            // live stream. Never classify that data against an older capture.
+            #[cfg(feature = "connected-engine")]
+            if let Some(baseline) = received.owner_baseline
+                && gate.snapshot_token()? != baseline
+            {
+                return Err(Error::LocalContention(Error::OWNER_CAPTURE_CHANGED));
+            }
             self.prepare_received_publication(access, received)?;
             self.begin_received_publication(access, received, &gate)?
         };
@@ -462,7 +560,7 @@ impl LocalStore {
     ) -> Result<()> {
         self.check_received_quarantine(received)?;
         let volume = received.volume;
-        if received.database_key != self.credentials(volume)?.database_key {
+        if received.database_key != self.local_database_key(volume)? {
             return Err(Error::AccessDenied("staged database credentials changed"));
         }
         let descriptor = self.volume(volume)?;
@@ -475,16 +573,28 @@ impl LocalStore {
         let metadata = self.db(volume, DatabaseId::Index)?;
         let before = replica_root(&metadata)?;
         if before.is_some() {
-            self.authorize_received(access, &MetadataPolicy::read(&metadata)?, true)?;
+            let previous = MetadataPolicy::read(&metadata)?;
+            if received.authority_qualified
+                && let Some(id) = access.session_id()
+                && let session = self.session(id)?
+                && session.is_distinct_world(volume)
+            {
+                // A qualified World cut can grant a new build or restore catalog
+                // Read. The retained policy identifies the baseline. Both the
+                // received and final policies below must admit the actual binding.
+                previous.validate_world_binding(&session)?;
+            } else {
+                self.authorize_received(access, &previous, true)?;
+            }
         } else {
             self.check_received_denial(access)?;
         }
         {
             let policy = MetadataPolicy::read(&received.metadata)?;
             self.authorize_received(access, &policy, false)?;
-            self.prepare_namespace_plan(access, received, &policy)?;
+            let confirmed = self.prepare_namespace_plan(access, received, &policy)?;
+            self.prepare_rejected_cut(access, received, &confirmed)?;
         }
-        self.prepare_rejected_cut(access, received)?;
         rejected::merge_local_index(
             &self.path.join(crate::paths::STAGING),
             received,
@@ -539,8 +649,8 @@ impl LocalStore {
         let policy = DatabasePolicy::read_source(&received.metadata, DatabaseId::Entry(entry))?;
         policy.metadata_readable(self.data_actor(access, policy.volume.volume())?)?;
         self.admit_received_entry(access, received, &policy.volume)?;
-        self.prepare_namespace_plan(access, received, &policy.volume)?;
-        self.prepare_rejected_cut(access, received)?;
+        let confirmed = self.prepare_namespace_plan(access, received, &policy.volume)?;
+        self.prepare_rejected_cut(access, received, &confirmed)?;
         let revocations = self.db(received.volume, DatabaseId::Revocations)?;
         super::scoped::ScopedSnapshot::for_reconciliation(
             &revocations,
@@ -593,7 +703,9 @@ impl LocalStore {
         if let Some(version) = &access.build_id {
             session.resolved_build_id = version.clone();
         }
-        if ![session.replica_volume()].contains(&received.volume) {
+        if session.is_distinct_world(received.volume) {
+            policy.admit_world(access.account, &session)?;
+        } else if session.replica_volume() != received.volume {
             let grant = self.personal_grant(access, &session, received.volume)?;
             if !grant.write
                 && let Some(entry) = received.entry_scope
@@ -769,7 +881,10 @@ impl LocalStore {
             if !retained && let Some(version) = &access.build_id {
                 session.resolved_build_id = version.clone();
             }
-            if session.replica_volume() != policy.volume.id {
+            if session.is_distinct_world(policy.volume.id) {
+                self.check_participant(policy.volume.id, access.account)?;
+                policy.admit_world(access.account, &session)?;
+            } else if session.replica_volume() != policy.volume.id {
                 self.personal_grant(access, &session, policy.volume.id)?;
             }
             if session.replica_volume() == policy.volume.id {
@@ -802,6 +917,7 @@ fn validate_named_backing(
     scratch: &Path,
     database: &Database,
     policy: &DatabasePolicy,
+    writer: Option<DataActor>,
 ) -> Result<()> {
     if let Some(entry) = &policy.entry
         && entry.protocol == Some(volume_index::DatabaseProtocol::BlobLog)
@@ -817,7 +933,7 @@ fn validate_named_backing(
     }
     let rejected = std::cell::RefCell::new(None);
     let resolver = |delta: &kvdb::sync::SyncDelta<'_>| {
-        if let Err(error) = policy.validate_sync_source(delta, None) {
+        if let Err(error) = policy.validate_sync_source_as(delta, writer) {
             *rejected.borrow_mut() = Some(error);
         }
         Ok(kvdb::sync::Resolution::KeepLocal)
@@ -923,6 +1039,20 @@ impl ReceivedVolume {
         tx.local_indexes().put(&key, &encode(receipt)?)?;
         tx.commit()?;
         Ok(())
+    }
+    /// Only an AP backing receipt from this transfer can certify equality.
+    /// A missing receipt is distinct from an acknowledged empty database.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn hosted_backing_matches(&self, entry: EntryId, root: ReplicaRoot) -> Result<bool> {
+        let mut key = vec![volume_index::META_BYTE, 12];
+        key.extend_from_slice(&DatabaseId::Entry(entry).to_bytes());
+        let tx = self.metadata.begin_read()?;
+        let Some(value) = tx.local_get(&key)? else { return Ok(false) };
+        if value.len() > 1024 {
+            return Err(Error::corrupt("receipt value exceeds 1024 bytes"));
+        }
+        let receipt: DurableRevision = decode(&value)?;
+        Ok(receipt.root == root)
     }
     pub fn receipt_page(&self, after: Option<DatabaseId>) -> Result<ReceiptPage> {
         let prefix = [volume_index::META_BYTE, 12];

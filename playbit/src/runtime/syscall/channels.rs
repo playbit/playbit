@@ -137,8 +137,9 @@ fn deliver(state: &mut State, event: crate::session_channel::Event) -> HostResul
             let participants = participants
                 .into_iter()
                 .map(|p| {
-                    let bytes = p.encode().map_err(|_| HostError::Internal)?;
+                    let bytes = p.participant.encode().map_err(|_| HostError::Internal)?;
                     Ok(Participant {
+                        display_name: p.display_name,
                         account_id: bytes[..16].try_into().expect("account"),
                         device_id: bytes[16..32].try_into().expect("device"),
                         instance_id: bytes[32..48].try_into().expect("instance"),

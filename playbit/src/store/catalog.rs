@@ -145,6 +145,20 @@ impl Session {
     pub fn replica_volume(&self) -> Id {
         self.shared_volume.unwrap_or(self.root_volume)
     }
+    pub fn is_distinct_world(&self, volume: Id) -> bool {
+        self.root_volume == volume && self.shared_volume.is_some_and(|shared| shared != volume)
+    }
+    pub fn validate_publisher_world(&self, volume: Id) -> Result<()> {
+        self.validate_shared_volume()?;
+        let derived = self
+            .app
+            .volume_id(crate::package::AutomaticVolumeRole::Root, None, None, None)
+            .map_err(Error::InvalidInput)?;
+        if volume != self.root_volume || volume != derived || self.shared_volume == Some(volume) {
+            return Err(Error::AccessDenied("publisher World binding"));
+        }
+        Ok(())
+    }
     pub fn validate_shared_volume(&self) -> Result<()> {
         let Some(shared) = self.shared_volume else { return Ok(()) };
         use crate::package::AutomaticVolumeRole;
@@ -320,6 +334,27 @@ impl MetadataPolicy {
         {
             return Err(Error::AccessDenied("Shared volume authority differs"));
         }
+        self.admit_version(account, session)
+    }
+    /// A session's World is owned by the signed app's publisher. The
+    /// invitation authenticates the session; the World authorizes the account.
+    pub fn admit_world(&self, account: Id, session: &Session) -> Result<()> {
+        self.validate_world_binding(session)?;
+        self.admit_version(account, session)?;
+        self.authorize(account, Permission::Read)
+    }
+
+    pub fn validate_world_binding(&self, session: &Session) -> Result<()> {
+        session.validate_publisher_world(self.volume.id)?;
+        if self.volume.owner != session.app.publisher
+            || self.volume.personal
+            || !self.volume.share_key_with_service
+        {
+            return Err(Error::AccessDenied("publisher World binding"));
+        }
+        Ok(())
+    }
+    fn admit_version(&self, account: Id, session: &Session) -> Result<()> {
         if account != self.volume.owner
             && !self.provisioned_versions.contains(&session.resolved_build_id)
         {

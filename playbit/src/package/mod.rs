@@ -9,6 +9,8 @@ use std::{collections::BTreeMap, fs, io::Read, path::Path};
 #[cfg(feature = "artwork")]
 pub mod artwork;
 
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+pub(crate) mod bundled_examples;
 pub mod codec;
 pub mod identity;
 pub mod initialization;

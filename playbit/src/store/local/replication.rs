@@ -9,11 +9,11 @@ pub struct ReplicationDatabasePage {
 }
 
 #[cfg(feature = "connected-engine")]
-struct OwnerPermissionSources<'view, 'local, 'remote> {
-    local_defaults: &'view Acl,
-    remote_defaults: &'view Acl,
-    local_index: &'view volume_index::IndexSnapshot<'local, RedbStorage>,
-    remote_index: &'view volume_index::IndexSnapshot<'remote, RedbStorage>,
+struct CapturedControls<'local, 'remote> {
+    local_defaults: Acl,
+    remote_defaults: Acl,
+    local_index: volume_index::IndexSnapshot<'local, RedbStorage>,
+    remote_index: volume_index::IndexSnapshot<'remote, RedbStorage>,
 }
 
 fn observe_source(
@@ -113,123 +113,271 @@ fn check_entry_delivery(
 }
 
 impl LocalStore {
-    /// Break owner recovery's control/data dependency using exact local ACL
-    /// commits. This does not qualify incoming state or acknowledge an Index.
+    /// Compare pinned local and authenticated AP controls under one admitted
+    /// binding. Release local gates before projection or network publication.
+    #[cfg(feature = "connected-engine")]
+    fn with_captured_controls<T>(
+        &self,
+        session: Option<&Session>,
+        volume: Id,
+        received: &Database,
+        use_controls: impl FnOnce(&Volume, DataActor, CapturedControls<'_, '_>) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let identity = self.volume(volume)?;
+        if !identity.share_key_with_service
+            || self.durable_revision(volume, DatabaseId::Index)?.is_none()
+        {
+            return Ok(None);
+        }
+        let access = match session {
+            Some(session) if session.replica_volume() == volume => {
+                Access::session_version(self.account.id, &session.id, &session.resolved_build_id)
+            }
+            None if identity.owner == self.account.id => Access::owner(self.account.id),
+            _ => return Ok(None),
+        };
+        let operations = self.access_operations(&access, volume)?;
+        let guards = operations.lock()?;
+        if let Some(session) = session
+            && self.session(&session.id)? != *session
+        {
+            // A candidate build may pull data before adoption, but it cannot
+            // publish edits under the retained session's admission.
+            return Ok(None);
+        }
+        let index = self.db(volume, DatabaseId::Index)?;
+        let local_tx = index.begin_read()?;
+        if local_tx.root_hash()?.is_none() {
+            return Ok(None);
+        }
+        let remote_tx = received.begin_read()?;
+        // Decode one bounded policy at a time and retain only its defaults.
+        let defaults = |tx: &kvdb::ReadTxn<'_, RedbStorage>, local| -> Result<Acl> {
+            let policy = MetadataPolicy::read_snapshot(tx, MetadataPolicy::MAX_MATERIALIZED_BYTES)?;
+            if !identity.same_identity(policy.volume()) {
+                return Err(Error::AccessDenied("recovery volume identity mismatch"));
+            }
+            if local {
+                self.admit_access(&access, &policy)?;
+            }
+            if let Some(session) = session {
+                policy.admit(self.account.id, session, volume)?;
+            }
+            Ok(policy.permissions)
+        };
+        let controls = CapturedControls {
+            local_defaults: defaults(&local_tx, true)?,
+            remote_defaults: defaults(&remote_tx, false)?,
+            local_index: volume_index::IndexSnapshot::new(local_tx),
+            remote_index: volume_index::IndexSnapshot::new(remote_tx),
+        };
+        let actor = self.data_actor(&access, &identity)?;
+        drop(guards);
+        drop(operations);
+        use_controls(&identity, actor, controls).map(Some)
+    }
+
+    /// Identify the exact qualified deletion for this blocked backing while
+    /// the local and hosted controls are pinned.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn retirement_for_capture(
+        &self,
+        session: Option<&Session>,
+        volume: Id,
+        received: &Database,
+        entry: crate::store::EntryId,
+    ) -> Result<Option<volume_index::Retirement>> {
+        self.with_captured_controls(session, volume, received, |volume, actor, controls| {
+            controls.local_index.retirement_for(
+                entry,
+                volume,
+                actor,
+                &controls.local_defaults,
+                &controls.remote_index,
+                &controls.remote_defaults,
+            )
+        })
+        .map(Option::flatten)
+    }
+
+    /// Project both records into a scoped sync only when the recovery is ready
+    /// to publish. A large causal context can exceed a live publication frame.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn project_retirement(
+        &self,
+        received: &Database,
+        retirement: &volume_index::Retirement,
+    ) -> Result<OutboundReplica> {
+        let replica = empty_detached_replica(&self.path.join(crate::paths::STAGING), received)?;
+        let mut tx = replica.database().begin_write(now_unix_secs())?;
+        retirement.copy_into(&mut tx)?;
+        tx.commit()?;
+        self.require_account_authority()?;
+        Ok(replica)
+    }
+
     #[cfg(feature = "connected-engine")]
     pub(crate) fn restore_owner_service_read(
         &self,
         volume: Id,
         received: &Database,
-        publish: impl FnMut(&[u8]) -> Result<()>,
-    ) -> Result<bool> {
-        let identity = self.volume(volume)?;
-        if identity.owner != self.account.id
-            || !identity.share_key_with_service
-            || self.durable_revision(volume, DatabaseId::Index)?.is_none()
-        {
-            return Ok(false);
-        }
-        let operations = self.operations(&[volume])?;
-        let guards = operations.lock()?;
-        let index = self.db(volume, DatabaseId::Index)?;
-        let local_tx = index.begin_read()?;
-        let remote_tx = received.begin_read()?;
-        // Decode one bounded policy at a time; retain only its actual defaults.
-        // The 3-MiB record charge bounds each retained ACL below 200 KiB.
-        let local_defaults = {
-            let policy =
-                MetadataPolicy::read_snapshot(&local_tx, MetadataPolicy::MAX_MATERIALIZED_BYTES)?;
-            if !identity.same_identity(policy.volume()) {
-                return Err(Error::AccessDenied("owner recovery volume identity mismatch"));
-            }
-            self.admit_access(&Access::owner(self.account.id), &policy)?;
-            policy.permissions
-        };
-        let remote_defaults = {
-            let policy =
-                MetadataPolicy::read_snapshot(&remote_tx, MetadataPolicy::MAX_MATERIALIZED_BYTES)?;
-            if !identity.same_identity(policy.volume()) {
-                return Err(Error::AccessDenied("owner recovery volume identity mismatch"));
-            }
-            policy.permissions
-        };
-        let local_index = volume_index::IndexSnapshot::new(local_tx);
-        let remote_index = volume_index::IndexSnapshot::new(remote_tx);
-        drop(guards);
-        self.publish_owner_service_restorations(
-            &identity,
-            OwnerPermissionSources {
-                local_defaults: &local_defaults,
-                remote_defaults: &remote_defaults,
-                local_index: &local_index,
-                remote_index: &remote_index,
-            },
-            publish,
-        )
-    }
-
-    #[cfg(feature = "connected-engine")]
-    fn publish_owner_service_restorations(
-        &self,
-        identity: &Volume,
-        sources: OwnerPermissionSources<'_, '_, '_>,
         mut publish: impl FnMut(&[u8]) -> Result<()>,
     ) -> Result<bool> {
         use crate::store::catalog::PLAYBIT_REPLICA_PRINCIPAL;
-        let OwnerPermissionSources { local_defaults, remote_defaults, local_index, remote_index } =
-            sources;
-        // Existing 8-MiB bootstrap credit: transfer buffers are released before
-        // this phase, which keeps 64 headers and one at-most-65-KiB delta. Each
-        // entry decode uses the existing 3-MiB allowance, one at a time.
-        let mut after = None;
-        let mut scanned = 0;
-        let mut published = false;
-        loop {
-            let page = remote_index.source_headers(after, 64)?;
-            scanned += page.entries.len();
-            if scanned > volume_index::namespace::MAX_ENTRIES {
-                return Err(Error::LimitExceeded);
-            }
-            for entry in
-                page.entries.into_iter().filter(|entry| !entry.deleted && entry.protocol.is_some())
-            {
-                match remote_index.authorize_staged_entry(
-                    identity,
-                    remote_defaults,
-                    PLAYBIT_REPLICA_PRINCIPAL,
-                    entry.id,
-                    Permission::Read,
-                ) {
-                    Ok(()) => continue,
-                    Err(Error::AccessDenied(_)) => {}
-                    Err(error) => return Err(error),
+        self.with_captured_controls(None, volume, received, |identity, _, controls| {
+            let mut after = None;
+            let mut scanned = 0;
+            let mut published = false;
+            loop {
+                let page = controls.remote_index.source_headers(after, 64)?;
+                scanned += page.entries.len();
+                if scanned > volume_index::namespace::MAX_ENTRIES {
+                    return Err(Error::LimitExceeded);
                 }
-                match local_index.authorize(
-                    identity,
-                    local_defaults,
-                    PLAYBIT_REPLICA_PRINCIPAL,
-                    entry.id,
-                    Permission::Read,
-                ) {
-                    Ok(()) => {}
-                    Err(Error::AccessDenied(_) | Error::NotFound(_)) => continue,
-                    Err(error) => return Err(error),
+                for entry in page
+                    .entries
+                    .into_iter()
+                    .filter(|entry| !entry.deleted && entry.protocol.is_some())
+                {
+                    match controls.remote_index.authorize_staged_entry(
+                        identity,
+                        &controls.remote_defaults,
+                        PLAYBIT_REPLICA_PRINCIPAL,
+                        entry.id,
+                        Permission::Read,
+                    ) {
+                        Ok(()) => continue,
+                        Err(Error::AccessDenied(_)) => {}
+                        Err(error) => return Err(error),
+                    }
+                    match controls.local_index.authorize(
+                        identity,
+                        &controls.local_defaults,
+                        PLAYBIT_REPLICA_PRINCIPAL,
+                        entry.id,
+                        Permission::Read,
+                    ) {
+                        Ok(()) => {}
+                        Err(Error::AccessDenied(_) | Error::NotFound(_)) => continue,
+                        Err(error) => return Err(error),
+                    }
+                    if let Some(bytes) = controls.local_index.permission_restoration_delta(
+                        identity.owner,
+                        entry.id,
+                        &controls.remote_index,
+                    )? {
+                        self.require_account_authority()?;
+                        publish(&bytes)?;
+                        published = true;
+                    }
                 }
-                let Some(bytes) = local_index.permission_restoration_delta(
-                    self.account.id,
-                    entry.id,
-                    remote_index,
-                )?
-                else {
-                    continue;
-                };
-                self.require_account_authority()?;
-                publish(&bytes)?;
-                published = true;
+                let Some(next) = page.next else { return Ok(published) };
+                after = Some(next);
             }
-            let Some(next) = page.next else { return Ok(published) };
-            after = Some(next);
+        })
+        .map(|published| published.unwrap_or(false))
+    }
+
+    /// A fresh selected AP cut may prove the deletion through an authority
+    /// fence. This admission neither clears the fence nor exposes retained data.
+    #[cfg(feature = "connected-engine")]
+    pub(super) fn admit_retirement_writer(
+        &self,
+        access: &Access,
+        entry: crate::store::EntryId,
+        policy: &MetadataPolicy,
+        index: &volume_index::IndexSnapshot<'_, RedbStorage>,
+    ) -> Result<DataActor> {
+        if let Some(id) = access.session_id()
+            && access.build_id() != Some(self.session(id)?.resolved_build_id.as_str())
+        {
+            return Err(Error::AccessDenied("entry retirement build changed"));
         }
+        let actor = self.data_actor(access, policy.volume())?;
+        if self.admit_access(access, policy)?.is_some_and(|grant| !grant.write)
+            || !index.source_granted(
+                policy.volume(),
+                policy.default_permissions(),
+                actor,
+                entry,
+                Permission::Write,
+            )?
+        {
+            return Err(Error::AccessDenied("entry retirement requires current Write"));
+        }
+        Ok(actor)
+    }
+
+    /// Check the qualified local source before opening a live selected scope.
+    /// A terminal receipt still needs the current binding and the writer's grant.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn entry_retirement_events(
+        &self,
+        access: &Access,
+        address: volume_index::EntryAddress,
+        session: Option<&Session>,
+    ) -> Result<Option<[crate::store::EntryId; 2]>> {
+        let operations = self.access_operations(access, address.volume)?;
+        let _guards = operations.lock()?;
+        let index = self.db(address.volume, DatabaseId::Index)?;
+        let snapshot = volume_index::IndexSnapshot::new(index.begin_read()?);
+        let Some((events, _)) = snapshot.selected_retirement(address.entry)? else {
+            return Ok(None);
+        };
+        let policy = MetadataPolicy::read(&index)?;
+        if let Some(session) = session
+            && self.session(&session.id)? != *session
+        {
+            return Err(Error::AccessDenied("entry retirement session binding changed"));
+        }
+        self.admit_retirement_writer(access, address.entry, &policy, &snapshot)?;
+        Ok(Some(events))
+    }
+
+    /// Both policies must admit the same birth before replaying its original
+    /// deletion and the selected entry's immutable predecessor revisions.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn entry_retirement_snapshot(
+        &self,
+        access: &Access,
+        address: volume_index::EntryAddress,
+        received: &Database,
+    ) -> Result<OutboundReplica> {
+        let operations = self.access_operations(access, address.volume)?;
+        let guards = operations.lock()?;
+        let index = self.db(address.volume, DatabaseId::Index)?;
+        let local = MetadataPolicy::read(&index)?;
+        let remote = MetadataPolicy::read(received)?;
+        if !local.volume().same_identity(remote.volume()) {
+            return Err(Error::AccessDenied("entry retirement binding changed"));
+        }
+        let snapshot = volume_index::IndexSnapshot::new(index.begin_read()?);
+        let actor = self.admit_retirement_writer(access, address.entry, &local, &snapshot)?;
+        let captured = volume_index::IndexSnapshot::new(received.begin_read()?);
+        let (events, retirement) = snapshot
+            .selected_retirement(address.entry)?
+            .ok_or(Error::NotFound("local entry retirement"))?;
+        if captured.source_birth_event(address.entry)? != events[0]
+            || !captured.source_granted(
+                remote.volume(),
+                remote.default_permissions(),
+                actor,
+                address.entry,
+                Permission::Write,
+            )?
+        {
+            return Err(Error::AccessDenied("entry retirement birth or authority changed"));
+        }
+        let history =
+            super::scoped::ScopedSnapshot::for_publication(&index, &local, address.entry, actor)?
+                .only_revision_history();
+        drop(guards);
+        let source = history.project(&self.path.join(crate::paths::STAGING))?;
+        let mut tx = source.database().begin_write(now_unix_secs())?;
+        retirement.copy_into(&mut tx)?;
+        tx.commit()?;
+        self.require_account_authority()?;
+        Ok(source)
     }
 
     /// Pin only this entry's publishable source facts. No catalog Read is
@@ -274,8 +422,10 @@ impl LocalStore {
         let operations = self.access_operations(access, volume)?;
         let guards = operations.lock()?;
         let index = self.db(volume, DatabaseId::Index)?;
+        // A catalog reader may have entry Write without ever receiving its
+        // backing. Only locally ready data can participate in an upload.
         if let DatabaseId::Entry(entry) = database
-            && volume_index::IndexSnapshot::new(index.begin_read()?).backing_quarantined(entry)?
+            && !volume_index::IndexSnapshot::new(index.begin_read()?).backing_ready(entry)?
         {
             return Ok(false);
         }
@@ -310,19 +460,20 @@ impl LocalStore {
         let mut after = None;
         loop {
             let page = snapshot.headers(after, 64)?;
-            for entry in page.entries.into_iter().filter(|entry| !entry.deleted) {
-                for permission in [Permission::Write, Permission::Append] {
-                    match snapshot.authorize(
+            for entry in page.entries {
+                // Qualified retirements still need to reach AP after the last
+                // live writable entry is gone. Append only applies to live entries.
+                let granted = |permission| {
+                    snapshot.source_granted(
                         policy.volume.volume(),
                         policy.volume.default_permissions(),
                         principal,
                         entry.id,
                         permission,
-                    ) {
-                        Ok(()) => return Ok(true),
-                        Err(Error::AccessDenied(_)) => {}
-                        Err(error) => return Err(error),
-                    }
+                    )
+                };
+                if granted(Permission::Write)? || (!entry.deleted && granted(Permission::Append)?) {
+                    return Ok(true);
                 }
             }
             let Some(next) = page.next else { return Ok(false) };
@@ -343,8 +494,8 @@ impl LocalStore {
             DatabasePolicy::read(&*self.db(volume, DatabaseId::Index)?, database)?
                 .ordinary_protocol()?;
         }
-        let credentials = self.credentials(volume)?;
-        let db = self.replica_db(volume, database, Some(credentials.database_key))?;
+        let key = self.local_database_key(volume)?;
+        let db = self.replica_db(volume, database, Some(key))?;
         f(&db)
     }
 
@@ -415,6 +566,13 @@ impl LocalStore {
             check_entry_delivery(access, entry, database, readable, bytes)?;
         } else {
             policy.authorize_reader(ReplicaReader::SessionParticipant(actor))?;
+        }
+        if let DatabaseId::Entry(id) = database
+            && !volume_index::IndexSnapshot::new(index.begin_read()?).backing_ready(id)?
+        {
+            // A delta can arrive after the bounded initial snapshot retries end.
+            // It cannot initialize an absent backing or merge into a rejected one.
+            return Err(Error::NotFound(Error::PENDING_BACKING));
         }
         self.apply_received_delta(volume, database, &policy, bytes, entry.zip(evidence))
     }
@@ -527,14 +685,14 @@ impl LocalStore {
         volume: Id,
         database: DatabaseId,
         bytes: &[u8],
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Option<Vec<u8>>> {
         let operations = self.access_operations(access, volume)?;
         let _guards = operations.lock()?;
         let index = self.db(volume, DatabaseId::Index)?;
         if let DatabaseId::Entry(entry) = database
             && volume_index::IndexSnapshot::new(index.begin_read()?).backing_quarantined(entry)?
         {
-            return Err(Error::NotFound("accepted backing is pending"));
+            return Err(Error::NotFound(Error::PENDING_BACKING));
         }
         let policy = DatabasePolicy::read(&index, database)?;
         if self.admit_access(access, &policy.volume)?.is_some_and(|grant| !grant.write) {
@@ -548,7 +706,13 @@ impl LocalStore {
         for entry in entries {
             self.check_authority(access, volume, Some(entry))?;
         }
-        crate::store::project_replica_delta(&policy, ReplicaReader::Service, bytes)
+        match crate::store::project_replica_delta(&policy, ReplicaReader::Service, bytes) {
+            Ok(projected) => Ok(Some(projected)),
+            // The writer is authorized above. Keep their service-excluded change
+            // local while allowing other entries to continue publishing.
+            Err(Error::AccessDenied("entry permission")) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Scan at most 64 source entry IDs. Reserved control databases occur only

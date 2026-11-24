@@ -12,6 +12,7 @@ are excluded; other conditional items remain part of the source measurement.
 import argparse
 from collections import Counter
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -173,30 +174,37 @@ def crate_counts(root):
     return results
 
 
-def report(root):
+def report(root, *, check_only=False):
     files = {}
     for directory in DIRECTORIES:
         for path in sorted((root / directory).rglob('*.rs')):
             relative = path.relative_to(root).as_posix()
+            if check_only and not any(in_scope(relative, scope) for scope in TIER_A):
+                continue
             if production_file(Path(relative)):
                 files[relative] = production_lines(path.read_text())
+    tiers = {}
+    tier_functions = []
+    for scope in TIER_A:
+        tiers[scope], items = measure((p, s) for p, s in files.items() if in_scope(p, scope))
+        tier_functions.extend(items)
+    if check_only:
+        return {'tier_a': tiers}
+
     directories = {}
     for directory in DIRECTORIES:
         directories[directory], _ = measure((p, s) for p, s in files.items() if in_scope(p, directory))
-    tiers = {}
     decoders = []
     targets = {
         p.relative_to(root).as_posix(): p.read_text()
         for p in sorted((root / 'playbit/fuzz/fuzz_targets').glob('*.rs'))
     }
-    for scope in TIER_A:
-        tiers[scope], items = measure((p, s) for p, s in files.items() if in_scope(p, scope))
-        for item in items:
-            if not item['name'].startswith(('decode', 'parse', 'validate')):
-                continue
-            hits = [p for p, source in targets.items() if item['name'] in source]
-            decoders.append({**item, 'fuzz_targets': hits,
-                             'covered': bool(hits or item['fuzz_annotation'])})
+    for item in tier_functions:
+        if not item['name'].startswith(('decode', 'parse', 'validate')):
+            continue
+        hits = [p for p, source in targets.items() if item['name'] in source]
+        decoders.append({**item, 'fuzz_targets': hits,
+                         'covered': bool(hits or item['fuzz_annotation'])})
     return {'directories': directories, 'tier_a': tiers, 'decoders': decoders,
             'crates': crate_counts(root)}
 
@@ -206,14 +214,14 @@ def violations(current, baseline):
     for scope, now in current['tier_a'].items():
         old = baseline['tier_a'].get(scope)
         if old is None:
-            errors.append(f'{scope}: baseline scope missing; baseline=null current=present')
+            errors.append(f'{scope} is missing from the Tier A baseline')
             continue
         if now['unwrap'] > old['unwrap']:
-            errors.append(f"{scope}: unwrap baseline={old['unwrap']} current={now['unwrap']}")
+            errors.append(f"{scope}: bare unwrap count increased from {old['unwrap']} to {now['unwrap']}")
         known = {f['id'] for f in old['long_functions']}
         for function in now['long_functions']:
             if function['id'] not in known:
-                errors.append(f"{scope}: {function['path']}::{function['name']}:{function['line']}: long_function baseline=absent current={function['lines']} lines")
+                errors.append(f"{function['path']}:{function['line']}: {function['name']} is {function['lines']} lines (limit 70)")
     return errors
 
 
@@ -263,18 +271,29 @@ def main():
     parser.add_argument('--json', type=Path, help='write the measurements as JSON')
     parser.add_argument('--check', action='store_true', help='fail on tier A regressions against the committed baseline')
     args = parser.parse_args()
-    data = report(ROOT)
-    errors = []
-    if args.check:
-        baseline = json.loads((ROOT / 'scripts/style-baseline.json').read_text())
-        errors = violations(data, baseline)
+    data = report(ROOT, check_only=args.check and args.json is None)
     if args.json:
         args.json.write_text(json.dumps(data, indent=2) + '\n')
-    print(markdown(data), end='')
-    if args.check:
-        print('\n## Baseline check\n')
-        print('\n'.join('- ' + error for error in errors) if errors else 'PASS: no tier A regressions.')
-    return bool(errors)
+    if not args.check:
+        print(markdown(data), end='')
+        return 0
+
+    baseline = json.loads((ROOT / 'scripts/style-baseline.json').read_text())
+    errors = violations(data, baseline)
+    if not errors:
+        print('PASS: no tier A regressions.')
+        return 0
+
+    print('\n'.join(errors), file=sys.stderr)
+    if summary := os.environ.get('GITHUB_STEP_SUMMARY'):
+        limit = 10
+        with open(summary, 'a') as file:
+            file.write('### Tiger Style regressions\n\n')
+            for error in errors[:limit]:
+                file.write(f'- `{error}`\n')
+            if len(errors) > limit:
+                file.write(f'\n{len(errors) - limit} more in the job log.\n')
+    return 1
 
 
 if __name__ == '__main__':

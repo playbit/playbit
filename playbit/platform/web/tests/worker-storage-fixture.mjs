@@ -3,11 +3,12 @@
 import { AbiError } from '../src/guest-memory.ts';
 import { incompatibleStorage } from '../src/storage-format.ts';
 import { unsupportedAccount } from '../src/account-format.ts';
+import { advisoryOperation } from '../src/ap-protocol.ts';
 
 export function compatibleWorkerStorage() {
     let observer;
     return {
-        AbiError, incompatibleStorage, unsupportedAccount,
+        AbiError, incompatibleStorage, unsupportedAccount, advisoryOperation,
         observeStorageFormat(listener) {
             if (observer) throw Error('Storage format already has an observer in this worker');
             observer = listener;

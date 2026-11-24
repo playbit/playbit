@@ -118,6 +118,11 @@ impl Codec for UpdateAuthority {
 impl Codec for Record {
     fn write(&self, out: &mut Vec<u8>) -> Result<()> {
         match self {
+            Self::AppVisibility { app, removed } => {
+                record::variant(out, 8);
+                record::put(out, 1, app)?;
+                record::put(out, 2, removed)
+            }
             Self::DisplayName { name } => {
                 record::variant(out, 1);
                 record::put(out, 1, name)
@@ -209,6 +214,13 @@ impl Codec for Record {
                     scope: fields.required(3, mode)?,
                 })
             }
+            8 => {
+                let fields = body.fields(mode, &[1, 2])?;
+                Ok(Self::AppVisibility {
+                    app: fields.required(1, mode)?,
+                    removed: fields.required(2, mode)?,
+                })
+            }
             _ => Err(Error::InvalidInput("unsupported account payload kind")),
         }
     }
@@ -274,7 +286,7 @@ mod tests {
                 record::decode::<UpdateAuthority>(&bytes),
                 Err(Error::InvalidInput("unsupported account update authority"))
             ));
-            bytes[record::MAGIC.len() + 1] = 8;
+            bytes[record::MAGIC.len() + 1] = u8::MAX;
             assert!(matches!(
                 record::decode::<Record>(&bytes),
                 Err(Error::InvalidInput("unsupported account payload kind"))

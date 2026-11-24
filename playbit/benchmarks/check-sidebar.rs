@@ -7,7 +7,15 @@ fn main() {
         let mode = args.next().expect("active, stopped, empty or new session preview");
         assert!(matches!(
             mode.as_str(),
-            "active" | "stopped" | "empty" | "new" | "benchmark" | "loading" | "builds"
+            "active"
+                | "instance"
+                | "stopped"
+                | "empty"
+                | "new"
+                | "new-empty"
+                | "benchmark"
+                | "loading"
+                | "builds"
         ));
         (args.next().map(Into::into), Some(mode))
     } else {

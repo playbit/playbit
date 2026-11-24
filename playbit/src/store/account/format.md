@@ -44,12 +44,21 @@ algorithms and host syscall capabilities.
 | Kind | Logical key | Classification and payload fields |
 | --- | --- | --- |
 | `display_name` | `settings/display-name` | Independent presentation; variant 1, field 1 name. |
+| `app_visibility` | `optional/app_visibility/{publisher ID}/{app ID}` | Independent presentation, variant 8. Field 1 is the app identity and field 2 is the boolean `removed`. Both fields are required. |
 | `volume` | `volume/{volume ID}` | Mandatory account authority; variant 2, fields 1 volume, 2 credentials. |
 | `volume_deleted` | `deleted-volume/{volume ID}` | Mandatory account authority; variant 3, field 1 volume ID. |
 | `invitation` | `session/{session ID}` | Mandatory account authority; variant 4, fields 1 invitation, 2 app name. |
 | `personal_volumes` | `session-mounts/{session ID}` | Mandatory account authority; variant 5, fields 1 session ID, 2 selected grants. |
 | `hosted_volume` | `volume/{volume ID}` | Mandatory account authority; variant 6, fields 1 volume, 2 credentials, 3 World scope. Scope variant 1 has fields 1 app identity, 2 original build, 3 initialization fingerprint. |
 | `hosted_invitation` | `session/{session ID}` | Mandatory account authority; variant 7, fields 1 invitation, 2 optional app name, 3 session scope. Scope variant 2 has fields 1 session ID, 2 creation build, 3 optional User override. Private scope data and credentials are excluded. |
+
+An absent app visibility record lists the app when the device has an import
+or retained session. A removal hides both sources independently of their
+arrival order. Explicit import or join in the native app writes the same key
+with `removed = false`. Invitation and volume credentials remain intact.
+Browser clients apply this preference to their recovered app list. Opening an
+invitation in the browser can still launch a removed app; restoring its account
+listing requires an explicit import or join in the native app.
 
 Known authority classifications cannot change. Unknown optional kinds must use
 `optional/{kind}/{nonempty suffix}`; they cannot overwrite or add conditions to

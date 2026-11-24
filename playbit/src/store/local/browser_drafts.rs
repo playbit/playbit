@@ -1,8 +1,8 @@
 //! The engine's profile writer owns bounded, non-replicating editor recovery.
 use super::*;
 use crate::store::browser_drafts::{
-    BrowserDraft, BrowserDraftBody, BrowserDraftOperation, BrowserDraftResult, MAX_ACCOUNT_BYTES,
-    MAX_DRAFTS, MAX_RECORD_BYTES,
+    BrowserDraft, BrowserDraftBody, BrowserDraftOperation, BrowserDraftResult, BrowserDraftSummary,
+    MAX_ACCOUNT_BYTES, MAX_DRAFTS, MAX_RECORD_BYTES,
 };
 use kvdb::storage::ValueRead;
 
@@ -21,6 +21,20 @@ fn read(reader: &dyn ValueRead) -> Result<BrowserDraft> {
     reader.read_exact_at(0, &mut bytes)?;
     let draft: BrowserDraft = record::decode(&bytes)?;
     draft.validate()?;
+    Ok(draft)
+}
+
+fn read_for_update(
+    tx: &kvdb::WriteTxn<'_, RedbStorage>,
+    key: &[u8],
+) -> Result<Option<BrowserDraft>> {
+    let mut draft = None;
+    tx.visit::<Error>(key, false, |stored_key, reader| {
+        if stored_key == key {
+            draft = Some(read(reader)?);
+        }
+        Ok(false)
+    })?;
     Ok(draft)
 }
 
@@ -50,7 +64,9 @@ impl LocalStore {
             return Err(Error::AccessDenied("browser drafts belong to another account"));
         }
         match operation {
-            BrowserDraftOperation::List => self.list_browser_drafts(account),
+            BrowserDraftOperation::List => {
+                Ok(BrowserDraftResult::List(self.list_browser_drafts(account)?))
+            }
             BrowserDraftOperation::Get { id } => {
                 let tx = self.metadata.begin_read()?;
                 let draft = tx
@@ -73,7 +89,22 @@ impl LocalStore {
         }
     }
 
-    fn list_browser_drafts(&self, account: Id) -> Result<BrowserDraftResult> {
+    // Caller holds the profile lock and stages the erased-volume fence in the
+    // same transaction, so a queued first draft cannot follow the cleanup.
+    pub(super) fn remove_erased_volume_drafts(
+        &self,
+        tx: &mut kvdb::WriteTxn<'_, RedbStorage>,
+        volumes: &BTreeSet<Id>,
+    ) -> Result<()> {
+        for draft in self.list_browser_drafts(self.account.id)? {
+            if volumes.contains(&draft.volume) {
+                tx.del(key(self.account.id, draft.id).as_bytes())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn list_browser_drafts(&self, account: Id) -> Result<Vec<BrowserDraftSummary>> {
         let prefix = prefix(account);
         let tx = self.metadata.begin_read()?;
         let mut summaries = Vec::with_capacity(MAX_DRAFTS);
@@ -96,7 +127,7 @@ impl LocalStore {
             summaries.push(draft.summary());
             Ok(true)
         })?;
-        Ok(BrowserDraftResult::List(summaries))
+        Ok(summaries)
     }
 
     fn upsert_browser_draft(
@@ -117,13 +148,10 @@ impl LocalStore {
         let prefix = prefix(account);
         let _profile = self.lock_profile()?;
         let mut tx = self.metadata.begin_write(now_unix_secs())?;
-        let mut old = None;
-        tx.visit::<Error>(draft_key.as_bytes(), false, |stored_key, reader| {
-            if stored_key == draft_key.as_bytes() {
-                old = Some(read(reader)?);
-            }
-            Ok(false)
-        })?;
+        if tx.has(app_removal::erased_local_volume(draft.volume).as_bytes())? {
+            return Err(Error::NotFound("local app data was erased"));
+        }
+        let old = read_for_update(&tx, draft_key.as_bytes())?;
         if old.as_ref().map(|old| old.revision) != expected_revision {
             return Err(Error::LocalContention("browser draft changed; reload before updating it"));
         }
@@ -177,13 +205,7 @@ impl LocalStore {
         let draft_key = key(account, id);
         let _profile = self.lock_profile()?;
         let mut tx = self.metadata.begin_write(now_unix_secs())?;
-        let mut old = None;
-        tx.visit::<Error>(draft_key.as_bytes(), false, |stored_key, reader| {
-            if stored_key == draft_key.as_bytes() {
-                old = Some(read(reader)?);
-            }
-            Ok(false)
-        })?;
+        let old = read_for_update(&tx, draft_key.as_bytes())?;
         if old.as_ref().is_none_or(|old| old.id != id || old.revision != expected_revision) {
             return Err(Error::LocalContention(
                 "browser draft changed; an older completion cannot remove it",

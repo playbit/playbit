@@ -6,6 +6,39 @@ import { encodeId } from './identifier.ts';
 import { ApConnection } from './ap-connection.ts';
 const operation = { op: 'get_blob', operation_id: encodeId(new Uint8Array(16).fill(0xab)), hash: encodeId(new Uint8Array(32).fill(0xcd)) };
 const cases = [
+    { name: 'SharedWorker bounds advisory work across tabs independently of its 128 ordinary requests', async run() {
+        const held = Promise.withResolvers();
+        let requests = 0;
+        ApConnection.prototype.beginChannel = async () => 7;
+        ApConnection.prototype.describe = ApConnection.prototype.channelDisplayName = () => held.promise;
+        ApConnection.prototype.request = async operation => { if (operation.op === 'sync_account') requests++; return held.promise; };
+        globalThis.self = { location: { href: 'https://playbit.app/assets/fixture/ap-worker.js?channel=public' } };
+        await import('./ap-worker.ts');
+        const tab = () => {
+            const replies = new Map(), port = { postMessage(reply) { replies.set(reply.id, reply); }, start() {} };
+            self.onconnect({ ports: [port] });
+            let next = 0;
+            return async (method, args = {}) => {
+                const id = ++next;
+                await port.onmessage({ data: { id, method, args } });
+                assert.ok(replies.has(id));
+                return replies.get(id);
+            };
+        };
+        const first = tab(), second = tab();
+        await first('beginChannel'); await second('beginChannel');
+        const controls = [['describe'], ['request', { operation: { op: 'put_account_display_name' } }],
+            ['channelDisplayName', { handle: 7, name: new Uint8Array(256) }]];
+        const active = controls.map(args => first(...args));
+        const push = { operation: { op: 'sync_account', direction: 'push' } };
+        const ordinary = Array.from({ length: 128 }, (_, i) => (i % 2 ? second : first)('request', push));
+        assert.equal(requests, 128);
+        assert.match((await first('request', push)).error, /busy/);
+        for (const args of controls) assert.equal((await second(...args)).code, 'ap-capacity');
+        held.resolve({});
+        for (const reply of await Promise.all([...active, ...ordinary])) assert.ok('result' in reply);
+        for (const args of controls) assert.ok('result' in await second(...args));
+    } },
     { name: 'SharedWorker keeps stream handles scoped to their tab and rejects account conflicts', async run() {
         const originalSelf = globalThis.self;
         const methods = ["begin", "streamRead", "streamClose", "connect"];

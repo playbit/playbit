@@ -110,6 +110,8 @@ pub(super) struct State {
     pub(super) volume_handles: [u64; abi::MAX_VOLUMES],
     pub(super) volume_revision: u64,
     pub(super) volume_watch: Option<u64>,
+    identity_change_pending: bool,
+    presence_change_pending: bool,
     pub(super) host: Box<dyn Host>,
     pub(super) files: super::file_handles::Table,
     pub(super) generation: u32,
@@ -212,7 +214,7 @@ impl State {
     }
 
     pub(super) fn new(
-        context: GuestContext,
+        mut context: GuestContext,
         mut host: Box<dyn Host>,
     ) -> Result<Self, RuntimeError> {
         let supported = validate_context(&context, host.as_ref()).map_err(|error| {
@@ -220,6 +222,7 @@ impl State {
         })?;
         let (query_limits, view_bytes_limit, capability_names) =
             admit_host_parameters(host.as_ref(), &supported)?;
+        apply_local_name(&context.identity, &mut context.participants);
         let tracing = app_tracing(&context)?;
         let generation = allocate_generation(host.as_mut())?;
         let (capabilities, volume_handles) = admit_volumes(&context.volumes)?;
@@ -242,6 +245,8 @@ impl State {
             volume_handles,
             volume_revision: 1,
             volume_watch: None,
+            identity_change_pending: false,
+            presence_change_pending: false,
             host,
             generation,
             query_limits,
@@ -374,7 +379,10 @@ pub fn validate_volumes(volumes: &[AvailableVolume]) -> HostResult<()> {
             || (volume.is_root && volume.backing != playbit_api::abi::data::VOLUME_PLAYBIT)
             || (volume.backing == playbit_api::abi::data::VOLUME_BUNDLE
                 && volume.rights != VolumeRights::READ)
-            || volume.rights.0 & !VolumeRights::ALL.0 != 0
+            || volume.rights.0 & !(VolumeRights::ALL.0 | VolumeRights::KV_WRITE.0) != 0
+            || (volume.rights.contains(VolumeRights::KV_WRITE)
+                && (volume.role != playbit_api::abi::data::VolumeRole::Root as u32
+                    || !volume.rights.contains(VolumeRights::READ)))
             || volume.name.is_empty()
             || volume.name.len() > 256
             || volume.tags.len() > 64
@@ -435,6 +443,7 @@ pub(super) fn validate_context(
     {
         return Err(HostError::LimitExceeded);
     }
+    validate_guest_name(&context.identity.display_name)?;
     validate_participants(&context.participants)?;
     let mut supported: BTreeSet<_> =
         abi::REGISTRY.iter().map(|(opcode, _)| *opcode).filter(|opcode| opcode.is_core()).collect();
@@ -473,6 +482,9 @@ pub(super) fn validate_participants(participants: &[Participant]) -> HostResult<
     if participants.len() > 1024 {
         return Err(HostError::LimitExceeded);
     }
+    for participant in participants {
+        validate_guest_name(&participant.display_name)?;
+    }
     let mut ids = BTreeSet::new();
     if participants.iter().any(|participant| {
         !ids.insert((participant.account_id, participant.device_id, participant.instance_id))
@@ -480,6 +492,33 @@ pub(super) fn validate_participants(participants: &[Participant]) -> HostResult<
         return Err(HostError::InvalidArgument);
     }
     Ok(())
+}
+
+fn validate_guest_name(name: &str) -> HostResult<()> {
+    if name.is_empty() {
+        return Ok(());
+    }
+    crate::store::account::validate_display_name(name).map_err(|_| HostError::InvalidArgument)
+}
+
+pub(super) fn apply_local_name(
+    identity: &super::host::Identity,
+    participants: &mut [Participant],
+) -> bool {
+    // A native guest's context device can differ from its AP transport device.
+    // Only substitute a local label when the roster identifies one such instance.
+    let mut matches = participants
+        .iter_mut()
+        .filter(|p| p.account_id == identity.account_id && p.instance_id == identity.instance_id);
+    let Some(own) = matches.next() else { return false };
+    if matches.next().is_some()
+        || (identity.display_name.is_empty() && own.device_id != identity.device_id)
+        || own.display_name == identity.display_name
+    {
+        return false;
+    }
+    own.display_name.clone_from(&identity.display_name);
+    true
 }
 
 fn app_tracing(context: &GuestContext) -> Result<crate::trace::AppScope, RuntimeError> {

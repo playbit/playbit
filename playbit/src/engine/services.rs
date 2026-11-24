@@ -8,13 +8,38 @@ use crate::{
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
+
+struct AppDataRecovery {
+    stopping: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl AppDataRecovery {
+    fn join(&mut self) {
+        if self.worker.take().is_some_and(|worker| worker.join().is_err()) {
+            crate::diagnostic!("Local app data recovery worker stopped unexpectedly");
+        }
+    }
+}
+
+impl Drop for AppDataRecovery {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        self.join();
+    }
+}
 
 /// Clones share the same store; complete fresh-account enrollment before
 /// lending clones to other owners, since account binding requires exclusivity.
 #[derive(Clone)]
 pub struct Services {
+    // Last service owner retires the worker before relinquishing its profile.
+    app_data_recovery: Option<Arc<AppDataRecovery>>,
     /// Trusted management access. Portable apps receive scoped runtime contexts,
     /// not this handle. Workers may clone the Arc; the store closes only after
     /// its last owner releases it, so retire workers before tearing down the host.
@@ -35,14 +60,65 @@ impl Services {
         let wake = Arc::new(wake);
         let notify = wake.clone();
         let store = Arc::new(LocalStore::open_with_wake(&path, move || notify())?);
-        Ok(Self {
+        let mut services = Self {
+            app_data_recovery: None,
             store,
             #[cfg(feature = "file-provider")]
             provider_store: Default::default(),
             path,
             #[cfg(any(feature = "native-runtime", feature = "wasm-runtime"))]
             files: Arc::new(std::sync::Mutex::new(None)),
-        })
+        };
+        services.resume_app_data_removals();
+        Ok(services)
+    }
+
+    // Called once, after exclusive account binding. An ordinary profile only
+    // probes the first intent key. Cleanup always shares this store's gates,
+    // caches and lifetime lock, including while the service owner is exiting.
+    pub(super) fn resume_app_data_removals(&mut self) {
+        if self.app_data_recovery.is_some() {
+            return;
+        }
+        let start = || -> Result<Option<AppDataRecovery>> {
+            if !self.store.has_pending_app_data_removal()? {
+                return Ok(None);
+            }
+            let store = self.store.clone();
+            let stopping = Arc::new(AtomicBool::new(false));
+            let stop = stopping.clone();
+            let path = self.path.clone();
+            let worker = std::thread::Builder::new()
+                .name("app-data-recovery".into())
+                .spawn(move || {
+                    if let Err(error) =
+                        store.resume_app_data_removals(|| stop.load(Ordering::Acquire))
+                    {
+                        crate::platform::failure::log(
+                            &path,
+                            "resume local app data removal",
+                            &error.to_string(),
+                        );
+                    }
+                })
+                .map_err(|error| crate::store::Error::System(error.to_string()))?;
+            Ok(Some(AppDataRecovery { stopping, worker: Some(worker) }))
+        };
+        match start() {
+            Ok(worker) => self.app_data_recovery = worker.map(Arc::new),
+            Err(error) => crate::platform::failure::log(
+                &self.path,
+                "schedule local app data removal",
+                &error.to_string(),
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn await_app_data_recovery(&mut self) {
+        if let Some(worker) = self.app_data_recovery.as_mut() {
+            Arc::get_mut(worker).expect("test owns all services").join();
+        }
     }
 
     #[cfg(any(feature = "native-runtime", feature = "wasm-runtime"))]
@@ -130,10 +206,9 @@ impl Services {
         let build = self.cache_package(&package)?;
         let path = self.path.join(crate::paths::BUILDS).join(&build);
         self.store.queue_build_upload(&build, &path)?;
-        self.store.remember_imported_app(&package)?;
         let root = app.volume_id(crate::package::AutomaticVolumeRole::Root, None, None, None)?;
         self.store
-            .create_session_binding_with_seed(
+            .bind_automatic_session(
                 crate::store::SessionCreation {
                     app,
                     selector: BuildSelector::Exact { build_id: build.clone() },
@@ -144,7 +219,8 @@ impl Services {
                         .declares(crate::package::AutomaticVolumeRole::Session),
                     user_volume: None,
                 },
-                seed,
+                Some(seed),
+                Some(&package),
             )
             .map_err(Into::into)
     }
@@ -183,6 +259,7 @@ impl Services {
         testing: Option<&crate::network::ap::hello::TestingCredentials>,
     ) -> Result<Self> {
         Ok(Self {
+            app_data_recovery: None,
             store: Arc::new(LocalStore::open_admitted(path, |path, fresh| {
                 super::testing_profile::admit(path, fresh, testing)
                     .map_err(|error| crate::store::Error::Credentials(error.to_string()))

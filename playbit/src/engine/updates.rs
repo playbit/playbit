@@ -15,13 +15,19 @@ pub(super) fn prepare_candidate(
     store: &LocalStore,
     id: &str,
     apps: &Path,
-    resolution: Value,
+    resolution: Option<Value>,
 ) -> Result<PreparedUpdate> {
     let prior = store.session(id)?;
-    let version = resolution["resolved_build_id"].as_str().ok_or("missing resolved build")?;
-    if !crate::identifier::valid(version, 32) {
-        return Err("Invalid resolved build identity".into());
+    let mut candidate = prior.clone();
+    if let Some(resolution) = resolution {
+        let version = resolution["resolved_build_id"].as_str().ok_or("missing resolved build")?;
+        if !crate::identifier::valid(version, 32) {
+            return Err("Invalid resolved build identity".into());
+        }
+        candidate.selector = serde_json::from_value(resolution["selector"].clone())?;
+        candidate.resolved_build_id = version.into();
     }
+    let version = candidate.resolved_build_id.as_str();
     let package = store
         .authenticate_package(Package::open(&apps.join(version))?, crate::store::now_unix_secs())?;
     if package.id()? != version {
@@ -33,9 +39,6 @@ pub(super) fn prepare_candidate(
     // Validation compiles/checks exports on the network worker. It never
     // instantiates a VM, runs pb_main, or admits guest data operations.
     runtime.validate_guest(&package.wasm()?)?;
-    let mut candidate = prior.clone();
-    candidate.selector = serde_json::from_value(resolution["selector"].clone())?;
-    candidate.resolved_build_id = version.into();
     let grants = store.personal_volume_grants(id)?.unwrap_or_default();
     Ok(PreparedUpdate { candidate, prior, grants })
 }
@@ -141,7 +144,7 @@ pub(super) fn prepare_update(
         let path = apps.join(version);
         remote.ensure_build(store, &candidate, &path)?;
     }
-    prepare_candidate(runtime, store, id, apps, resolution)
+    prepare_candidate(runtime, store, id, apps, Some(resolution))
 }
 
 /// Local bindings follow only their authenticated app's published code. This
@@ -180,10 +183,10 @@ fn prepare_local_update(
         store,
         &session.id,
         apps,
-        serde_json::json!({
+        Some(serde_json::json!({
             "revision":revision,
             "selector":session.selector,
             "resolved_build_id":build,
-        }),
+        })),
     )
 }

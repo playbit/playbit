@@ -64,9 +64,10 @@ The intent disappears after app metadata and Git setup succeed. An
 existing Playbit source directory can also be initialized for another publisher;
 its source and existing data are preserved.
 
-The Rust starter has seven maintained files: `Cargo.toml`, `playbit.toml`,
-`src/app.rs`, `playbit-volumes.json`, `icon.svg`, `.gitignore` and
-`.cargo/config.toml`. Its only app dependency is `playbit-api`.
+The Rust starter includes the Little List source in `src/`, its corkboard artwork
+in `icon.png`, and the project files `Cargo.toml`, `playbit.toml`,
+`playbit-volumes.json`, `.gitignore` and `.cargo/config.toml`. Its only app
+dependency is `playbit-api`.
 
 `playbit.toml` declares the app ID, build commands, bundled resources, required
 host features and optional trace names. See the [manifest reference](playbit-toml.md).
@@ -354,8 +355,13 @@ DataReady; `context.take_channel(subscription)` returns `Completion::Ready(())`
 when subscribed. `drafts.publish(context, bytes)` returns another operation handle;
 its completion means AP accepted a live delivery attempt. A subscribed publisher
 receives its own messages. Read ChannelMessage with `event.channel_message()` for
-the channel handle, sender identity, message ID and bytes. Use PresenceChanged
-and `context.presence()` for connected app instances.
+the channel handle, sender identity, message ID and bytes.
+
+For a roster-only app, call `context.session()?` once at startup to start or
+reuse live membership. Read the cached roster with `context.presence(&mut rows)`.
+The first read can be empty while joining. On the first and subsequent
+`PresenceChanged` events, reread the roster and use each participant's
+`display_name()?` for its label. Opening a named channel is optional.
 
 Names are case-sensitive, unnormalized UTF-8 strings of 1–223 bytes. Each instance
 can open 16 names, and messages can contain at most 32 KiB. `unsubscribe` stops

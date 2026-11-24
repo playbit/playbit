@@ -12,6 +12,19 @@ pub(crate) struct PreparedEntry {
 }
 
 impl LiveReplicas {
+    pub(crate) async fn retire_entry(&mut self, address: EntryAddress) -> Result<()> {
+        let source = ReplicaSource::Entry(address);
+        if let Some(index) = self.entries.iter().position(|entry| entry.key.source() == source) {
+            self.retire(index).await?;
+            self.entries.swap_remove(index);
+        }
+        self.publisher
+            .forget_scope(PublishKey { volume: address.volume, entry: Some(address.entry) })
+            .await?;
+        self.notices.retire_entry(address);
+        Ok(())
+    }
+
     pub(crate) async fn begin_entry(
         &mut self,
         connection: Arc<ApConnection>,
@@ -23,6 +36,8 @@ impl LiveReplicas {
             session: session.clone(),
         })?;
         key.entry = Some(address.entry);
+        let mut scope = PublishScope::for_volume(&self.store, address.volume, session.as_ref())?;
+        scope.entry = Some(address.entry);
         let index = self.reserve(key)?;
         self.retire(index).await?;
         self.generation =
@@ -31,10 +46,12 @@ impl LiveReplicas {
         self.entries[index].key = key;
         self.entries[index].preparation = Some(generation);
         self.entries[index].publication_generation = None;
-        let mut scope = PublishScope::new(address.volume, session.as_ref())?;
-        scope.entry = Some(address.entry);
-        let subscription =
-            replication::subscribe(&connection, ReplicaScope::Entry { address, session }).await?;
+        let subscription = replication::subscribe_scoped(
+            &connection,
+            ReplicaScope::Entry { address, session },
+            scope.route,
+        )
+        .await?;
         let publication = self
             .publisher
             .begin_bootstrap(PublishKey { volume: address.volume, entry: Some(address.entry) })
@@ -91,11 +108,20 @@ impl LiveReplicas {
             .find(|entry| entry.key.source() == source && entry.ready)
             .ok_or("entry subscription is not installed")?;
         let receive = entry.receive.as_ref().ok_or("entry receiver is not installed")?;
-        receive.control.as_ref().ok_or("entry checkpoint is unavailable")?.checkpoint().await?;
-        if self.notices.state(source) == Some((receive.epoch, ReplicaState::Gap)) {
-            return Err(LiveGap.into());
+        let result =
+            receive.control.as_ref().ok_or("entry checkpoint is unavailable")?.checkpoint().await;
+        let state = self.notices.state(source);
+        if state == Some((receive.epoch, ReplicaState::Gap))
+            && !result.as_ref().is_err_and(|error| error.is::<replication::CheckpointCapacity>())
+            && let Some(error) = receive.apply_failure(ReplicaState::Gap)
+        {
+            return Err(error);
         }
-        if self.notices.state(source) != Some((receive.epoch, ReplicaState::Live)) {
+        result?;
+        if state == Some((receive.epoch, ReplicaState::Gap)) {
+            return Err(LiveGap::Delivery.into());
+        }
+        if state != Some((receive.epoch, ReplicaState::Live)) {
             return Err("entry subscription lost its caught-up boundary".into());
         }
         Ok(())

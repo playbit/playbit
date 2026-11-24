@@ -29,11 +29,10 @@ pub(in crate::runtime) fn admit_begin(
         | Opcode::SchemaReadBegin
         | Opcode::ObjectFieldReadAuthenticatedBegin => super::VolumeRights::READ,
         Opcode::SchemaEstablishBegin => super::VolumeRights::SCHEMA,
-        Opcode::KvPutBegin
-        | Opcode::BloblogAppendBegin
-        | Opcode::KvDeleteBegin
-        | Opcode::ObjectEditBegin
-        | Opcode::ObjectCreateBegin => super::VolumeRights::WRITE,
+        Opcode::KvPutBegin | Opcode::KvDeleteBegin => super::VolumeRights::KV_WRITE,
+        Opcode::BloblogAppendBegin | Opcode::ObjectEditBegin | Opcode::ObjectCreateBegin => {
+            super::VolumeRights::WRITE
+        }
         _ => return Err(HostError::Unsupported),
     };
     resolve_volume(state, volume, rights).map(|_| ())

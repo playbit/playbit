@@ -18,7 +18,7 @@ function page(states, failure) {
     const context = vm.createContext({ encodeId, decodeId, validId, replicaCapability,
         document: { createElement: tag => ({ tag }) }, navigator: { clipboard: { writeText: async text => copied.push(text) } },
         onboarding, error, console: { error: (...args) => failures.push(args) }, status: text => { status = text; },
-        joining: false, paused: false, opened: false, canJoin: true, attempt: 0, syncTimer: undefined,
+        recoveryListAccount: undefined, joining: false, paused: false, opened: false, canJoin: true, attempt: 0, syncTimer: undefined,
         invitation: { url: "https://playbit.app/s#example", uri: "playbit:session:public:example", session_id: "session", privateKey: {},
             invitation: { session: { id: "session" }, root: { id: "root", share_key_with_service: false, personal: false }} },
         enrollment: { account: "bob-account" }, personalCatalog: [], runtimeVersion: undefined,
@@ -62,6 +62,18 @@ test("unsupported scene has author guidance and conditional installed-app action
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(ui.requests(), 2);
     assert.equal(ui.saved.at(-1).paused, false);
+});
+
+test("joining retires the recovery worker and its streams before checking invitation readiness", async () => {
+    const ui = page([{ kind: 'waiting_peer' }]);
+    const closed = [];
+    ui.context.recoveryListAccount = 'bob-account';
+    ui.context.streams.add(42);
+    ui.context.apClient.streamClose = async handle => closed.push(handle);
+    await ui.join();
+    assert.equal(ui.terminated(), 1);
+    assert.deepEqual(closed, [42, 1]);
+    assert.equal(ui.requests(), 1); assert.equal(ui.opens(), 0);
 });
 
 test("denied invitation supplies account-identification action and retries access without sharing secrets", async () => {

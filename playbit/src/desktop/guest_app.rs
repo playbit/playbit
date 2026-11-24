@@ -888,7 +888,9 @@ pub(super) fn refresh_installation(profile: &Path) -> Result<()> {
                 temporary.join("Contents/Info.plist"),
                 crate::engine::installation::read(&bundle.join("Contents/Info.plist"), 64 * 1024)?,
             )?;
-            for name in ["Assets.car", "icon-guest.icns", "App.icns", "AppDark.icns"] {
+            for name in
+                ["Assets.car", "icon-guest.icns", "App.icns", "AppDark.icns", icon::PNG_ICON]
+            {
                 let source = bundle.join("Contents/Resources").join(name);
                 match crate::engine::installation::read(&source, 16 * 1024 * 1024) {
                     Ok(bytes) => fs::write(temporary.join("Contents/Resources").join(name), bytes)?,
@@ -1095,6 +1097,8 @@ fn guest_icon_version(compiled: &Path) -> Result<String> {
         return Err("Invalid packaged guest icon version".into());
     }
     let mut hash = blake3::Hasher::new();
+    // Rebuild cached wrappers that predate the PNG-specific icon filename.
+    hash.update(icon::PNG_ICON.as_bytes());
     hash.update(version.as_bytes());
     hash.update(crate::package::artwork::macos_template_digest().as_bytes());
     Ok(crate::identifier::encode(hash.finalize().as_bytes()))
@@ -1106,8 +1110,13 @@ fn write_bundle_icon(
     output: &Path,
 ) -> Result<&'static str> {
     if let Some(source) = source {
+        let format = image::guess_format(source);
+        if matches!(format, Ok(image::ImageFormat::Png)) {
+            write_icon(source, &output.join(icon::PNG_ICON), false)?;
+            return Ok("    <key>CFBundleIconFile</key><string>AppPNG.icns</string>");
+        }
         write_icon(source, &output.join("App.icns"), false)?;
-        if image::guess_format(source).is_err() {
+        if format.is_err() {
             write_icon(source, &output.join("AppDark.icns"), true)?;
         }
         return Ok("    <key>CFBundleIconFile</key><string>App.icns</string>");
@@ -1427,6 +1436,23 @@ mod tests {
                 fs::read(compiled.join(name)).unwrap()
             );
             fs::remove_file(output.join(name)).unwrap();
+        }
+        // Raster sources select their Dock treatment from their original format.
+        for (format, filename) in
+            [(image::ImageFormat::Png, icon::PNG_ICON), (image::ImageFormat::Jpeg, "App.icns")]
+        {
+            let mut source = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(2, 2).write_to(&mut source, format).unwrap();
+            let raster = tempfile::tempdir().unwrap();
+            let info = write_bundle_icon(Some(source.get_ref()), &compiled, raster.path()).unwrap();
+            assert!(
+                info.contains(&format!("<key>CFBundleIconFile</key><string>{filename}</string>"))
+            );
+            let files: Vec<_> = fs::read_dir(raster.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            assert_eq!(files, [std::ffi::OsStr::new(filename)]);
         }
         let source =
             br#"<svg width="24" height="24"><rect width="24" height="24" fill="red"/></svg>"#;

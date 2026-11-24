@@ -320,26 +320,18 @@ impl LocalStore {
                 scopes.push(scope);
             }
         }
-        encode(&RecoveryCatalog {
-            account: self.account.id,
-            volumes: self
-                .volumes()?
-                .into_iter()
-                .filter_map(|volume| match self.replication_supported(volume.id) {
-                    Ok(false) => None,
-                    Ok(true) => Some(Ok(volume)),
-                    Err(error) => Some(Err(error)),
-                })
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .map(|volume| {
-                    let credentials = self.credentials(volume.id)?;
-                    Ok(CatalogVolume { volume, credentials })
-                })
-                .collect::<Result<_>>()?,
-            invitations,
-            scopes,
-        })
+        let mut volumes = Vec::new();
+        for volume in self.volumes()? {
+            if !self.replication_supported(volume.id)? {
+                continue;
+            }
+            match self.credentials(volume.id) {
+                Ok(credentials) => volumes.push(CatalogVolume { volume, credentials }),
+                Err(Error::NotFound(_)) if self.uses_world_projection(volume.id)? => (),
+                Err(error) => return Err(error),
+            }
+        }
+        encode(&RecoveryCatalog { account: self.account.id, volumes, invitations, scopes })
     }
 
     /// Union both devices' capabilities. Existing local session adoption and
@@ -438,12 +430,18 @@ impl LocalStore {
         for item in &catalog.volumes {
             if let Some(bytes) = local.get(format!("volume/{}", item.volume.id).as_bytes())? {
                 let volume: Volume = decode(&bytes)?;
-                let credentials = local
-                    .get(format!("credentials/{}", volume.id).as_bytes())?
-                    .ok_or(Error::corrupt("volume credentials record is missing"))?;
-                if volume.owner != item.volume.owner
-                    || decode::<Credentials>(&credentials)? != item.credentials
-                {
+                let credentials = local.get(format!("credentials/{}", volume.id).as_bytes())?;
+                let keys_match = match credentials {
+                    Some(bytes) => {
+                        volume.owner == item.volume.owner
+                            && decode::<Credentials>(&bytes)? == item.credentials
+                    }
+                    None => {
+                        volume.same_identity(&item.volume)
+                            && self.uses_world_projection(volume.id)?
+                    }
+                };
+                if !keys_match {
                     return Err(Error::InvalidInput(
                         "recovered volume keys conflict with this device",
                     ));
@@ -539,6 +537,13 @@ impl LocalStore {
             }
             let key = format!("volume/{}", item.volume.id);
             if tx.get(key.as_bytes())?.is_some() {
+                if !tx.has(format!("credentials/{}", item.volume.id).as_bytes())? {
+                    tx.put(
+                        format!("credentials/{}", item.volume.id).as_bytes(),
+                        &encode(&item.credentials)?,
+                    )?;
+                    new_volumes += 1;
+                }
                 continue;
             }
             tx.put(key.as_bytes(), &encode(&item.volume)?)?;
@@ -735,12 +740,14 @@ mod tests {
     // ordinary parallel store tests never initialize a process trace source.
     fn trace_capture() -> Option<(crate::trace::Recorder, std::path::PathBuf)> {
         use std::os::unix::fs::DirBuilderExt;
-        let directory = std::path::PathBuf::from(std::env::var_os("PLAYBIT_PROFILE")?)
-            .join(crate::paths::TRACE);
+        let profile = std::env::var_os("PLAYBIT_PROFILE")?;
         crate::trace::initialize(8, &[]).unwrap();
         if !crate::trace::is_recording() {
             return None;
         }
+        let directory = crate::engine::profile::isolated_benchmark_profile(Path::new(&profile))
+            .expect("benchmark trace output requires an isolated profile")
+            .join(crate::paths::TRACE);
         std::fs::DirBuilder::new().mode(0o700).create(&directory).unwrap();
         let recorder = crate::trace::Recorder::start(&directory, &directory, false).unwrap();
         Some((recorder, directory))

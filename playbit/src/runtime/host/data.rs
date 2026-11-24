@@ -121,9 +121,8 @@ impl DataKind {
             | Self::FileTransferStart
             | Self::FileTransferChunk
             | Self::FileTransferCommit
-            | Self::BloblogAppend
-            | Self::KvPut
-            | Self::KvDelete => VolumeRights::WRITE,
+            | Self::BloblogAppend => VolumeRights::WRITE,
+            Self::KvPut | Self::KvDelete => VolumeRights::KV_WRITE,
             _ => VolumeRights::READ,
         }
     }

@@ -252,6 +252,7 @@ FIELD_TYPE(PBParticipant, account_id, ExpectedBytes16);
 FIELD_TYPE(PBParticipant, device_id, ExpectedBytes16);
 FIELD_TYPE(PBParticipant, instance_id, ExpectedBytes16);
 FIELD_TYPE(PBParticipant, build_id, ExpectedBytes32);
+FIELD_TYPE(PBParticipant, display_name, ExpectedBytes256);
 
 FIELD_TYPE(PBFileReference, size, uint32_t);
 FIELD_TYPE(PBFileReference, written, uint32_t);
@@ -303,6 +304,7 @@ FIELD_TYPE(PBIdentity, instance_id, ExpectedBytes16);
 FIELD_TYPE(PBIdentity, session_id, ExpectedBytes32);
 FIELD_TYPE(PBIdentity, flags, uint32_t);
 FIELD_TYPE(PBIdentity, reserved, uint32_t);
+FIELD_TYPE(PBIdentity, display_name, ExpectedBytes256);
 
 FIELD_TYPE(PBApp, size, uint32_t);
 FIELD_TYPE(PBApp, written, uint32_t);

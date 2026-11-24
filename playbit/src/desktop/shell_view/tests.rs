@@ -19,24 +19,38 @@ fn shell_zoom_scales_templates_modals_and_native_minimum(cx: &mut gpui::TestAppC
                 assert_eq!(window.min_size(), Some(sessions_min_size(scale)));
                 let template = window
                     .accessibility_nodes_for_test()
-                    .find(|(_, node)| node.label() == Some("Try a TODO app"))
+                    .find(|(_, node)| node.label() == Some("Make an app"))
                     .expect("welcome template")
                     .1
                     .bounds()
                     .expect("template bounds");
                 assert!((template.width() - f64::from(200. * scale)).abs() < 1.);
-                assert!((template.height() - f64::from(162. * scale)).abs() < 1.);
+                assert!((template.height() - f64::from(146. * scale)).abs() < 1.);
+                let example = window
+                    .accessibility_nodes_for_test()
+                    .find(|(_, node)| node.label() == Some("Little List"))
+                    .expect("featured example")
+                    .1
+                    .bounds()
+                    .expect("example bounds");
+                assert!((example.width() - f64::from(96. * scale)).abs() < 1.);
+                assert!((example.height() - f64::from(80. * scale)).abs() < 1.);
+                assert!((template.x0 - example.x0 - f64::from(8. * scale)).abs() < 1.);
+                assert!((template.y0 - example.y0 - f64::from(140. * scale)).abs() < 2.);
             })
             .unwrap();
         host.update(cx, |host, cx| host.open_join_dialog(cx));
         cx.run_until_parked();
         window
             .update(cx, |_, window, _| {
-                assert!(
-                    window
-                        .accessibility_nodes_for_test()
-                        .any(|(_, node)| node.label() == Some("Join") && node.is_disabled())
-                );
+                let submit = window
+                    .accessibility_nodes_for_test()
+                    .find(|(_, node)| node.label() == Some("Join Session…"))
+                    .expect("join action")
+                    .1;
+                assert!(submit.is_disabled());
+                let right = window.viewport_size().width.to_f64() / 2. + f64::from(192. * scale);
+                assert!((submit.bounds().unwrap().x1 - right).abs() < 2.);
             })
             .unwrap();
         // Close the dialog by its actual keyboard route at the current scale.
@@ -234,7 +248,7 @@ fn initial_link_shows_sign_in_for_an_unenrolled_profile(cx: &mut gpui::TestAppCo
     responses
         .try_send(WorkerResponse::from_reply(Ok(Reply::InvitationPreview(
             crate::store::InvitationPreview {
-                session: "shared-session".into(),
+                session: crate::store::session_id(&[7; crate::store::SEED_BYTES]).unwrap(),
                 paused: false,
                 retained: false,
                 received: None,
@@ -282,7 +296,7 @@ fn resource_launch_waits_for_late_url_and_opens_retained_session(cx: &mut gpui::
     });
     assert!(matches!(
         requests.try_recv().unwrap(),
-        Message::Request(QueuedRequest { request: Request::Status, .. })
+        Message::Request(QueuedRequest { request: Request::DesktopLaunch, .. })
     ));
     assert!(
         matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest {request:Request::PrepareSession {session}, ..}) if session == id)
@@ -319,12 +333,13 @@ fn signed_out_launch_and_reopen_only_show_sign_in(cx: &mut gpui::TestAppContext)
 fn retained_launch_waits_for_sign_in_and_resumes_once(cx: &mut gpui::TestAppContext) {
     use crate::ui::desktop::sign_in::flow::Step;
     let (host, responses, requests) = launch_link(cx);
+    let session_id = crate::store::session_id(&[7; crate::store::SEED_BYTES]).unwrap();
     responses.try_send(saved_status(serde_json::json!({"sessions":[], "enrolled":false}))).unwrap();
     cx.run_until_parked();
     responses
         .try_send(WorkerResponse::from_reply(Ok(Reply::InvitationPreview(
             crate::store::InvitationPreview {
-                session: "saved-session".into(),
+                session: session_id.clone(),
                 retained: true,
                 paused: false,
                 received: None,
@@ -340,7 +355,7 @@ fn retained_launch_waits_for_sign_in_and_resumes_once(cx: &mut gpui::TestAppCont
     }
     host.read_with(cx, |host, _| {
         assert!(host.sessions_window.is_none());
-        assert_eq!(host.opening.as_deref(), Some("saved-session"));
+        assert_eq!(host.opening.as_deref(), Some(session_id.as_str()));
         assert!(!host.joining);
     });
     host.update(cx, |host, cx| {
@@ -367,7 +382,7 @@ fn retained_launch_waits_for_sign_in_and_resumes_once(cx: &mut gpui::TestAppCont
             ..
         }) = message
         {
-            assert_eq!(session, "saved-session");
+            assert_eq!(session, session_id);
             starts += 1;
         }
     }
@@ -465,20 +480,9 @@ fn status_refresh_preserves_welcome_and_invitation_navigation(cx: &mut gpui::Tes
     responses.try_send(saved_status(status.clone())).unwrap();
     cx.run_until_parked();
     let window = host.read_with(cx, |host, _| {
-        assert_eq!(
-            host.invitation.as_ref().unwrap().session,
-            "older-invitation",
-            "ordinary startup still restores a pending invitation"
-        );
+        assert!(host.invitation.is_none());
         host.sessions_window.unwrap()
     });
-    cx.update(|cx| {
-        window
-            .update(cx, |host, window, cx| host.navigation_controls["join"].read(cx).focus(window))
-            .unwrap()
-    });
-    test_support::press(window, "enter", cx);
-    host.read_with(cx, |host, _| assert!(host.invitation.is_none()));
     status["availability"] = "Reconnecting…".into();
     responses.try_send(saved_status(status.clone())).unwrap();
     cx.run_until_parked();
@@ -499,24 +503,19 @@ fn status_refresh_preserves_welcome_and_invitation_navigation(cx: &mut gpui::Tes
             })
             .unwrap()
     });
-    host.update(cx, |host, cx| {
-        host.send_action(
-            Request::PreviewInvitation {
-                invitation: crate::examples::EXAMPLES[0].invitation.into(),
-            },
-            cx,
-        )
-    });
+    let reference = crate::store::SessionReference::new([8; crate::store::SEED_BYTES]).unwrap();
+    let selected = reference.internal_id().to_owned();
+    host.update(cx, |host, _| host.preview_invitation_link(reference).unwrap());
     assert!(matches!(
         requests.try_recv().unwrap(),
-        Message::Request(QueuedRequest { request: Request::PreviewInvitation { .. }, .. })
+        Message::Request(QueuedRequest { request: Request::PreviewDesktopInvitation { .. }, .. })
     ));
     assert!(requests.try_recv().is_err());
     responses
         .try_send(WorkerResponse::from_reply(Ok(Reply::InvitationPreview(
             crate::store::InvitationPreview {
-                session: "requested-example".into(),
-                paused: true,
+                session: selected.clone(),
+                paused: false,
                 retained: false,
                 received: None,
             },
@@ -525,14 +524,14 @@ fn status_refresh_preserves_welcome_and_invitation_navigation(cx: &mut gpui::Tes
     cx.run_until_parked();
     assert!(matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest {
         request:Request::WatchInvitation {session}, ..
-    }) if session == "requested-example"));
+    }) if session == selected));
     status["availability"] = "Connected".into();
     responses.try_send(saved_status(status)).unwrap();
     cx.run_until_parked();
     host.read_with(cx, |host, _| {
         assert_eq!(
             host.invitation.as_ref().unwrap().session,
-            "requested-example",
+            selected,
             "status must preserve the explicitly selected invitation"
         )
     });
@@ -555,7 +554,7 @@ fn initial_status_does_not_replace_a_late_launch_url(cx: &mut gpui::TestAppConte
     cx.run_until_parked();
     assert!(matches!(
         requests.try_recv().unwrap(),
-        Message::Request(QueuedRequest { request: Request::PreviewInvitation { .. }, .. })
+        Message::Request(QueuedRequest { request: Request::PreviewDesktopInvitation { .. }, .. })
     ));
     responses.try_send(saved_status(serde_json::json!({
         "sessions":[], "enrolled":true,
@@ -572,7 +571,9 @@ fn initial_status_does_not_replace_a_late_launch_url(cx: &mut gpui::TestAppConte
 }
 
 #[gpui::test]
-fn late_ordinary_open_restores_pending_invitation_once(cx: &mut gpui::TestAppContext) {
+fn ordinary_open_after_status_keeps_unresolved_invitation_out_of_the_window(
+    cx: &mut gpui::TestAppContext,
+) {
     cx.text_system()
         .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(
             "../../../assets/InterVariable.ttf"
@@ -612,11 +613,8 @@ fn late_ordinary_open_restores_pending_invitation_once(cx: &mut gpui::TestAppCon
     cx.update(|cx| Shell::show_sessions(&host, cx));
     cx.run_until_parked();
     host.read_with(cx, |host, _| {
-        assert_eq!(
-            host.invitation.as_ref().map(|i| i.session.as_str()),
-            Some("saved-invitation"),
-            "late ordinary-open delivery must retain startup restoration"
-        )
+        assert!(host.invitation.is_none());
+        assert!(host.sessions_window.is_some());
     });
     assert!(requests.try_recv().is_err());
 }
@@ -715,24 +713,26 @@ fn cli_url_registers_open_intent_before_worker_response(cx: &mut gpui::TestAppCo
     });
     assert!(matches!(
         requests.try_recv().unwrap(),
-        Message::Request(QueuedRequest { request: Request::Status, .. })
+        Message::Request(QueuedRequest { request: Request::DesktopLaunch, .. })
     ));
     assert!(
         matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest {request:Request::PrepareSession {session}, ..}) if session == id)
     );
-    // A link to a session this device does not hold is previewed, as is any other text.
+    // A new link opens a preview; an invalid link cannot start any engine work.
     host.update(cx, |host, _| {
         host.enrolled = Some(false);
         host.sessions.clear();
     });
-    for link in [uri, "not a link".into()] {
-        urls.try_send(Ok(link)).unwrap();
-        cx.run_until_parked();
-        assert!(matches!(
-            requests.try_recv().unwrap(),
-            Message::Request(QueuedRequest { request: Request::PreviewInvitation { .. }, .. })
-        ));
-    }
+    urls.try_send(Ok(uri)).unwrap();
+    cx.run_until_parked();
+    assert!(matches!(
+        requests.try_recv().unwrap(),
+        Message::Request(QueuedRequest { request: Request::PreviewDesktopInvitation { .. }, .. })
+    ));
+    urls.try_send(Ok("not a link".into())).unwrap();
+    cx.run_until_parked();
+    assert!(requests.is_empty());
+    host.read_with(cx, |host, _| assert!(!host.error.is_empty()));
 }
 #[gpui::test]
 fn reopen_sessions_window_reuses_host_and_does_not_borrow_it_during_first_render(

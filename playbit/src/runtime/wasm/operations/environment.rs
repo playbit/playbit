@@ -99,7 +99,7 @@ pub(super) fn presence(
             pointer,
             capacity,
             stride,
-            participant_layout::LAYOUT,
+            participant_layout::OUTPUT,
             false,
             1024,
             Some(count),
@@ -118,6 +118,13 @@ pub(super) fn presence(
             record.write(memory.data, participant_layout::DEVICE_ID, &participant.device_id);
             record.write(memory.data, participant_layout::INSTANCE_ID, &participant.instance_id);
             record.write(memory.data, participant_layout::BUILD_ID, &participant.build_id);
+            if record.len()
+                >= participant_layout::DISPLAY_NAME
+                    + playbit_api::abi::environment::DISPLAY_NAME_BYTES
+            {
+                let name = environment::display_name_field(&participant.display_name);
+                record.write(memory.data, participant_layout::DISPLAY_NAME, &name);
+            }
             record.publish(memory.data, participant_layout::LAYOUT);
         }
         Ok(0)

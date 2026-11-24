@@ -12,15 +12,19 @@ def collect(mcp, directory):
             name="playbit", arguments=dict(op="authenticate-package", bundle=str(directory / (name + ".pbapp")))))
         for name in examples
     ]
-    result = subprocess.run([mcp], input="".join(json.dumps(item) + "\n" for item in requests),
-                            text=True, stdout=subprocess.PIPE, check=True, timeout=120)
+    process = subprocess.run([mcp], input="".join(json.dumps(item) + "\n" for item in requests),
+                             text=True, stdout=subprocess.PIPE, check=True, timeout=120)
     publisher = None
     evidence = None
-    for name, line in zip(examples, result.stdout.splitlines(), strict=True):
+    for name, line in zip(examples, process.stdout.splitlines(), strict=True):
         reply = json.loads(line)
-        if reply.get("id") != name or "result" not in reply or reply["result"].get("isError"):
-            raise ValueError(f"Could not authenticate {name} with the active Playbit signer profile")
-        identity = json.loads(reply["result"]["content"][0]["text"])
+        if reply.get("id") != name or "result" not in reply:
+            raise ValueError(f"Unexpected authentication response for {name}")
+        result = reply["result"]
+        message = result["content"][0]["text"]
+        if result.get("isError"):
+            raise ValueError(f"Could not authenticate {name}: {message}")
+        identity = json.loads(message)
         app = identity["app"]
         current = {key: identity[key] for key in ("issuer", "status")}
         if app["app_id"] != name or not app["publisher"] or any(
@@ -38,7 +42,10 @@ def collect(mcp, directory):
 
 if __name__ == "__main__":
     output = Path(sys.argv[2]).resolve(strict=True)
-    evidence = collect(sys.argv[1], output)
+    try:
+        evidence = collect(sys.argv[1], output)
+    except ValueError as error:
+        sys.exit(f"Browser examples: {error}")
     with (output / "example-publisher.json").open("x") as stream:
         json.dump(evidence, stream, separators=(",", ":"))
         stream.write("\n")

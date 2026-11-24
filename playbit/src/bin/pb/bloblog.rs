@@ -1,4 +1,5 @@
 //! Bounded log operations use the same scoped tool authority as the other pb data commands.
+use crate::usage_error;
 use playbit::{
     engine::{Request, Result, ipc, reply::Reply, tool_client::DataContext},
     runtime::host::{DataCall, DataOperation, DataResult},
@@ -13,8 +14,8 @@ pub(super) fn run(
 ) -> Result<()> {
     match args.first().map(String::as_str) {
         Some("create") if args.len() == 3 => {
-            let volume = Id::parse(&args[1])?;
-            playbit::store::volume_index::validate_name(&args[2])?;
+            let volume = Id::parse(&args[1]).map_err(usage_error)?;
+            playbit::store::volume_index::validate_name(&args[2]).map_err(usage_error)?;
             let Reply::VolumeEntry { entry, .. } =
                 call(Request::BloblogCreate { session: None, volume, name: args[2].clone() })?
             else {
@@ -27,7 +28,9 @@ pub(super) fn run(
         Some(command @ ("get" | "watch")) if (3..=4).contains(&args.len()) => {
             read(command, args, profile, call)
         }
-        _ => Err("expected pb bloblog create|put|put-file|get|watch; run pb help bloblog".into()),
+        _ => Err(usage_error(
+            "expected pb bloblog create|put|put-file|get|watch; run pb help bloblog",
+        )),
     }
 }
 
@@ -77,16 +80,16 @@ fn get(
 
 fn append(command: &str, args: &[String], call: &dyn Fn(Request) -> Result<Reply>) -> Result<()> {
     if args.len() - 4 > bloblog::MAX_BLOBS {
-        return Err("too many blobs".into());
+        return Err(usage_error("too many blobs"));
     }
-    let volume = Id::parse(&args[1])?;
-    let log = EntryId::parse(&args[2])?;
+    let volume = Id::parse(&args[1]).map_err(usage_error)?;
+    let log = EntryId::parse(&args[2]).map_err(usage_error)?;
     let mut blobs = Vec::with_capacity(args.len() - 4);
-    let append_id = Id::parse(&args[3])?;
+    let append_id = Id::parse(&args[3]).map_err(usage_error)?;
     for arg in &args[4..] {
         let data = if command == "put" {
             if arg.len() > bloblog::MAX_BLOB_BYTES {
-                return Err("blob exceeds 32 KiB".into());
+                return Err(usage_error("blob exceeds 32 KiB"));
             }
             arg.as_bytes().to_vec()
         } else {
@@ -117,9 +120,10 @@ fn read(
     profile: &Path,
     call: &dyn Fn(Request) -> Result<Reply>,
 ) -> Result<()> {
-    let volume = Id::parse(&args[1])?;
-    let log = EntryId::parse(&args[2])?;
-    let mut cursor = args.get(3).map(|s| bloblog::Cursor::parse(s)).transpose()?;
+    let volume = Id::parse(&args[1]).map_err(usage_error)?;
+    let log = EntryId::parse(&args[2]).map_err(usage_error)?;
+    let mut cursor =
+        args.get(3).map(|s| bloblog::Cursor::parse(s)).transpose().map_err(usage_error)?;
     // Capture the change boundary BEFORE reading, including on first
     // watch. An append racing a read makes the next wait return at once.
     // Start the engine before connecting the notification socket.

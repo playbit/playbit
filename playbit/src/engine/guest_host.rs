@@ -63,6 +63,7 @@ struct State {
     data_revision: u64,
     mount_revision: u64,
     changed: bool,
+    display_name: Option<String>,
 
     volumes: Option<Vec<crate::runtime::host::AvailableVolume>>,
 }
@@ -155,11 +156,15 @@ impl Inbox {
     pub fn has_ready(&self) -> bool {
         let state = self.0.state.lock().expect("guest completion lock poisoned");
         state.changed
+            || state.display_name.is_some()
             || state.volumes.is_some()
             || files::has_ready(&state)
             || state.data_entries().any(|entry| {
                 available(entry, state.revision) && !entry.notified && !entry.abandoned
             })
+    }
+    pub fn take_display_name(&self) -> Option<String> {
+        self.0.state.lock().expect("guest completion lock poisoned").display_name.take()
     }
     pub fn take_changed(&self) -> bool {
         let mut state = self.0.state.lock().expect("guest completion lock poisoned");
@@ -795,8 +800,8 @@ fn event_lane(
                     return Err("Guest event ownership or continuity was lost".into());
                 }
                 if let Some(reason) = notice.stop {
-                    if !notice.volumes.is_empty() {
-                        return Err("Stopped guest notice retained mounts".into());
+                    if !notice.volumes.is_empty() || !notice.display_name.is_empty() {
+                        return Err("Stopped guest notice retained guest metadata".into());
                     }
                     record_failure(&mut state, Failure::Stopped(reason));
                     drop(state);
@@ -819,6 +824,7 @@ fn event_lane(
                 state.data_revision = notice.data_revision;
                 state.mount_revision = notice.mount_revision;
                 if initial || changed {
+                    state.display_name = Some(notice.display_name);
                     if state.roots.enabled {
                         roots::request(&mut state, &bulk, notice.volumes)
                             .map_err(|error| format!("File root refresh failed: {error:?}"))?;
@@ -831,7 +837,8 @@ fn event_lane(
                 state.changed |= !initial && changed;
 
                 roots::settle(&mut state);
-                let wake = state.volumes.is_some()
+                let wake = state.display_name.is_some()
+                    || state.volumes.is_some()
                     || state.changed
                     || files::has_ready(&state)
                     || state.data_entries().any(|entry| available(entry, state.revision));

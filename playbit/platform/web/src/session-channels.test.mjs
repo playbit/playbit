@@ -16,13 +16,13 @@ async function fixture() {
     const streams=new Map(),ciphertexts=[];
     const key=new Uint8Array(32).fill(9),session=new Uint8Array(32).fill(7);
     const same=(a,b)=>Buffer.from(a).equals(Buffer.from(b));
-    const client=byte=>{
+    const client=(byte, displayName = '', displayNames = false, account = byte)=>{
         const events=[],status=[],controls=[];
-        const identity={session,account:new Uint8Array(16).fill(byte),device:new Uint8Array(16),instance:new Uint8Array(16).fill(byte+20),build:new Uint8Array(32).fill(8),proof:new Uint8Array(64)};
+        const identity={session,account:new Uint8Array(16).fill(account),device:new Uint8Array(16),instance:new Uint8Array(16).fill(byte+20),build:new Uint8Array(32).fill(8),proof:new Uint8Array(64), displayName};
         const authenticatedDevice=new Uint8Array(16).fill(byte+10);
         let generation=1;
         const transport={
-            async connect(){return {device:authenticatedDevice.slice(),generation};},
+            async connect(){return {device:authenticatedDevice.slice(),generation,displayNames};},
             consumed(){},
             async open(frame,device,admission){
                 assert.equal(admission,generation,"a new stream uses current transport readiness");
@@ -46,12 +46,96 @@ async function fixture() {
             },
             async close(handle){const stream=streams.get(handle);streams.delete(handle);stream?.waiting?.reject(new Error('closed'));},
         };
-        const channels=new SessionChannels(identity,key,protocol,transport,(name,source,message,data)=>events.push({name,source,message,data}),()=>controls.push("presence"),error=>status.push(error),()=>controls.push("update"));
-        return {channels,events,status,controls,transport,reconnect:async()=>{generation++;await channels.reconnect(authenticatedDevice,generation);}};
+        let presence;
+        const channels=new SessionChannels(identity,key,protocol,transport,(name,source,message,data)=>events.push({name,source,message,data}),()=>{
+            controls.push("presence"); presence?.(); presence = undefined;
+        },error=>status.push(error),()=>controls.push("update"));
+        return {channels,events,status,controls,transport, nextPresence: () => new Promise(resolve => { presence = resolve; }),
+            reconnect:async()=>{generation++;await channels.reconnect(authenticatedDevice,generation);}};
     };
-    return {client,ciphertexts};
+    return {client,ciphertexts,streams};
 }
 const settle=()=>new Promise(resolve=>setTimeout(resolve,20));
+
+test('late discovery cannot opt a retired membership into named rosters', async () => {
+    const f = await fixture(), client = f.client(1, 'Ada'), first = Promise.withResolvers();
+    const connect = client.transport.connect;
+    client.transport.connect = async () => ({ ...await connect(), displayNames: undefined });
+    let probes = 0, writes = 0;
+    client.transport.discoverNames = async () => ++probes === 1 ? first.promise : false;
+    client.transport.displayName = async () => { writes++; };
+    try {
+        await client.channels.start(); await client.reconnect();
+        first.resolve(true); await new Promise(setImmediate);
+        client.channels.setDisplayName('Bea');
+        assert.equal(probes, 2); assert.equal(writes, 0);
+    } finally { client.channels.close(); }
+});
+
+test('an uncertain opt-in write retires the membership stream', async () => {
+    const f = await fixture(), client = f.client(1, 'Ada'), write = Promise.withResolvers();
+    const connect = client.transport.connect;
+    client.transport.connect = async () => ({ ...await connect(), displayNames: undefined });
+    client.transport.discoverNames = async () => true;
+    client.transport.displayName = () => write.promise;
+    try {
+        const handle = await client.channels.start();
+        write.reject(Object.assign(Error('Write acknowledgement timed out'), { code: 'ap-transport' }));
+        await new Promise(setImmediate);
+        assert.deepEqual(client.status, [-5]);
+        assert.equal(f.streams.has(handle), false);
+    } finally { client.channels.close(); }
+});
+
+test('presence carries each member’s UTF-8 display name on join, rename and clear', async () => {
+    // An invitation-only browser has no local name, even when another device belongs to its account.
+    const f = await fixture(), a = f.client(1, '春', true), b = f.client(2, '', true, 1), baseline = f.client(3, '春');
+    let renamed, own;
+    a.transport.displayName = async (handle, bytes) => { assert.equal(handle, own); renamed(bytes); };
+    try {
+        const legacy = await baseline.channels.start();
+        assert.equal(f.streams.get(legacy).frame.body.length, 64);
+        baseline.channels.setDisplayName('林');
+        own = await a.channels.start();
+        const peer = await b.channels.start();
+        const initial = f.streams.get(own).frame.body.slice(64);
+        const utf8 = new TextEncoder(), padded = new Uint8Array(256);
+        padded.set(utf8.encode('春'));
+        assert.deepEqual(initial, padded);
+        assert.deepEqual(f.streams.get(peer).frame.body.slice(64), new Uint8Array(256), 'empty names still request the extended roster');
+        const deliver = async name => {
+            const { account, device, instance, build, session } = a.channels.identity;
+            const member = { account_id: encodeId(account), device_id: encodeId(device), instance_id: encodeId(instance),
+                build_id: encodeId(build) };
+            const browser = b.channels.identity;
+            const unnamed = { ...member, device_id: encodeId(browser.device) };
+            const local = { ...unnamed, instance_id: encodeId(browser.instance) };
+            if (name) member.display_name = name;
+            const body = utf8.encode(JSON.stringify({ kind: 'presence', participants: [member, unnamed, local] }));
+            const stream = f.streams.get(peer);
+            const updated = b.nextPresence();
+            stream.waiting.resolve({ type: AP.PUBLISH, flags: 0, source: new Uint8Array(), destination: session, body });
+            await updated;
+        };
+        await deliver('春');
+        assert.deepEqual(b.channels.participants.map(p => p.displayName), ['春', '', '']);
+        b.transport.displayName = async () => {};
+        b.channels.setDisplayName('Local');
+        assert.deepEqual(b.channels.participants.map(p => p.displayName), ['春', '', 'Local']);
+        const maximum = '雪'.repeat(85) + '!';
+        const changed = new Promise(resolve => { renamed = resolve; });
+        a.channels.setDisplayName(maximum);
+        assert.deepEqual(await changed, utf8.encode(maximum));
+        await deliver(maximum);
+        assert.deepEqual(b.channels.participants.map(p => p.displayName), [maximum, '', 'Local']);
+        const cleared = new Promise(resolve => { renamed = resolve; });
+        a.channels.setDisplayName('');
+        assert.deepEqual(await cleared, new Uint8Array());
+        await deliver('');
+        assert.deepEqual(b.channels.participants.map(p => p.displayName), ['', '', 'Local']);
+        assert.deepEqual(baseline.status, []);
+    } finally { a.channels.close(); b.channels.close(); baseline.channels.close(); }
+});
 
 test('a superseded channel connection remains retryable while its replacement starts', async () => {
     const f = await fixture(), a = f.client(1);

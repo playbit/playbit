@@ -1,4 +1,5 @@
 //! Controls address a GUI owner, independently of account/data management.
+use crate::usage_error;
 use playbit::{
     engine::{Request, Result, reply::Reply},
     store::Id,
@@ -20,36 +21,40 @@ pub(super) fn run(
         "logs" if args.len() == 2 => Operation::Logs { after: None },
         "stop" if args.len() == 2 => Operation::Quit,
         "input" if args.len() >= 4 => match args[2].as_str() {
-            "click" if args.len() == 4 => {
-                Operation::Input { kind: 2, target: args[3].parse()?, data: vec![] }
-            }
+            "click" if args.len() == 4 => Operation::Input {
+                kind: 2,
+                target: args[3].parse().map_err(usage_error)?,
+                data: vec![],
+            },
             "submit" if args.len() == 5 => Operation::Input {
                 kind: 3,
-                target: args[3].parse()?,
+                target: args[3].parse().map_err(usage_error)?,
                 data: args[4].as_bytes().to_vec(),
             },
             "key" if args.len() == 6 => {
                 let pressed = match args[5].as_str() {
                     "down" => true,
                     "up" => false,
-                    _ => return Err("Expected key transition down or up".into()),
+                    _ => return Err(usage_error("Expected key transition down or up")),
                 };
-                Operation::key(args[3].parse()?, &args[4], pressed)?
+                Operation::key(args[3].parse().map_err(usage_error)?, &args[4], pressed)
+                    .map_err(usage_error)?
             }
             "pointer" if (7..=8).contains(&args.len()) => Operation::pointer(
-                args[3].parse()?,
+                args[3].parse().map_err(usage_error)?,
                 &args[4],
-                args[5].parse()?,
-                args[6].parse()?,
+                args[5].parse().map_err(usage_error)?,
+                args[6].parse().map_err(usage_error)?,
                 args.get(7).map(String::as_str),
-            )?,
+            )
+            .map_err(usage_error)?,
             _ => {
-                return Err(
-                    "Expected click, submit, key or pointer arguments (see pb help input)".into()
-                );
+                return Err(usage_error(
+                    "Expected click, submit, key or pointer arguments (see pb help input)",
+                ));
             }
         },
-        _ => return Err("Expected an app control and SESSION [--instance ID]".into()),
+        _ => return Err(usage_error("Expected an app control and SESSION [--instance ID]")),
     };
     let Reply::InstanceOwners(owners) = call(Request::InstanceList { session })? else {
         return Err("Unexpected session-instance list reply".into());
@@ -75,10 +80,10 @@ pub(super) fn run(
 fn selection(args: &[String]) -> Result<(&[String], Option<Id>)> {
     let length = args.len();
     if length >= 2 && args[length - 2] == "--instance" {
-        return Ok((&args[..length - 2], Some(Id::parse(&args[length - 1])?)));
+        return Ok((&args[..length - 2], Some(Id::parse(&args[length - 1]).map_err(usage_error)?)));
     }
     if args.iter().any(|arg| arg == "--instance") {
-        return Err("Place --instance ID after the app control arguments".into());
+        return Err(usage_error("Place --instance ID after the app control arguments"));
     }
     Ok((args, None))
 }

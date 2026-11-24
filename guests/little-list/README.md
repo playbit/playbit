@@ -26,3 +26,13 @@ changes. Build output and local app data stay under this guest's `target` direct
 
 After opening, it follows guest logs in the terminal until the app exits.
 Press Ctrl-C to stop following logs and leave Little List running.
+
+The Playbit-published launcher example gives each room a private list shared by
+its invitees. The default developer starter continues to use its World. To build
+the official room variant in a clean authoring checkout, apply `guests/little-list/published/task-volume.patch` from the repository root,
+copy `published/playbit-volumes.json` over `playbit-volumes.json` in this guest,
+then run `python3 published/build.py` from the guest directory with `pb` on PATH.
+The same helper on the original World-backed source builds the personal template.
+The helper remaps the toolchain and source paths before compilation. For a new
+publication, sign the resulting private-room package with the designated publisher
+in each release environment before publishing it and collecting its admission receipt.

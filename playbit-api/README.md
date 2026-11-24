@@ -223,8 +223,11 @@ host-drawn titlebar. To control the window decorations, declare
 `ui.window.style.v1` in `required_host_features` and call `window_style` before
 the scene root. Each accepted scene supplies its own style. Omitting it restores
 the host's usual window decorations and appearance. `TRANSPARENT_TITLEBAR`
-reveals the scene beneath the native title and buttons. `FULLSIZE_CONTENT` on
-its own extends the drawable area while AppKit paints its titlebar over it.
+reveals the scene beneath the native title and buttons. On macOS, a titled
+whole-window canvas that explicitly requests `TRANSPARENT_TITLEBAR` lets the
+user drag the window by its titlebar. If a drag starts on the canvas and ends
+on the titlebar background, the canvas receives the release. `FULLSIZE_CONTENT`
+on its own extends the drawable area while AppKit paints its titlebar over it.
 Session windows show the host's Copy Session Link button in the upper right,
 including over a whole-window canvas. Set `WindowStyle::HIDE_SESSION_BUTTON`
 to hide it. The Window menu still offers Copy Session Link.

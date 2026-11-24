@@ -1,5 +1,6 @@
 app_id = "little-list"
 name = "Little List"
+icon = "icon.png"
 build_cmd = "cargo build --target wasm32-unknown-unknown"
 
 [release]

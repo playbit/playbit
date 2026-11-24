@@ -1,13 +1,15 @@
-//! Bounded recovery of an owned source that AP cannot initialize yet.
+//! Bounded recovery while a volume or an invited World awaits initialization.
 //! Only explicit source readiness or pre-dispatch capacity rejection schedules
 //! work. This is not a freshness poll; exhaustion waits for explicit recovery.
 use super::{Duration, Id, Instant, Result};
 use crate::engine::publisher::VOLUME_LIMIT;
 
+pub(super) const CHANGING_CUT: &str =
+    "volume source kept changing during bootstrap; no received stage was adopted";
 const RETRY_LIMIT: u8 = 6;
 const FIRST_DELAY: Duration = Duration::from_millis(250);
 
-/// Only an authorized source with a scheduled retry may produce this error.
+/// A scheduled retry is pending. Each attempt checks current authorization.
 #[derive(Debug)]
 pub(super) struct Pending(pub(super) Box<dyn std::error::Error + Send + Sync>);
 impl std::fmt::Display for Pending {
@@ -38,9 +40,22 @@ pub(super) fn retain_error(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Source {
+    Volume(Id),
+    // The Shared ID is derived from the session. Its World admission is
+    // independent of other sessions and of this room's own database capture.
+    WorldControls(Id),
+}
+impl From<Id> for Source {
+    fn from(volume: Id) -> Self {
+        Self::Volume(volume)
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Retry {
-    volume: Id,
+    source: Source,
     scheduled: u8,
     after: Option<Instant>,
 }
@@ -60,41 +75,89 @@ const _: () = assert!(
 );
 
 impl Initializations {
+    /// Explicit sync renews the retry budget even for an installed stream whose
+    /// last capture left a sibling pending. Disconnect discards the bindings.
+    pub(super) fn restart(&mut self, now: Instant, installed: impl Fn(Id) -> bool) {
+        for slot in &mut self.slots {
+            if let Some(retry) = slot
+                && let Source::Volume(volume) = retry.source
+                && installed(volume)
+            {
+                retry.scheduled = 1;
+                retry.after = Some(now + FIRST_DELAY);
+            } else {
+                *slot = None;
+            }
+        }
+    }
     pub(super) fn clear(&mut self) {
         self.slots.fill(None);
     }
     #[cfg(any(test, feature = "file-provider"))]
     pub(super) fn retain(&mut self, selected: &[Id]) {
         for slot in &mut self.slots {
-            if slot.is_some_and(|retry| !selected.contains(&retry.volume)) {
+            if slot.is_some_and(
+                |retry| !matches!(retry.source, Source::Volume(id) if selected.contains(&id)),
+            ) {
                 *slot = None;
             }
         }
     }
-    pub(super) fn forget(&mut self, volume: Id) {
-        if let Some(slot) = self.slots.iter_mut().find(|s| s.is_some_and(|r| r.volume == volume)) {
+    pub(super) fn forget(&mut self, source: impl Into<Source>) {
+        let source = source.into();
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.is_some_and(|r| r.source == source)) {
             *slot = None;
         }
     }
-    pub(super) fn failed(&mut self, volume: Id, error: &str, now: Instant) -> Result<()> {
-        if !retryable_error(error) {
-            self.forget(volume);
+    pub(super) fn failed(
+        &mut self,
+        source: impl Into<Source>,
+        error: &str,
+        now: Instant,
+    ) -> Result<()> {
+        self.failed_capture(source, error, now, false)
+    }
+    pub(super) fn failed_capture(
+        &mut self,
+        source: impl Into<Source>,
+        error: &str,
+        now: Instant,
+        receiving: bool,
+    ) -> Result<()> {
+        let source = source.into();
+        let changing =
+            error == CHANGING_CUT && (receiving || matches!(source, Source::WorldControls(_)));
+        if !retryable_error(error) && !changing {
+            if receiving {
+                // Keep a pending stream discoverable by explicit Sync after a terminal error.
+                self.start(source);
+            } else {
+                self.forget(source);
+            }
             return Ok(());
         }
         let index = self
             .slots
             .iter()
-            .position(|s| s.is_some_and(|r| r.volume == volume))
+            .position(|s| s.is_some_and(|r| r.source == source))
             .or_else(|| self.slots.iter().position(Option::is_none))
             .ok_or("initial source readiness retry capacity exhausted")?;
-        let retry = self.slots[index].get_or_insert(Retry { volume, scheduled: 0, after: None });
+        let retry = self.slots[index].get_or_insert(Retry { source, scheduled: 0, after: None });
+        if retry.after.is_some() {
+            return Ok(());
+        }
         retry.after =
             (retry.scheduled < RETRY_LIMIT).then(|| now + FIRST_DELAY * (1u32 << retry.scheduled));
         retry.scheduled = retry.scheduled.saturating_add(1).min(RETRY_LIMIT);
         Ok(())
     }
-    pub(super) fn scheduled(&self, volume: Id) -> bool {
-        self.slots.iter().flatten().any(|retry| retry.volume == volume && retry.after.is_some())
+    pub(super) fn tracked(&self, source: impl Into<Source>) -> bool {
+        let source = source.into();
+        self.slots.iter().flatten().any(|retry| retry.source == source)
+    }
+    pub(super) fn scheduled(&self, source: impl Into<Source>) -> bool {
+        let source = source.into();
+        self.slots.iter().flatten().any(|retry| retry.source == source && retry.after.is_some())
     }
     #[cfg(any(test, feature = "app-host"))]
     pub(super) fn retrying(&self, error: &(dyn std::error::Error + 'static)) -> bool {
@@ -120,22 +183,46 @@ impl Initializations {
             self.slots
                 .iter()
                 .flatten()
-                .find(|r| r.volume == *volume)
+                .find(|r| r.source == Source::Volume(*volume))
                 .is_none_or(|r| r.after.is_some_and(|after| after <= now))
         });
         for retry in self.slots.iter().flatten() {
             if volumes.len() == VOLUME_LIMIT {
                 break;
             }
-            if retry.after.is_some_and(|after| after <= now) && !volumes.contains(&retry.volume) {
-                volumes.push(retry.volume);
+            if let Source::Volume(volume) = retry.source
+                && retry.after.is_some_and(|after| after <= now)
+                && !volumes.contains(&volume)
+            {
+                volumes.push(volume);
             }
         }
     }
-    pub(super) fn start(&mut self, volume: Id) {
+    pub(super) fn interrupted(&mut self, source: Source, now: Instant) {
+        if let Some(retry) = self.slots.iter_mut().flatten().find(|retry| retry.source == source)
+            && retry.after.is_none()
+        {
+            retry.after = Some(now);
+        }
+    }
+
+    pub(super) fn due_world_controls(&self, now: Instant) -> Vec<Id> {
+        self.slots
+            .iter()
+            .flatten()
+            .filter_map(|retry| match retry.source {
+                Source::WorldControls(shared) if retry.after.is_some_and(|after| after <= now) => {
+                    Some(shared)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    pub(super) fn start(&mut self, source: impl Into<Source>) {
+        let source = source.into();
         // Consume only the attempt actually starting. If an earlier volume
         // loses the transport, unattempted selected volumes retain their wake.
-        if let Some(retry) = self.slots.iter_mut().flatten().find(|r| r.volume == volume) {
+        if let Some(retry) = self.slots.iter_mut().flatten().find(|r| r.source == source) {
             retry.after = None;
         }
     }
@@ -178,6 +265,22 @@ mod tests {
                 assert!(pending.wake_after(now).is_none());
             }
         }
+        // A manually restarted live volume still needs its missing backing.
+        pending.restart(now, |id| id == volume);
+        assert!(pending.tracked(volume));
+        assert_eq!(pending.wake_after(now), Some(FIRST_DELAY));
+        pending.start(volume);
+        pending
+            .failed_capture(volume, CHANGING_CUT, now, true)
+            .expect("tracked retry already fits");
+        assert!(pending.scheduled(volume));
+        pending
+            .failed_capture(volume, "storage error", now, true)
+            .expect("terminal error stops scheduling");
+        assert!(pending.tracked(volume));
+        assert!(!pending.scheduled(volume));
+        pending.restart(now, |_| false);
+        assert!(!pending.tracked(volume));
         for error in ["denied", "waiting for an authorized peer", "disk full", "request timed out"]
         {
             pending.failed(volume, error, now).expect("nonretrying errors allocate no slot");
@@ -186,6 +289,40 @@ mod tests {
             pending.select(&mut claimed, now);
             assert_eq!(claimed, [volume]);
         }
+    }
+
+    #[test]
+    fn world_capture_retries_keep_the_room_deadline_through_cut_changes_and_transport_loss() {
+        let mut retries = Initializations::default();
+        let mut now = Instant::now();
+        let shared = Id::from_bytes([7; 16]);
+        let room = Source::WorldControls(shared);
+        retries
+            .failed(room, "waiting for initial database synchronization", now)
+            .expect("retry fits the bounded registry");
+        for (attempt, error) in
+            ["AP request capacity exhausted", CHANGING_CUT].into_iter().enumerate()
+        {
+            now += FIRST_DELAY * (1 << attempt);
+            assert_eq!(retries.due_world_controls(now), [shared]);
+            retries.start(room);
+            retries.failed(room, error, now).expect("retry fits the bounded registry");
+            assert_eq!(retries.wake_after(now), Some(FIRST_DELAY * (2 << attempt)));
+        }
+        now += FIRST_DELAY * 4;
+        retries.start(room);
+        retries.interrupted(room, now);
+        assert_eq!(retries.due_world_controls(now), [shared]);
+        retries.start(room);
+        retries.failed(room, CHANGING_CUT, now).expect("retry fits the bounded registry");
+        assert_eq!(retries.wake_after(now), Some(FIRST_DELAY * 8));
+        // A healthy requalified World releases only its own source.
+        retries
+            .failed(shared, "waiting for initial database synchronization", now)
+            .expect("retry fits the bounded registry");
+        retries.forget(room);
+        assert!(retries.due_world_controls(now + FIRST_DELAY * 8).is_empty());
+        assert!(retries.scheduled(shared));
     }
 
     #[test]
@@ -203,10 +340,20 @@ mod tests {
         assert_eq!(failure.expect("terminal failure retained").to_string(), "storage failed");
 
         let mut pending = Initializations::default();
-        let now = Instant::now();
+        let mut now = Instant::now();
         let waiting = "waiting for initial database synchronization";
-        for _ in 0..=RETRY_LIMIT {
-            pending.failed(Id::from_bytes([1; 16]), waiting, now).expect("retry fits");
+        let exhausted = Id::from_bytes([1; 16]);
+        for attempt in 0..=RETRY_LIMIT {
+            pending.start(exhausted);
+            pending.failed(exhausted, waiting, now).expect("retry fits");
+            if attempt < RETRY_LIMIT {
+                let delay = FIRST_DELAY * (1u32 << attempt);
+                // Another attempt for this World while its wake is reserved must
+                // neither consume the next attempt nor move this deadline.
+                pending.failed(exhausted, waiting, now).expect("same retry fits");
+                assert_eq!(pending.wake_after(now), Some(delay));
+                now += delay;
+            }
         }
         pending.failed(Id::from_bytes([2; 16]), waiting, now).expect("retry fits");
         assert!(pending.wake_after(now).is_some());

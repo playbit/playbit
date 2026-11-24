@@ -67,14 +67,20 @@ unsafe extern "C" fn turn(raw: *mut abi::Context, state: *mut c_void) -> i32 {
     let presence = context.presence(&mut people).unwrap();
     assert_eq!(presence.len(), fixture.participant_count as usize);
     if let Some(person) = presence.first() {
+        assert_eq!(person.display_name().unwrap(), Some("小"));
         assert_eq!(
             *person,
             ffi::Participant {
-                account_id: [fixture.seed; 16],
+                account_id: [fixture.seed + 4; 16],
                 device_id: [fixture.seed + 1; 16],
                 instance_id: [fixture.seed + 2; 16],
                 build_id: [fixture.seed + 3; 32],
                 written: size_of::<ffi::Participant>() as u32,
+                display_name: {
+                    let mut name = [0; ffi::DISPLAY_NAME_BYTES];
+                    name[..3].copy_from_slice("小".as_bytes());
+                    name
+                },
                 ..Default::default()
             }
         );
@@ -91,10 +97,11 @@ unsafe fn app(fixture: &mut Fixture) -> NativeInstance {
     ctx.startup_arguments =
         BTreeMap::from([("empty".into(), "".into()), ("mode".into(), "小".into())]);
     ctx.participants.push(playbit::runtime::syscall::Participant {
-        account_id: [seed; 16],
+        account_id: [seed + 4; 16],
         device_id: [seed + 1; 16],
         instance_id: [seed + 2; 16],
         build_id: [seed + 3; 32],
+        display_name: "小".into(),
     });
     unsafe {
         NativeInstance::new(
@@ -211,6 +218,7 @@ fn limit_context() -> GuestContext {
             device_id: [2; 16],
             instance_id: i.to_le_bytes(),
             build_id: [3; 32],
+            display_name: String::new(),
         })
         .collect();
     ctx

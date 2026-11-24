@@ -16,8 +16,12 @@ export interface ChannelExports {
     pb_web_channel_receive(length:number,expected:number,destination:number,source:number,kind:number):number;
 }
 const utf8=new TextEncoder(),text=new TextDecoder();
+const displayNameText = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 function checked(status:number):number{if(status<0)throw new AbiError(status);return status;}
-type Received={kind:'update'}|{kind:'presence';participants:Uint8Array[]}|{kind:'message';aad:Uint8Array<ArrayBuffer>};
+type Received =
+    | { kind: 'update' }
+    | { kind: 'presence'; participants: { source: Uint8Array<ArrayBuffer>; displayName: string }[] }
+    | { kind: 'message'; aad: Uint8Array<ArrayBuffer> };
 export class ChannelHost {
     private readonly host:()=>ChannelExports;
     constructor(host:()=>ChannelExports){this.host=host;}
@@ -41,7 +45,16 @@ export class ChannelHost {
         const result=this.call([expected,frame.destination,frame.source,frame.body],(host,length)=>host.pb_web_channel_receive(length,expected.length,frame.destination.length,frame.source.length,frame.type));
         switch(result[0]){
             case 1:return {kind:'update'};
-            case 2:{const participants=[];for(let at=1;at<result.length;at+=80)participants.push(result.slice(at,at+80));return {kind:'presence',participants};}
+            case 2: {
+                const participants = [], view = new DataView(result.buffer, result.byteOffset, result.byteLength);
+                for (let at = 1; at < result.length;) {
+                    const source = result.slice(at, at + 80), length = view.getUint16(at + 80, true);
+                    at += 82;
+                    participants.push({ source, displayName: displayNameText.decode(result.subarray(at, at + length)) });
+                    at += length;
+                }
+                return { kind: 'presence', participants };
+            }
             case 3:return {kind:'message',aad:result.slice(1)};
             default:throw new Error('Invalid Rust channel result');
         }

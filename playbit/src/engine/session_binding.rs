@@ -71,6 +71,7 @@ impl Binding {
                     .map_err(|_| HostError::InvalidArgument)?,
             ),
             identity: Identity {
+                display_name: services.store.guest_display_name().clone(),
                 account_id: *services.store.account().id.as_bytes(),
                 is_service: false,
                 device_id: *services.store.account().id.as_bytes(),

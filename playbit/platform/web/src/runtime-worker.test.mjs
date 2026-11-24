@@ -12,7 +12,8 @@ import { bootstrap, createHost, key, File } from "../tests/host-fixture.mjs";
 import { GuestWork } from "./guest-work.ts";
 import { GuestDeadline, clockNs } from "./guest-deadline.ts";
 import { bindOperations, supportsDeadline } from "./guest-imports.ts";
-import { guestOperations } from "./guest-operations.ts";
+import { guestOperations, IDENTITY_CHANGED } from "./guest-operations.ts";
+import { displayNameBytes, SessionChannels } from "./session-channels.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -1462,7 +1463,7 @@ test('unlocking an open invitation coalesces account storage and replaces its vo
             events.push('open');
             if (!unlocked) return null;
             entered.resolve(); await release.promise;
-            return { close() { events.push('close owner'); } };
+            return { close() { events.push('close owner'); }, async profile() { return { revision: 0n, displayName: '', deletedVolumes: new Set() }; } };
         } },
         OpfsStore: class { static async open() { return new this(); } close() { events.push('close store'); } },
         self: { location: { href: "https://playbit.app/runtime-worker.js?channel=public" }, postMessage() {} }, record: value => events.push(value),
@@ -1730,6 +1731,39 @@ test('a browser example reads the same session through identity.read and session
     await context.launch();
 });
 
+test('the worker exposes the committed account name at launch and wakes a guest after a rename', async () => {
+    const memory = new WebAssembly.Memory({ initial: 1 }), view = new DataView(memory.buffer);
+    let snapshot = { revision: 3n, displayName: 'Robin 雨', deletedVolumes: new Set() };
+    const wake = Promise.withResolvers();
+    const context = vm.createContext({ ...compatibleWorkerStorage(), workerChannel, decodeId, displayNameBytes, IDENTITY_CHANGED,
+        guestOperations: lifecycleOperations, GuestWork: FixtureWork, AccountSignal, observeAccountMetadata() {},
+        TextEncoder, TextDecoder, crypto, memory, readProfile: () => snapshot, guestWoke: wake.resolve,
+        self: { location: { href: 'https://playbit.app/runtime-worker.js?channel=public' }, postMessage() {} },
+    });
+    vm.runInContext(source.replace(/^import .*;$/gm, '') + `
+        profile = { account: "${encodeId(new Uint8Array(16).fill(2))}", session: { id: "${session.id}", selector: { kind: 'exact' } } };
+        accountReplica = { profile: readProfile };
+        globalThis.refresh = refreshAccountProfile;
+        globalThis.launch = () => { guest = { exports: { memory, pb_main: () => guestWoke(guestWork.poll()?.kind) } }; };
+        globalThis.read = () => operations.pb_identity(128);
+        globalThis.poll = () => guestWork.poll()?.kind;
+    `, context);
+    const name = () => {
+        view.setUint32(128, 360, true); view.setUint32(132, 0, true);
+        assert.equal(context.read(), 0); assert.equal(view.getUint32(132, true), 360);
+        const bytes = new Uint8Array(memory.buffer, 232, 256);
+        return new TextDecoder().decode(bytes.subarray(0, bytes.indexOf(0)));
+    };
+    await context.refresh(); context.launch();
+    assert.equal(name(), 'Robin 雨'); assert.equal(context.poll(), undefined);
+    snapshot = { ...snapshot, revision: 4n, displayName: 'Lin' };
+    await context.refresh();
+    snapshot = { ...snapshot, revision: 2n, displayName: 'Stale' };
+    await context.refresh();
+    assert.equal(await wake.promise, IDENTITY_CHANGED);
+    assert.equal(name(), 'Lin'); assert.equal(context.poll(), undefined);
+});
+
 test('each web guest generation registers a distinct nonzero app instance',async()=>{
     const identities=[];
     let services;
@@ -1758,6 +1792,89 @@ test('each web guest generation registers a distinct nonzero app instance',async
     assert.equal(identities.length,2);
     assert(identities.every(identity=>identity.instance.some(byte=>byte!==0)));
     assert.notDeepEqual(Array.from(identities[0].instance),Array.from(identities[1].instance));
+});
+
+test('a browser guest joins during stalled discovery and upgrades the same stream after a transient refusal', { timeout: 5000 }, async () => {
+    const device = new Uint8Array(16).fill(2), participant = encodeId(device), root = bootstrap(participant);
+    const { host } = await createHost(root), memory = new WebAssembly.Memory({ initial: 1 }), view = new DataView(memory.buffer);
+    const notice = Promise.withResolvers(), opened = [], firstDiscovery = Promise.withResolvers();
+    const optIn = Promise.withResolvers(), releaseWrite = Promise.withResolvers(), rename = Promise.withResolvers(), namedRoster = Promise.withResolvers();
+    let discovered = 0, rosterReads = 0, optInAttempts = 0, renameAttempts = 0;
+    const context = vm.createContext({ ...compatibleWorkerStorage(), workerChannel, decodeId, crypto, TextEncoder, TextDecoder,
+        ChannelHost, SessionChannels, AccountSignal, observeAccountMetadata() {}, GuestWork: FixtureWork, memory, backend: host,
+        guestOperations: services => lifecycleOperations({ ...services, ready() {
+            const event = services.events.find(event => event.kind === 5 || event.kind === 19);
+            if (event) notice.resolve(event.kind);
+        } }),
+        self: { location: { href: 'https://playbit.app/runtime-worker.js?channel=public' }, postMessage() {} },
+        fakeAp: async (method, ...args) => {
+            if (method === 'connect') return { instanceId: device, connectionCount: 7 };
+            if (method === 'describe') {
+                discovered++;
+                return discovered === 1 ? firstDiscovery.promise : { features: ['session.display-names.v1'] };
+            }
+            if (method === 'beginChannel') {
+                const [frame, authenticatedDevice, generation] = args;
+                assert.deepEqual(Array.from(authenticatedDevice), Array.from(device)); assert.equal(generation, 7);
+                opened.push(frame); return opened.length;
+            }
+            if (method === 'channelRead') {
+                if (args[0] !== 1) return new Promise(() => {});
+                const member = { account_id: participant, device_id: participant, instance_id: participant, build_id: current };
+                rosterReads++;
+                if (rosterReads > 2) return new Promise(() => {});
+                if (rosterReads === 2) {
+                    await namedRoster.promise;
+                    member.display_name = 'Remote 雨';
+                }
+                return { type: 3, flags: 0, source: new Uint8Array(), destination: opened[0].destination,
+                    body: new TextEncoder().encode(JSON.stringify({ kind: 'presence', participants: [member] })) };
+            }
+            if (method === 'channelDisplayName') {
+                assert.equal(args[0], 1);
+                if (args[1].length === 256) {
+                    if (++optInAttempts === 1) throw Object.assign(Error('SharedWorker busy'), { code: 'ap-capacity' });
+                    optIn.resolve(args[1]); await releaseWrite.promise;
+                } else {
+                    if (++renameAttempts === 1) throw Object.assign(Error('SharedWorker busy'), { code: 'ap-capacity' });
+                    rename.resolve(args[1]);
+                }
+                return;
+            }
+            if (method !== 'streamClose') throw Error(`Unexpected AP method ${method}`);
+        },
+    });
+    vm.runInContext(source.replace(/^import .*;$/gm, '') + `
+        managed = true; profile = ${JSON.stringify({ ...root, seed: Array(16).fill(1) })};
+        host = backend; ap = fakeAp; proof = Array(64).fill(1);
+        files = { cleanup: async () => {}, flushPublication() {} }; recoverChannels = () => {};
+        globalThis.launch = () => startGuest({ exports: { memory, pb_main() { scene = { controls: new Map() }; } } });
+        globalThis.roster = () => operations.pb_presence(128, 1, 344, 64);
+        globalThis.subscribe = () => channelClient.command('game', 2, new Uint8Array());
+        globalThis.rename = name => channelClient.setDisplayName(name);
+        globalThis.stop = () => channelClient?.close();
+    `, context);
+    try {
+        await context.launch();
+        assert.equal(await notice.promise, 5, 'membership arrived through the startup listener');
+        assert.equal(discovered, 1); assert.equal(opened[0].body.length, 64);
+        view.setUint32(128, 344, true);
+        assert.equal(context.roster(), 0); assert.equal(view.getUint32(64, true), 1);
+        assert.deepEqual(new Uint8Array(memory.buffer, 136, 16), device);
+        await context.subscribe(); assert.equal(new TextDecoder().decode(opened[1].destination.subarray(32)), 'game');
+        context.rename('Local 雪');
+        firstDiscovery.reject(Object.assign(Error('AP request capacity exhausted'), { code: 'ap-capacity', serviceCode: 'operation_failed' }));
+        const field = new Uint8Array(256); field.set(new TextEncoder().encode('Local 雪'));
+        assert.deepEqual(await optIn.promise, field);
+        context.rename('Later'); releaseWrite.resolve();
+        assert.equal(new TextDecoder().decode(await rename.promise), 'Later');
+        namedRoster.resolve(); await new Promise(setImmediate);
+        assert.equal(context.roster(), 0);
+        const name = new Uint8Array(memory.buffer, 128 + 88, 256);
+        assert.equal(new TextDecoder().decode(name.subarray(0, name.indexOf(0))), 'Remote 雨');
+        assert.equal(opened.length, 2); assert.equal(discovered, 2);
+        assert.equal(optInAttempts, 2); assert.equal(renameAttempts, 2);
+    } finally { context.stop(); }
 });
 
 

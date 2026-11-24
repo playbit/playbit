@@ -84,7 +84,10 @@ pub(super) unsafe fn array<T: Element>(
                 return Err(HostError::InvalidArgument);
             }
             for field in T::FIELDS {
-                if field.offset < size && size < field.offset + field.width {
+                if field.offset < size
+                    && size < field.offset + field.width
+                    && Some(field.offset) != T::OPTIONAL_OUTPUT_FIELD
+                {
                     return Err(HostError::InvalidArgument);
                 }
             }

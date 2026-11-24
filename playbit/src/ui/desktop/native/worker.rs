@@ -60,17 +60,50 @@ pub(super) struct Message {
     epoch: u64,
     source: InputSource,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum InputSource {
     Window,
+    Menu(blake3::Hash),
     Tool,
+}
+impl Message {
+    /// Discard an obsolete selection before checking its epoch. Dropping its
+    /// admission credit here makes any independent pump output ordinary readiness.
+    fn if_current<'a>(self, scene: impl FnOnce() -> Option<&'a ViewNode>) -> Option<Self> {
+        if let InputSource::Menu(digest) = &self.source
+            && scene().is_some_and(|view| {
+                !super::super::popup::guest_menu_present(view, &|items| {
+                    crate::runtime::syscall::menu_contains(items, self.input.target)
+                        && super::super::popup::menu_digest(items) == *digest
+                })
+            })
+        {
+            return None;
+        }
+        Some(self)
+    }
+    /// A closed window has no display demand. Revalidate other accepted actions
+    /// after older runtime events have been consumed and their scene adopted.
+    fn closing_event<'a>(
+        self,
+        handle: &Handle,
+        scene: impl Fn() -> Option<&'a ViewNode>,
+    ) -> Result<Option<Event>, String> {
+        if crate::runtime::work::discard_on_deactivate(self.input.kind) {
+            return Ok(None);
+        }
+        let Some(message) = self.if_current(&scene) else { return Ok(None) };
+        if message.epoch != handle.epoch() {
+            return Err("An earlier input failed. Try the action again.".into());
+        }
+        Ok(Some(message.source.event(message.input, scene)))
+    }
 }
 impl InputSource {
     fn event<'a>(self, input: Input, scene: impl FnOnce() -> Option<&'a ViewNode>) -> Event {
         let mut event = Event { kind: input.kind, target: input.target, data: input.data };
         // The scene can resize between tool admission and the owner's turn.
         // Physical input was already mapped by the surface that received it.
-        if self == Self::Tool
+        if matches!(self, Self::Tool)
             && event.kind == EventKind::Pointer
             && let Some((width, height)) =
                 scene().and_then(|view| super::super::canvas::canvas_size(view, event.target))
@@ -151,6 +184,9 @@ impl Handle {
     pub fn send(&self, input: Input, epoch: Option<u64>) -> bool {
         self.enqueue(input, epoch, InputSource::Window)
     }
+    pub(super) fn send_menu(&self, input: Input, epoch: u64, menu: blake3::Hash) -> bool {
+        self.enqueue(input, Some(epoch), InputSource::Menu(menu))
+    }
     #[cfg(feature = "process")]
     pub(super) fn send_tool_input(&self, input: Input) -> bool {
         self.enqueue(input, None, InputSource::Tool)
@@ -191,6 +227,23 @@ impl Handle {
                 let _ = self.errors.try_send(ADMISSION_ERROR);
             }
             false
+        }
+    }
+    fn admit_closing_event(
+        &self,
+        event: Result<Option<Event>, String>,
+        rejected: &mut Option<String>,
+        admit: impl FnOnce(Event) -> Result<(), playbit_api::abi::syscall::Error>,
+    ) {
+        let result = event.and_then(|event| match event {
+            Some(event) => {
+                admit(event).map_err(|error| format!("Accepted input failed: {error:?}"))
+            }
+            None => Ok(()),
+        });
+        if let Err(error) = result {
+            self.failed();
+            rejected.get_or_insert(error);
         }
     }
     fn failed(&self) {
@@ -272,7 +325,8 @@ struct Slot {
     handle: Handle,
     inputs: async_channel::Receiver<Message>,
     ready_output: std::cell::RefCell<Option<ready_output::Pending>>,
-    draining: bool,
+    closing: Option<crate::runtime::work::ClosingInputs>,
+    rejected_input: Option<String>,
 }
 pub(super) struct Worker {
     stop: Arc<AtomicBool>,
@@ -927,39 +981,42 @@ fn run_guest(
         })
         .map_err(|_| "The app window stopped receiving guest output")?;
     presentation.opened = true;
-    let mut draining = false;
+    let mut closing = None;
     let mut rejected_input = None;
     // One diagnostic token, never an execution or admission dependency. An
     // overlapping input is explicitly unqualified rather than retained forever.
     let mut ready_output = None;
     loop {
         let _ = receive.try_recv();
-        if (stop.load(Ordering::Acquire) || receiver.is_closed()) && !draining {
-            // Closing admission is the boundary. Every input admitted by the UI
-            // before it is transferred to runtime work before deactivation.
+        if (stop.load(Ordering::Acquire) || receiver.is_closed()) && closing.is_none() {
             handle.inputs.close();
-            while let Ok(message) = receiver.try_recv() {
-                if let Err(error) =
-                    admit_guest_input(guest, &handle, message.input, message.epoch, message.source)
-                {
-                    handle.failed();
-                    rejected_input = Some(error);
-                }
-            }
-            guest.deactivate();
-            draining = true;
+            closing = Some(
+                guest
+                    .deactivate_with_inputs(receiver.len())
+                    .map_err(|error| format!("Cannot deactivate app: {error:?}"))?,
+            );
         }
-        if !draining && let Ok(message) = receiver.try_recv() {
+        if let Some(roots) = &mut closing {
+            // A guest can consume only part of its event queue in a turn.
+            if !guest.ready(Instant::now())
+                && let Ok(message) = receiver.try_recv()
+            {
+                let event = message.closing_event(&handle, || guest.scene());
+                handle.admit_closing_event(event, &mut rejected_input, |event| {
+                    guest.admit_input(event, Some(roots))
+                });
+            }
+        } else if let Ok(message) = receiver.try_recv() {
             advance_guest(guest, &handle, Some(message), output, publisher, &mut ready_output)?;
         }
         if guest.ready(Instant::now()) {
             advance_guest(guest, &handle, None, output, publisher, &mut ready_output)?;
         }
-        if draining {
+        if closing.is_some() {
             if guest.drain_failed() {
                 return Err("Accepted app work could not finish. Reopen from committed data; uncertain edits were not replayed.".into());
             }
-            if !guest.accepted_work_pending() {
+            if receiver.is_empty() && !guest.accepted_work_pending() {
                 if let Some(error) = rejected_input {
                     return Err(error.into());
                 }
@@ -994,15 +1051,16 @@ fn advance_guest(
     let _job = Span::new(if message.is_some() { "ui.worker.input" } else { "ui.guest.ready" });
     let mut ack = InputAck::default();
     let mut frame_input = false;
-    let admitted = if let Some(message) = message {
-        ack = InputAck::new(message.input.target, message.input.revision.unwrap_or_default());
+    let admitted =
+        if let Some(message) = message.and_then(|input| input.if_current(|| guest.scene())) {
+            ack = InputAck::new(message.input.target, message.input.revision.unwrap_or_default());
 
-        frame_input = message.input.kind == EventKind::Frame;
-        pending = Some(message.pending);
-        admit_guest_input(guest, handle, message.input, message.epoch, message.source)
-    } else {
-        Ok(())
-    };
+            frame_input = message.input.kind == EventKind::Frame;
+            pending = Some(message.pending);
+            admit_guest_input(guest, handle, message.input, message.epoch, message.source)
+        } else {
+            Ok(())
+        };
     let frame = guest.pump().map_err(|error| error.to_string())?;
     publisher.frame(frame.encoded, &frame.logs);
     let result = admitted.map(|()| frame.view);
@@ -1104,6 +1162,7 @@ fn drive(
     stop: &AtomicBool,
     mut changes: impl FnMut(&mut Apps) -> Result<bool, String>,
 ) -> Result<(), Failure> {
+    let mut failure = None;
     while !slots.is_empty() {
         let _ = receive.try_recv(); // Clear before drain: store wake can rearm it.
         let pending_changes = changes(apps)?;
@@ -1115,31 +1174,26 @@ fn drive(
         let mut ready = false;
         let mut deadline = None;
         for slot in &mut slots {
-            if slot.inputs.is_closed() && !slot.draining {
-                // Transfer already accepted inputs before closing root admission.
-                while let Ok(message) = slot.inputs.try_recv() {
-                    if message.epoch != slot.handle.epoch() {
-                        return Err("An accepted input failed before deactivation.".into());
-                    }
-                    let _job = Span::new("ui.worker.input");
-
-                    let event = message
-                        .source
-                        .event(message.input, || apps.scene(slot.handle.generation).ok().flatten());
-                    apps.input(slot.handle.generation, event)
-                        .map_err(|error| format!("Accepted input failed: {error:?}"))?;
-                }
-                apps.deactivate(slot.handle.generation)
-                    .map_err(|error| format!("Cannot deactivate app: {error:?}"))?;
-                slot.draining = true;
+            let generation = slot.handle.generation;
+            if slot.inputs.is_closed() && slot.closing.is_none() {
+                slot.closing = Some(
+                    apps.deactivate_with_inputs(generation, slot.inputs.len())
+                        .map_err(|error| format!("Cannot deactivate app: {error:?}"))?,
+                );
             }
-            if let Ok(message) = slot.inputs.try_recv() {
+            if let Some(roots) = &mut slot.closing {
+                if apps.step(generation, Instant::now()).map_err(|e| format!("{e:?}"))?.ready {
+                    advance(apps, slot, None, output);
+                } else if let Ok(message) = slot.inputs.try_recv() {
+                    let event = message
+                        .closing_event(&slot.handle, || apps.scene(generation).ok().flatten());
+                    slot.handle.admit_closing_event(event, &mut slot.rejected_input, |event| {
+                        apps.admit_input(generation, event, Some(roots))
+                    });
+                }
+            } else if let Ok(message) = slot.inputs.try_recv() {
                 advance(apps, slot, Some(message), output);
-            } else if apps
-                .step(slot.handle.generation, Instant::now())
-                .map_err(|e| format!("{e:?}"))?
-                .ready
-            {
+            } else if apps.step(generation, Instant::now()).map_err(|e| format!("{e:?}"))?.ready {
                 advance(apps, slot, None, output);
             }
             let step =
@@ -1147,7 +1201,7 @@ fn drive(
             ready |= !slot.inputs.is_empty() || step.ready;
             deadline = earliest(deadline, step.wake_after.map(|delay| Instant::now() + delay));
         }
-        close_drained(apps, &mut slots, output)?;
+        close_drained(apps, &mut slots, output, &mut failure)?;
         if slots.is_empty() {
             break;
         }
@@ -1163,7 +1217,7 @@ fn drive(
             }
         }
     }
-    Ok(())
+    failure.map_or(Ok(()), Err)
 }
 #[allow(unsafe_code, reason = "The owner retains trusted descriptors through detach.")]
 unsafe fn attach(
@@ -1230,7 +1284,13 @@ fn open_slot(
         logs,
         quit_on_last_window,
     });
-    Ok(Slot { handle, inputs: receiver, ready_output: Default::default(), draining: false })
+    Ok(Slot {
+        handle,
+        inputs: receiver,
+        ready_output: Default::default(),
+        closing: None,
+        rejected_input: None,
+    })
 }
 
 #[cfg(feature = "connected-engine")]
@@ -1301,16 +1361,30 @@ fn close_drained(
     apps: &mut Apps,
     slots: &mut Vec<Slot>,
     output: &async_channel::Sender<Output>,
+    failure: &mut Option<Failure>,
 ) -> Result<(), Failure> {
     for index in (0..slots.len()).rev() {
-        if slots[index].draining
+        if slots[index].closing.is_some()
             && !apps
                 .drain_pending(slots[index].handle.generation)
                 .map_err(|error| format!("Accepted app work failed to drain: {error:?}"))?
+            && slots[index].inputs.is_empty()
         {
-            let generation = slots.remove(index).handle.generation;
+            let slot = slots.remove(index);
+            let generation = slot.handle.generation;
             apps.detach(generation).map_err(|error| format!("Native close failed: {error:?}"))?;
-            let _ = output.send_blocking(Output::Closed(generation));
+            if let Some(error) = slot.rejected_input {
+                if failure.is_none() {
+                    *failure = Some(error.into());
+                    // The shared worker will stop. Seal each sibling's mailbox
+                    // now and let its accepted work reach the same close barrier.
+                    for sibling in slots.iter() {
+                        sibling.handle.close();
+                    }
+                }
+            } else {
+                let _ = output.send_blocking(Output::Closed(generation));
+            }
         }
     }
     Ok(())
@@ -1327,15 +1401,13 @@ fn advance(
     let mut frame_input = false;
     let mut pending = None;
     let mut admitted = Ok(());
-    if let Some(message) = message {
+    let scene = || apps.scene(generation).ok().flatten();
+    if let Some(message) = message.and_then(|input| input.if_current(scene)) {
         pending = Some(message.pending);
-
         ack = InputAck::new(message.input.target, message.input.revision.unwrap_or_default());
-
         frame_input = message.input.kind == EventKind::Frame;
         admitted = if message.epoch == slot.handle.epoch() {
-            let event =
-                message.source.event(message.input, || apps.scene(generation).ok().flatten());
+            let event = message.source.event(message.input, scene);
             apps.input(generation, event)
                 .map_err(|error| format!("Input failed: {error:?}. Try the action again."))
         } else {

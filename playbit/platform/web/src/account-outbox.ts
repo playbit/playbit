@@ -3,6 +3,8 @@ import { validId } from './identifier.ts';
 // keys share the existing store with its string-keyed account row; no migration
 // or second metadata database is needed. Network work never enters these txns.
 import { MAX_ACCOUNT_RECORD_BYTES } from './account-record.ts';
+import type { AppVisibilityRecord } from './account-record.ts';
+import type { InvitationSession } from './invitation.ts';
 import { unsupportedAccount } from './account-format.ts';
 import { openMetadata, watchMetadata } from './storage-format.ts';
 
@@ -30,6 +32,7 @@ const opaque = (value: unknown): value is string => typeof value === 'string' &&
 const maximumClock = 0xfffffffffffffffcn;
 const recordKey = (account: string, key: string): RecordKey => [account, 'record', key];
 const dirtyKey = (account: string, key: string): DirtyKey => [account, 'dirty', key];
+const removedAppKey = (account: string, app: InvitationSession['app']) => [account, 'removed-app', app.publisher, app.app_id];
 const quarantineKey = (account: string): [string, string] => [account, 'unsupported-account'];
 const pausedAccounts = new Set<string>();
 let authorityCacheFull = false;
@@ -166,10 +169,11 @@ export async function commitAccountMutation<S = unknown>({ database, store }: Ac
 // The caller authenticates and projects the record before write admission.
 // This transaction rechecks its original snapshot and the current encrypted
 // head. An exact local replay remains dirty until a publication acknowledgment.
-export async function adoptAccountMutation<S = unknown>({ database, store }: AccountMetadata<S>, account: string, expected: AccountMetadataControl, state: S, incoming: AccountOutboxRecord, admit: () => boolean = () => true): Promise<boolean> {
+export async function adoptAccountMutation<S = unknown>({ database, store }: AccountMetadata<S>, account: string, expected: AccountMetadataControl, state: S, incoming: AccountOutboxRecord, admit: () => boolean = () => true, visibility?: AppVisibilityRecord): Promise<boolean> {
     if (!id(account)) throw Error('Invalid account metadata identity');
     control(expected); record(incoming);
     const changed = await withAccountAuthority(account, () => transaction<boolean>(database, store, 'readwrite', (store, done, fail) => {
+        const marker = visibility && store.getKey(removedAppKey(account, visibility.app));
         const head = store.get(recordKey(account, incoming.key)), clock = store.get([account]);
         clock.onsuccess = () => {
             try {
@@ -183,12 +187,18 @@ export async function adoptAccountMutation<S = unknown>({ database, store }: Acc
                         for (let index = 0; index < count && !order; index++) order = current.ciphertext[index] - incoming.ciphertext[index];
                         if (!order) order = current.ciphertext.length - incoming.ciphertext.length;
                     }
-                    if (order >= 0) { done(false); return; }
+                    // An older reader retained this optional record opaquely.
+                    // Replaying its exact head can now install the missing projection.
+                    if (order > 0 || order === 0 && (!visibility || visibility.removed === (marker?.result !== undefined))) { done(false); return; }
                 }
                 if (version.revision !== expected.revision) throw metadataChanged();
                 if (version.revision === maximumClock) throw Error('Account metadata revision exhausted');
                 store.put(state, account);
                 store.put(incoming, recordKey(account, incoming.key));
+                if (visibility) {
+                    const key = removedAppKey(account, visibility.app);
+                    if (visibility.removed) store.put(true, key); else store.delete(key);
+                }
                 store.delete(dirtyKey(account, incoming.key));
                 store.put({ revision: version.revision + 1n, clock: incoming.clock > version.clock ? incoming.clock : version.clock }, [account]);
                 done(true);
@@ -197,6 +207,26 @@ export async function adoptAccountMutation<S = unknown>({ database, store }: Acc
     }));
     if (changed) observer?.(account);
     return changed;
+}
+// Bound each read by the caller's current recovered list. Removed apps may
+// accumulate independently over the lifetime of an account.
+export async function removedAppsIn(account: string, apps: InvitationSession['app'][]): Promise<Set<string>> {
+    const metadata = await openAccountMetadata('recovery');
+    try {
+        return await transaction(metadata.database, metadata.store, 'readonly', (store, done) => {
+            const removed = new Set<string>();
+            let index = 0;
+            const next = () => {
+                if (index === apps.length) { done(removed); return; }
+                const app = apps[index++], request = store.getKey(removedAppKey(account, app));
+                request.onsuccess = () => {
+                    if (request.result !== undefined) removed.add(`${app.publisher}/${app.app_id}`);
+                    next();
+                };
+            };
+            next();
+        });
+    } finally { metadata.database.close(); }
 }
 export async function pendingAccountRecord(kind: AccountMetadataKind, account: string, after: string = ''): Promise<AccountOutboxRecord | null> {
     if (!id(account) || (after && !opaque(after))) throw Error('Invalid account outbox cursor');

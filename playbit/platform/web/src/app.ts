@@ -6,12 +6,12 @@ import { encodeId } from "./identifier.ts";
 import { configuration, deploymentChannel, workerURL } from './release-channel.ts';
 import type { ApStatus, ApReplicaSubscription } from "./ap-protocol.ts";
 import { isSessionPath, replicaCapability, setScopeAddresses, parseInvitation, retainedInvitation, openEnvelope, sessionProof } from "./invitation.ts";
-import type { ParsedInvitation } from "./invitation.ts";
+import type { Invitation, ParsedInvitation } from "./invitation.ts";
 import { RecoveryClient } from "./recovery.ts";
 import type { RecoveryStatus, CatalogVolume } from "./recovery.ts";
 import { personalVolumes, personalSelections } from "./personal.ts";
 import type { PersonalGrant } from "./personal.ts";
-import { pendingAccountRecord, observeAccountMetadata } from './account-outbox.ts';
+import { pendingAccountRecord, observeAccountMetadata, removedAppsIn } from './account-outbox.ts';
 import { AccountSignal } from './account-notices.ts';
 import { showOfflineEdits } from './offline-edits.ts';
 import { holdWebAccount, reloadWebAccount, SIGN_IN_HANDOFF, SIGN_IN_AFTER_RESET, prepareWebAccount, beginWebReset } from './web-account.ts';
@@ -47,7 +47,7 @@ await holdWebAccount(message => reloadWebAccount(message, webTab));
 const parameters = new URLSearchParams(location.search);
 const app = parameters.get("app") === "note" ? "note" : parameters.get("app") === "kart" ? "kart" : "todo";
 const profile = parameters.get("profile") ?? `local-${app}`;
-let worker: Worker;
+let worker: Worker, recoveryListAccount: string | undefined;
 let apClient: ApClient, opened = false, joining = false, paused = false, invitation: ParsedInvitation, enrollment: Enrollment, attempt = 0;
 let replicationState: ReplicationState | undefined;
 let pageClosing = false;
@@ -67,10 +67,11 @@ const words = (...values: number[]): Uint8Array => {
     values.forEach((value, index) => view.setUint32(index * 4, value, true)); return bytes;
 };
 function createWorker() {
-    replicationState = undefined;
+    replicationState = undefined; recoveryListAccount = undefined;
     worker = new Worker(workerURL('./runtime-worker.js', import.meta.url, selectedChannel), { type: "module" });
     const current = worker;
     current.onmessage = async ({ data }: MessageEvent<RuntimeWorkerMessage>) => {
+        if (current !== worker) return;
         if (data.engineFailure) {
             engineFailure = data.engineFailure;
             updateFrames();
@@ -90,16 +91,30 @@ function createWorker() {
                 const methods = apClient as unknown as Record<string, ((...args: unknown[]) => Promise<unknown>) | undefined>;
                 if (!apClient || typeof methods[method] !== "function") throw new Error("Sign in to continue");
                 const result = await methods[method]!(...args);
-                if (method === "begin" || method === "beginChannel") streams.add(result as number);
-                if (method === "subscribeReplica") streams.add((result as ApReplicaSubscription).handle);
+                const handle = method === "begin" || method === "beginChannel" ? result as number
+                    : method === "subscribeReplica" ? (result as ApReplicaSubscription).handle : undefined;
+                if (current !== worker) {
+                    if (handle !== undefined) await apClient.streamClose(handle);
+                    return;
+                }
+                if (handle !== undefined) streams.add(handle);
                 if (method === "streamClose") streams.delete(args[0] as number);
                 if (method === 'streamRead' && result instanceof Uint8Array && result.buffer instanceof ArrayBuffer) {
                     current.postMessage({ apReply: { id, result } }, [result.buffer]);
                 } else current.postMessage({ apReply: { id, result } });
-            } catch (error) { current.postMessage({ apReply: { id, error: (error as Error).message, code: (error as Error & { code?: string }).code } }); }
+            } catch (error) {
+                const cause = error as Error & { code?: string; serviceCode?: string };
+                current.postMessage({ apReply: { id, error: cause.message, code: cause.code, serviceCode: cause.serviceCode } });
+            }
             return;
         }
-        if (data.replication) { showReplication(data.replication); return; }
+        if (data.replication) {
+            if (recoveryListAccount) {
+                if (data.replication.kind === 'failed' || data.replication.kind === 'action_required')
+                    error.textContent = data.replication.message ?? 'Could not synchronize recovered apps';
+            } else showReplication(data.replication);
+            return;
+        }
         if (data.accountNoticeFailed) { accountNoticeFailed(); return; }
         if (Object.hasOwn(data, "guestFailure")) {
             guestFailure = data.guestFailure ?? undefined;
@@ -582,12 +597,15 @@ async function showPersonal(session: string, container: HTMLElement = onboarding
 function persistInvitation(joined = opened): void {
     localStorage.setItem("playbit-invitation", JSON.stringify({ url: invitation.url, paused, joined, envelope: invitation.envelope }));
 }
+function replaceWorker(reason: string): void {
+    worker.terminate();
+    for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error(reason)); } pending.clear();
+    for (const handle of streams) apClient.streamClose(handle).catch(() => {}); streams.clear();
+    createWorker();
+}
 function cancelJoin(): void {
     paused = true; joining = false; attempt++; persistInvitation(false);
-    worker.terminate();
-    for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error("Joining paused")); } pending.clear();
-    for (const handle of streams) apClient.streamClose(handle).catch(() => {}); streams.clear();
-    createWorker(); status("Joining paused. Your invitation is saved");
+    replaceWorker("Joining paused"); status("Joining paused. Your invitation is saved");
     onboarding.replaceChildren(action("Resume joining", () => { paused = false; join(); }));
 }
 function showJoin(): void {
@@ -698,21 +716,57 @@ async function showRecovery(known?: RecoveryStatus): Promise<void> {
     if (opened) onboarding.append(action("Return to app", () => { recoveryAction(); }));
 }
 
+let recoveryRender = 0;
 async function showRecoveredApps(): Promise<void> {
-    const catalog = await recoveryClient.catalog();
-    if (!opened) status("Your private credentials are available");
-    onboarding.replaceChildren();
-    if (!catalog.invitations.length) onboarding.append(textElement("p", "Your account key is ready. Open an invitation to join an app."));
-    else onboarding.append(textElement("p", "Open a recovered app. Its shared data will be restored through Playbit."));
-    for (const retained of catalog.invitations) {
-        const parsed = await retainedInvitation(retained, selectedChannel);
-        onboarding.append(action(replicaCapability(parsed.invitation!).volume.name || "Open shared app", async () => {
-            if (opened) { await call("close"); worker.terminate(); createWorker(); opened = false; main.replaceChildren(); delete main.dataset.scene; }
-            invitation = parsed; paused = false; canJoin = true; persistInvitation(false); showInvitationHeader(); showJoin();
-        }));
+    await recoveryClient.catalog();
+    if (!opened) {
+        status("Your private credentials are available");
+        if (recoveryListAccount !== enrollment.account) {
+            if (recoveryListAccount) replaceWorker("Recovery account changed");
+            recoveryListAccount = enrollment.account;
+            await call("watch_recovery", { account: enrollment.account });
+        }
     }
+    const message = textElement("p", "");
+    message.id = "recovered-app-message";
+    const controls = document.createElement("div");
+    controls.id = "recovered-app-list";
+    onboarding.replaceChildren(message, controls);
+    await refreshRecoveredAppVisibility();
+    if (!message.isConnected) return;
     if (invitation && !opened) onboarding.append(action("Continue invitation", showJoin));
     if (opened) onboarding.append(action("Return to app", () => { recoveryAction(); }));
+}
+async function refreshRecoveredAppVisibility(): Promise<void> {
+    const controls = onboarding.querySelector("#recovered-app-list"), message = onboarding.querySelector("#recovered-app-message");
+    if (!controls || !message) return;
+    const generation = ++recoveryRender, account = enrollment.account;
+    const { catalog } = await recoveryClient.state();
+    const removed = await removedAppsIn(account, catalog.invitations.map(retained => retained.session.app));
+    if (!controls.isConnected || generation !== recoveryRender || enrollment.account !== account) return;
+    const visible = catalog.invitations.filter(({ session: { app } }) => !removed.has(`${app.publisher}/${app.app_id}`));
+    message.textContent = visible.length ? "Open a recovered app. Its shared data will be restored through Playbit."
+        : "Your account key is ready. Open an invitation to join an app.";
+    const buttons = Array.from(controls.querySelectorAll("button"));
+    const label = (retained: Invitation) => replicaCapability(retained).volume.name || "Open shared app";
+    if (buttons.length === visible.length && visible.every((entry, i) =>
+        buttons[i].dataset.session === entry.session.id && buttons[i].textContent === label(entry))) return;
+    controls.replaceChildren(...visible.map(retained => {
+        const button = action(label(retained), async () => {
+            try {
+                const { catalog } = await recoveryClient.state();
+                const entry = catalog.invitations.find(item => item.session.id === retained.session.id);
+                if (!entry || !button.isConnected || enrollment.account !== account) return;
+                const parsed = await retainedInvitation(entry, selectedChannel);
+                const removed = await removedAppsIn(account, [entry.session.app]);
+                if (removed.size || !button.isConnected || enrollment.account !== account) return;
+                if (opened) { await call("close"); worker.terminate(); createWorker(); opened = false; main.replaceChildren(); delete main.dataset.scene; }
+                invitation = parsed; paused = false; canJoin = true; persistInvitation(false); showInvitationHeader(); showJoin();
+            } catch (failure) { error.textContent = (failure as Error).message; }
+        });
+        button.dataset.session = retained.session.id;
+        return button;
+    }));
 }
 function recoveryAction(): void {
     recoveryVisible = false;
@@ -840,6 +894,7 @@ function showJoinProblem(kind: string, message = ""): void {
 async function join(): Promise<void> {
     if (joining || paused) return;
     if (!canJoin) { await afterAuthentication(); return; }
+    if (recoveryListAccount) replaceWorker("Opening invitation");
     joining = true; persistInvitation(false); error.textContent = "";
     const current = ++attempt;
     status("Checking invitation…");
@@ -895,6 +950,8 @@ async function join(): Promise<void> {
             personalCatalog.map(item => item.volume), call);
         if (current !== attempt) return;
         opened = true; joining = false; persistInvitation();
+        // An account notice may have arrived between the worker's opening snapshot and this receipt.
+        void refreshAccountPending().catch(accountNoticeFailed);
         recoveryAction(); render(result); status("Changes saved on this web browser · Connecting live updates…");
         (document.querySelector("#identity") as HTMLElement).textContent = JSON.stringify(result.identity, null, 2);
         try { await recoveryClient.rememberInvitation(invitation.invitation!); }
@@ -913,6 +970,7 @@ async function join(): Promise<void> {
 }
 async function refreshAccountPending(): Promise<void> {
     if (opened) await call('account_changed');
+    await refreshRecoveredAppVisibility();
     try { accountPending = Boolean(await pendingAccountRecord('personal', enrollment.account)); }
     catch { accountPending = undefined; }
     if (!guestFailure && replicationState?.kind === 'live' && (!recoveryVisible || personalProgress)) status(liveReplicationMessage());
@@ -941,10 +999,10 @@ function showReplication(state: ReplicationState): void {
         error.textContent = state.kind === "catching_up" || state.kind === "reconnecting" ? "" : state.message ?? "";
     }
 }
-window.addEventListener("online", () => { if (opened) void call("reconnect"); });
-document.addEventListener("visibilitychange", () => { updateFrames(); if (opened && document.visibilityState === "visible") void call("reconnect"); });
-window.addEventListener("pageshow", () => { if (opened) void call("reconnect"); });
-window.addEventListener('pagehide', event => { if (!event.persisted) { pageClosing = true; updateFrames(); accountSignal.close(); apClient?.close(); } });
+window.addEventListener("online", () => { if (opened || recoveryListAccount) void call("reconnect"); });
+document.addEventListener("visibilitychange", () => { updateFrames(); if ((opened || recoveryListAccount) && document.visibilityState === "visible") void call("reconnect"); });
+window.addEventListener("pageshow", () => { if (opened || recoveryListAccount) void call("reconnect"); });
+window.addEventListener('pagehide', event => { if (!event.persisted) { pageClosing = true; updateFrames(); if (recoveryListAccount) worker.terminate(); accountSignal.close(); apClient?.close(); } });
 function showInvitationHeader(): void {
     (document.querySelector("#invitation-title") as HTMLElement).textContent = "You’re invited";
     (document.querySelector("#invitation-detail") as HTMLElement).textContent = `Join ${(invitation.invitation && replicaCapability(invitation.invitation).volume.name) || "a shared app"}. Your personal data stays separate unless you choose to connect it.`;

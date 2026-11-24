@@ -42,6 +42,17 @@ static PBStatus app_init(PBContext *context, void *data, void **output) {
     PBIdentity identity = {.size=sizeof(PBIdentity)};
     assert(pb_identity(context, &identity) == PB_OK);
     assert(identity.generation != 0 && identity.flags == 2 && identity.reserved == 0);
+    assert(identity.written == sizeof(identity));
+    assert(memcmp(identity.display_name, "Zoë", sizeof("Zoë")) == 0);
+    const uint32_t identity_prefix = offsetof(PBIdentity, display_name);
+    const uint32_t capacities[] = {identity_prefix, 128, sizeof(identity) - 1};
+    for (size_t i = 0; i < sizeof(capacities) / sizeof(capacities[0]); i++) {
+        identity.size = capacities[i];
+        memset(identity.display_name, 0x55, sizeof(identity.display_name));
+        assert(pb_identity(context, &identity) == PB_OK);
+        assert(identity.size == capacities[i] && identity.written == identity_prefix);
+        for (size_t j = 0; j < sizeof(identity.display_name); j++) assert(identity.display_name[j] == 0x55);
+    }
     probe->generation = identity.generation;
     const uint8_t invalid_utf8[] = { 0xff };
     assert(pb_log(context, invalid_utf8, 1) == PB_INVALID_ARGUMENT);
@@ -394,10 +405,22 @@ PBStatus probe_environment(PBContext *context, uint8_t seed, uint32_t participan
     assert(presence_count == participant_count && people[0].build_id[0] == 0x55);
     assert(pb_presence(context, people, 1, sizeof(PBParticipant), &presence_count) == PB_OK);
     if (participant_count) {
-        assert(people[0].account_id[0] == seed);
+        assert(people[0].account_id[0] == seed + 4);
         assert(people[0].device_id[0] == seed + 1);
         assert(people[0].instance_id[0] == seed + 2);
         assert(people[0].build_id[0] == seed + 3);
+        assert(people[0].written == sizeof(PBParticipant));
+        assert(memcmp(people[0].display_name, "小", sizeof("小")) == 0);
+        const uint32_t prefix = offsetof(PBParticipant, display_name);
+        const uint32_t capacities[] = {prefix, 96, sizeof(PBParticipant) - 1};
+        for (size_t i = 0; i < sizeof(capacities) / sizeof(capacities[0]); i++) {
+            people[0].size = capacities[i];
+            uint32_t stride = (capacities[i] + 3) & ~3u;
+            memset(people[0].display_name, 0x55, sizeof(people[0].display_name));
+            assert(pb_presence(context, people, 1, stride, &presence_count) == PB_OK);
+            assert(people[0].size == capacities[i] && people[0].written == prefix);
+            for (size_t j = 0; j < sizeof(people[0].display_name); j++) assert(people[0].display_name[j] == 0x55);
+        }
     }
     assert(pb_presence(context, people, 1, sizeof(PBParticipant), NULL) == PB_INVALID_ARGUMENT);
     assert(pb_presence(context, people, 1, sizeof(PBParticipant), (uint32_t *)people) == PB_INVALID_ARGUMENT);

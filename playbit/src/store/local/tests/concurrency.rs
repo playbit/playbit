@@ -667,7 +667,7 @@ fn registry_capacity_failure_does_not_partially_evict_or_acquire() {
 }
 
 // Publishing a retained build upload and recording the pending operation that
-// names it share the cache lock, so a writer that finds the file already on
+// names it share the build publication lock, so a writer that finds the file already on
 // disk cannot record work against an entry the publisher has renamed into place
 // but not yet fsynced.
 #[test]
@@ -688,6 +688,7 @@ fn a_reused_build_upload_waits_for_the_publisher_to_make_its_entry_durable() {
     std::thread::scope(|scope| {
         let publisher = scope.spawn(|| store.queue_build_upload(&version, &bundle));
         publishing.recv_timeout(DEADLINE).unwrap();
+        assert!(store.blob_cache.try_lock().is_ok(), "file publications can proceed");
         assert!(
             dir.path().join(crate::paths::BUILDS).join(&version).exists(),
             "renamed, not yet published"

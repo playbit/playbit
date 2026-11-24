@@ -18,11 +18,8 @@ wasm-ld --version
 sh playbit/platform/native/build-wasm-probe.sh --build-only
 sh scripts/prepare-apps.sh
 
-# Signed example packaging uses the ordinary local engine with explicit offline fixture authority.
-signer_work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pb-offline.XXXXXX")
-python3 scripts/offline_fixture.py "$signer_work/profile"
 # Build the browser client.
-PLAYBIT_PROFILE="$signer_work/profile" sh playbit/platform/web/build.sh debug
+sh playbit/platform/web/build.sh debug
 
 # Check projected query browser codec.
 node playbit/platform/web/tests/projected-query.mjs target/wasm32-unknown-unknown/debug/playbit.wasm

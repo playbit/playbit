@@ -119,7 +119,21 @@ pub(super) fn automatic_rights(
             Err(crate::store::Error::NotFound(_)) => session.app.publisher == store.account().id,
             Err(error) => return Err(error.into()),
         };
-    Ok(if writable { rt::VolumeRights::ALL } else { rt::VolumeRights::READ })
+    // Only the canonical publisher World defers KV mutation to each entry's ACL.
+    // An explicit Root returned above retains the caller's chosen ceiling.
+    Ok(if writable {
+        rt::VolumeRights::ALL
+    } else {
+        rt::VolumeRights(rt::VolumeRights::READ.0 | rt::VolumeRights::KV_WRITE.0)
+    })
+}
+
+pub(super) const fn personal_rights(write: bool) -> rt::VolumeRights {
+    if write {
+        rt::VolumeRights(rt::VolumeRights::READ.0 | rt::VolumeRights::WRITE.0)
+    } else {
+        rt::VolumeRights::READ
+    }
 }
 
 pub(super) fn volumes(
@@ -168,11 +182,7 @@ pub(super) fn volumes(
             id: *volume.id.as_bytes(),
             name: volume.name,
             tags: vec!["personal".into()],
-            rights: if grant.write && selection.write {
-                rt::VolumeRights(rt::VolumeRights::READ.0 | rt::VolumeRights::WRITE.0)
-            } else {
-                rt::VolumeRights::READ
-            },
+            rights: personal_rights(grant.write && selection.write),
             is_root: false,
             role: 0,
         });

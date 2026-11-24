@@ -5,7 +5,7 @@ use super::{
 };
 use crate::runtime::{
     TEST_FUEL,
-    host::{DataCall, DataOperation, DataResult},
+    host::{DataCall, DataOperation, DataResult, VolumeRights},
     syscall::{Host, Opcode},
     wasm::Runtime,
 };
@@ -62,10 +62,31 @@ fn wasm_kv_checks_regions_copies_inputs_and_retains_short_completions() {
                 .unwrap();
         let module = runtime.compile_app(&wat::parse_str(MODULE).unwrap()).unwrap();
         let records = Arc::new(Mutex::new(Records::default()));
+        // The World advertises volume Read. Only its entry-addressed KV writes
+        // may reach the host for an ACL decision. A personal mount retains its
+        // explicit read-only ceiling even for the same operation and entry ID.
+        let mut context = context();
+        let world = &mut context.volumes[0];
+        world.rights = VolumeRights(VolumeRights::READ.0 | VolumeRights::KV_WRITE.0);
+        world.role = playbit_api::abi::data::VolumeRole::Root as u32;
+        let personal = crate::runtime::host::AvailableVolume {
+            id: [8; 16],
+            rights: VolumeRights::READ,
+            role: 0,
+            is_root: false,
+            ..world.clone()
+        };
+        context.volumes.push(personal);
         let state =
-            WasmState::new(context(), Box::new(KvHost(records.clone())), runtime.fuel_limit)
-                .unwrap();
+            WasmState::new(context, Box::new(KvHost(records.clone())), runtime.fuel_limit).unwrap();
         let scoped = state.app.volume_handle([6; 16]).unwrap();
+        let personal = state.app.volume_handle([8; 16]).unwrap();
+        for right in [VolumeRights::WRITE, VolumeRights::SCHEMA] {
+            assert_eq!(
+                crate::runtime::syscall::resolve_volume(&state.app, scoped, right),
+                Err(HostError::AccessDenied)
+            );
+        }
         let mut store = Store::new(&runtime.engine, state);
         store.set_fuel(TEST_FUEL).unwrap();
         let mut linker = Linker::new(&runtime.engine);
@@ -76,12 +97,18 @@ fn wasm_kv_checks_regions_copies_inputs_and_retains_short_completions() {
             .get_typed_func::<(u32, u64, u64, u64, u64, u64, u64), i64>(&mut store, "invoke")
             .unwrap();
         memory.data_mut(&mut store)[8..12].copy_from_slice(&32_u32.to_le_bytes());
-        memory.data_mut(&mut store)[16..20].copy_from_slice(&scoped.slot.to_le_bytes());
-        memory.data_mut(&mut store)[20..24].copy_from_slice(&scoped.generation.to_le_bytes());
+        memory.data_mut(&mut store)[16..20].copy_from_slice(&personal.slot.to_le_bytes());
+        memory.data_mut(&mut store)[20..24].copy_from_slice(&personal.generation.to_le_bytes());
         memory.data_mut(&mut store)[24..39].fill(7);
         memory.data_mut(&mut store)[128..131].copy_from_slice(&[0, 255, 1]);
         memory.data_mut(&mut store)[192..195].copy_from_slice(&[0, 128, 255]);
+        assert_eq!(
+            invoke.call(&mut store, (0x144, 8, 128, 3, 192, 3, 0)).unwrap(),
+            i64::from(HostError::AccessDenied as i32),
+        );
         assert!(records.lock().unwrap().calls.is_empty());
+        memory.data_mut(&mut store)[16..20].copy_from_slice(&scoped.slot.to_le_bytes());
+        memory.data_mut(&mut store)[20..24].copy_from_slice(&scoped.generation.to_le_bytes());
         assert_eq!(
             super::tests::save_handle(
                 invoke.call(&mut store, (0x144, 8, 128, 3, 192, 3, 0)).unwrap(),
@@ -171,5 +198,19 @@ fn wasm_kv_checks_regions_copies_inputs_and_retains_short_completions() {
         records.lock().unwrap().results.insert(4, Ok(Arc::new(DataResult::KvDeleted)));
         assert_eq!(invoke.call(&mut store, (0x147, handle, 0, 0, 0, 0, 0)).unwrap(), 0);
         assert_eq!(records.lock().unwrap().released, vec![1, 2, 3, 4]);
+        // Retain the Root role and same DB handle. An explicitly selected
+        // read-only Root cannot dispatch a KV write, even to a writable entry.
+        super::tests::set_rights(&mut store, VolumeRights::READ);
+        assert_eq!(
+            invoke.call(&mut store, (0x144, 8, 128, 3, 192, 3, 0)).unwrap(),
+            i64::from(HostError::AccessDenied as i32),
+        );
+        assert_eq!(records.lock().unwrap().calls.len(), 4);
+        super::tests::set_rights(
+            &mut store,
+            VolumeRights(VolumeRights::READ.0 | VolumeRights::WRITE.0),
+        );
+        assert!(invoke.call(&mut store, (0x144, 8, 128, 3, 192, 3, 0)).unwrap() > 0);
+        assert_eq!(records.lock().unwrap().calls.len(), 5);
     }
 }

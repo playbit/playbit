@@ -9,7 +9,7 @@ mod codec;
 
 pub fn validate_display_name(name: &str) -> Result<()> {
     if name.is_empty()
-        || name.len() > 256
+        || name.len() > playbit_api::abi::environment::DISPLAY_NAME_BYTES
         || name.trim() != name
         || name.chars().any(char::is_control)
     {
@@ -34,6 +34,10 @@ pub struct Credentials {
     reason = "Account records keep bounded decoded values inline without a second allocation."
 )]
 pub enum Record {
+    AppVisibility {
+        app: crate::package::AppIdentity,
+        removed: bool,
+    },
     DisplayName {
         name: String,
     },
@@ -80,6 +84,7 @@ impl Record {
 
     pub(super) fn validate(&self) -> Result<()> {
         match self {
+            Self::AppVisibility { app, .. } => app.validate().map_err(Error::InvalidInput)?,
             Self::DisplayName { name } => validate_display_name(name)?,
             Self::Volume { volume, credentials }
             | Self::HostedVolume { volume, credentials, .. } => {
@@ -142,6 +147,9 @@ impl Record {
 
     pub(crate) fn logical_key(&self) -> Result<String> {
         Ok(match self {
+            Self::AppVisibility { app, .. } => {
+                format!("optional/app_visibility/{}/{}", app.publisher, app.app_id)
+            }
             Self::DisplayName { .. } => "settings/display-name".into(),
             Self::Volume { volume, .. } | Self::HostedVolume { volume, .. } => {
                 format!("volume/{}", volume.id)
@@ -158,6 +166,7 @@ impl Record {
     }
     pub(super) fn kind(&self) -> &'static str {
         match self {
+            Self::AppVisibility { .. } => "app_visibility",
             Self::DisplayName { .. } => "display_name",
             Self::HostedVolume { .. } => "hosted_volume",
             Self::HostedInvitation { .. } => "hosted_invitation",

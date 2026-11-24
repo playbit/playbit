@@ -3,6 +3,7 @@
 use super::*;
 use crate::store::object_contract::{FieldDeclaration, ObjectFields, Value, ValueType};
 use crate::store::volume_index::EntryAddress;
+use crate::ui::desktop::typography::tabular_numerals;
 use crate::ui::desktop::zoom::length as ui;
 mod drafts;
 pub(super) use drafts::Retired;
@@ -557,7 +558,7 @@ impl Browser {
             .items_center()
             .gap(ui(8.))
             .child(
-                self.text("record-id", format!("#{}", &id.to_string()[..8]), cx)
+                tabular_numerals(self.text("record-id", format!("#{}", &id.to_string()[..8]), cx))
                     .flex_1()
                     .min_w_0()
                     .truncate()

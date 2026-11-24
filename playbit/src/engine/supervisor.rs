@@ -11,6 +11,8 @@ pub struct Engine {
     #[cfg(all(not(target_os = "ios"), feature = "process"))]
     pub(super) session_instances: session_instance::registry::Registry,
     #[cfg(all(not(target_os = "ios"), feature = "process"))]
+    pub(super) purging_app: Option<crate::package::AppIdentity>,
+    #[cfg(all(not(target_os = "ios"), feature = "process"))]
     pub(super) tool_contexts: tool_context::Contexts,
     #[cfg(all(not(target_os = "ios"), feature = "process"))]
     pub(super) service_executor: service_call::executor::Executor,
@@ -96,9 +98,11 @@ impl Engine {
             }
         };
         let mut remote = remote::Remote::open(&path, completion.wake.clone())?;
-        remote.restore_profile_binding(
-            Arc::get_mut(&mut services.store).expect("newly opened store is exclusively owned"),
-        )?;
+        let store =
+            Arc::get_mut(&mut services.store).expect("newly opened store is exclusively owned");
+        remote.restore_profile_binding(store)?;
+        let wake = completion.wake.clone();
+        store.set_session_activity_wake(move || wake.notify());
         let store = &services.store;
         if let Some(testing) = testing {
             remote.configure_testing(store, testing)?;
@@ -120,10 +124,13 @@ impl Engine {
         #[cfg(all(not(target_os = "ios"), feature = "process"))]
         let session_instances =
             session_instance::registry::Registry::open(&path, changes.generation)?;
+        services.resume_app_data_removals();
         Ok(Self {
             channel: remote.channel(),
             #[cfg(all(not(target_os = "ios"), feature = "process"))]
             session_instances,
+            #[cfg(all(not(target_os = "ios"), feature = "process"))]
+            purging_app: None,
             #[cfg(all(not(target_os = "ios"), feature = "process"))]
             tool_contexts: tool_context::Contexts::new(changes.generation),
             #[cfg(all(not(target_os = "ios"), feature = "process"))]
@@ -229,49 +236,39 @@ impl Engine {
     pub fn join(&mut self, invitation: &str) -> Result<Session> {
         let seed = crate::store::parse_session_link(invitation, self.channel)?;
         let id = crate::store::session_id(&seed)?;
-        match self.services.store.retain_session(&id) {
-            Ok(()) => {
-                let session = self.services.store.session(&id)?;
+        let local_session = match self.services.store.session(&id) {
+            Ok(session) => {
                 if let Some(reason) = self.services.store.session_denial(&id)? {
                     return Err(reason.into());
                 }
-                // Only ordinary sessions require a materialized replica before joining.
-                let build_path =
-                    self.services.path.join(crate::paths::BUILDS).join(&session.resolved_build_id);
                 let local = self.services.store.is_local_session(&id)?;
-                if local
-                    || (build_path.is_file()
-                        && self
-                            .services
-                            .store
-                            .replica_root(
-                                session.replica_volume(),
-                                crate::store::DatabaseId::Index,
-                            )?
-                            .is_some())
-                {
+                if self.session_data_ready(&session, local)? {
                     self.services.store.admit_binding(
                         &Access::session_version(
                             self.services.store.account().id,
                             &id,
                             &session.resolved_build_id,
                         ),
-                        // Local control admission preserves lazy scopes. Once Shared
-                        // exists, its participant and dependency authority are checked too.
-                        if local { session.root_volume } else { session.replica_volume() },
+                        self.session_admission_volume(&session)?,
                     )?;
+                    self.services.store.retain_joined_session(&id)?;
                     return Ok(session);
                 }
+                local.then_some(session)
             }
-            Err(crate::store::Error::NotFound("session")) => {}
+            Err(crate::store::Error::NotFound("local record")) => None,
             Err(error) => return Err(error.into()),
-        }
+        };
         if self.background_pending() {
             return Err("A background operation is in progress; join did not start".into());
         }
         let preview = self.services.store.preview_invitation(invitation, self.channel)?;
-        self.receive_pending_invitation(&preview.session)?;
-        let session = self.services.store.import_invitation(&preview.session)?;
+        let session = if let Some(local) = local_session {
+            local
+        } else {
+            self.receive_pending_invitation(&preview.session)?;
+            self.services.store.import_invitation(&preview.session)?
+        };
         let resolution =
             self.remote.as_mut().ok_or("A network operation is in progress")?.bootstrap_current(
                 &self.services.store,
@@ -296,7 +293,7 @@ impl Engine {
                 &retained.id,
                 &retained.resolved_build_id,
             ),
-            retained.replica_volume(),
+            self.session_admission_volume(&retained)?,
         )?;
         self.services.store.complete_invitation(&session.id)?;
         self.stop_invitation_watch(&session.id);
@@ -318,6 +315,7 @@ impl Engine {
                 | Request::Invitation { .. }
                 | Request::PersonalVolumes { .. }
                 | Request::AppVolumes { .. }
+                | Request::AppRemovalImpact { .. }
                 | Request::AutomaticVolumes { .. }
                 | Request::Entries { .. }
                 | Request::DirectoryEntries { .. }
@@ -387,6 +385,10 @@ impl Engine {
             | Request::SetDisplayName { .. } | Request::AcceptAgreement { .. } | Request::Sync
             | Request::Disconnect) => self.dispatch_owner_control(request)?,
             #[rustfmt::skip]
+            Request::AppRemovalImpact { .. } | Request::RemoveApp { .. } => {
+                return Err("App removal requires asynchronous owner admission".into());
+            }
+            #[rustfmt::skip]
             Request::GrantVolume { .. }
             | Request::PublishApp { .. } | Request::ListApps { .. }
             | Request::SetAppEnabled { .. } | Request::DeleteApp { .. }
@@ -406,7 +408,7 @@ impl Engine {
                 return Err("enrollment requires asynchronous owner admission".into());
             }
             #[rustfmt::skip]
-            request @ (Request::Join { .. } | Request::PreviewInvitation { .. }
+            request @ (Request::Join { .. } | Request::PreviewInvitation { .. } | Request::PreviewDesktopInvitation { .. } | Request::DesktopLaunch | Request::RetainDesktopInvitation { .. }
             | Request::WatchInvitation { .. } | Request::ResumeInvitation { .. }
             | Request::PauseInvitation { .. } | Request::Provision { .. }
             | Request::Permissions { .. } | Request::Revoke { .. }) =>
@@ -507,6 +509,16 @@ impl Engine {
         use reply::Reply;
         Ok(match request {
             Request::Join { invitation } => Reply::Session(self.join(&invitation)?),
+            Request::DesktopLaunch => {
+                let invitations = self.desktop_launch_invitations()?;
+                Reply::Status(Box::new(self.status_with_invitations(invitations)?))
+            }
+            Request::PreviewDesktopInvitation { invitation } => {
+                Reply::InvitationPreview(self.preview_desktop_invitation(&invitation)?)
+            }
+            Request::RetainDesktopInvitation { session } => {
+                self.retain_desktop_invitation(&session)?
+            }
             Request::PreviewInvitation { invitation } => Reply::InvitationPreview(
                 self.services.store.preview_invitation(&invitation, self.channel)?,
             ),
@@ -530,11 +542,24 @@ impl Engine {
     }
     /// Local data and app operations, after request routing selects this owner.
     pub(super) fn status_snapshot(&mut self) -> Result<reply::Status> {
+        self.status_with_invitations(self.services.store.pending_invitations()?)
+    }
+    fn status_with_invitations(
+        &mut self,
+        invitations: Vec<crate::store::InvitationPreview>,
+    ) -> Result<reply::Status> {
         self.network.report_onboarding(self.services.store.clone());
         let sessions = self.services.store.retained_sessions()?;
         self.network.refresh_builds(self.services.store.clone(), self.completion.wake.clone())?;
         let volumes = self.services.store.volumes()?;
         let automatic_volume_ids = self.services.store.automatic_volume_ids(&volumes)?;
+        let invitation_status = self.invitation_status();
+        let desktop_invitation = match &invitation_status {
+            Some(selected) if selected.state != reply::InvitationState::Paused => {
+                self.services.store.resolved_desktop_invitation(&selected.session)?
+            }
+            _ => None,
+        };
         let status = reply::Status {
             #[cfg(all(not(target_os = "ios"), feature = "process"))]
             startup: self.session_instances.startup_progress(),
@@ -569,6 +594,7 @@ impl Engine {
             },
             session_references: self.services.store.session_references()?,
             imported_apps: self.services.store.imported_apps()?,
+            session_activity: self.services.store.session_activity(&sessions)?,
             sessions,
             // Ready is published after the name commit. Observe it first so
             // a completion cannot overtake an older name snapshot.
@@ -576,10 +602,11 @@ impl Engine {
             app_names: self.services.store.session_app_names()?,
             recent_sessions: self.services.store.recent_sessions()?,
             updates: self.updates.clone(),
-            invitations: self.services.store.pending_invitations()?,
+            invitations,
+            desktop_invitation,
             enrolled: self.enrolled(),
             email: self.email(),
-            invitation_status: self.invitation_status(),
+            invitation_status,
             recovery: recovery::local_status(&self.services.store)?,
             transfer: self.transfer_status(),
             pending: self.services.store.pending_operations()?,

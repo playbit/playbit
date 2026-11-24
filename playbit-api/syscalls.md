@@ -151,6 +151,7 @@ entry permissions in addition to volume rights.
 | `0x003` | `ui.submit` | `pb_view_submit` | `u8* scene, length:u32` |
 | `0x004` | `event.poll` | `pb_event_poll` | `PBEvent* event, u8* data, capacity:u32` |
 | `0x005` | `identity.read` | `pb_identity` | `PBIdentity* output` |
+| `0x013` | `session.read` | `pb_session` | None |
 | `0x163` | `session.info` | `pb_session_info` | `PBSessionInfo* output` |
 | `0x006` | `startup.read` | `pb_startup_arguments` | `PBArguments* output` |
 | `0x007` | `volume.list` | `pb_volumes` | `PBVolumes* output` |
@@ -166,6 +167,9 @@ entry permissions in addition to volume rights.
 - **capabilities** returns supported registry names, not opcode/name pairs.
   `PBCapabilities` holds name ranges and UTF-8 bytes, with capacities of at most
   256 names and 32 KiB. Discovery is advisory; an operation can still fail.
+- **session.read** starts or reuses live membership in the current session and
+  returns a positive app-generation token. A roster-only guest calls this once
+  at startup. Membership arrives asynchronously.
 - **session.info** returns local metadata for the guest's current session.
   Initialize the output with `PB_RECORD_INIT(PBSessionInfo)`. The v1 record
   occupies 64 bytes. Its four little-endian 32-bit fields are `size`, `written`,
@@ -210,6 +214,13 @@ entry permissions in addition to volume rights.
 - **identity.read** returns the host-verified generation, account, device and
   instance IDs, plus a 32-byte session ID when present. `flags` bit 0 means
   service identity, bit 1 means session present; reserved members are zero.
+  The optional tail at byte 104 contains a 256-byte `display_name` field. Read
+  it when `written >= 360`. Sizes 104–359 give `written=104` and preserve every
+  byte from offset 104 onward. The name contains UTF-8 up to the first zero byte or the
+  end of the field. Unused bytes are zero. An empty or absent field means the
+  name is unavailable. Use the IDs for identification and the name for display.
+  Reread on `IdentityChanged`. The `display-names.v1` host feature declares the
+  identity and participant name fields and their change notifications.
 - **startup.read** returns at most 32 name/value pairs in `PBArguments`, with
   at most 32 KiB of output bytes. Names contain 1–128 bytes of lowercase ASCII
   letters, digits, `.`, `_` or `-`; values are at most 4 KiB each.
@@ -228,8 +239,15 @@ entry permissions in addition to volume rights.
   timer or relationship to the data-change revision is required.
 - **update.defer** names the generation carried by `UpdateAvailable`.
   A generation that is no longer the pending update returns `Conflict`.
-- **presence.read** returns at most 1,024 participant records containing account,
-  device, instance and 32-byte build IDs. Refresh after `PresenceChanged`.
+- **presence.read** reads the cached roster. The first read after `session.read`
+  may be empty. Read again on the first and subsequent `PresenceChanged` events.
+  The result has at most 1,024 participant records containing account,
+  device, instance and 32-byte build IDs. The 256-byte `display_name` tail at
+  byte 88 uses the same encoding as `PBIdentity` and is available when
+  `written >= 344`. An element size of 88–343 gives `written=88` and preserves
+  every byte from offset 88 onward. Changing a member's name also raises
+  `PresenceChanged`. Channel messages carry the sender IDs. Look up the current
+  name in presence when displaying a message.
 - **wake.after** replaces the instance's one pending wake with a delay from
   1,000 through 86,400,000 ms. It also removes an expired, unconsumed Wake event.
   Delivery may be late during suspension or busy work. The wake does not survive
@@ -253,6 +271,11 @@ PresenceChanged=5, UpdateAvailable=6, ObjectCreationReady=7, FileCopyReady=8,
 FileSelectionReady=9, Wake=10, Pointer=11, Key=12, Frame=13, TextChanged=14,
 SurfaceChanged=15, DataReady=16 and VolumesChanged=17. Packed event payloads use little-endian
 integers and contain no pointers.
+
+`IdentityChanged` (`PB_EVENT_IDENTITY_CHANGED`, kind `0x80000015`) is an
+advisory notification with target zero and an empty payload. A guest can read
+the current name at startup, then reread `identity.read` on this event to
+update an open badge. Each read returns the latest local snapshot.
 
 `TextChanged` carries a little-endian `u32` edit count, up to 256 packed
 `{u32 start, u32 end, u32 inserted_len}` edits, then the complete committed UTF-8

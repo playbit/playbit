@@ -1,0 +1,18 @@
+--- a/guests/little-list/src/lib.rs
++++ b/guests/little-list/src/lib.rs
+@@ -60,12 +60,11 @@
+         let mut tags = [data::Range::default(); 1024];
+         let available =
+             context.available_volumes(&mut volumes, &mut tags, &mut bytes).map_err(describe)?;
+-        let root = available
+-            .iter()
+-            .find(|volume| volume.is_root)
++        let shared = available
++            .volume(data::VolumeRole::Session)
+             .ok_or("The task volume is unavailable.")?
+             .handle;
+-        self.resolving = Some(context.begin_resolve_entry(root, "docdb").map_err(describe_read)?);
++        self.resolving = Some(context.begin_resolve_entry(shared, "docdb").map_err(describe_read)?);
+         self.read_requested = true;
+         Ok(())
+     }

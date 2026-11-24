@@ -389,6 +389,419 @@ fn qualified_ap_reconciliation_restores_backing_after_write_withdrawal() {
 
 #[test]
 #[cfg(feature = "connected-engine")]
+fn writers_keep_a_populated_database_created_after_the_captured_ap_index() {
+    use volume_index::{EntryAddress, EntryKind};
+    for (participant_created, append_only) in [(false, false), (true, false), (true, true)] {
+        let (_a, alice, _b, bob, volume, owner, participant) = pair();
+        if append_only {
+            alice
+                .set_permissions(
+                    &owner,
+                    volume.id,
+                    Acl {
+                        grants: vec![Grant {
+                            subject: Subject::Public,
+                            permissions: vec![Permission::Read, Permission::Append],
+                        }],
+                    },
+                )
+                .unwrap();
+            sync_volume(&alice, &bob, volume.id);
+        }
+        let (source, target, writer) =
+            if participant_created { (&alice, &bob, participant) } else { (&bob, &alice, owner) };
+        let mut older = receive(source, target, volume.id);
+        qualify(&mut older);
+        let entry = target.create_database(&writer, volume.id, "new", EntryKind::KvDb {}).unwrap();
+        let address = EntryAddress { volume: volume.id, entry: entry.id };
+        target.kv_put(&writer, address, b"key", b"created offline").unwrap();
+        if append_only {
+            assert!(matches!(
+                target.kv_put(&writer, address, b"key", b"overwrite"),
+                Err(Error::AccessDenied(_))
+            ));
+        }
+        target.adopt_received_volume(&writer, &older).unwrap();
+        assert_eq!(
+            target.kv_read(&writer, address, b"key", 0, 64, None).unwrap().bytes,
+            b"created offline"
+        );
+        assert!(
+            target.replica_upload_allowed(&writer, volume.id, DatabaseId::Entry(entry.id)).unwrap()
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "connected-engine")]
+fn append_only_capture_rejects_kv_overwrites_and_tombstones() {
+    use volume_index::{EntryAddress, EntryKind, IndexSnapshot};
+    let (_a, alice, _b, bob, volume, owner, participant) = pair();
+    let hosted = alice.create_database(&owner, volume.id, "hosted", EntryKind::KvDb {}).unwrap();
+    let hosted = EntryAddress { volume: volume.id, entry: hosted.id };
+    for key in [b"a", b"b"] {
+        alice.kv_insert(&owner, hosted, key, b"accepted").unwrap();
+    }
+    bob.adopt_received_volume(&participant, &receive(&alice, &bob, volume.id)).unwrap();
+    bob.kv_put(&participant, hosted, b"a", b"overwritten offline").unwrap();
+    bob.kv_delete(&participant, hosted, b"b").unwrap();
+    let new = bob.create_database(&participant, volume.id, "new", EntryKind::KvDb {}).unwrap();
+    let new = EntryAddress { volume: volume.id, entry: new.id };
+    bob.kv_insert(&participant, new, b"deleted", b"value").unwrap();
+    bob.kv_delete(&participant, new, b"deleted").unwrap();
+
+    alice
+        .set_permissions(
+            &owner,
+            volume.id,
+            Acl {
+                grants: vec![Grant {
+                    subject: Subject::Public,
+                    permissions: vec![Permission::Read, Permission::Append],
+                }],
+            },
+        )
+        .unwrap();
+    let mut accepted = receive(&alice, &bob, volume.id);
+    qualify(&mut accepted);
+    bob.adopt_received_volume(&participant, &accepted).unwrap();
+    for key in [b"a", b"b"] {
+        assert_eq!(bob.kv_read(&participant, hosted, key, 0, 64, None).unwrap().bytes, b"accepted");
+    }
+    assert!(
+        IndexSnapshot::new(bob.db(volume.id, DatabaseId::Index).unwrap().begin_read().unwrap())
+            .backing_quarantined(new.entry)
+            .unwrap()
+    );
+    assert!(
+        !bob.replica_upload_allowed(&participant, volume.id, DatabaseId::Entry(new.entry)).unwrap()
+    );
+}
+
+#[test]
+#[cfg(feature = "connected-engine")]
+fn retired_backings_after_write_withdrawal_require_matching_receipts() {
+    use volume_index::{EntryAddress, EntryKind, IndexSnapshot, namespace::source::cut};
+    let (_a, alice, _b, bob, volume, owner, participant) = pair();
+    let mut retired = Vec::new();
+    for name in ["acknowledged", "changed offline", "unconfirmed deletion"] {
+        let entry = bob.create_database(&participant, volume.id, name, EntryKind::KvDb {}).unwrap();
+        let address = EntryAddress { volume: volume.id, entry: entry.id };
+        let database = DatabaseId::Entry(entry.id);
+        bob.kv_insert(&participant, address, b"key", b"accepted").unwrap();
+        let root = bob.replica_root(volume.id, database).unwrap();
+        bob.acknowledge_replica(
+            volume.id,
+            database,
+            &DurableRevision { root, revision: 1, policy_revision: 1 },
+        )
+        .unwrap();
+        if name == "changed offline" {
+            bob.kv_put(&participant, address, b"key", b"unaccepted overwrite").unwrap();
+        }
+        bob.remove_entry(&participant, volume.id, entry.id).unwrap();
+        retired.push(entry.id);
+    }
+    sync_volume(&bob, &alice, volume.id);
+    alice
+        .set_permissions(
+            &owner,
+            volume.id,
+            Acl {
+                grants: vec![Grant {
+                    subject: Subject::Public,
+                    permissions: vec![Permission::Read, Permission::Append],
+                }],
+            },
+        )
+        .unwrap();
+    let mut stage = receive(&alice, &bob, volume.id);
+    let index = bob.db(volume.id, DatabaseId::Index).unwrap();
+    let missing = cut::current::Record::read(&index.begin_read().unwrap(), retired[2])
+        .unwrap()
+        .unwrap()
+        .deletion
+        .unwrap()
+        .event_id();
+    let mut accepted =
+        stage.with_database(DatabaseId::Index, |db| cut::accepted(&db.begin_read()?)).unwrap();
+    assert!(accepted.remove(&missing).is_some());
+    qualify_accepted(&mut stage, &accepted);
+    bob.adopt_received_volume(&participant, &stage).unwrap();
+    let current = IndexSnapshot::new(index.begin_read().unwrap());
+    assert!(current.backing_ready(retired[0]).unwrap());
+    assert!(current.backing_quarantined(retired[1]).unwrap());
+    assert!(current.backing_quarantined(retired[2]).unwrap());
+}
+
+#[cfg(feature = "connected-engine")]
+fn qualified_control_cut(
+    source: &LocalStore,
+    target: &LocalStore,
+    volume: Id,
+    pending: &[DatabaseId],
+) -> ReceivedVolume {
+    let mut stage = target.prepare_received_volume(volume).unwrap();
+    for database in [DatabaseId::Index, DatabaseId::Revocations] {
+        source
+            .with_replica(volume, database, |source| {
+                stage.with_database(database, |target| {
+                    if database == DatabaseId::Index {
+                        merge_index_replica(
+                            &std::env::temp_dir(),
+                            source,
+                            target,
+                            kvdb::Lww,
+                            |_| Ok(()),
+                        )
+                    } else {
+                        merge_replica(&std::env::temp_dir(), source, target, kvdb::Lww, |_| Ok(()))
+                    }
+                })
+            })
+            .unwrap();
+        stage.finish_database(database).unwrap();
+    }
+    for &database in pending {
+        stage.with_database(database, |_| Ok(())).unwrap();
+        stage.discard_pending_backing(database).unwrap();
+    }
+    qualify(&mut stage);
+    stage
+}
+
+#[test]
+#[cfg(feature = "connected-engine")]
+fn owner_capture_cannot_quarantine_a_newer_sibling_write() {
+    // A read-only owner receives a newer value after the AP snapshot was
+    // captured. Publication must discard that snapshot before classifying edits.
+    use volume_index::{EntryAddress, EntryKind};
+    let (_a, alice, _b, bob, volume, owner, participant) = pair();
+    let ready = alice.create_database(&owner, volume.id, "ready", EntryKind::KvDb {}).unwrap();
+    let address = EntryAddress { volume: volume.id, entry: ready.id };
+    alice.kv_put(&owner, address, b"key", b"captured").unwrap();
+    alice
+        .set_entry_permissions(
+            &owner,
+            volume.id,
+            ready.id,
+            EntryAcl::Replace(Acl {
+                grants: vec![
+                    Grant { subject: Subject::Public, permissions: vec![Permission::Read] },
+                    Grant {
+                        subject: Subject::Principal(Principal::Human(bob.account().id)),
+                        permissions: vec![Permission::Write],
+                    },
+                ],
+            }),
+        )
+        .unwrap();
+    bob.adopt_received_volume(&participant, &receive(&alice, &bob, volume.id)).unwrap();
+    let mut captured = receive(&bob, &alice, volume.id);
+    qualify(&mut captured);
+    captured.owner_baseline = Some(alice.source_snapshot_token(volume.id).unwrap());
+    bob.kv_put(&participant, address, b"key", b"newer").unwrap();
+    sync_volume(&bob, &alice, volume.id);
+    assert!(matches!(
+        alice.adopt_received_volume(&owner, &captured),
+        Err(Error::LocalContention(Error::OWNER_CAPTURE_CHANGED))
+    ));
+    assert_eq!(alice.kv_read(&owner, address, b"key", 0, 8, None).unwrap().bytes, b"newer");
+    assert!(alice.rejected_entry_cuts(&owner, address).unwrap().is_empty());
+}
+
+#[test]
+#[cfg(feature = "connected-engine")]
+fn owner_seeds_only_authorized_content_when_ap_has_the_birth_without_its_backing() {
+    // One AP-only capture includes both births. The owner can seed its original
+    // append-only database. A previously acknowledged key overwritten under
+    // withdrawn Write needs its hosted baseline for reconciliation.
+    use volume_index::{EntryAddress, EntryKind};
+    let (_directory, store, volume, owner) = setup();
+    let mut pending = Vec::new();
+    for changed in [false, true] {
+        let name = if changed { "acknowledged" } else { "new" };
+        let entry = store.create_database(&owner, volume.id, name, EntryKind::KvDb {}).unwrap();
+        let address = EntryAddress { volume: volume.id, entry: entry.id };
+        let database = DatabaseId::Entry(entry.id);
+        if changed {
+            store.kv_insert(&owner, address, b"key", b"accepted").unwrap();
+            let root = store.replica_root(volume.id, database).unwrap();
+            store
+                .acknowledge_replica(
+                    volume.id,
+                    database,
+                    &DurableRevision { revision: 1, policy_revision: 1, root },
+                )
+                .unwrap();
+            store.kv_put(&owner, address, b"key", b"offline overwrite").unwrap();
+        }
+        store
+            .set_entry_permissions(
+                &owner,
+                volume.id,
+                entry.id,
+                EntryAcl::Replace(Acl {
+                    grants: vec![Grant {
+                        subject: Subject::Public,
+                        permissions: vec![Permission::Read, Permission::Append],
+                    }],
+                }),
+            )
+            .unwrap();
+        if !changed {
+            store.kv_insert(&owner, address, b"key", b"original seed").unwrap();
+        }
+        pending.push(database);
+    }
+    let stage = qualified_control_cut(&store, &store, volume.id, &pending);
+    store.adopt_received_volume(&owner, &stage).unwrap();
+    for (database, ready) in pending.into_iter().zip([true, false]) {
+        let DatabaseId::Entry(entry) = database else { unreachable!() };
+        let address = EntryAddress { volume: volume.id, entry };
+        assert_eq!(store.replica_upload_allowed(&owner, volume.id, database).unwrap(), ready);
+        assert_eq!(store.rejected_entry_cuts(&owner, address).unwrap().is_empty(), ready);
+        if ready {
+            assert_eq!(
+                store.kv_read(&owner, address, b"key", 0, 64, None).unwrap().bytes,
+                b"original seed"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "connected-engine")]
+fn pending_owner_retirement_requires_write_on_the_hosted_live_birth() {
+    // Keep a replica of the live read-only birth while the owner restores Write
+    // and retires it offline. Only the hosted authority can admit the upload.
+    use volume_index::{EntryKind, IndexSnapshot};
+    let (_a, store, _b, service, volume, owner, reader) = pair();
+    let entry = store.create_database(&owner, volume.id, "scratch", EntryKind::KvDb {}).unwrap();
+    let address = volume_index::EntryAddress { volume: volume.id, entry: entry.id };
+    let database = DatabaseId::Entry(entry.id);
+    store.kv_insert(&owner, address, b"key", b"unpublished").unwrap();
+    store
+        .set_entry_permissions(
+            &owner,
+            volume.id,
+            entry.id,
+            EntryAcl::Replace(Acl {
+                grants: vec![Grant {
+                    subject: Subject::Public,
+                    permissions: vec![Permission::Read],
+                }],
+            }),
+        )
+        .unwrap();
+    service
+        .adopt_received_volume(
+            &reader,
+            &qualified_control_cut(&store, &service, volume.id, &[database]),
+        )
+        .unwrap();
+    store.set_entry_permissions(&owner, volume.id, entry.id, EntryAcl::Inherit).unwrap();
+    store.remove_entry(&owner, volume.id, entry.id).unwrap();
+    let hosted = qualified_control_cut(&service, &store, volume.id, &[database]);
+    store.adopt_received_volume(&owner, &hosted).unwrap();
+    let index = store.db(volume.id, DatabaseId::Index).unwrap();
+    assert!(IndexSnapshot::new(index.begin_read().unwrap()).backing_quarantined(entry.id).unwrap());
+    assert!(!store.replica_upload_allowed(&owner, volume.id, database).unwrap());
+}
+
+#[test]
+#[cfg(feature = "connected-engine")]
+fn full_owner_capture_after_selected_retirement_waits_for_the_sibling_edit() {
+    use volume_index::{
+        EntryAddress, EntryKind, IndexSnapshot,
+        namespace::{Assignments, observations, receipt, source::cut},
+    };
+    for competing in [false, true] {
+        let (_a, store, _b, service, volume, owner, reader) = pair();
+        let entry =
+            store.create_database(&owner, volume.id, "scratch", EntryKind::KvDb {}).unwrap();
+        let address = EntryAddress { volume: volume.id, entry: entry.id };
+        store.kv_insert(&owner, address, b"key", b"saved").unwrap();
+        service
+            .adopt_received_volume(
+                &reader,
+                &qualified_control_cut(&store, &service, volume.id, &[DatabaseId::Entry(entry.id)]),
+            )
+            .unwrap();
+        let ap = service.db(volume.id, DatabaseId::Index).unwrap();
+        let index = store.db(volume.id, DatabaseId::Index).unwrap();
+        let competing_id = competing.then(|| {
+            service.remove_entry(&reader, volume.id, entry.id).unwrap();
+            // Make the offline deletion the raw LWW winner while AP still
+            // confirms its earlier deletion. The two events remain concurrent.
+            let later = kvdb::clock::EPOCH_UNIX_SECS + u64::from(ap.clock().time) + 1;
+            index.begin_write(later).unwrap().commit().unwrap();
+            IndexSnapshot::new(ap.begin_read().unwrap()).source_retirement_event(entry.id).unwrap()
+        });
+        // This rename is outside the selected retirement's publication scope.
+        let sibling = data(&store, volume.id);
+        store.rename_entry(&owner, volume.id, sibling.entry, "renamed sibling").unwrap();
+        store.remove_entry(&owner, volume.id, entry.id).unwrap();
+        let events = store.entry_retirement_events(&owner, address, None).unwrap().unwrap();
+        let replay = store.entry_retirement_snapshot(&owner, address, &ap).unwrap();
+        merge_index_replica(&std::env::temp_dir(), replay.database(), &ap, kvdb::Lww, |_| Ok(()))
+            .unwrap();
+        assert_eq!(
+            IndexSnapshot::new(ap.begin_read().unwrap()).source_retirement_event(entry.id).unwrap(),
+            events[1]
+        );
+        let captured = qualified_control_cut(&service, &store, volume.id, &[]);
+        captured
+            .with_database(DatabaseId::Index, |index| {
+                let confirmed = receipt::capture(&index.begin_read()?, None)?
+                    .iter()
+                    .map(|row| row.source.id())
+                    .collect::<Result<Vec<_>>>()?;
+                assert!(confirmed.contains(&events[0]));
+                assert!(!confirmed.contains(&events[1]));
+                if let Some(id) = competing_id {
+                    assert!(confirmed.contains(&id));
+                }
+                Ok(())
+            })
+            .unwrap();
+        let witness = cut::delivered(
+            &index.begin_read().unwrap(),
+            &BTreeMap::from([(events[1], Assignments::default())]),
+        )
+        .unwrap()
+        .remove(0);
+        store.adopt_received_volume(&owner, &captured).unwrap();
+        let current = IndexSnapshot::new(index.begin_read().unwrap());
+        assert_eq!(current.backing_quarantined(entry.id).unwrap(), competing);
+        if !competing {
+            assert!(current.backing_ready(entry.id).unwrap());
+            assert_eq!(
+                observations::source_status(&index.begin_read().unwrap(), &witness, 0).unwrap(),
+                Some(observations::Status::Authored)
+            );
+            let recovered =
+                store.recover_entry(&owner, address, "recovered scratch", None).unwrap();
+            assert_eq!(
+                store
+                    .kv_read(
+                        &owner,
+                        EntryAddress { entry: recovered.id, ..address },
+                        b"key",
+                        0,
+                        64,
+                        None
+                    )
+                    .unwrap()
+                    .bytes,
+                b"saved"
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "connected-engine")]
 fn qualified_metadata_without_read_quarantines_backing_until_canonical_capture() {
     use crate::store::local::received::{PublicationCheckpoint, rejected};
     use crate::store::volume_index::{EntryAddress, EntryKind, IndexSnapshot};
@@ -399,33 +812,6 @@ fn qualified_metadata_without_read_quarantines_backing_until_canonical_capture()
     bob.adopt_received_volume(&participant, &receive(&alice, &bob, volume.id)).unwrap();
     bob.kv_put(&participant, address, b"key", b"rejected").unwrap();
     bob.kv_put(&participant, address, b"offline-only", b"recover me").unwrap();
-    let control_cut = |target: &LocalStore| {
-        let mut stage = target.prepare_received_volume(volume.id).unwrap();
-        for database in [DatabaseId::Index, DatabaseId::Revocations] {
-            alice
-                .with_replica(volume.id, database, |source| {
-                    stage.with_database(database, |target| {
-                        if database == DatabaseId::Index {
-                            merge_index_replica(
-                                &std::env::temp_dir(),
-                                source,
-                                target,
-                                kvdb::Lww,
-                                |_| Ok(()),
-                            )
-                        } else {
-                            merge_replica(&std::env::temp_dir(), source, target, kvdb::Lww, |_| {
-                                Ok(())
-                            })
-                        }
-                    })
-                })
-                .unwrap();
-            stage.finish_database(database).unwrap();
-        }
-        qualify(&mut stage);
-        stage
-    };
     alice
         .set_entry_permissions(
             &owner,
@@ -440,7 +826,11 @@ fn qualified_metadata_without_read_quarantines_backing_until_canonical_capture()
         )
         .unwrap();
     for _ in 0..3 {
-        bob.adopt_received_volume(&participant, &control_cut(&bob)).unwrap();
+        bob.adopt_received_volume(
+            &participant,
+            &qualified_control_cut(&alice, &bob, volume.id, &[]),
+        )
+        .unwrap();
     }
     let index = bob.db(volume.id, DatabaseId::Index).unwrap();
     let cuts = rejected::cuts(&index).unwrap();
@@ -463,7 +853,8 @@ fn qualified_metadata_without_read_quarantines_backing_until_canonical_capture()
             }),
         )
         .unwrap();
-    bob.adopt_received_volume(&participant, &control_cut(&bob)).unwrap();
+    bob.adopt_received_volume(&participant, &qualified_control_cut(&alice, &bob, volume.id, &[]))
+        .unwrap();
     assert!(
         !bob.replica_upload_allowed(&participant, volume.id, DatabaseId::Entry(entry.id)).unwrap()
     );
@@ -2037,6 +2428,28 @@ fn journal_recovery_does_not_grant_access_to_a_later_revoked_participant() {
 // Credits charge the lifetime of reserved stage handles, including completed
 // stages still held for receipts. Dropping an owner makes exactly one slot free.
 #[test]
+#[cfg(feature = "connected-engine")]
+fn only_the_current_pull_can_certify_an_unchanged_world_backing() {
+    let (_dir, store, volume, access) = setup();
+    let (address, _) = super::live::new_named_object(&store, &access, volume.id, "saves");
+    let database = DatabaseId::Entry(address.entry);
+    let root = store.replica_root(volume.id, database).unwrap();
+    assert!(root.is_some());
+    let received = store.prepare_received_volume(volume.id).unwrap();
+    assert!(!received.hosted_backing_matches(address.entry, root).unwrap());
+    let mut receipt = DurableRevision { revision: 12, policy_revision: 5, root };
+    received.record_receipt(database, &receipt).unwrap();
+    assert!(received.hosted_backing_matches(address.entry, root).unwrap());
+    assert!(!received.hosted_backing_matches(address.entry, None).unwrap());
+    receipt.root = None;
+    received.record_receipt(database, &receipt).unwrap();
+    assert!(received.hosted_backing_matches(address.entry, None).unwrap());
+    assert!(!received.hosted_backing_matches(address.entry, root).unwrap());
+    let next = store.prepare_received_volume(volume.id).unwrap();
+    assert!(!next.hosted_backing_matches(address.entry, None).unwrap());
+}
+
+#[test]
 fn received_preparation_bounds_reserved_handles_and_releases_credits() {
     let (_directory, store, volume, _owner) = setup();
     let first = store.prepare_received_volume(volume.id).unwrap();
@@ -2403,4 +2816,82 @@ fn malformed_revocation_keys_abort_present_and_tombstone_batches() {
             before
         );
     }
+}
+
+#[cfg(feature = "connected-engine")]
+#[test]
+fn entry_retirement_confirms_concurrent_ap_winner_through_a_fence_without_releasing_reads() {
+    use volume_index::namespace::{
+        Assignments,
+        observations::{self, Status},
+        receipt,
+        source::cut,
+    };
+    let (alice_dir, alice, bob_dir, bob, volume, owner, _) = pair();
+    let local = Access::owner(bob.account().id);
+    let entry = alice
+        .create_database(&owner, volume.id, "offline", volume_index::EntryKind::KvDb {})
+        .unwrap()
+        .id;
+    let address = volume_index::EntryAddress { volume: volume.id, entry };
+    sync_volume(&alice, &bob, volume.id);
+    bob.remove_entry(&local, volume.id, entry).unwrap();
+    let before = bob.entry_retirement_events(&local, address, None).unwrap().unwrap();
+    let local_witness = bob
+        .with_replica(volume.id, DatabaseId::Index, |index| {
+            let candidates = BTreeMap::from([(before[1], Assignments::default())]);
+            Ok(cut::delivered(&index.begin_read()?, &candidates)?.remove(0))
+        })
+        .unwrap();
+    bob.receive_entry_authority_terminal(
+        &local,
+        address,
+        volume.id,
+        crate::network::ap::replication::TerminalCause::EntryAuthorityChanged,
+    )
+    .unwrap();
+    assert_eq!(bob.entry_retirement_events(&local, address, None).unwrap(), Some(before));
+    let hosted = alice.db(volume.id, DatabaseId::Index).unwrap();
+    bob.entry_retirement_snapshot(&local, address, &hosted).unwrap();
+
+    alice.remove_entry(&owner, volume.id, entry).unwrap();
+    let stage = bob.prepare_received_entry(address).unwrap();
+    let policy =
+        DatabasePolicy::reserved(MetadataPolicy::read(&hosted).unwrap(), DatabaseId::Index)
+            .unwrap();
+    let projected = crate::store::ScopedSnapshot::retirement_confirmation(
+        &hosted,
+        &policy,
+        bob.account().id.into(),
+        entry,
+    )
+    .unwrap()
+    .project(alice_dir.path())
+    .unwrap();
+    let winner = stage
+        .with_database(DatabaseId::Index, |target| {
+            merge_replica(alice_dir.path(), projected.database(), target, kvdb::Lww, |_| Ok(()))?;
+            let accepted = cut::accepted(&hosted.begin_read()?)?;
+            receipt::retain_fixture(target, Some(entry), &accepted)?;
+            Ok(receipt::capture(&target.begin_read()?, Some(entry))?
+                .into_iter()
+                .find(|row| !row.source.birth)
+                .unwrap()
+                .source)
+        })
+        .unwrap();
+    assert_ne!(winner.id().unwrap(), before[1]);
+    bob.confirm_entry_retirement(&local, &stage, before).unwrap();
+    bob.confirm_entry_retirement(&local, &stage, before).unwrap();
+    drop(stage);
+    drop(bob);
+    let bob = LocalStore::open(bob_dir.path()).unwrap();
+    let index = bob.db(volume.id, DatabaseId::Index).unwrap();
+    let read = index.begin_read().unwrap();
+    assert_eq!(observations::source_status(&read, &winner, 0).unwrap(), Some(Status::Confirmed));
+    assert_eq!(
+        observations::source_status(&read, &local_witness, 0).unwrap(),
+        Some(Status::Authored)
+    );
+    assert!(matches!(bob.entry_revisions(&local, address, None, 8), Err(Error::AccessDenied(_))));
 }

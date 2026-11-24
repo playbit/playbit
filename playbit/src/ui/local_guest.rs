@@ -362,6 +362,11 @@ impl Apps {
                 if revision.is_none() {
                     return Err("The app's data change source is unavailable".into());
                 }
+                // Profile saves publish the name before the revision. Reading
+                // the revision first keeps a concurrent save observable.
+                app.guest
+                    .set_display_name(&app.store.guest_display_name())
+                    .map_err(|error| format!("Invalid account display name: {error:?}"))?;
                 app.observed = revision;
                 if changed.is_some() {
                     app.dirty = true;
@@ -389,7 +394,9 @@ impl Apps {
 
                     match result {
                         Ok(()) => {}
-                        Err(HostError::LimitExceeded) => app.inbox.defer(token),
+                        Err(HostError::LimitExceeded | HostError::WouldBlock) => {
+                            app.inbox.defer(token)
+                        }
                         Err(error) => {
                             return Err(format!("Guest completion failed: {error:?}").into());
                         }
@@ -474,7 +481,7 @@ fn scopes(volumes: &[crate::runtime::host::AvailableVolume]) -> (Vec<Id>, Vec<Id
             .collect(),
         volumes
             .iter()
-            .filter(|volume| volume.rights.0 & VolumeRights::WRITE.0 != 0)
+            .filter(|volume| volume.data_rights().contains(VolumeRights::KV_WRITE))
             .map(|volume| Id::from_bytes(volume.id))
             .collect(),
     )

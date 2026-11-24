@@ -8,11 +8,13 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::{icon as macos_icon, template_digest as macos_template_digest};
 
-/// Decode to a centered straight-RGBA canvas. Native hosts use 48px (desktop)
-/// and 120px (iPhone); the Mac bundle writer uses 128/256/512px icon entries.
+/// Largest 48-point launcher tile at 200% zoom on a 2× Mac display.
+pub(crate) const MAX_TILE_PIXELS: u32 = 192;
+
+/// Decode to a centered straight-RGBA canvas at the host's requested pixel size.
 /// No file, network, font or external resource resolution.
 pub fn decode(bytes: &[u8], side: u32) -> Result<image::RgbaImage, String> {
-    if !matches!(side, 48 | 120 | 128 | 256 | 512) {
+    if !matches!(side, 48..=MAX_TILE_PIXELS | 256 | 512) {
         return Err("unsupported display icon size".into());
     }
     if bytes.len() > super::codec::MAX_ICON_BYTES {

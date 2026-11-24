@@ -1,0 +1,15 @@
+{
+    "session": {
+        "permissions": { "grants": [] },
+        "databases": [
+            {
+                "id": "2dV35z4fXHPCMvdc5Gs2",
+                "name": "docdb",
+                "kind": {
+                    "type": "blob_log"
+                }
+            }
+        ],
+        "blobs": []
+    }
+}

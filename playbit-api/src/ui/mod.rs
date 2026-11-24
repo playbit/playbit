@@ -516,7 +516,7 @@ pub struct ThemeOverride {
 }
 
 /// Built-in monochrome menu symbols, rendered at 16dp in the row's foreground color.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(u8)]
 pub enum MenuIcon {
     Avatar = 1,

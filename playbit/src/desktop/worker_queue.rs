@@ -16,12 +16,21 @@ struct Budget {
     bytes: AtomicUsize,
     next_admission: AtomicU64,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum InvitationRequest {
+    Saved,
+    Preview,
+    Dialog,
+}
+
 pub struct Credit {
     budget: Arc<Budget>,
     bytes: usize,
     pub(super) browser_session: Option<[u8; 32]>,
     admission: u64,
+    pub(super) invitation: Option<InvitationRequest>,
     pub(super) read_cancelled: Option<Arc<AtomicBool>>,
+    pub(super) draft_erasure: Option<super::drafts::ErasureHold>,
 }
 impl Credit {
     pub fn admission(&self) -> u64 {
@@ -124,6 +133,9 @@ pub struct RequestSender(Arc<SenderState>, pub(super) Option<[u8; 32]>);
 // caller belong here; adding a new one requires its memory accounting.
 fn retained_bytes(request: &Request) -> Option<usize> {
     let heap = match request {
+        Request::AppRemovalImpact { app, .. } | Request::RemoveApp { app, .. } => {
+            app.app_id.capacity()
+        }
         Request::SignInWithKey { email, account_key } => {
             email.capacity().checked_add(account_key.capacity())?
         }
@@ -133,7 +145,7 @@ fn retained_bytes(request: &Request) -> Option<usize> {
         | Request::LabelVolume { label: value, .. }
         | Request::SetDisplayName { name: value }
         | Request::RecoverCredentials { secret: value }
-        | Request::PreviewInvitation { invitation: value }
+        | Request::PreviewDesktopInvitation { invitation: value }
         | Request::PrepareSession { session: value }
         | Request::RetrySessionInfo { session: value }
         | Request::StartJoin { session: value }
@@ -325,6 +337,15 @@ impl RequestSender {
             .map_err(|_| "Account operation could not start")
     }
     pub fn send(&self, request: Request) -> Result<(), &'static str> {
+        if matches!(request, Request::DesktopLaunch) {
+            // The initial snapshot also retires the prior app's transient seed.
+            // It belongs to this launch even if engine admission is recovering.
+            return self
+                .0
+                .send
+                .try_send(Message::Request(QueuedRequest::internal(request)))
+                .map_err(|_| "Playbit's launch request could not be queued");
+        }
         self.enqueue(request).map(|_| ())
     }
     pub(super) fn payload_size(
@@ -333,9 +354,11 @@ impl RequestSender {
         entry: Option<crate::store::EntryId>,
     ) -> Result<SizeRead, &'static str> {
         let cancelled = Arc::new(AtomicBool::new(false));
-        let admission = self.enqueue_with_cancellation(
+        let admission = self.enqueue_request(
             Request::PayloadSize { session: self.1.map(Box::new), volume, entry },
             Some(cancelled.clone()),
+            false,
+            None,
         )?;
         Ok(SizeRead { admission, cancelled, wake: self.0.send.clone() })
     }
@@ -449,15 +472,36 @@ impl RequestSender {
             browser_session: self.1,
             admission,
             read_cancelled: None,
+            draft_erasure: None,
+            invitation: None,
         })
     }
     pub(super) fn enqueue(&self, request: Request) -> Result<u64, &'static str> {
-        self.enqueue_with_cancellation(request, None)
+        self.enqueue_request(request, None, false, None)
     }
-    fn enqueue_with_cancellation(
+    pub(super) fn join_dialog_request(&self, request: Request) -> Result<u64, &'static str> {
+        self.enqueue_request(request, None, true, None)
+    }
+    pub(super) fn remove_app(
+        &self,
+        request: Request,
+        hold: Option<super::drafts::ErasureHold>,
+    ) -> Result<u64, &'static str> {
+        let receipt = hold.as_ref().map(|hold| hold.receipt.clone());
+        let result = self.enqueue_request(request, None, false, hold);
+        if result.is_err()
+            && let Some(receipt) = receipt
+        {
+            let _ = receipt.try_send(Vec::new()); // The request was never admitted.
+        }
+        result
+    }
+    fn enqueue_request(
         &self,
         request: Request,
         cancelled: Option<Arc<AtomicBool>>,
+        join_dialog: bool,
+        draft_erasure: Option<super::drafts::ErasureHold>,
     ) -> Result<u64, &'static str> {
         let optional_read = cancelled.is_some();
         let result = (|| {
@@ -466,6 +510,16 @@ impl RequestSender {
                 .ok_or("This operation is not supported by the app window")?;
             let mut credit = self.reserve(bytes)?;
             credit.read_cancelled = cancelled;
+            credit.draft_erasure = draft_erasure;
+            credit.invitation = if join_dialog {
+                Some(InvitationRequest::Dialog)
+            } else if matches!(request, Request::PreviewDesktopInvitation { .. }) {
+                Some(InvitationRequest::Preview)
+            } else if matches!(request, Request::ResumeInvitation { .. }) {
+                Some(InvitationRequest::Saved)
+            } else {
+                None
+            };
             let admission = credit.admission();
             self.0
                 .send
@@ -478,7 +532,10 @@ impl RequestSender {
                 .map(|()| admission)
                 .map_err(|_| "Playbit's worker is unavailable; this action did not start")
         })();
-        if !optional_read && let Err(error) = result {
+        if !optional_read
+            && !join_dialog
+            && let Err(error) = result
+        {
             let _ = self.0.errors.try_send(error);
         }
         result
@@ -780,7 +837,7 @@ mod tests {
     fn retained_capacity_is_charged_before_admitting_management() {
         let (send, receive, errors) = channel();
         for request in [
-            Request::PreviewInvitation { invitation: String::with_capacity(MAX_BYTES) },
+            Request::PreviewDesktopInvitation { invitation: String::with_capacity(MAX_BYTES) },
             Request::CreateVolume {
                 name: String::with_capacity(MAX_BYTES),
                 share_key_with_service: true,

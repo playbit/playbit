@@ -74,7 +74,7 @@ function aad(account: string, revision: number, version: number): Uint8Array<Arr
     new DataView(bytes.buffer).setBigUint64(domain.length + 16, BigInt(revision), true);
     return bytes;
 }
-function encode(bytes: Uint8Array): string {
+export function base64url(bytes: Uint8Array): string {
     let text = "";
     for (const byte of bytes) text += String.fromCharCode(byte);
     return btoa(text).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
@@ -82,7 +82,7 @@ function encode(bytes: Uint8Array): string {
 function decode(text: unknown): Uint8Array<ArrayBuffer> {
     if (typeof text !== "string" || text.length > Math.ceil(MAX_BYTES / 3) * 4 || !/^[A-Za-z0-9_-]+$/.test(text)) throw new Error("Invalid credential backup encoding");
     const bytes = Uint8Array.from(atob(text.replaceAll("-", "+").replaceAll("_", "/")), character => character.charCodeAt(0));
-    if (encode(bytes) !== text || bytes.length <= 29 || bytes.length > MAX_BYTES || (bytes[0] !== 1 && bytes[0] !== 2)) throw new Error("Invalid credential backup envelope");
+    if (base64url(bytes) !== text || bytes.length <= 29 || bytes.length > MAX_BYTES || (bytes[0] !== 1 && bytes[0] !== 2)) throw new Error("Invalid credential backup envelope");
     return bytes;
 }
 // The output bound is checked while draining, including authenticated compressed input.
@@ -113,7 +113,7 @@ export async function seal(account: string, revision: number, secret: Uint8Array
     const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: aad(account, revision, version), tagLength: 128 }, key, body));
     const envelope = new Uint8Array(13 + ciphertext.length);
     envelope[0] = version; envelope.set(nonce, 1); envelope.set(ciphertext, 13);
-    return encode(envelope);
+    return base64url(envelope);
 }
 export async function open(account: string, revision: number, secret: Uint8Array<ArrayBuffer>, ciphertext: unknown): Promise<Uint8Array<ArrayBuffer>> {
     if (!keyBytes(secret)) throw new Error("Invalid account key");

@@ -102,6 +102,11 @@ pub struct SessionInstance {
     pub owner_generation: u64,
     pub state: State,
 }
+/// The registry allocates this time-prefixed ID when it admits the launch reservation.
+pub fn reserved_unix_secs(id: Id) -> u32 {
+    u32::from_be_bytes(id.as_bytes()[..4].try_into().expect("four-byte ID prefix"))
+}
+
 impl SessionInstance {
     #[cfg(all(not(target_os = "ios"), feature = "process"))]
     pub(crate) fn delivery_volumes(&self) -> Vec<Id> {
@@ -147,6 +152,8 @@ pub struct ReconstructionTarget {
 
 #[derive(Clone, Debug, serde::Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct Admission {
+    #[serde(skip)]
+    pub display_name: String,
     /// Sent only to the authenticated owner in the private, build-matched IPC archive.
     #[serde(skip)]
     pub(crate) session_reference: crate::store::SessionReference,
@@ -684,17 +691,45 @@ pub(super) mod registry {
                         })
                         .transpose()?
                         .flatten();
-                    Ok(LaunchOwner {
-                        instance: record.instance.clone(),
-                        process,
-                        presentation: self
-                            .startup
-                            .get(&record.instance.id)
-                            .filter(|startup| record.context == Some(startup.context))
-                            .map_or(0, |startup| startup.presentation),
-                    })
+                    Ok(self.launch_owner(record, process))
                 })
                 .collect()
+        }
+        /// Snapshot candidates on the owner thread. The removal worker checks
+        /// their session and kernel process identities before sending Quit.
+        pub fn writer_candidates(&self, account: Id) -> Result<Vec<LaunchOwner>> {
+            self.available()?;
+            Ok(self
+                .records
+                .iter()
+                .filter(|record| {
+                    record.instance.account == account
+                        && !terminal(record.instance.state)
+                        && record.owner.is_some()
+                })
+                .map(|record| self.launch_owner(record, record.owner.clone()))
+                .collect())
+        }
+        pub fn owns_session(&self, session: &str, account: Id, peer: &UnixStream) -> Result<bool> {
+            self.available()?;
+            let owner = Owner::capture(peer)?;
+            Ok(self.records.iter().any(|record| {
+                record.instance.session == session
+                    && record.instance.account == account
+                    && matches!(record.instance.state, State::Owned | State::Unknown)
+                    && record.owner.as_ref() == Some(&owner.identity)
+            }))
+        }
+        fn launch_owner(&self, record: &Record, process: Option<ProcessIdentity>) -> LaunchOwner {
+            LaunchOwner {
+                instance: record.instance.clone(),
+                process,
+                presentation: self
+                    .startup
+                    .get(&record.instance.id)
+                    .filter(|startup| record.context == Some(startup.context))
+                    .map_or(0, |startup| startup.presentation),
+            }
         }
         /// Saved GUI configurations are local metadata, never shared session data.
         pub fn configurations(&self, session: &str, account: Id) -> Result<Vec<Id>> {

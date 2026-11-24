@@ -52,7 +52,7 @@ impl LocalStore {
         let directory = ProjectionDirectory(parent.join(Id::generate()?.to_string()));
         fs::DirBuilder::new().mode(0o700).create(&directory.0).map_err(io)?;
         let key = DatabaseId::Entry(destination.entry)
-            .hash_key(&self.credentials(destination.volume)?.database_key, destination.volume);
+            .hash_key(&self.local_database_key(destination.volume)?, destination.volume);
         let path = directory.0.join("backing.kvdb");
         let database = create_db(&path, Some(key), 512 * 1024)?;
         if source.entry.info.protocol == Some(DatabaseProtocol::BlobLog) {

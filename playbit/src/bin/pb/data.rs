@@ -1,4 +1,5 @@
 //! CLI storage diagnostics share guest data semantics and explicit tool authority.
+use crate::usage_error;
 use playbit::{
     engine::{Request, Result, reply::Reply, tool_client::DataContext},
     runtime::{
@@ -28,20 +29,39 @@ pub(super) fn run(
     let entry_id = *address.entry.as_bytes();
     let operation = match args[0].as_str() {
         "schema" if args.len() == 4 => DataOperation::SchemaEstablish {
-            entry_id,            schema: store_bridge::from_schema(read_json(Path::new(&args[3]))?),
+            entry_id,
+            schema: store_bridge::from_schema(read_json(Path::new(&args[3]))?),
         },
         "object-create" if args.len() == 5 => {
-            let fields: BTreeMap<Id, Option<Vec<object_contract::Value>>> = read_json(Path::new(&args[4]))?;
+            let fields: BTreeMap<Id, Option<Vec<object_contract::Value>>> =
+                read_json(Path::new(&args[4]))?;
             DataOperation::Create {
-                entry_id,                type_id: *Id::parse(&args[3])?.as_bytes(),
-                fields: fields.into_iter().map(|(id, values)| FieldChange {
-                    field_id: *id.as_bytes(),
-                    values: values.map(|values| values.into_iter().map(store_bridge::from_owned_value).collect()),
-                }).collect(),
+                entry_id,
+                type_id: *Id::parse(&args[3]).map_err(usage_error)?.as_bytes(),
+                fields: fields
+                    .into_iter()
+                    .map(|(id, values)| FieldChange {
+                        field_id: *id.as_bytes(),
+                        values: values.map(|values| {
+                            values.into_iter().map(store_bridge::from_owned_value).collect()
+                        }),
+                    })
+                    .collect(),
             }
         }
-        "objects" if (4..=5).contains(&args.len()) => return objects(address, Id::parse(&args[3])?, args.get(4).map(|id| Id::parse(id)).transpose()?, call),
-        _ => return Err("expected pb schema VOLUME DATABASE JSON_FILE, object-create VOLUME DATABASE TYPE JSON_FILE, or objects VOLUME DATABASE TYPE [AFTER]".into()),
+        "objects" if (4..=5).contains(&args.len()) => {
+            return objects(
+                address,
+                Id::parse(&args[3]).map_err(usage_error)?,
+                args.get(4).map(|id| Id::parse(id)).transpose().map_err(usage_error)?,
+                call,
+            );
+        }
+        _ => {
+            return Err(usage_error(
+                "expected pb schema VOLUME DATABASE JSON_FILE, object-create VOLUME DATABASE TYPE JSON_FILE, or objects VOLUME DATABASE TYPE [AFTER]",
+            ));
+        }
     };
     let mut context = DataContext::open(None, call)?;
     let result = context.execute(DataCall { volume: *volume.as_bytes(), operation });

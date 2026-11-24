@@ -686,6 +686,7 @@ fn queued_checkbox_keeps_object_identity_through_insert_reorder_and_deletion() {
                     app_name: "Test app".into(),
                     app_build: None,
                     identity: Identity {
+                        display_name: String::new(),
                         account_id: [5; 16],
                         is_service: false,
                         device_id: [6; 16],

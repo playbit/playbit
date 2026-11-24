@@ -155,7 +155,7 @@ pub struct SegmentEntry {
 }
 
 /// Guest symbols retain their wire identities; host menus may use bundled artwork.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MenuGlyph {
     Builtin(MenuIcon),
     Asset(&'static str),
@@ -167,7 +167,7 @@ impl From<MenuIcon> for MenuGlyph {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum MenuEntry {
     Action {
         id: u32,

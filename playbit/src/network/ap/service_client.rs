@@ -173,7 +173,9 @@ pub async fn subscribe_replica(
 ) -> Result<(ApStream, crate::network::ap::replication::SubscriptionAck)> {
     if !matches!(
         request,
-        ServiceRequest::SubscribeReplica { .. } | ServiceRequest::SubscribeAccount { .. }
+        ServiceRequest::SubscribeReplica { .. }
+            | ServiceRequest::SubscribeAccount { .. }
+            | ServiceRequest::WorldReplica { request: WorldReplicaRequest::Subscribe { .. }, .. }
     ) {
         return Err("request is not a replica subscription".into());
     }
@@ -195,11 +197,16 @@ pub async fn publish_replica(
 ) -> Result<crate::network::ap::replication::PublicationAck> {
     if !matches!(
         request,
-        ServiceRequest::PublishReplica { .. } | ServiceRequest::PublishAccount { .. }
+        ServiceRequest::PublishReplica { .. }
+            | ServiceRequest::PublishAccount { .. }
+            | ServiceRequest::WorldReplica { request: WorldReplicaRequest::Publish { .. }, .. }
     ) {
         return Err("request is not a replica publication".into());
     }
     crate::network::ap::replication::validate_delta(delta)?;
+    if matches!(request, ServiceRequest::WorldReplica { .. }) {
+        require_features(connection, service::required_features(request)).await?;
+    }
     publish_payload(connection, request, delta).await
 }
 

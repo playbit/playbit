@@ -255,7 +255,7 @@ fn run(updates: bool, sidebar: Option<Option<std::path::PathBuf>>, session: Opti
                         })
                         .collect();
                 if let Some(directory) = icons {
-                    host.session_icons.load_preview(directory, &host.sessions);
+                    host.session_icons.load_preview(directory, &mut host.sessions);
                 }
                 if session.as_deref() == Some("loading") {
                     host.sidebar_volumes = false;
@@ -312,6 +312,10 @@ fn run(updates: bool, sidebar: Option<Option<std::path::PathBuf>>, session: Opti
         {
             host.update(cx, |host, cx| {
                 host.sidebar_volumes = false;
+                if mode == "new-empty" {
+                    host.sessions.clear();
+                    return;
+                }
                 host.recent_sessions = host.sessions.iter().map(|row| row.id.clone()).collect();
                 if mode == "builds" {
                     use crate::engine::builds::BuildState;
@@ -330,11 +334,20 @@ fn run(updates: bool, sidebar: Option<Option<std::path::PathBuf>>, session: Opti
                 if mode == "new" {
                     return;
                 }
-                host.sidebar_session = Some(host.sessions[1].id.clone());
-                let id = host.sessions[1].id.clone();
+                if matches!(mode.as_str(), "active" | "empty" | "stopped" | "instance") {
+                    host.preview_session_browser(mode, cx);
+                } else {
+                    host.sidebar_session = Some(host.sessions[1].id.clone());
+                }
+                let id = host.sidebar_session.clone().expect("selected preview session");
+                let owner = host.applications.highlighted_instance().map(|owner| owner.instance.id);
+                let instance = host.applications.instance;
                 host.logs.update(cx, |logs, cx| {
                     use crate::ui::app_control::{LogBatch, LogCursor, LogEntry, LogSeverity};
-                    logs.select(&id, cx);
+                    logs.select(&id, instance, cx);
+                    if let Some(owner) = owner {
+                        logs.receive(&id, log::Update::Running(owner), cx);
+                    }
                     if mode == "empty" {
                         return;
                     }
@@ -355,7 +368,8 @@ fn run(updates: bool, sidebar: Option<Option<std::path::PathBuf>>, session: Opti
                         &id,
                         log::Update::Batch(LogBatch {
                             cursor: LogCursor {
-                                instance: crate::store::Id::from_bytes([1; 16]),
+                                instance: owner
+                                    .unwrap_or_else(|| crate::store::Id::from_bytes([1; 16])),
                                 generation: 1,
                                 next: line_count,
                             },
@@ -516,9 +530,9 @@ fn measure_sessions(host: Entity<Shell>, cx: &mut App) {
                 host.logs.update(cx, |logs, cx| {
                     let lines = vec![crate::ui::app_control::LogEntry::recorded(
                         "x".repeat(256), crate::ui::app_control::LogSeverity::Info); 256];
-                    logs.select("fixture-0", cx);
+                    logs.select("fixture-0", None, cx);
                     logs.set("fixture-0", &lines, cx);
-                    logs.select("fixture-1", cx);
+                    logs.select("fixture-1", None, cx);
                     logs.set("fixture-1", &lines, cx);
                 });
                 cx.notify();
@@ -530,7 +544,7 @@ fn measure_sessions(host: Entity<Shell>, cx: &mut App) {
                 host.update(cx, |host, cx| {
                     let id = format!("fixture-{}", i % 2);
                     host.sidebar_session = Some(id.clone());
-                    host.logs.update(cx, |logs, cx| logs.select(&id, cx));
+                    host.logs.update(cx, |logs, cx| logs.select(&id, None, cx));
                     cx.notify();
                 }).expect("fixture selection");
                 let callback = start.elapsed().as_secs_f64() * 1000.;

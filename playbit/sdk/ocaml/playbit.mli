@@ -45,10 +45,24 @@ module Session : sig
       Anyone with the code can use the invitation. *)
   val code : info -> string option
 
+  type participant = private { identity : string; display_name : string option }
+
+  (** Read the local identity and optional UTF-8 name. Refresh on
+      [EventKind.identity_changed], an [int32] advisory event kind. *)
+  val local_participant : unit -> participant
+
+  (** Start or reuse live membership in the current session without waiting for
+      the first roster. A roster-only app can call this once at startup. *)
+  val join : unit -> unit
+
+  (** Read cached members and their optional names. The first read after [join]
+      may be empty. Refresh on every [EventKind.presence_changed]. *)
+  val participants : unit -> participant list
+
   (** The local context's account, device and instance IDs, each 16 bytes. *)
   val identity : unit -> string
 
-  (** Live authenticated tuples in the same layout as [identity]. The local
+  (** Cached live members after [join], as tuples in the same layout as [identity]. The local
       member's transport device may differ from the context device. *)
   val presence : unit -> string list
 

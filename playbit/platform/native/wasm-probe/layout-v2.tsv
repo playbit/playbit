@@ -440,9 +440,9 @@ PBArguments.bytes_capacity.offset	28
 PBArguments.bytes_capacity.width	4
 PBArguments.bytes_count.offset	32
 PBArguments.bytes_count.width	4
-PBParticipant.sizeof	88
+PBParticipant.sizeof	344
 PBParticipant.alignof	4
-PBParticipant.field_count	6
+PBParticipant.field_count	7
 PBParticipant.size.offset	0
 PBParticipant.size.width	4
 PBParticipant.written.offset	4
@@ -455,6 +455,8 @@ PBParticipant.instance_id.offset	40
 PBParticipant.instance_id.width	16
 PBParticipant.build_id.offset	56
 PBParticipant.build_id.width	32
+PBParticipant.display_name.offset	88
+PBParticipant.display_name.width	256
 PBFileReference.sizeof	32
 PBFileReference.alignof	8
 PBFileReference.field_count	5
@@ -543,9 +545,9 @@ PBEvent.kind.offset	16
 PBEvent.kind.width	4
 PBEvent.target.offset	20
 PBEvent.target.width	4
-PBIdentity.sizeof	104
+PBIdentity.sizeof	360
 PBIdentity.alignof	8
-PBIdentity.field_count	9
+PBIdentity.field_count	10
 PBIdentity.size.offset	0
 PBIdentity.size.width	4
 PBIdentity.written.offset	4
@@ -564,6 +566,8 @@ PBIdentity.flags.offset	96
 PBIdentity.flags.width	4
 PBIdentity.reserved.offset	100
 PBIdentity.reserved.width	4
+PBIdentity.display_name.offset	104
+PBIdentity.display_name.width	256
 PBApp.sizeof	24
 PBApp.alignof	4
 PBApp.field_count	6

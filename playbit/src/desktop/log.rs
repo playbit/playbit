@@ -47,7 +47,7 @@ pub(super) enum Update {
     Batch(app_control::LogBatch),
     Notice(&'static str),
     Stopped,
-    Running,
+    Running(crate::store::Id),
 }
 
 pub(super) fn retain(
@@ -57,7 +57,7 @@ pub(super) fn retain(
 ) -> usize {
     match update {
         // Connection and lifecycle notices are presented separately by LogView.
-        Update::Stopped | Update::Running | Update::Notice(_) => 0,
+        Update::Stopped | Update::Running(_) | Update::Notice(_) => 0,
         Update::Batch(batch) => {
             // A new runtime resets its source cursor, not this session's launch-local
             // history. The transport already supplies only that source's unread suffix.
@@ -84,13 +84,16 @@ impl Watch {
     pub fn start(
         profile: PathBuf,
         session: String,
+        instance: Option<crate::store::Id>,
         retained_cursor: Option<app_control::LogCursor>,
     ) -> Result<(Self, async_channel::Receiver<Update>), String> {
         OBSERVERS
             .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < MAX_OBSERVERS).then_some(count + 1)
             })
-            .map_err(|_| "The previous log observer is closing. Select Log again.".to_string())?;
+            .map_err(|_| {
+                "The previous log observer is closing. Select the session again.".to_string()
+            })?;
         let credit = Credit;
         let state = Arc::new(Mutex::new(State::default()));
         let shared = state.clone();
@@ -107,13 +110,19 @@ impl Watch {
                     if shared.lock().expect("log observer lock poisoned").stopped { return Ok(()); }
                     let response = ipc::call_archive(&profile, &Request::InstanceList { session: session.clone() }).and_then(ipc::Response::into_owned).map_err(|e| e.to_string())?;
                     let Reply::InstanceOwners(owners) = response else { return Err("Invalid app owner response".into()); };
-                    let current: Vec<_> = owners.into_iter().filter(|owner| owner.process.is_some() && owner.instance.state == crate::engine::session_instance::State::Owned).collect();
-                    if current.len() != 1 {
-                        send.send_blocking(if current.is_empty() { Update::Stopped } else { Update::Notice("Several app instances are running. Open the log in the app window.") }).map_err(|e| e.to_string())?;
+                    let selected = match instance {
+                        Some(id) => owners.iter().find(|owner| owner.instance.id == id),
+                        None => owners.first(),
+                    };
+                    let owner = selected.filter(|owner| {
+                        owner.process.is_some()
+                            && owner.instance.state == crate::engine::session_instance::State::Owned
+                    });
+                    let Some(owner) = owner else {
+                        send.send_blocking(Update::Stopped).map_err(|e| e.to_string())?;
                         continue;
-                    }
-                    send.send_blocking(Update::Running).map_err(|e| e.to_string())?;
-                    let owner = &current[0];
+                    };
+                    send.send_blocking(Update::Running(owner.instance.id)).map_err(|e| e.to_string())?;
                     let mut cursor = retained_cursor.take().filter(|cursor| cursor.instance == owner.instance.id);
                     loop {
                         let reply = (|| -> Result<_, String> {
@@ -140,7 +149,7 @@ impl Watch {
                 }
             })();
             if result.is_err() && !shared.lock().expect("log observer lock poisoned").stopped {
-                let _ = send.send_blocking(Update::Notice("Log observation stopped. Select Log again to attach."));
+                let _ = send.send_blocking(Update::Notice("Log observation stopped. Select the session again to attach."));
             }
         }).map_err(|e| e.to_string())?;
         Ok((Self(state), receive))
@@ -372,11 +381,11 @@ mod tests {
                 assert_eq!(stream.read(&mut [0]).unwrap(), 0, "cancel wakes the idle endpoint");
             });
             let (watch, receive) =
-                Watch::start(profile.path().into(), "fixture-session".into(), None).unwrap();
+                Watch::start(profile.path().into(), "fixture-session".into(), None, None).unwrap();
             let (updates, received) = mpsc::channel();
             let forward = std::thread::spawn(move || {
                 while let Ok(update) = receive.recv_blocking() {
-                    if matches!(update, Update::Running) {
+                    if matches!(update, Update::Running(_)) {
                         continue;
                     }
                     if updates.send(update).is_err() {

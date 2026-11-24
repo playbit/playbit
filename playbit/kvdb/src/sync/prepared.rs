@@ -21,8 +21,37 @@ impl<'db, S: Storage, B: SyncStaging, J: SyncStaging> PreparedSync<'db, S, B, J>
         journal.clear()?;
         let resolver = Journal { storage: journal, capacity: max_journal_bytes };
         Ok(Self {
-            receiver: SyncReceiver::start(db, resolver, entry_staging, None, out)?,
+            receiver: SyncReceiver::start(db, resolver, entry_staging, None, None, out)?,
             hash_key: db.meta().hash_key,
+            branch_factor: db.meta().branch_factor,
+        })
+    }
+    /// Request the independently keyed sender's actual leaf range. Compare
+    /// values against the pinned local source and stage only logical differences.
+    /// No local canonical branch or hash is exposed to the sender.
+    pub fn new_projection(
+        db: &'db Db<S>,
+        projection_key: [u8; 32],
+        entry_staging: B,
+        mut journal: J,
+        max_journal_bytes: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<Self> {
+        if !db.meta().syncable {
+            return Err(Error::Mode);
+        }
+        journal.clear()?;
+        let resolver = Journal { storage: journal, capacity: max_journal_bytes };
+        Ok(Self {
+            receiver: SyncReceiver::start(
+                db,
+                resolver,
+                entry_staging,
+                None,
+                Some(projection_key),
+                out,
+            )?,
+            hash_key: projection_key,
             branch_factor: db.meta().branch_factor,
         })
     }
@@ -128,9 +157,7 @@ impl<J: SyncStaging> PreparedChanges<J> {
     pub fn inspect(self) -> PreparedInspection<J> {
         PreparedInspection {
             changes: self,
-            offset: 0,
-            previous: [0; crate::KEY_SIZE_MAX],
-            previous_len: 0,
+            cursor: JournalCursor::new(),
             finished: false,
             failed: false,
         }
@@ -146,6 +173,20 @@ impl<J: SyncStaging> PreparedChanges<J> {
     pub fn merge<'db, S: Storage, R: SyncResolver>(
         &self,
         db: &'db Db<S>,
+        resolver: R,
+        wall_secs: u64,
+        max_delta_bytes: usize,
+    ) -> Result<PreparedMerge<'db, S>> {
+        self.merge_projection(db, &db.meta().hash_key, resolver, wall_secs, max_delta_bytes)
+    }
+
+    /// Install differences received against an explicitly authorized projection
+    /// of this database. The caller supplies its expected transport identity
+    /// and resolves incoming logical facts against the current canonical data.
+    pub fn merge_projection<'db, S: Storage, R: SyncResolver>(
+        &self,
+        db: &'db Db<S>,
+        projection_key: &[u8; 32],
         mut resolver: R,
         wall_secs: u64,
         max_delta_bytes: usize,
@@ -153,7 +194,7 @@ impl<J: SyncStaging> PreparedChanges<J> {
         if !db.meta().syncable {
             return Err(Error::Mode);
         }
-        if db.meta().hash_key != self.hash_key {
+        if projection_key != &self.hash_key {
             return Err(Error::HashKeyMismatch);
         }
         if db.meta().branch_factor != self.branch_factor {
@@ -166,81 +207,40 @@ impl<J: SyncStaging> PreparedChanges<J> {
             wtxn.set_clock(wtxn.clock().recv(self.observed_clock, 0)?)?;
         }
         let mut repair = PendingRepair::default();
-        let mut offset = 0usize;
+        let mut cursor = JournalCursor::new();
         let mut applied = 0;
         let mut deltas = 0;
-        let mut key = [0; crate::KEY_SIZE_MAX + 1];
-        let mut previous = [0; crate::KEY_SIZE_MAX];
-        let mut previous_len = 0;
-        while offset < self.journal.len() {
-            let mut header = [0; HEADER];
-            self.journal.read_exact_at(offset, &mut header)?;
-            offset = offset.checked_add(HEADER).ok_or(Error::Corrupt)?;
-            let key_len = u16::from_le_bytes(
-                header[..2]
-                    .try_into()
-                    .expect("checked fixed-width field has the destination width"),
-            ) as usize;
-            let value_len = u32::from_le_bytes(
-                header[2..6]
-                    .try_into()
-                    .expect("checked fixed-width field has the destination width"),
-            ) as usize;
-            let clock = Clock::decode(&header[6..14]).ok_or(Error::Corrupt)?;
-            let kind = header[14];
-            if key_len == 0
-                || key_len > crate::KEY_SIZE_MAX
-                || value_len > crate::VALUE_SIZE_MAX
-                || kind > 2
-                || (kind != 2 && value_len != 0)
-                || (kind == 0) != clock.is_zero()
-                || clock > self.observed_clock
-            {
-                return Err(Error::Corrupt);
-            }
-            self.journal.read_exact_at(offset, &mut key[1..1 + key_len])?;
-            if previous_len > 0 && key[1..1 + key_len] <= previous[..previous_len] {
-                return Err(Error::Corrupt);
-            }
-            previous[..key_len].copy_from_slice(&key[1..1 + key_len]);
-            previous_len = key_len;
-            offset = offset.checked_add(key_len).ok_or(Error::Corrupt)?;
-            let end = offset.checked_add(value_len).ok_or(Error::Corrupt)?;
-            if end > self.journal.len() {
-                return Err(Error::Corrupt);
-            }
-            let value = JournalValue { journal: &self.journal, offset, len: value_len };
-            let remote = match kind {
-                0 => SyncEntState::Missing,
-                1 => SyncEntState::Deleted { clock },
-                _ => SyncEntState::Present { clock, value: &value },
-            };
-            let source = snapshot.raw().snapshot_value(&key[..1 + key_len])?;
-            let local = source.as_ref().map(|v| StreamEntry::new(v)).transpose()?;
+        while cursor.next(self, |stored_key, remote| {
+            let source = snapshot.raw().snapshot_value(stored_key)?;
+            let local = source.as_ref().map(|value| StreamEntry::new(value)).transpose()?;
+            let key = &stored_key[1..];
             let delta = SyncDelta {
-                key: &key[1..1 + key_len],
+                key,
                 local: local.as_ref().map_or(SyncEntState::Missing, StreamEntry::state),
                 remote,
             };
-            deltas += 1;
             if resolver.resolve(&delta)? == Resolution::UseRemote {
-                repair.prepare(&mut wtxn, delta.key)?;
-                if kind == 0 {
-                    if wtxn.sync_forget_deferred(delta.key)? {
-                        repair.changed(delta.key, false);
-                        applied += 1;
+                repair.prepare(&mut wtxn, key)?;
+                let changed = match delta.remote {
+                    SyncEntState::Missing => wtxn.sync_forget_deferred(key)?.then_some(false),
+                    SyncEntState::Deleted { clock } => wtxn.sync_put_from_deferred(
+                        key,
+                        &crate::storage::SliceValue(&[]),
+                        ENT_FLAG_TOMBSTONE,
+                        clock,
+                    )?,
+                    SyncEntState::Present { clock, value } => {
+                        wtxn.sync_put_from_deferred(key, value, 0, clock)?
                     }
-                } else if let Some(stable) = wtxn.sync_put_from_deferred(
-                    delta.key,
-                    &value,
-                    if kind == 1 { ENT_FLAG_TOMBSTONE } else { 0 },
-                    clock,
-                )? {
-                    repair.changed(delta.key, stable);
+                };
+                if let Some(stable) = changed {
+                    repair.changed(key, stable);
                     applied += 1;
                 }
             }
-            offset = end;
+            Ok(())
+        })? {
+            deltas += 1;
         }
         repair.flush(&mut wtxn)?;
         Ok(PreparedMerge { wtxn, end: self.end, deltas, applied })
@@ -251,9 +251,7 @@ impl<J: SyncStaging> PreparedChanges<J> {
 /// a borrowed streamed value, not an allocated copy. No database is borrowed.
 pub struct PreparedInspection<J: SyncStaging> {
     changes: PreparedChanges<J>,
-    offset: usize,
-    previous: [u8; crate::KEY_SIZE_MAX],
-    previous_len: usize,
+    cursor: JournalCursor,
     finished: bool,
     failed: bool,
 }
@@ -271,13 +269,41 @@ impl<J: SyncStaging> PreparedInspection<J> {
             return Ok(false);
         }
         self.failed = true;
-        if self.offset == self.changes.journal.len() {
-            self.finished = true;
-            self.failed = false;
+        let found = self.cursor.next(&self.changes, |key, remote| inspect(&key[1..], remote))?;
+        self.finished = !found;
+        self.failed = false;
+        Ok(found)
+    }
+
+    pub fn finish(self) -> Result<PreparedChanges<J>> {
+        if !self.finished || self.failed {
+            return Err(Error::Protocol);
+        }
+        Ok(self.changes)
+    }
+}
+
+/// Both inspection and merge consume the identical validated record stream.
+struct JournalCursor {
+    offset: usize,
+    previous: [u8; crate::KEY_SIZE_MAX],
+    previous_len: usize,
+}
+impl JournalCursor {
+    fn new() -> Self {
+        Self { offset: 0, previous: [0; crate::KEY_SIZE_MAX], previous_len: 0 }
+    }
+    /// The callback gets the level-zero storage key, including its prefix.
+    fn next<J: SyncStaging>(
+        &mut self,
+        changes: &PreparedChanges<J>,
+        visit: impl FnOnce(&[u8], SyncEntState<'_>) -> Result<()>,
+    ) -> Result<bool> {
+        if self.offset == changes.journal.len() {
             return Ok(false);
         }
         let mut header = [0; HEADER];
-        self.changes.journal.read_exact_at(self.offset, &mut header)?;
+        changes.journal.read_exact_at(self.offset, &mut header)?;
         let mut offset = self.offset.checked_add(HEADER).ok_or(Error::Corrupt)?;
         let key_len = u16::from_le_bytes(
             header[..2].try_into().expect("checked fixed-width field has the destination width"),
@@ -293,39 +319,31 @@ impl<J: SyncStaging> PreparedInspection<J> {
             || kind > 2
             || (kind != 2 && value_len != 0)
             || (kind == 0) != clock.is_zero()
-            || clock > self.changes.observed_clock
+            || clock > changes.observed_clock
         {
             return Err(Error::Corrupt);
         }
-        let mut key = [0; crate::KEY_SIZE_MAX];
-        self.changes.journal.read_exact_at(offset, &mut key[..key_len])?;
-        if self.previous_len > 0 && key[..key_len] <= self.previous[..self.previous_len] {
+        let mut key = [0; crate::KEY_SIZE_MAX + 1];
+        changes.journal.read_exact_at(offset, &mut key[1..=key_len])?;
+        if self.previous_len > 0 && key[1..=key_len] <= self.previous[..self.previous_len] {
             return Err(Error::Corrupt);
         }
         offset = offset.checked_add(key_len).ok_or(Error::Corrupt)?;
         let end = offset.checked_add(value_len).ok_or(Error::Corrupt)?;
-        if end > self.changes.journal.len() {
+        if end > changes.journal.len() {
             return Err(Error::Corrupt);
         }
-        let value = JournalValue { journal: &self.changes.journal, offset, len: value_len };
+        let value = JournalValue { journal: &changes.journal, offset, len: value_len };
         let remote = match kind {
             0 => SyncEntState::Missing,
             1 => SyncEntState::Deleted { clock },
             _ => SyncEntState::Present { clock, value: &value },
         };
-        inspect(&key[..key_len], remote)?;
-        self.previous[..key_len].copy_from_slice(&key[..key_len]);
+        visit(&key[..=key_len], remote)?;
+        self.previous[..key_len].copy_from_slice(&key[1..=key_len]);
         self.previous_len = key_len;
         self.offset = end;
-        self.failed = false;
         Ok(true)
-    }
-
-    pub fn finish(self) -> Result<PreparedChanges<J>> {
-        if !self.finished || self.failed {
-            return Err(Error::Protocol);
-        }
-        Ok(self.changes)
     }
 }
 

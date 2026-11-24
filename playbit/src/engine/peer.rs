@@ -242,9 +242,23 @@ pub fn pull_into(
     )?;
     let result = runtime.block_on(async {
         ready(&mut stream, &mut cipher).await?;
-        pull(&store.profile_path().join(crate::paths::STAGING), target, &mut stream, &mut cipher)
-            .await?;
-        receipt(&mut stream, &mut cipher).await
+        pull(
+            &store.profile_path().join(crate::paths::STAGING),
+            target,
+            key,
+            &mut stream,
+            &mut cipher,
+        )
+        .await?;
+        let mut received = receipt(&mut stream, &mut cipher).await?;
+        if target.meta().hash_key != key {
+            let sender = SyncSender::new(target)?;
+            if super::remote::world::wire_root(&sender, key).await? != received.durable.root {
+                return Err("credentialed peer receipt differs from delivered World data".into());
+            }
+            received.durable.root = sender.root_hash()?;
+        }
+        Ok(received)
     });
     failure::qualify(result, store, session, &event)
 }
@@ -286,7 +300,7 @@ pub fn push(
     )?;
     runtime.block_on(async {
         send(&mut stream, &mut cipher, READY, &[]).await?;
-        send_replica(projected.database(), &mut stream, &mut cipher).await?;
+        send_replica(projected.database(), key, &mut stream, &mut cipher).await?;
         receipt(&mut stream, &mut cipher).await.map(|receipt| receipt.durable)
     })
 }
@@ -305,7 +319,14 @@ fn validate_target(
     target: &Database,
 ) -> Result<[u8; 32]> {
     let key = volume_key(store, volume, database)?;
-    if !target.meta().syncable || target.meta().hash_key != key {
+    let meta = target.meta();
+    if !meta.syncable
+        || (meta.hash_key != key
+            && (!store.uses_world_projection(volume)?
+                || meta.hash_key
+                    != database
+                        .hash_key(&crate::store::DatabaseId::world_projection_key(volume), volume)))
+    {
         return Err("private peer target volume key mismatch".into());
     }
     Ok(key)
@@ -399,9 +420,12 @@ fn respond(
     let mut stream = runtime.block_on(wire::begin(connection, &request))?;
     runtime.block_on(wire::response(&mut stream, request.operation_id()))?;
     // Only the trusted runtime obtains the database key; it never crosses AP.
-    let mut cipher = store.with_replica(volume, event.database_id, |db| {
-        Cipher::new(db.meta().hash_key, event, false).map_err(error)
-    })?;
+    let key = volume_key(store, volume, event.database_id)?;
+    // A participant may have the catalog record without a local backing yet.
+    // Open its local replica before the existing per-request authorization and transfer.
+    // The local tree's hash key carries no peer encryption authority.
+    store.with_replica(volume, event.database_id, |_| Ok(()))?;
+    let mut cipher = Cipher::new(key, event, false)?;
     let access = Access::session_version(account, &event.session_id, &event.build_id);
     let result = match event.direction {
         SyncDirection::Pull => respond_pull(
@@ -410,6 +434,7 @@ fn respond(
             &access,
             volume,
             event.database_id,
+            key,
             account,
             &mut stream,
             &mut cipher,
@@ -422,6 +447,7 @@ fn respond(
                 &access,
                 volume,
                 event.database_id,
+                key,
                 account,
                 &mut stream,
                 &mut cipher,
@@ -450,38 +476,16 @@ fn respond_pull(
     access: &Access,
     volume: Id,
     database: crate::store::DatabaseId,
+    key: [u8; 32],
     account: Id,
     stream: &mut ApStream,
     cipher: &mut Cipher,
 ) -> crate::store::Result<ReplicaReceipt> {
-    let (projected, receipt) = store.with_authorized_replica(
-        access,
-        volume,
-        database,
-        Some(Permission::Read),
-        |db, policy| {
-            let projected = outbound_replica(
-                &store.profile_path().join(crate::paths::STAGING),
-                db,
-                policy,
-                ReplicaReader::Participant(account),
-            )?;
-            let receipt = ReplicaReceipt {
-                namespace: crate::store::volume_index::namespace::receipt::Receipt::Unavailable,
-                source: store.source_snapshot_token(volume)?,
-                durable: DurableRevision {
-                    root: projected.root()?,
-                    revision: db.clock().as_u64(),
-                    policy_revision: policy.volume.revision(),
-                },
-            };
-            Ok((projected, receipt))
-        },
-    )?;
+    let (projected, mut receipt) = authorized_snapshot(store, access, volume, database, account)?;
     runtime
         .block_on(async {
             send(stream, cipher, READY, &[]).await?;
-            send_replica(projected.database(), stream, cipher).await?;
+            receipt.durable.root = send_replica(projected.database(), key, stream, cipher).await?;
             Ok::<ReplicaReceipt, Box<dyn std::error::Error + Send + Sync>>(receipt)
         })
         .map_err(error)
@@ -497,6 +501,7 @@ fn respond_push(
     access: &Access,
     volume: Id,
     database: crate::store::DatabaseId,
+    key: [u8; 32],
     account: Id,
     stream: &mut ApStream,
     cipher: &mut Cipher,
@@ -508,32 +513,66 @@ fn respond_push(
         .block_on(pull(
             &store.profile_path().join(crate::paths::STAGING),
             staged.database(),
+            key,
             stream,
             cipher,
         ))
         .map_err(error)?;
     store.merge_authorized_replica(access, volume, database, staged.database())?;
+    let (projected, mut receipt) = authorized_snapshot(store, access, volume, database, account)?;
+    receipt.durable.root = runtime
+        .block_on(async {
+            let sender = SyncSender::new(projected.database())?;
+            if projected.database().meta().hash_key == key {
+                return Ok(sender.root_hash()?);
+            }
+            super::remote::world::wire_root(&sender, key).await
+        })
+        .map_err(error)?;
+    Ok(receipt)
+}
+
+/// Capture the authorized bytes, clock and policy at one cut. Finish the receipt
+/// in the credentialed wire context from that same immutable view.
+fn authorized_snapshot(
+    store: &LocalStore,
+    access: &Access,
+    volume: Id,
+    database: crate::store::DatabaseId,
+    account: Id,
+) -> crate::store::Result<(crate::store::OutboundReplica, ReplicaReceipt)> {
     store.with_authorized_replica(access, volume, database, Some(Permission::Read), |db, policy| {
-        Ok(ReplicaReceipt {
+        let projected = outbound_replica(
+            &store.profile_path().join(crate::paths::STAGING),
+            db,
+            policy,
+            ReplicaReader::Participant(account),
+        )?;
+        let receipt = ReplicaReceipt {
             namespace: crate::store::volume_index::namespace::receipt::Receipt::Unavailable,
             source: store.source_snapshot_token(volume)?,
             durable: DurableRevision {
-                root: outbound_replica(
-                    &store.profile_path().join(crate::paths::STAGING),
-                    db,
-                    policy,
-                    ReplicaReader::Participant(account),
-                )?
-                .root()?,
+                // Filled from the exact authorized outgoing snapshot.
+                root: None,
                 revision: db.clock().as_u64(),
                 policy_revision: policy.volume.revision(),
             },
-        })
+        };
+        Ok((projected, receipt))
     })
 }
 
-async fn send_replica(db: &Database, stream: &mut ApStream, cipher: &mut Cipher) -> Result<()> {
+async fn send_replica(
+    db: &Database,
+    key: [u8; 32],
+    stream: &mut ApStream,
+    cipher: &mut Cipher,
+) -> Result<crate::store::ReplicaRoot> {
     let mut sender = SyncSender::new(db)?;
+    if db.meta().hash_key != key {
+        let root = super::remote::world::wire_root(&sender, key).await?;
+        sender.use_projection(key, root)?;
+    }
     let mut done = false;
     loop {
         let (kind, input) = receive(stream, cipher).await?;
@@ -541,7 +580,7 @@ async fn send_replica(db: &Database, stream: &mut ApStream, cipher: &mut Cipher)
             if !done || !input.is_empty() {
                 return Err("premature private peer completion".into());
             }
-            return Ok(());
+            return Ok(sender.root_hash()?);
         }
         if kind != DATA {
             return Err("invalid private database message".into());
@@ -549,7 +588,10 @@ async fn send_replica(db: &Database, stream: &mut ApStream, cipher: &mut Cipher)
         done = sender.process(&input)? == SyncStatus::Done;
         let mut output = vec![0; CHUNK];
         loop {
-            let length = sender.write_output(&mut output)?;
+            let Some(length) = sender.try_write_output(&mut output)? else {
+                tokio::task::yield_now().await;
+                continue;
+            };
             if length == 0 {
                 break;
             }
@@ -560,12 +602,17 @@ async fn send_replica(db: &Database, stream: &mut ApStream, cipher: &mut Cipher)
 async fn pull(
     scratch: &std::path::Path,
     db: &Database,
+    key: [u8; 32],
     stream: &mut ApStream,
     cipher: &mut Cipher,
 ) -> Result<()> {
     let mut output = Vec::new();
-    let mut receiver =
-        SyncReceiver::new(db, Lww, crate::store::sync_staging(scratch)?, now(), &mut output)?;
+    let staging = crate::store::sync_staging(scratch)?;
+    let mut receiver = if db.meta().hash_key == key {
+        SyncReceiver::new(db, Lww, staging, now(), &mut output)?
+    } else {
+        SyncReceiver::new_projection(db, key, Lww, staging, now(), &mut output)?
+    };
     loop {
         send_data(stream, cipher, &output).await?;
         output.clear();

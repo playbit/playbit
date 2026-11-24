@@ -2,22 +2,6 @@
 use crate::engine::{Request, ipc, reply::Reply};
 use std::path::Path;
 
-pub(super) fn stop(profile: &Path, session: String) -> crate::engine::Result<()> {
-    let Reply::InstanceOwners(owners) =
-        ipc::call_archive(profile, &Request::InstanceList { session })?.into_owned()?
-    else {
-        return Err("Invalid app owner response".into());
-    };
-    let mut owners = owners.into_iter().filter(|o| {
-        o.process.is_some() && o.instance.state == crate::engine::session_instance::State::Owned
-    });
-    let owner = owners.next().ok_or("This session is no longer running")?;
-    if owners.next().is_some() {
-        return Err("Several instances are running; stop the app from its own window.".into());
-    }
-    stop_owner(profile, &owner)
-}
-
 fn stop_owner(
     profile: &Path,
     owner: &crate::engine::session_instance::LaunchOwner,

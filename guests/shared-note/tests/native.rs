@@ -19,6 +19,7 @@ fn context(shared: [u8; 16], root: [u8; 16]) -> GuestContext {
         app_name: "Shared note fixture".into(),
         app_build: None,
         identity: Identity {
+            display_name: String::new(),
             account_id: [5; 16],
             device_id: [6; 16],
             instance_id: [7; 16],

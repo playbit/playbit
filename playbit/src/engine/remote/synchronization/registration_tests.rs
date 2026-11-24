@@ -326,13 +326,13 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
                     state.first_error.take().map_or(Ok(()), Err)
                 }
                 "session" | "late-session" | "unsupported-shared" | "invalid-shared" => {
-                    remote.sync_session(&store, &session)
+                    remote.sync_required_session(&store, &session)
                 }
                 "canceled-registration" => {
                     let canceled = Arc::new(crate::engine::cancellation::Canceled::default());
                     remote.set_cancellation(Some(canceled.clone()));
                     std::thread::scope(|scope| {
-                        let task = scope.spawn(|| remote.sync_session(&store, &session));
+                        let task = scope.spawn(|| remote.sync_required_session(&store, &session));
                         held.recv_timeout(Duration::from_secs(10)).unwrap();
                         assert!(store.pending_operations().unwrap().contains(&pending));
                         canceled.raise();
@@ -361,7 +361,7 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
                 // The cached absent capability fails an explicit retry without
                 // another discovery request or changing the retained operation.
                 assert_eq!(
-                    remote.sync_session(&store, &session).unwrap_err().to_string(),
+                    remote.sync_required_session(&store, &session).unwrap_err().to_string(),
                     expected
                 );
                 // The initial/reconnect pass continues with ordinary registrations
@@ -384,7 +384,14 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
                 reconnect.registrations(&remote, &store).unwrap();
                 assert!(matches!(reconnect.phase, Phase::Owned));
                 assert_eq!(reconnect.volumes, [root.id]);
-                assert_eq!(reconnect.first_error.unwrap().to_string(), expected);
+                let deferred = store.volume(session.replica_volume()).unwrap();
+                assert_eq!(
+                    reconnect.first_error.unwrap().to_string(),
+                    format!(
+                        "Couldn’t sync volume {:?} ({})\n{expected}",
+                        deferred.name, deferred.id
+                    )
+                );
                 assert!(store.pending_operations().unwrap().iter().all(|op| !matches!(
                     &op.operation, PendingKind::RegisterSession { session, .. } if session.id == baseline.id)));
                 assert_eq!(
@@ -467,7 +474,19 @@ fn first_use_after_registration_phase_precedes_remote_session_admission() {
                 requests, expected,
                 "{consumer}, {role:?}, reject={reject_registration}: {error:?}"
             );
-            assert_eq!(error.as_deref(), expected_error, "{consumer}");
+            // Rejected registrations identify their own backing. The full sync
+            // listener/session pass also retains its scope on admission failure.
+            if reject_registration || matches!(consumer, "listeners" | "invalid-shared") {
+                let volume = store.volume(session.replica_volume()).unwrap();
+                let cause = expected_error.expect("this case rejects registration or admission");
+                assert_eq!(
+                    error.as_deref().unwrap(),
+                    format!("Couldn’t sync volume {:?} ({})\n{cause}", volume.name, volume.id),
+                    "{consumer}",
+                );
+            } else {
+                assert_eq!(error.as_deref(), expected_error, "{consumer}");
+            }
             let remaining = store.pending_operations().unwrap();
             let session_pending = reject_registration
                 || !session_admission

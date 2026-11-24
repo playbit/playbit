@@ -161,11 +161,13 @@ impl State {
         &mut self,
         generation: u64,
         event: Event,
+        closing: Option<&mut work::ClosingInputs>,
     ) -> HostResult<()> {
         self.require_running_generation(generation)?;
         if matches!(
             event.kind,
             EventKind::Started
+                | EventKind::IdentityChanged
                 | EventKind::UpdateAvailable
                 | EventKind::ObjectCreationReady
                 | EventKind::FileCopyReady
@@ -181,7 +183,25 @@ impl State {
             }
             playbit_api::abi::environment::Surface::decode(&event.data)?;
         }
-        push_event(self, event)
+        if let Some(closing) = closing {
+            let root = self.work.take_closing_input(generation, closing)?;
+            let result = crate::runtime::syscall::events::push_work_event(self, event, Some(root));
+            if result.is_err() {
+                self.reap_work();
+            }
+            result
+        } else {
+            push_event(self, event)
+        }
+    }
+    pub(in crate::runtime) fn deactivate_with_inputs(
+        &mut self,
+        count: usize,
+    ) -> HostResult<work::ClosingInputs> {
+        self.reap_work();
+        let closing = self.work.seal_inputs(self.generation(), count)?;
+        self.deactivate();
+        Ok(closing)
     }
 
     pub(in crate::runtime) fn notify_creation(
@@ -279,16 +299,54 @@ impl State {
         Ok(())
     }
 
+    pub(in crate::runtime) fn set_display_name(&mut self, name: &str) -> HostResult<()> {
+        if self.context.identity.display_name == name {
+            return Ok(());
+        }
+        validate_guest_name(name)?;
+        name.clone_into(&mut self.context.identity.display_name);
+        self.identity_change_pending = true;
+        self.presence_change_pending |=
+            apply_local_name(&self.context.identity, &mut self.context.participants);
+        self.queue_name_changes();
+        Ok(())
+    }
+
+    // Each event invalidates a snapshot. A full queue retains the invalidation
+    // until an event is consumed. Repeated edits share a queued notification.
+    pub(in crate::runtime) fn queue_name_changes(&mut self) {
+        if self.work.draining {
+            return;
+        }
+        if self.identity_change_pending {
+            self.identity_change_pending = !self.queue_invalidation(EventKind::IdentityChanged);
+        }
+        if self.presence_change_pending {
+            self.presence_change_pending = !self.queue_invalidation(EventKind::PresenceChanged);
+        }
+    }
+
+    fn queue_invalidation(&mut self, kind: EventKind) -> bool {
+        self.events.iter().any(|queued| queued.kind == kind)
+            || push_event(self, Event { kind, target: 0, data: Vec::new() }).is_ok()
+    }
+
     pub(in crate::runtime) fn set_participants(
         &mut self,
         generation: u64,
-        participants: Vec<Participant>,
+        mut participants: Vec<Participant>,
     ) -> HostResult<()> {
         self.require_running_generation(generation)?;
+        if self.work.draining {
+            return Err(HostError::Conflict);
+        }
         validate_participants(&participants)?;
-        let state = self;
-        push_event(state, Event { kind: EventKind::PresenceChanged, target: 0, data: Vec::new() })?;
-        state.context.participants = participants;
+        apply_local_name(&self.context.identity, &mut participants);
+        if self.context.participants != participants {
+            self.context.participants = participants;
+            self.presence_change_pending = true;
+            self.queue_name_changes();
+        }
         Ok(())
     }
 
@@ -476,8 +534,7 @@ impl State {
         self.volume_watch = None;
         self.wake_deadline = None;
         self.events.retain(|event| {
-            if matches!(event.kind, EventKind::Wake | EventKind::Frame | EventKind::VolumesChanged)
-            {
+            if work::discard_on_deactivate(event.kind) {
                 self.queued_bytes -= 20 + event.data.len();
                 false
             } else {

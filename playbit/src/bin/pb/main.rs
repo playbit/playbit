@@ -1,4 +1,9 @@
-use playbit::engine::{Request, Result, ipc, reply::Reply};
+use playbit::engine::{
+    Request, Result,
+    failure::{UsageError, usage_error},
+    ipc,
+    reply::Reply,
+};
 mod bloblog;
 mod control;
 mod data;
@@ -40,14 +45,17 @@ fn main() {
             std::env::consts::OS,
             std::env::consts::ARCH
         );
-        eprintln!(
-            "If you think this is a bug, please let us know by emailing the output of the command to support@playbit.app"
-        );
+        if !error.is::<UsageError>() {
+            eprintln!(
+                "If you think this is a bug, please let us know by emailing the output of the command to support@playbit.app"
+            );
+        }
         std::process::exit(1);
     }
 }
+
 fn argument(args: &[String], n: usize) -> Result<&str> {
-    args.get(n).map(String::as_str).ok_or_else(|| "missing argument; run pb help".into())
+    args.get(n).map(String::as_str).ok_or_else(|| usage_error("missing argument; run pb help"))
 }
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -61,20 +69,20 @@ fn run() -> Result<()> {
         let start = match args.get(1).map(String::as_str) {
             Some("start") if args.len() == 2 => true,
             Some("unregister") if args.len() == 2 => false,
-            _ => return Err("expected pb engine-service start or unregister".into()),
+            _ => return Err(usage_error("expected pb engine-service start or unregister")),
         };
         return playbit::engine::launch_agent::control(start);
     }
     if matches!(command, "version" | "--version") {
         if args.len() != 1 {
-            return Err("expected pb version or pb --version".into());
+            return Err(usage_error("expected pb version or pb --version"));
         }
         println!("{}", playbit::VERSION);
         return Ok(());
     }
     if command == "hash-file" {
         if args.len() != 2 {
-            return Err("expected pb hash-file PATH".into());
+            return Err(usage_error("expected pb hash-file PATH"));
         }
         println!("{}", serde_json::to_string(&digest::file(std::path::Path::new(&args[1]))?)?);
         return Ok(());
@@ -109,9 +117,14 @@ fn run() -> Result<()> {
             Some("start") => playbit::trace::control::Command::Start,
             Some("stop") => playbit::trace::control::Command::Stop,
             Some("status") => playbit::trace::control::Command::Observe,
-            _ => return Err("expected pb trace start|stop [SESSION-INSTANCE-ID] [--clean], pb trace status [SESSION-INSTANCE-ID], or pb trace tail [SESSION-INSTANCE-ID] [--since TIMESTAMP]".into()),
+            _ => {
+                return Err(usage_error(
+                    "expected pb trace start|stop [SESSION-INSTANCE-ID] [--clean], pb trace status [SESSION-INSTANCE-ID], or pb trace tail [SESSION-INSTANCE-ID] [--since TIMESTAMP]",
+                ));
+            }
         };
-        let (selector, clean) = trace::control_arguments(command, &args[2..])?;
+        let (selector, clean) =
+            trace::control_arguments(command, &args[2..]).map_err(usage_error)?;
         trace::control(&profile, command, selector, clean)?;
         return Ok(());
     }
@@ -146,7 +159,7 @@ fn run() -> Result<()> {
     let value = match command {
         "meta-gen" => {
             if args.len() != 1 {
-                return Err("expected pb meta-gen".into());
+                return Err(usage_error("expected pb meta-gen"));
             }
             let directory = std::env::current_dir()?;
             let manifest = playbit::package::Manifest::read(&directory)?;
@@ -157,7 +170,7 @@ fn run() -> Result<()> {
         "sdk" => sdk::update(&args[1..])?,
         "sdk-path" => {
             if args.len() != 1 {
-                return Err("expected pb sdk-path".into());
+                return Err(usage_error("expected pb sdk-path"));
             }
             serde_json::json!({"path": native::sdk_path(&std::env::current_exe()?.canonicalize()?)?})
         }
@@ -174,19 +187,21 @@ fn run() -> Result<()> {
             developer::run(&args[1..], &std::env::current_dir()?, &profile, &call, channel)?;
             return Ok(());
         }
-        "publish" => serde_json::to_value(developer::publish(&args[1..], &std::env::current_dir()?, &call)?)?,
+        "publish" => {
+            serde_json::to_value(developer::publish(&args[1..], &std::env::current_dir()?, &call)?)?
+        }
         "app" => match argument(&args, 1)? {
             "list" if args.len() == 2 => {
                 developer::list_apps(&call, &mut std::io::stdout().lock())?;
                 return Ok(());
             }
-            "enable" | "disable" | "delete" => serde_json::to_value(developer::app_lifecycle(&args[1..], &call)?)?,
-            _ => return Err("expected pb app list, enable, disable or delete".into()),
+            "enable" | "disable" | "delete" => {
+                serde_json::to_value(developer::app_lifecycle(&args[1..], &call)?)?
+            }
+            _ => return Err(usage_error("expected pb app list, enable, disable or delete")),
         },
         "session" => match argument(&args, 1)? {
-            "create" => {
-                output(developer::create_session(&args[2..], &std::env::current_dir()?)?)?
-            }
+            "create" => output(developer::create_session(&args[2..], &std::env::current_dir()?)?)?,
             "volumes" if args.len() == 3 => {
                 output(Request::AutomaticVolumes { session: session_argument(&args[2], channel)? })?
             }
@@ -211,20 +226,19 @@ fn run() -> Result<()> {
             }
             "delete" => {
                 if args.len() != 3 {
-                    return Err("expected pb session delete SESSION".into());
+                    return Err(usage_error("expected pb session delete SESSION"));
                 }
                 output(Request::ForgetSession { session: session_argument(&args[2], channel)? })?
             }
             "join" => return join(&args[2..], &profile, &call, channel),
             _ => {
-                return Err(
-                    "expected pb session create APP.pbapp [--root-volume ID] [--user-volume ID], list, delete SESSION, or join SESSION [--new-instance] [--background] [--detach]"
-                        .into(),
-                );
+                return Err(usage_error(
+                    "expected pb session create APP.pbapp [--root-volume ID] [--user-volume ID], list, delete SESSION, or join SESSION [--new-instance] [--background] [--detach]",
+                ));
             }
         },
         "volume" => match argument(&args, 1)? {
-            "create" => output(volume::create(&args[2..])?)?,
+            "create" => output(volume::create(&args[2..]).map_err(usage_error)?)?,
             "list" if args.len() == 2 => {
                 let Reply::Status(status) = call(Request::Status)? else {
                     return Err("unexpected status reply".into());
@@ -232,42 +246,51 @@ fn run() -> Result<()> {
                 serde_json::to_value(status.volumes)?
             }
             "label" if args.len() == 4 => {
-                let volume = Id::parse(&args[2])?;
-                playbit::store::validate_volume_label(&args[3])?;
+                let volume = Id::parse(&args[2]).map_err(usage_error)?;
+                playbit::store::validate_volume_label(&args[3]).map_err(usage_error)?;
                 playbit::diagnostic!("Renaming volume…");
                 output(Request::LabelVolume { volume, label: args[3].clone() })?
             }
             "grant" if args.len() == 5 => {
-                let volume = Id::parse(&args[2])?;
+                let volume = Id::parse(&args[2]).map_err(usage_error)?;
                 let email = args[3].trim().to_ascii_lowercase();
                 if !playbit::network::ap::operation::valid_account_email(&email) {
-                    return Err("invalid recipient email".into());
+                    return Err(usage_error("invalid recipient email"));
                 }
                 let write = match args[4].as_str() {
                     "r" => false,
                     "rw" => true,
-                    _ => return Err("access must be r or rw".into()),
+                    _ => return Err(usage_error("access must be r or rw")),
                 };
                 playbit::diagnostic!("Granting volume access…");
                 output(Request::GrantVolume { volume, email, write })?
             }
-            _ => return Err(
-                "expected pb volume create [--no-shared-key] [LABEL], list, label ID LABEL, or grant ID EMAIL r|rw"
-                    .into(),
-            ),
+            _ => {
+                return Err(usage_error(
+                    "expected pb volume create [--no-shared-key] [LABEL], list, label ID LABEL, or grant ID EMAIL r|rw",
+                ));
+            }
         },
         "bloblog" => return bloblog::run(&args[1..], &profile, &call),
         "file-write" | "file-read" => files::run(&args, &call, channel)?,
-        "cache-budget" => output(Request::CacheBudget { bytes: argument(&args, 1)?.parse()? })?,
-        "usage" => output(Request::Usage { volume: Id::parse(argument(&args, 1)?)? })?,
+        "cache-budget" => output(Request::CacheBudget {
+            bytes: argument(&args, 1)?.parse().map_err(usage_error)?,
+        })?,
+        "usage" => {
+            output(Request::Usage { volume: Id::parse(argument(&args, 1)?).map_err(usage_error)? })?
+        }
         "request-code" if args.len() == 2 => {
-            playbit::diagnostic!("We use your email address for sign-in. Privacy policy: https://playbit.app/help/privacy");
+            playbit::diagnostic!(
+                "We use your email address for sign-in. Privacy policy: https://playbit.app/help/privacy"
+            );
             output(Request::RequestCode { email: args[1].clone() })?
         }
         "accept-terms" => {
             use playbit::network::ap::registration::{TERMS_REVISION, TERMS_URL, terms_digest};
             if args.len() != 3 || args[1] != "--revision" || args[2] != TERMS_REVISION.to_string() {
-                return Err(format!("Read {TERMS_URL}, then run pb accept-terms --revision {TERMS_REVISION} to agree.").into());
+                return Err(usage_error(format!(
+                    "Read {TERMS_URL}, then run pb accept-terms --revision {TERMS_REVISION} to agree."
+                )));
             }
             let Reply::Status(status) = call(Request::Status)? else {
                 return Err("could not identify the signed-in account".into());
@@ -298,27 +321,29 @@ fn run() -> Result<()> {
             let enabled = match (args.get(1).map(String::as_str), args.len()) {
                 (Some("on"), 2) => true,
                 (Some("off"), 2) => false,
-                _ => return Err("expected pb offline on|off".into()),
+                _ => return Err(usage_error("expected pb offline on|off")),
             };
             output(Request::WorkOffline { enabled })?
         }
         "join" => return join(&args[1..], &profile, &call, channel),
         "provision" => output(Request::Provision {
-            volume: Id::parse(argument(&args, 1)?)?,
+            volume: Id::parse(argument(&args, 1)?).map_err(usage_error)?,
             version: argument(&args, 2)?.into(),
         })?,
         "permissions" => output(Request::Permissions {
-            volume: Id::parse(argument(&args, 1)?)?,
+            volume: Id::parse(argument(&args, 1)?).map_err(usage_error)?,
             acl: serde_json::from_slice(&fs::read(argument(&args, 2)?)?)?,
         })?,
         "revoke" => output(Request::Revoke {
-            volume: Id::parse(argument(&args, 1)?)?,
-            account: Id::parse(argument(&args, 2)?)?,
+            volume: Id::parse(argument(&args, 1)?).map_err(usage_error)?,
+            account: Id::parse(argument(&args, 2)?).map_err(usage_error)?,
             reason: argument(&args, 3)?.into(),
         })?,
         "status" => output(Request::Status)?,
         "schema" | "object-create" | "objects" => data::run(&args, &call)?,
-        "stop" | "frame" | "input" | "logs" | "screenshot" => control::run(&args, &profile, &call, channel)?,
+        "stop" | "frame" | "input" | "logs" | "screenshot" => {
+            control::run(&args, &profile, &call, channel)?
+        }
         "invite" => {
             let value = call(Request::Invitation {
                 session: session_argument(argument(&args, 1)?, channel)?,
@@ -344,7 +369,7 @@ fn run() -> Result<()> {
             }
             serde_json::to_value(value)?
         }
-        _ => return Err("unknown command; run pb help".into()),
+        _ => return Err(usage_error("unknown command; run pb help")),
     };
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
@@ -355,7 +380,7 @@ pub(crate) fn session_argument(
     value: &str,
     channel: playbit::release_channel::ReleaseChannel,
 ) -> Result<String> {
-    playbit::engine::session_presentation::session_argument(value, channel)
+    playbit::engine::session_presentation::session_argument(value, channel).map_err(usage_error)
 }
 
 pub(crate) fn human_reply(
@@ -476,9 +501,9 @@ fn join(
     channel: playbit::release_channel::ReleaseChannel,
 ) -> Result<()> {
     if !(1..=4).contains(&args.len()) {
-        return Err(
-            "expected pb session join SESSION [--new-instance] [--background] [--detach]".into()
-        );
+        return Err(usage_error(
+            "expected pb session join SESSION [--new-instance] [--background] [--detach]",
+        ));
     }
     let mut fresh = false;
     let mut background = false;
@@ -489,10 +514,9 @@ fn join(
             "--background" if !background => background = true,
             "--detach" if !detach => detach = true,
             _ => {
-                return Err(
-                    "expected pb session join SESSION [--new-instance] [--background] [--detach]"
-                        .into(),
-                );
+                return Err(usage_error(
+                    "expected pb session join SESSION [--new-instance] [--background] [--detach]",
+                ));
             }
         }
     }
@@ -536,7 +560,7 @@ fn join(
 
 fn entry_address(args: &[String]) -> Result<playbit::store::volume_index::EntryAddress> {
     Ok(playbit::store::volume_index::EntryAddress {
-        volume: Id::parse(argument(args, 1)?)?,
-        entry: playbit::store::EntryId::parse(argument(args, 2)?)?,
+        volume: Id::parse(argument(args, 1)?).map_err(usage_error)?,
+        entry: playbit::store::EntryId::parse(argument(args, 2)?).map_err(usage_error)?,
     })
 }

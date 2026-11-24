@@ -153,6 +153,7 @@ impl LocalStore {
         &self,
         access: &Access,
         stage: &ReceivedVolume,
+        confirmed: &[EntryId],
     ) -> Result<()> {
         if !stage.authority_qualified {
             return Ok(());
@@ -166,7 +167,7 @@ impl LocalStore {
             return cut.verify(&stage._directory.0);
         }
         let index = self.db(stage.volume, DatabaseId::Index)?;
-        let entries = self.find_rejected_entries(access, stage, &index)?;
+        let entries = self.find_rejected_entries(access, stage, &index, confirmed)?;
         if entries.is_empty() {
             return Ok(());
         }
@@ -192,7 +193,7 @@ impl LocalStore {
             bytes: 0,
             files: BTreeMap::new(),
         };
-        self.copy_rejected_backings(&mut cut, stage, &index, available)?;
+        self.copy_rejected_backings(access, &mut cut, stage, &index, confirmed, available)?;
         // Replay files are transient; Drop removes them after publication while
         // keeping this archive. Reserve the complete manifest budget as well.
         cut.bytes = cut.bytes.checked_add(RECORD_LIMIT as u64).ok_or(Error::LimitExceeded)?;
@@ -220,6 +221,7 @@ impl LocalStore {
         access: &Access,
         stage: &ReceivedVolume,
         index: &Database,
+        confirmed: &[EntryId],
     ) -> Result<Vec<EntryId>> {
         let accepted = MetadataPolicy::read(&stage.metadata)?;
         let actor = self.data_actor(access, accepted.volume())?;
@@ -239,9 +241,9 @@ impl LocalStore {
                     actor,
                     entry.id,
                 )?;
-                let backing_differs =
-                    self.rejected_entry_backing(access, stage, &accepted, entry.id)?;
-                if rejected || backing_differs {
+                if rejected
+                    || self.rejected_entry_backing(access, stage, &accepted, entry.id, confirmed)?
+                {
                     if entries.len() == MAX_ENTRIES {
                         return Err(Error::LimitExceeded);
                     }
@@ -260,69 +262,133 @@ impl LocalStore {
         stage: &ReceivedVolume,
         accepted: &MetadataPolicy,
         entry: EntryId,
+        confirmed: &[EntryId],
     ) -> Result<bool> {
+        let backing = DatabaseId::Entry(entry);
+        let volume = self.path.join(crate::paths::VOLUMES).join(stage.volume.to_string());
+        if !volume.join(backing.file_name()).is_file() {
+            return Ok(false);
+        }
         let index = self.db(stage.volume, DatabaseId::Index)?;
         if IndexSnapshot::new(index.begin_read()?).backing_quarantined(entry)? {
             return Ok(false);
+        }
+        if access.session_id().is_none() && stage.pending_backing(backing)? {
+            return Ok(!self.retain_missing_backing(access, stage, entry, confirmed)?);
         }
         let actor = self.data_actor(access, accepted.volume())?;
         if retains_log_appends(&stage.metadata, actor, entry)? {
             return Ok(false);
         }
-        let writable = IndexSnapshot::new(stage.metadata.begin_read()?).authorize_staged_entry(
+        let captured = IndexSnapshot::new(stage.metadata.begin_read()?);
+        let writable = captured.authorize_staged_entry(
             accepted.volume(),
             accepted.default_permissions(),
             actor,
             entry,
             Permission::Write,
         );
-        let denied = match writable {
-            Ok(()) => false,
-            Err(Error::AccessDenied(_) | Error::NotFound(_)) => true,
+        match writable {
+            Ok(()) => return Ok(false),
+            Err(Error::NotFound(_)) if stage.entry_scope.is_none() => {
+                let replica = match access.session_id() {
+                    Some(id) => {
+                        let session = self.session(id)?;
+                        session.replica_volume() == stage.volume
+                            || self.world_append_scope(&session, stage.volume)?
+                    }
+                    None => true,
+                };
+                if replica && self.pending_local_backing(&index, stage, accepted, actor, entry)? {
+                    return Ok(false);
+                }
+            }
+            Err(Error::AccessDenied(_) | Error::NotFound(_)) => {}
+            Err(error) => return Err(error),
+        }
+        let received_path = stage._directory.0.join(backing.file_name());
+        if !received_path.is_file() {
+            // A temporarily unavailable AP backing says nothing about the contents
+            // of its last acknowledged local copy. A changed local copy still needs
+            // the ordinary rejection path when its writer has lost permission.
+            return Ok(!self.retain_missing_backing(access, stage, entry, confirmed)?);
+        }
+        let local = self.entry_backing(stage.volume, entry, false)?;
+        stage.with_database(backing, |remote| {
+            let policy = DatabasePolicy::read_source(&stage.metadata, backing)?;
+            rejected_backing(&self.path.join(crate::paths::STAGING), remote, &local, &policy, actor)
+        })
+    }
+
+    fn retain_missing_backing(
+        &self,
+        access: &Access,
+        stage: &ReceivedVolume,
+        entry: EntryId,
+        confirmed: &[EntryId],
+    ) -> Result<bool> {
+        let database = DatabaseId::Entry(entry);
+        if stage.pending_backing(database)? {
+            if access.session_id().is_none() {
+                return self.retain_pending_owner_backing(access, stage, entry, confirmed);
+            }
+            if let Some(receipt) = self.durable_revision(stage.volume, database)?
+                && replica_root(&*self.entry_backing(stage.volume, entry, false)?)? == receipt.root
+            {
+                return Ok(true);
+            }
+        } else {
+            let index = self.db(stage.volume, DatabaseId::Index)?;
+            if self.retains_retired_backing(&index, stage, access, entry, confirmed)? {
+                // A rejected namespace edit can share the accepted retirement.
+                // Its archive must leave the independently qualified backing ready.
+                return Ok(true);
+            }
+        }
+        let Some(id) = access.session_id() else { return Ok(false) };
+        if !self.world_append_scope(&self.session(id)?, stage.volume)? {
+            return Ok(false);
+        }
+        let staged = match DatabasePolicy::read_source(&stage.metadata, database) {
+            Ok(policy) => policy,
+            Err(Error::NotFound(_)) => return Ok(false),
             Err(error) => return Err(error),
         };
-        let backing = DatabaseId::Entry(entry);
-        let local_path = self
-            .path
-            .join(crate::paths::VOLUMES)
-            .join(stage.volume.to_string())
-            .join(backing.file_name());
-        let received_path = stage._directory.0.join(backing.file_name());
-        if denied && local_path.is_file() && !received_path.is_file() {
-            return Ok(true);
+        if !staged.entry.is_some_and(|e| {
+            e.kind == crate::store::EntryType::KvDb
+                && e.protocol == Some(volume_index::DatabaseProtocol::Kvdb)
+        }) {
+            return Ok(false);
         }
-        Ok(if denied && local_path.is_file() && received_path.is_file() {
-            let local = self.entry_backing(stage.volume, entry, false)?;
-            stage.with_database(backing, |remote| {
-                let policy = DatabasePolicy::read_source(&stage.metadata, backing)?;
-                if policy.entry.as_ref().and_then(|entry| entry.protocol)
-                    == Some(volume_index::DatabaseProtocol::BlobLog)
-                {
-                    let read = local.begin_read()?;
-                    return Ok(read
-                        .iter_from(b"p/")
-                        .next()
-                        .transpose()?
-                        .is_some_and(|(key, _)| key.starts_with(b"p/")));
-                }
-                rejected_backing(
-                    &self.path.join(crate::paths::STAGING),
-                    remote,
-                    &local,
-                    &policy,
-                    actor,
-                )
-            })?
-        } else {
-            false
-        })
+        // Only retained Append can preserve a previously initialized blind KV
+        // target. Prior Write still requires ordinary quarantine/reconciliation.
+        let actor = self.data_actor(access, staged.volume.volume())?;
+        if super::super::entries::granted(staged.authorize(actor, Permission::Read))? {
+            return Ok(false);
+        }
+        let old = match DatabasePolicy::read(&*self.db(stage.volume, DatabaseId::Index)?, database)
+        {
+            Ok(policy) => policy,
+            Err(Error::NotFound(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        for policy in [&old, &staged] {
+            if !super::super::entries::granted(policy.authorize(actor, Permission::Append))?
+                || super::super::entries::granted(policy.authorize(actor, Permission::Write))?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn copy_rejected_backings(
         &self,
+        access: &Access,
         cut: &mut RejectedCut,
         stage: &ReceivedVolume,
         index: &Database,
+        confirmed: &[EntryId],
         available: u64,
     ) -> Result<()> {
         let archive = stage._directory.0.join("rejected");
@@ -338,7 +404,10 @@ impl LocalStore {
         for entry in cut.entries.clone() {
             let database = DatabaseId::Entry(entry);
             let path = volume.join(database.file_name());
-            if path.is_file() {
+            if path.is_file()
+                && (stage._directory.0.join(database.file_name()).is_file()
+                    || !self.retain_missing_backing(access, stage, entry, confirmed)?)
+            {
                 let source = self.entry_backing(stage.volume, entry, false)?;
                 copy(
                     cut,
@@ -393,6 +462,189 @@ impl LocalStore {
             cursor = Some(next);
         }
         Ok(())
+    }
+}
+
+impl LocalStore {
+    /// A missing AP backing supplies no baseline for an overwrite. Only the
+    /// same qualified birth can keep an acknowledged copy or an authorized upload.
+    fn retain_pending_owner_backing(
+        &self,
+        access: &Access,
+        stage: &ReceivedVolume,
+        entry: EntryId,
+        confirmed: &[EntryId],
+    ) -> Result<bool> {
+        use volume_index::namespace::source::cut::current::Record;
+        let index = self.db(stage.volume, DatabaseId::Index)?;
+        let read = index.begin_read()?;
+        let Some(current) = Record::read(&read, entry)? else { return Ok(false) };
+        let snapshot = IndexSnapshot::new(read);
+        if confirmed.binary_search(&current.birth.event_id()).is_err()
+            || !snapshot.backing_ready(entry)?
+        {
+            return Ok(false);
+        }
+        if current.deletion.is_some() {
+            return self.retains_retired_backing(&index, stage, access, entry, confirmed);
+        }
+        let database = DatabaseId::Entry(entry);
+        let backing = self.entry_backing(stage.volume, entry, false)?;
+        let receipt = self.durable_revision(stage.volume, database)?;
+        if let Some(receipt) = &receipt
+            && replica_root(&backing)? == receipt.root
+        {
+            return Ok(true);
+        }
+        let old = DatabasePolicy::read(&index, database)?;
+        let staged = DatabasePolicy::read_source(&stage.metadata, database)?;
+        let actor = self.data_actor(access, staged.volume.volume())?;
+        if retains_log_appends(&stage.metadata, actor, entry)? {
+            return Ok(true);
+        }
+        let old_write = entries::granted(old.authorize(actor, Permission::Write))?;
+        let new_write = entries::granted(staged.authorize(actor, Permission::Write))?;
+        if old_write && new_write {
+            return Ok(true);
+        }
+        if old_write
+            || receipt.is_some()
+            || !entries::granted(old.authorize(actor, Permission::Append))?
+            || !(new_write || entries::granted(staged.authorize(actor, Permission::Append))?)
+            || snapshot.entry(entry)?.info.origin.installation != self.installation()
+        {
+            return Ok(false);
+        }
+        // A locally created append-only backing can seed its first upload.
+        // AP applies the same per-record admission to its actual database.
+        stage.admits_initial_backing(&backing, if new_write { &old } else { &staged }, actor)
+    }
+
+    /// A hosted retirement must match the local qualified events. An authorized
+    /// local retirement may still be waiting to publish against a hosted live birth.
+    fn retains_retired_backing(
+        &self,
+        index: &Database,
+        stage: &ReceivedVolume,
+        access: &Access,
+        entry: EntryId,
+        confirmed: &[EntryId],
+    ) -> Result<bool> {
+        use volume_index::namespace::source::cut::current::Record;
+        let Some(record) = Record::read(&index.begin_read()?, entry)? else { return Ok(false) };
+        let Some(deletion) = record.deletion else { return Ok(false) };
+        let hosted_retirement = confirmed.binary_search(&deletion.event_id()).is_ok();
+        if confirmed.binary_search(&record.birth.event_id()).is_err() {
+            return Ok(false);
+        }
+        let database = DatabaseId::Entry(entry);
+        let accepted = MetadataPolicy::read(&stage.metadata)?;
+        let actor = self.data_actor(access, accepted.volume())?;
+        let writable = |db: &Database, policy: &MetadataPolicy| {
+            entries::granted(IndexSnapshot::new(db.begin_read()?).authorize_staged_write(
+                policy.volume(),
+                policy.default_permissions(),
+                actor,
+                entry,
+            ))
+        };
+        if writable(&stage.metadata, &accepted)? && writable(index, &MetadataPolicy::read(index)?)?
+        {
+            if hosted_retirement {
+                return Ok(true);
+            }
+            let local = IndexSnapshot::new(index.begin_read()?);
+            if access.session_id().is_some()
+                || stage.entry_scope.is_some()
+                || access.account != accepted.volume().owner
+                || access.account != self.account.id
+                || !local.backing_ready(entry)?
+            {
+                return Ok(false);
+            }
+            // A scoped replay can arrive before the owner's ordinary Index push.
+            // Keep the still-ready local bytes pending across that exact replay.
+            return Ok(stage.pending_backing(database)?
+                || local.matches_authored_retirement(
+                    entry,
+                    record,
+                    &IndexSnapshot::new(stage.metadata.begin_read()?),
+                    confirmed,
+                )?);
+        }
+        // A contracted writer needs the qualified retirement and evidence that
+        // every retained byte was already hosted.
+        if !hosted_retirement {
+            return Ok(false);
+        }
+        let Some(ack) = self.durable_revision(stage.volume, database)? else {
+            return Ok(false);
+        };
+        let local = self.entry_backing(stage.volume, entry, false)?;
+        Ok(replica_root(&local)? == ack.root)
+    }
+
+    /// A full AP capture can predate a local creation. The caller has already
+    /// checked all pending index sources against that cut. Only an exact authored
+    /// birth can carry its own backing across the missing remote declaration.
+    fn pending_local_backing(
+        &self,
+        index: &Database,
+        stage: &ReceivedVolume,
+        accepted: &MetadataPolicy,
+        actor: DataActor,
+        entry: EntryId,
+    ) -> Result<bool> {
+        use volume_index::namespace::{observations, source};
+        let remote = stage.metadata.begin_read()?;
+        for prefix in volume_index::entry_source_prefixes(entry, true) {
+            if remote.next_source_key(&prefix, false)?.is_some_and(|key| key.starts_with(&prefix)) {
+                return Ok(false);
+            }
+        }
+        let read = index.begin_read()?;
+        let Some(current) = source::cut::current::Record::read(&read, entry)? else {
+            return Ok(false);
+        };
+        if current.deletion.is_some() {
+            return Ok(false);
+        }
+        let (clock, bytes) = current.birth.read(&read)?;
+        let birth = source::Declaration::decode(entry, clock, &bytes)?.witness();
+        if observations::source_status(&read, &birth, bytes.len())?
+            != Some(observations::Status::Authored)
+        {
+            return Ok(false);
+        }
+        let snapshot = IndexSnapshot::new(read);
+        if !snapshot.backing_ready(entry)? {
+            return Ok(false);
+        }
+        let mut policy = DatabasePolicy::read(index, DatabaseId::Entry(entry))?;
+        let local_write = entries::granted(policy.authorize(actor, Permission::Write))?;
+        if !local_write && !entries::granted(policy.authorize(actor, Permission::Append))? {
+            return Ok(false);
+        }
+        let captured_write = entries::granted(snapshot.authorize(
+            accepted.volume(),
+            accepted.default_permissions(),
+            actor,
+            entry,
+            Permission::Write,
+        ))?;
+        if local_write && captured_write {
+            return Ok(true);
+        }
+        if !captured_write {
+            policy.volume = accepted.clone();
+            if !entries::granted(policy.authorize(actor, Permission::Append))? {
+                return Ok(false);
+            }
+        }
+        // AP has no records for this birth. Use its ordinary per-record admission
+        // against an empty backing, including KV tombstones and object edit keys.
+        let local = self.entry_backing(stage.volume, entry, false)?;
+        stage.admits_initial_backing(&local, &policy, actor)
     }
 }
 
@@ -462,6 +714,16 @@ fn rejected_backing(
     actor: DataActor,
 ) -> Result<bool> {
     use kvdb::sync::{Lww, Resolution, SyncReceiver, SyncResolver, SyncSender, SyncStatus};
+    if policy.entry.as_ref().and_then(|entry| entry.protocol)
+        == Some(volume_index::DatabaseProtocol::BlobLog)
+    {
+        let read = target.begin_read()?;
+        return Ok(read
+            .iter_from(b"p/")
+            .next()
+            .transpose()?
+            .is_some_and(|(key, _)| key.starts_with(b"p/")));
+    }
     if replica_root(source)? == replica_root(target)? {
         return Ok(false);
     }
@@ -507,6 +769,28 @@ fn rejected_backing(
 }
 
 impl ReceivedVolume {
+    fn admits_initial_backing(
+        &self,
+        backing: &Database,
+        policy: &DatabasePolicy,
+        actor: DataActor,
+    ) -> Result<bool> {
+        entries::granted(validate_named_backing(
+            &self._directory.0.join("scratch"),
+            backing,
+            policy,
+            Some(actor),
+        ))
+    }
+
+    fn pending_backing(&self, database: DatabaseId) -> Result<bool> {
+        Ok(self
+            .metadata
+            .begin_read()?
+            .local_get(format!("received-pending/{database}").as_bytes())?
+            .is_some())
+    }
+
     pub(super) fn rejected_entry(&self, entry: EntryId) -> Result<bool> {
         Ok(RejectedCut::read(&self._directory.0)?
             .is_some_and(|cut| cut.entries.binary_search(&entry).is_ok()))

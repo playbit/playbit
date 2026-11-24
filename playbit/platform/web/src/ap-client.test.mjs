@@ -19,6 +19,15 @@ test('account notice waits for its reader, ACKs despite full AP admission, and r
         port.onmessage({ data: { id: watch.id, result: null } });
         await watching; await turn(); assert.equal(messages.length, 1);
         const ordinary = Array.from({ length: 32 }, () => client.status().catch(error => error.message));
+        const profile = client.request({ op: 'put_account_display_name', operation_id: account });
+        const discovery = client.describe();
+        const write = client.channelDisplayName(7, new Uint8Array(256));
+        assert.equal(client.describe(), discovery);
+        const advisory = messages.slice(-3);
+        await assert.rejects(client.status(), /Too many/);
+        await assert.rejects(client.request({ op: 'put_account_display_name', operation_id: account }), { code: 'ap-capacity' });
+        for (const request of advisory) port.onmessage({ data: { id: request.id, result: null } });
+        await Promise.all([profile, discovery, write]);
         const controls = Array.from({ length: 3 }, () => client.accountChanged(account));
         const changed = messages.slice(-3);
         const consumed = client.channelConsumed([17, 18]);

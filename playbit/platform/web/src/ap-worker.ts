@@ -6,6 +6,7 @@ import { AccountNotices } from './account-notices.ts';
 import { resetWebAccount } from './web-account.ts';
 import type { ResetRequest } from './web-account.ts';
 import type { ApRequest } from "./ap-protocol.ts";
+import { advisoryOperation, type AdvisoryOperation } from './ap-protocol.ts';
 
 // A tab's request as the worker reads it before `method` narrows it: the
 // account-notice acknowledgment and `detach` carry no `id` or `account`, and
@@ -46,6 +47,7 @@ async function resetAccount(args: ResetAccountArgs): Promise<void> {
     finally { resetting = null; }
 }
 const inFlight = new Set<Promise<void>>();
+const advisoryInFlight = new Set<AdvisoryOperation>();
 
 self.onconnect = ({ ports: [port] }) => {
     const handles = new Set<number>();
@@ -75,10 +77,15 @@ self.onconnect = ({ ports: [port] }) => {
         if (resetting || resetError) {
             port.postMessage({ id, error: resetError || 'Clearing web browser data…' }); return;
         }
-        if (inFlight.size >= 128 && method !== "channelConsumed") {
+        const advisory = advisoryOperation(method, method === 'begin' || method === 'request' ? args?.operation : undefined);
+        if (advisory && advisoryInFlight.has(advisory)) {
+            port.postMessage({ id, code: 'ap-capacity', error: 'An advisory AP request is already pending' }); return;
+        }
+        if (!advisory && inFlight.size - advisoryInFlight.size >= 128 && method !== "channelConsumed") {
             port.postMessage({ id, error: 'Playbit is busy. Try again after the current operation finishes' }); return;
         }
         let finished!: () => void;
+        if (advisory) advisoryInFlight.add(advisory);
         const task = new Promise<void>(resolve => { finished = resolve; }); inFlight.add(task);
         try {
             if (!['streamClose', 'channelConsumed', 'detach', 'status'].includes(method)) requireStorageFormat();
@@ -88,7 +95,8 @@ self.onconnect = ({ ports: [port] }) => {
                 && (!connection.account || args!.account !== connection.account)) throw new Error("Account notice belongs to another account");
             // The account-notice methods above and every stream*/checkpointReplica
             // method send object args with the field each guard reads.
-            if ((method.startsWith("stream") || method === "checkpointReplica" || method === "channelRead") && !handles.has(args!.handle!)) throw new Error("AP stream belongs to another tab");
+            if ((method.startsWith("stream") || method === "checkpointReplica" || method === "channelRead"
+                || method === "channelDisplayName") && !handles.has(args!.handle!)) throw new Error("AP stream belongs to another tab");
             switch (method) {
                 case "describe": result = await connection.describe(); break;
                 case "onboarding": await connection.onboarding(args.stage); break;
@@ -104,6 +112,7 @@ self.onconnect = ({ ports: [port] }) => {
                     if(detached||connection!==owner){owner.streamClose(result);return;}
                     handles.add(result);break;
                 }
+                case "channelDisplayName": result = await connection.channelDisplayName(args.handle, args.name); break;
                 case "channelRead": {
                     const owner=connection;result=await owner.channelRead(args.handle);
                     if(result.receipt!==undefined){
@@ -158,7 +167,10 @@ self.onconnect = ({ ports: [port] }) => {
             if (!detached) port.postMessage({ ...(method === "ackAccountNotice" ? { event: "account-error" } : { id }),
                 error: String((error as Errorish)?.message ?? error), code: (error as Errorish)?.code, serviceCode: (error as Errorish)?.serviceCode,
                 stack: error instanceof Error ? error.stack?.slice(0, MAX_ERROR_STACK) : undefined });
-        } finally { inFlight.delete(task); finished(); }
+        } finally {
+            if (advisory) advisoryInFlight.delete(advisory);
+            inFlight.delete(task); finished();
+        }
     };
     port.addEventListener?.('close', () => {releaseChannels();accountNotices.detach(port);});
     port.start();

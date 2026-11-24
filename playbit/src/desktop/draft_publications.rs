@@ -82,6 +82,11 @@ pub(super) fn available(cx: &App) -> bool {
     })
 }
 
+pub(super) fn any_pending(cx: &App) -> bool {
+    cx.try_global::<Publications>()
+        .is_some_and(|state| !state.requests.is_empty() || !state.values.is_empty())
+}
+
 pub(super) fn pending(id: crate::store::Id, cx: &App) -> bool {
     cx.has_global::<Publications>() && {
         let writes = cx.global::<Publications>();

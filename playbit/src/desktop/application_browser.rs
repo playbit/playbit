@@ -8,12 +8,16 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 
 mod actions;
+mod inspector;
 mod navigation;
+#[cfg(feature = "desktop-qualification")]
+mod preview;
 mod queries;
+mod removal;
 mod scrolling;
 mod view;
 
-const MAX_SESSIONS: usize = 256;
+pub(super) const MAX_SESSIONS: usize = 256;
 
 #[derive(Clone)]
 struct Application {
@@ -21,15 +25,18 @@ struct Application {
     name: String,
     build: String,
     sessions: Vec<String>,
+    invitations: Vec<(String, String)>,
+    can_open: bool,
 }
 
 #[derive(Clone)]
 enum Target {
+    Volume(Id),
     Application(AppIdentity),
     Session(String),
+    Invitation(String),
     Instance(Id),
     Scope { role: Role, volume: Id, session: bool },
-    Log,
 }
 
 #[derive(Clone)]
@@ -41,11 +48,13 @@ struct Row {
 
 #[derive(Default)]
 pub(super) struct State {
+    removal: Option<removal::Pending>,
+    removal_dialog: Option<removal::Dialog>,
     catalog: Vec<Session>,
     imported: Vec<crate::store::ImportedApp>,
     apps: Vec<Application>,
     selected: Option<AppIdentity>,
-    instance: Option<Id>,
+    pub(in crate::desktop) instance: Option<Id>,
     owners: Vec<LaunchOwner>,
     owners_session: Option<String>,
     refreshing: bool,
@@ -54,10 +63,10 @@ pub(super) struct State {
     action_busy: bool,
     pending_scope: Option<(Role, Id, bool)>,
     uncertain_app: Option<AppIdentity>,
-    root_open: bool,
+    pub(super) root_open: bool,
     selected_role: Option<Role>,
     scope_in_session: bool,
-    log_open: bool,
+    activity: BTreeMap<String, inspector::Activity>,
     app_slots: Vec<AutomaticVolumeSlot>,
     session_slots: Vec<AutomaticVolumeSlot>,
     slots_app: Option<AppIdentity>,
@@ -77,6 +86,24 @@ pub(super) struct State {
 }
 
 impl State {
+    pub(super) fn highlighted_instance(&self) -> Option<&LaunchOwner> {
+        match self.instance {
+            Some(id) => self.owners.iter().find(|owner| owner.instance.id == id),
+            None => self.owners.first(),
+        }
+    }
+
+    fn push_row(&mut self, column: usize, row: Row) {
+        while self.columns.len() <= column {
+            self.columns.push(Vec::new());
+        }
+        self.columns[column].push(row);
+    }
+
+    pub(super) fn push_volume_row(&mut self, id: Id, selected: bool) {
+        self.push_row(0, Row { key: format!("volume-{id}"), target: Target::Volume(id), selected });
+    }
+
     pub(super) fn sessions(&self) -> &[Session] {
         &self.catalog
     }
@@ -95,14 +122,22 @@ impl State {
     pub(super) fn clear_selection(&mut self) {
         self.selected = None;
         self.instance = None;
+        self.close_scope();
+    }
+
+    pub(super) fn close_scope(&mut self) {
         self.pending_scope = None;
         self.root_open = false;
         self.selected_role = None;
         self.scope_in_session = false;
-        self.log_open = false;
     }
 
-    fn rebuild(&mut self, rows: &[SessionRow], recent: &[String]) {
+    fn rebuild(
+        &mut self,
+        rows: &[SessionRow],
+        recent: &[String],
+        invitations: &[crate::store::InvitationPreview],
+    ) {
         let mut apps: Vec<Application> = self
             .imported
             .iter()
@@ -111,6 +146,8 @@ impl State {
                 name: app.name.clone(),
                 build: app.build_id.clone(),
                 sessions: Vec::new(),
+                invitations: Vec::new(),
+                can_open: true,
             })
             .collect();
         for session in &self.catalog {
@@ -125,6 +162,29 @@ impl State {
                         .unwrap_or_else(|| session.app.app_id.clone()),
                     build: session.resolved_build_id.clone(),
                     sessions: vec![session.id.clone()],
+                    invitations: Vec::new(),
+                    can_open: true,
+                });
+            }
+        }
+        for preview in invitations {
+            let Some(received) = &preview.received else { continue };
+            if preview.retained || self.catalog.iter().any(|session| session.id == preview.session)
+            {
+                continue;
+            }
+            let session = &received.session;
+            let row = (preview.session.clone(), received.root_name.clone());
+            if let Some(app) = apps.iter_mut().find(|app| app.identity == session.app) {
+                app.invitations.push(row);
+            } else {
+                apps.push(Application {
+                    identity: session.app.clone(),
+                    name: session.app.app_id.clone(),
+                    build: session.resolved_build_id.clone(),
+                    sessions: Vec::new(),
+                    invitations: vec![row],
+                    can_open: false,
                 });
             }
         }
@@ -159,7 +219,6 @@ impl State {
             self.selected = None;
             self.instance = None;
             self.root_open = false;
-            self.log_open = false;
         }
     }
 }
@@ -169,6 +228,14 @@ fn application_key(identity: &AppIdentity) -> String {
 }
 
 impl Shell {
+    pub(super) fn rebuild_application_list(&mut self) {
+        self.applications.rebuild(&self.sessions, &self.recent_sessions, &self.saved_invitations);
+    }
+
+    pub(super) fn showing_application_path(&self) -> bool {
+        !self.sidebar_volumes || self.browser.is_none() || self.applications.root_open
+    }
+
     pub(super) fn apply_imported_app_catalog(&mut self, apps: Vec<crate::store::ImportedApp>) {
         if apps.len() > MAX_SESSIONS
             || apps.iter().any(|app| {
@@ -182,7 +249,7 @@ impl Shell {
             return;
         }
         self.applications.imported = apps;
-        self.applications.rebuild(&self.sessions, &self.recent_sessions);
+        self.rebuild_application_list();
     }
     pub(super) fn begin_application_render(&mut self) {
         self.applications.columns.clear();
@@ -217,7 +284,7 @@ impl Shell {
                 cx.notify();
             });
         }
-        self.applications.rebuild(&self.sessions, &self.recent_sessions);
+        self.rebuild_application_list();
         if let Some(session) = self
             .selected_session_id()
             .and_then(|id| self.applications.catalog.iter().find(|session| session.id == id))
@@ -243,7 +310,6 @@ impl Shell {
         self.applications.instance = None;
         self.applications.root_open = false;
         self.applications.selected_role = None;
-        self.applications.log_open = false;
         self.applications.refresh_needed = true;
         self.refresh_application_instances(cx);
         self.applications.scope_refresh_needed = true;

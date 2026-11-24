@@ -1,8 +1,11 @@
-//! Running SVG app icons follow macOS, independently of our light-only UI.
+//! PNG guests use their artwork directly. SVG icons follow the macOS appearance.
 #![allow(unsafe_code, reason = "AppKit images and the observer are owned on the main thread.")]
 use cocoa::foundation::NSString;
 use objc::{class, msg_send, rc::StrongPtr, runtime::Object, sel, sel_impl};
 use std::{marker::PhantomData, path::Path, rc::Rc};
+
+/// PNG-source wrappers use this ICNS for both the bundle and the running Dock icon.
+pub(super) const PNG_ICON: &str = "AppPNG.icns";
 
 pub(crate) struct Observer {
     observer: *mut Object,
@@ -12,12 +15,12 @@ pub(crate) struct Observer {
 
 impl Observer {
     /// Called once on AppKit's main thread after initialization. Only generated
-    /// SVG wrappers have AppDark.icns; complete PNG/JPEG and generic icons retain
-    /// their normal bundle behavior. The two immutable images are <=512 pixels.
+    /// SVG wrappers have AppDark.icns and need an appearance observer.
     pub(crate) fn new() -> Option<Self> {
         let executable = std::env::current_exe().ok()?;
         let resources = executable.parent()?.parent()?.join("Resources");
         if !resources.join("AppDark.icns").is_file() {
+            set_png_icon(&resources.join(PNG_ICON));
             return None;
         }
         let light = load(&resources.join("App.icns"));
@@ -50,6 +53,22 @@ impl Observer {
             let _: () = msg_send![name, release];
             Some(Self { observer, _main_thread: PhantomData })
         }
+    }
+}
+
+fn set_png_icon(path: &Path) {
+    if !path.is_file() {
+        return;
+    }
+    let image = load(path);
+    if image.is_null() {
+        crate::diagnostic!("The generated PNG app icon could not be loaded");
+        return;
+    }
+    unsafe {
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, setApplicationIconImage: image];
+        let _: () = msg_send![image, release];
     }
 }
 

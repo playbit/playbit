@@ -8,6 +8,7 @@ use crate::{
     ui::desktop::{
         UI_FONT_FAMILY, alert,
         canvas::{canvas_extent, canvas_frame_target, canvas_id, canvas_step},
+        popup,
         scene::{Input, InputAck, Scene},
         text_accessibility_node, text_editor, visual_bell,
     },
@@ -122,12 +123,29 @@ fn presentation(view: Option<&ViewNode>) -> Presentation<'_> {
 impl AppWindow {
     fn new(handle: Option<Handle>, view: Option<ViewNode>, cx: &mut Context<Self>) -> Self {
         let weak = cx.weak_entity();
-        let scene = Scene::new(
+        let mut scene = Scene::new(
             input_sender(handle.clone()),
             Rc::new(move |id, cx| {
-                let _ = weak.update(cx, |window: &mut Self, cx| window.click(id, cx));
+                let _ = weak.update(cx, |window: &mut Self, cx| window.click(id, None, cx));
             }),
         );
+        let owner = cx.weak_entity();
+        scene.prepare_menu = Some(Rc::new(move |items, cx| {
+            let window = owner.upgrade()?;
+            let app = window.read(cx);
+            if app.closing
+                || app.stopped
+                || !popup::guest_menu_present(app.view.as_ref()?, &|current| current == items)
+            {
+                return None;
+            }
+            let digest = popup::menu_digest(items);
+            let owner = owner.clone();
+            let activate: crate::ui::desktop::controls::Activate = Rc::new(move |id, cx| {
+                let _ = owner.update(cx, |app, cx| app.click(id, Some(digest), cx));
+            });
+            Some((window.entity_id(), activate))
+        }));
         let mut this = Self {
             handle,
             quit_on_last_window: true,
@@ -195,6 +213,7 @@ impl AppWindow {
 
         self.held_keys = 0;
         self.scene.cancel_pointer_presses(cx);
+        popup::reconcile_guest_menu(cx.entity_id(), None, cx);
         self.scene.rebind(input_sender(Some(handle.clone())), cx);
         self.draft_epoch = handle.epoch();
         self.set_audio_visible(false);
@@ -223,7 +242,10 @@ impl AppWindow {
             self.held_keys = 0;
         }
         match self.scene.apply(&view, ack, cx) {
-            Ok(()) => self.view = Some(view),
+            Ok(()) => {
+                popup::reconcile_guest_menu(cx.entity_id(), Some(&view), cx);
+                self.view = Some(view);
+            }
             Err(error) => {
                 self.fail(error.into(), cx);
                 return false;
@@ -306,9 +328,10 @@ impl AppWindow {
         self.feedback = None;
         self.stopped = true;
         self.set_audio_visible(false);
+        popup::reconcile_guest_menu(cx.entity_id(), None, cx);
         self.scene.set_active(false, self.view.as_ref(), cx);
     }
-    fn click(&mut self, target: u32, cx: &mut Context<Self>) {
+    fn click(&mut self, target: u32, menu: Option<blake3::Hash>, cx: &mut Context<Self>) {
         #[cfg(target_os = "macos")]
         if crate::ui::desktop::popup::is_modal_active() {
             return;
@@ -321,12 +344,12 @@ impl AppWindow {
         let retry = epoch != self.draft_epoch;
         self.draft_epoch = epoch;
         if self.scene.send_drafts(self.view.as_ref(), retry, cx) {
-            let accepted = handle.send(
-                Input { kind: EventKind::Click, target, data: vec![], revision: None },
-                Some(epoch),
-            );
-
-            let _ = accepted;
+            let input = Input { kind: EventKind::Click, target, data: Vec::new(), revision: None };
+            if let Some(menu) = menu {
+                handle.send_menu(input, epoch, menu);
+            } else {
+                handle.send(input, Some(epoch));
+            }
         }
     }
     fn begin_close(&mut self, cx: &mut Context<Self>) {
@@ -335,6 +358,7 @@ impl AppWindow {
             self.cancel_session_link();
             self.held_keys = 0;
             self.closing = true;
+            popup::reconcile_guest_menu(cx.entity_id(), None, cx);
             if self.handle.is_none() {
                 self.error.clear();
             }
@@ -391,7 +415,7 @@ impl AppWindow {
             return true;
         }
         self.begin_close(cx);
-        if cx.windows().len() == 1 && self.retained_owners.get() == 0 {
+        if popup::non_menu_window_count(cx) == 1 && self.retained_owners.get() == 0 {
             // Release this window's entity borrow before AppKit's Quit callback
             // deactivates every window and starts the accepted-work barrier.
             cx.defer(|cx| cx.quit());
@@ -625,7 +649,6 @@ impl Render for AppWindow {
 
         self.schedule_frame(window, cx);
         let presentation = self.window_presentation();
-        #[cfg(feature = "desktop")]
         let style = presentation.style;
         let text_color = rgba(presentation.theme.color(ThemeColor::Text).0);
         let extent = self.view.as_ref().map_or(CanvasExtent::Inline, canvas_extent);
@@ -761,32 +784,37 @@ impl Render for AppWindow {
                 }));
             }
         }
-        if chrome.full_size_content && chrome.transparent_titlebar && !session_bar {
-            // GPUI subtracts press handlers from this strip. A display-only
-            // canvas leaves it draggable, even when drawing beneath the titlebar.
-            root = root.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .w_full()
-                    .h(window.macos_titlebar_height())
-                    .window_control_area(gpui::WindowControlArea::DragBehindControls),
-            );
-        }
-        root = root.child(
-            div()
-                .relative()
-                .flex_1()
-                .min_h(px(0.))
-                .flex()
-                .child(content)
-                .when(observe_surface, |v| v.child(self.scene.surface_observer(extent)))
-                .when(!viewport_canvas, |element| {
-                    element
-                        .child(crate::ui::desktop::scrollbar::Scrollbars::overlay(&self.scrollbars))
-                }),
-        );
+        let content = div()
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .child(content)
+            .when(observe_surface, |v| v.child(self.scene.surface_observer(extent)))
+            .when(!viewport_canvas, |element| {
+                element.child(crate::ui::desktop::scrollbar::Scrollbars::overlay(&self.scrollbars))
+            });
+        root = if chrome.full_size_content && chrome.transparent_titlebar && !session_bar {
+            let strip = div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .h(window.macos_titlebar_height())
+                .window_control_area(gpui::WindowControlArea::DragBehindControls);
+            if whole_window && style.is_some_and(|s| s.contains(WindowStyle::TRANSPARENT_TITLEBAR))
+            {
+                // Paint above the canvas so AppKit owns presses in the titlebar.
+                // Moves and releases still reach gestures that began on the canvas.
+                root.child(content).child(
+                    strip.on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()),
+                )
+            } else {
+                root.child(strip).child(content)
+            }
+        } else {
+            root.child(content)
+        };
         root = root.children(self.accessories(whole_window));
         #[cfg(feature = "desktop")]
         if style.is_some_and(|style| style.contains(WindowStyle::HIDE_SESSION_BUTTON)) {
@@ -1238,7 +1266,7 @@ fn report_startup_delay(windows: &mut Windows, foreground: bool, cx: &mut App) {
     }
     let kind = alert::Kind::RecoverySlow;
     let details = "App owner startup has not completed after 10 seconds";
-    if !foreground || !windows.owners.is_empty() || !cx.windows().is_empty() {
+    if !foreground || !windows.owners.is_empty() || popup::non_menu_window_count(cx) != 0 {
         alert::show(kind, details, cx);
         return;
     }
@@ -1270,7 +1298,7 @@ pub(super) fn receive(
     let retained = windows.borrow().retained.clone();
     let closed_retained = retained.clone();
     cx.on_window_closed(move |cx| {
-        if cx.windows().is_empty() && closed_retained.get() == 0 {
+        if popup::non_menu_window_count(cx) == 0 && closed_retained.get() == 0 {
             cx.quit();
         }
     })
@@ -1338,17 +1366,18 @@ pub(super) fn receive(
         }
         let _ = cx.update(|cx| {
             let windows = windows.borrow();
+            let windowless = popup::non_menu_window_count(cx) == 0;
             if !windows.owners.is_empty() && windows.owners.values().all(|owner| owner.completed) {
-                if cx.windows().is_empty() {
+                if windowless {
                     cx.quit();
                 }
                 return;
             }
-            if windows.owners.is_empty() && cx.windows().is_empty() {
+            if windows.owners.is_empty() && windowless {
                 cx.quit();
                 return;
             }
-            if cx.windows().is_empty() {
+            if windowless {
                 show_failure(
                     "The app worker stopped without confirming its accepted work.".into(),
                     acknowledged,
@@ -1796,7 +1825,7 @@ mod tests {
                 assert!(this.feedback.as_ref().unwrap().0.contains("Retry zoom or Quit"));
                 assert!(this.logs.back().unwrap().0.contains("read-only fixture"));
                 assert!(this.error.is_empty());
-                this.click(1, cx);
+                this.click(1, None, cx);
             })
             .unwrap();
         assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::Click);
@@ -1921,11 +1950,11 @@ mod tests {
                 })
                 .unwrap();
             cx.run_until_parked();
+            assert!(cx.window_can_drag_at(window.into(), at(300., 8.)));
             assert_eq!(
-                cx.window_can_drag_at(window.into(), at(300., 8.)),
-                extent == CanvasExtent::Viewport || id == 0
+                cx.window_can_drag_at(window.into(), at(300., 22.)),
+                extent == CanvasExtent::Window
             );
-            assert_eq!(cx.window_can_drag_at(window.into(), at(300., 22.)), id == 0);
             assert!(!cx.window_can_drag_at(window.into(), at(300., 65.)));
         }
     }
@@ -3081,6 +3110,32 @@ mod tests {
             ) > 0
         );
         assert!(complete(None, vec![], false, InputAck::default(), cx) > 0);
+        // A canceled menu produces only independent readiness. Its new scene
+        // and logs must be adopted without acknowledging the earlier error.
+        let prior = cx.update(|cx| {
+            entity.update(cx, |this, cx| {
+                this.fail("An earlier input failed.".into(), cx);
+                this.error.clone()
+            })
+        });
+        assert!(!prior.is_empty());
+        let independent =
+            ViewNode::Text { text: "Back online".into(), style: playbit_api::ui::TextStyle::Body };
+        complete(
+            Some(independent),
+            vec!["Peer reconnected".into()],
+            false,
+            InputAck::default(),
+            cx,
+        );
+        cx.update(|cx| {
+            let app = entity.read(cx);
+            assert_eq!(app.error, prior);
+            assert!(
+                matches!(&app.view, Some(ViewNode::Text { text, .. }) if text == "Back online")
+            );
+            assert_eq!(app.logs.back().unwrap().0, "Peer reconnected");
+        });
     }
     #[gpui::test]
     fn critical_failure_stops_existing_inputs_without_creating_an_error_window(
@@ -3105,7 +3160,7 @@ mod tests {
         window
             .update(cx, |this, _, cx| {
                 assert!(this.stopped);
-                this.click(1, cx);
+                this.click(1, None, cx);
             })
             .unwrap();
         assert!(inputs.is_empty());

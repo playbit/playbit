@@ -106,8 +106,6 @@ fn finish_launch(
                 .is_some_and(|handle| !cx.windows().contains(&gpui::AnyWindowHandle::from(handle)))
             {
                 host.sessions_window = None;
-                host.session_tab = SessionTab::Log;
-                host.tab_change_pending = None;
                 cx.notify();
             }
         });

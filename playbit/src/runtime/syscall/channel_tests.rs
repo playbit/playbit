@@ -50,6 +50,7 @@ fn fixture() -> (State, Rc<RefCell<Records>>) {
         app_name: "Channels".into(),
         app_build: Some([5; 32]),
         identity: Identity {
+            display_name: String::new(),
             account_id: [1; 16],
             device_id: [2; 16],
             instance_id: [3; 16],
@@ -194,11 +195,74 @@ fn membership_identifies_instances_with_their_authenticated_account_and_device()
     records.borrow_mut().results.insert(
         1,
         Ok(Arc::new(DataResult::ChannelEvents(vec![crate::session_channel::Event::Presence {
-            participants: vec![first, other],
+            participants: vec![
+                crate::session_channel::PresentParticipant {
+                    participant: first,
+                    display_name: "Robin 雨".into(),
+                },
+                crate::session_channel::PresentParticipant {
+                    participant: other,
+                    display_name: String::new(),
+                },
+            ],
         }]))),
     );
     state.notify_data(state.generation(), 1).unwrap();
     assert_eq!(events::take_event(&mut state).unwrap().kind, EventKind::PresenceChanged);
     assert_eq!(state.context.participants.len(), 2);
+    assert_eq!(state.context.participants[0].display_name, "Robin 雨");
     assert_ne!(state.context.participants[0].account_id, state.context.participants[1].account_id);
+}
+
+#[test]
+fn display_name_changes_coalesce_and_reach_both_snapshots_after_queue_pressure() {
+    // Read the latest local name and roster after two renames while guest events are full.
+    let (mut state, _) = fixture();
+    events::take_event(&mut state).unwrap();
+    let local = Participant {
+        account_id: state.context.identity.account_id,
+        device_id: [7; 16], // AP transport device differs from the guest context device.
+        instance_id: [3; 16],
+        build_id: [4; 32],
+        display_name: "Older peer observation".into(),
+    };
+    let peer = Participant { instance_id: [9; 16], display_name: "Freja".into(), ..local.clone() };
+    state.set_participants(state.generation(), vec![local, peer]).unwrap();
+    assert_eq!(events::take_event(&mut state).unwrap().kind, EventKind::PresenceChanged);
+    assert!(environment::identity(&state).unwrap().1.display_name.is_empty());
+    assert_eq!(environment::presence(&state).unwrap()[1].display_name, "Freja");
+    for _ in 0..MAX_QUEUED_EVENTS {
+        events::push_event(
+            &mut state,
+            Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+        )
+        .unwrap();
+    }
+    state.set_display_name("Mira").unwrap();
+    let name = "雨a".repeat(64);
+    state.set_display_name(&name).unwrap();
+    assert_eq!(state.set_display_name("bad\0name"), Err(HostError::InvalidArgument));
+    assert_eq!(environment::identity(&state).unwrap().1.display_name, name);
+    assert_eq!(environment::presence(&state).unwrap()[0].display_name, name);
+    assert_eq!(environment::presence(&state).unwrap()[1].display_name, "Freja");
+    for _ in 0..MAX_QUEUED_EVENTS {
+        assert_eq!(events::take_event(&mut state).unwrap().kind, EventKind::DataChanged);
+    }
+    for kind in [EventKind::IdentityChanged, EventKind::PresenceChanged] {
+        assert_eq!(
+            events::take_event(&mut state).unwrap(),
+            Event { kind, target: 0, data: vec![] }
+        );
+    }
+    state.set_display_name(&name).unwrap();
+    assert_eq!(events::take_event(&mut state), Err(HostError::WouldBlock));
+
+    let mut duplicate = state.context.participants[0].clone();
+    duplicate.device_id = [8; 16];
+    duplicate.display_name = "Other device".into();
+    let mut roster = state.context.participants.clone();
+    roster.push(duplicate);
+    state.set_participants(state.generation(), roster.clone()).unwrap();
+    state.set_display_name("Another rename").unwrap();
+    assert_eq!(environment::presence(&state).unwrap(), roster);
 }

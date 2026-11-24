@@ -145,6 +145,7 @@ impl Connected {
             Stop { canceled: Arc::new(Canceled::default()), connection: remote.cancel_handle() };
         remote.set_cancellation(Some(stop.canceled.clone()));
         let network = remote.network_handles();
+        services.resume_app_data_removals();
         Ok(Self {
             services,
             remote,
@@ -409,6 +410,7 @@ impl Connected {
                 &Access::session_version(self.services.store.account().id, &local, &build),
                 session.root_volume,
             )?;
+            self.services.store.retain_joined_session(&session.id)?;
             return Ok(session);
         }
         let preview = self.services.store.preview_invitation(invitation, self.channel())?;

@@ -2,6 +2,8 @@
 //! Field edits, cache hits and blob sealing are data-plane paths. Cache admission
 //! owns each slot through opening and retirement; crypto and backend I/O stay
 //! outside the cache lock. Full kvdb verification is an explicit diagnostic.
+mod app_removal;
+pub use app_removal::{AppRemovalImpact, AppRemovalResult};
 mod authority;
 mod bloblog;
 mod browser_drafts;
@@ -44,10 +46,15 @@ mod payload_size;
 mod permission_preferences;
 mod profile_format;
 mod session_list;
+#[cfg(all(feature = "desktop", any(test, feature = "desktop-qualification")))]
+pub(crate) use session_list::SeenParticipant;
+#[cfg(feature = "app-host")]
+pub(crate) use session_list::SessionActivity;
 mod snapshot;
 mod ui_zoom;
 mod volume_actions;
 mod work_offline;
+mod world;
 use crate::store::AppScope;
 use crate::store::account::Credentials;
 use crate::store::catalog::*;
@@ -70,6 +77,8 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, RwLock},
 };
+#[cfg(feature = "connected-engine")]
+pub(crate) use world::WorldReplicaRoute;
 
 pub type Database = Db<RedbStorage>;
 /// A local resource guard, not a promised supported collection/database capacity.
@@ -331,6 +340,23 @@ struct PendingInvitation {
     seed: Seed,
     paused: bool,
     invitation: Option<Invitation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_removal: Option<u64>,
+    // Older hosts stored all seeds. New callers that need an unresolved
+    // capability across launches opt in explicitly (including the iOS host).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    retain_unloaded: bool,
+}
+struct DesktopInvitation {
+    session: String,
+    pending: Box<PendingInvitation>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InvitationRetention {
+    Durable,
+    Desktop,
+    #[cfg(all(unix, feature = "connected-engine"))]
+    ProfileReset,
 }
 /// Credentials authorized for a live service replica. Blob and session secrets
 /// are deliberately absent from this serialization boundary.
@@ -385,6 +411,25 @@ pub fn detached_replica(scratch: &Path, source: &Database) -> Result<OutboundRep
 /// Empty discardable protocol target with the source's exact tree identity.
 /// Selected Push negotiates against this instead of disclosing existing records.
 pub fn empty_detached_replica(scratch: &Path, source: &Database) -> Result<OutboundReplica> {
+    empty_replica_with_hash(scratch, source.meta().hash_key, source.meta().branch_factor)
+}
+/// Blind selected-World writes negotiate against an empty public tree without
+/// reading other records in the publisher's canonical backing.
+pub fn empty_world_replica(
+    scratch: &Path,
+    source: &Database,
+    volume: Id,
+    database: crate::store::DatabaseId,
+) -> Result<OutboundReplica> {
+    let hash = database.hash_key(&crate::store::DatabaseId::world_projection_key(volume), volume);
+    empty_replica_with_hash(scratch, hash, source.meta().branch_factor)
+}
+
+fn empty_replica_with_hash(
+    scratch: &Path,
+    hash_key: [u8; 32],
+    branch_factor: u8,
+) -> Result<OutboundReplica> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(scratch).map_err(io)?;
     let directory = ProjectionDirectory(scratch.join(format!("replica-{}", Id::generate()?)));
     fs::DirBuilder::new().mode(0o700).create(&directory.0).map_err(io)?;
@@ -392,12 +437,12 @@ pub fn empty_detached_replica(scratch: &Path, source: &Database) -> Result<Outbo
     let redb = crate::store::file_backend::create(&path, 512 * 1024)
         .map_err(|error| Error::System(error.to_string()))?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).map_err(io)?;
-    let mut options =
-        CreateOptions::syncable(source.meta().hash_key, u64::from_le_bytes(random_array()?));
-    options.branch_factor = source.meta().branch_factor;
+    let mut options = CreateOptions::syncable(hash_key, u64::from_le_bytes(random_array()?));
+    options.branch_factor = branch_factor;
     let database = Db::create(RedbStorage::from_database(redb), &options)?;
     Ok(OutboundReplica { database, _directory: directory })
 }
+
 /// Private, unlinked scratch for one streamed sync entry. Drop closes and
 /// discards it; it never becomes a recoverable replica or visible catalog.
 pub fn sync_staging(scratch: &Path) -> Result<kvdb::redb::FileStaging> {
@@ -796,17 +841,25 @@ pub struct LocalStore {
     metadata: Database,
     #[cfg(feature = "app-host")]
     session_catalog_epoch: Arc<kvdb::redb::WriteEpoch>,
+    #[cfg(feature = "app-host")]
+    session_visitors: session_list::SessionVisitors,
     account_cipher: Mutex<Option<account_replica::CachedCipher>>,
     recovery_persistence: RecoveryPersistence,
     account: Account,
     installation: Id,
     changes: crate::store::change_feed::CommittedChangeFeed,
+    #[cfg(any(feature = "connected-engine", feature = "native-runtime"))]
+    guest_display_name: tokio::sync::watch::Sender<String>,
     volume_names_generation: std::sync::atomic::AtomicU64,
     // Lock order: account authority/consent -> sorted unique volume operations
-    // -> blob cache -> short profile mutation -> open cache -> database txn.
+    // -> short profile mutation -> blob cache -> open cache -> database txn.
+    // Build publication has its own lock and takes it before the profile writer.
     // Session bindings are immutable; authorization/version/denial is reread only
     // after acquiring all dependencies. No network work under any guard.
     profile: Mutex<()>,
+    // A single desktop preview. Its registered envelope stays here until the
+    // live app acknowledges receipt or explicitly joins the session.
+    desktop_preview: Mutex<Option<DesktopInvitation>>,
     // Admission for account-tree writers only. Read snapshots and profile
     // mutations remain independent; callers release before network/adoption.
     account_writer: Mutex<()>,
@@ -817,10 +870,10 @@ pub struct LocalStore {
     /// and eviction. Publishing and recording share one critical section, so no
     /// reference is ever recorded for bytes an eviction removed meanwhile.
     /// Hashing, sealing, opening and the staged write and fsync stay outside it
-    /// so one volume's large file cannot block another volume's blob work. It
-    /// covers publishing a retained build upload and the pending record naming
-    /// it on the same terms.
+    /// so one volume's large file cannot block another volume's blob work.
     blob_cache: Arc<Mutex<blob_files::BlobCache>>,
+    /// Serialize build directory publication through its durable upload record.
+    build_publication: Mutex<()>,
     /// Cache invalidation only. Active verified reads may outlive file eviction.
     blob_eviction_generation: std::sync::atomic::AtomicU64,
     entry_blobs: entry_blobs::BlobPreparations,
@@ -1105,19 +1158,31 @@ impl LocalStore {
             path,
             blob_cache_path,
             installation: profile::installation(&metadata)?,
+            #[cfg(any(feature = "connected-engine", feature = "native-runtime"))]
+            guest_display_name: {
+                let name: Option<String> = get(&metadata, b"settings/display-name")?;
+                if let Some(name) = &name {
+                    crate::store::account::validate_display_name(name)?;
+                }
+                tokio::sync::watch::Sender::new(name.unwrap_or_default())
+            },
             metadata,
             #[cfg(feature = "app-host")]
             session_catalog_epoch,
+            #[cfg(feature = "app-host")]
+            session_visitors: Default::default(),
             account_cipher: Mutex::new(None),
             recovery_persistence,
             account,
             changes: changes()?,
             volume_names_generation: std::sync::atomic::AtomicU64::new(0),
             profile: Mutex::new(()),
+            desktop_preview: Mutex::new(None),
             account_writer: Mutex::new(()),
             account_authority_paused: std::sync::atomic::AtomicBool::new(false),
             personal_consent: RwLock::new(()),
             blob_cache: Arc::new(Mutex::new(blob_files::BlobCache::default())),
+            build_publication: Mutex::new(()),
             blob_eviction_generation: std::sync::atomic::AtomicU64::new(0),
             entry_blobs: Default::default(),
             snapshots: Default::default(),
@@ -1138,11 +1203,11 @@ impl LocalStore {
             open_ready: Condvar::new(),
             _lock: lock,
         };
-        crate::paths::private_directory(&store.path, crate::paths::VOLUMES).map_err(io)?;
         Self::finish_open(store)
     }
 
     fn finish_open(store: Self) -> Result<Self> {
+        crate::paths::private_directory(&store.path, crate::paths::VOLUMES).map_err(io)?;
         let recovery = store.recovery_state()?;
         store.prepared_account_key(store.account.id)?;
         store.validate_recovery_persistence()?;
@@ -1157,7 +1222,11 @@ impl LocalStore {
         store.recover_volume_duplication()?;
         store.recover_received_publications()?;
         for volume in store.pending_volume_names()? {
-            store.project_volume_name(volume)?;
+            // A committed erase has already retired its descriptor. Reclaim its
+            // outstanding projection marker on the same worker as the backing.
+            if !store.app_data_erasure_pending(volume)? {
+                store.project_volume_name(volume)?;
+            }
         }
         Ok(store)
     }
@@ -1286,22 +1355,126 @@ impl LocalStore {
         link: &str,
         channel: crate::release_channel::ReleaseChannel,
     ) -> Result<InvitationPreview> {
+        self.preview_link(link, channel, InvitationRetention::Durable)
+    }
+    #[cfg(feature = "app-host")]
+    pub(crate) fn preview_desktop_invitation(
+        &self,
+        link: &str,
+        channel: crate::release_channel::ReleaseChannel,
+    ) -> Result<InvitationPreview> {
+        self.preview_link(link, channel, InvitationRetention::Desktop)
+    }
+    #[cfg(all(unix, feature = "connected-engine"))]
+    pub(crate) fn restore_invitation_seed(
+        &self,
+        link: &str,
+        channel: crate::release_channel::ReleaseChannel,
+    ) -> Result<InvitationPreview> {
+        self.preview_link(link, channel, InvitationRetention::ProfileReset)
+    }
+    fn desktop_preview(&self) -> Result<std::sync::MutexGuard<'_, Option<DesktopInvitation>>> {
+        self.desktop_preview
+            .lock()
+            .map_err(|_| Error::Internal("desktop invitation lock is poisoned"))
+    }
+    fn preview_link(
+        &self,
+        link: &str,
+        channel: crate::release_channel::ReleaseChannel,
+        retention: InvitationRetention,
+    ) -> Result<InvitationPreview> {
         let seed = crate::store::invitation::parse_session_link(link, channel)?;
         let session_id = SessionKeys::derive(&seed)?.session_id();
         let _guard = self.lock_profile()?;
+        let observed_removal =
+            if matches!(retention, InvitationRetention::Desktop | InvitationRetention::Durable) {
+                Some(get::<u64>(&self.metadata, session_list::REMOVAL_SERIAL)?.unwrap_or(0))
+            } else {
+                None
+            };
+        self.record_invitation_preview(session_id, seed, retention, observed_removal)
+    }
+
+    #[cfg(any(test, feature = "app-host"))]
+    pub(crate) fn prepare_retained_invitation(
+        &self,
+        session_id: &str,
+    ) -> Result<InvitationPreview> {
+        let _guard = self.lock_profile()?;
+        if self.app_removed(&self.session(session_id)?.app)? {
+            return Err(Error::AccessDenied("this app was removed; join its invitation again"));
+        }
+        self.record_invitation_preview(
+            session_id.to_owned(),
+            self.session_seed(session_id)?,
+            InvitationRetention::Durable,
+            None,
+        )
+    }
+
+    // Caller holds the profile lock so removal and explicit presentation are ordered.
+    fn record_invitation_preview(
+        &self,
+        session_id: String,
+        seed: Seed,
+        retention: InvitationRetention,
+        observed_removal: Option<u64>,
+    ) -> Result<InvitationPreview> {
         let key = format!("invitation/{session_id}");
-        let mut pending = match get::<PendingInvitation>(&self.metadata, key.as_bytes())? {
-            Some(existing) => PendingInvitation { paused: false, ..existing },
-            None => PendingInvitation { seed, paused: false, invitation: None },
+        let mut slot = self.desktop_preview()?;
+        let staged = slot.as_ref().filter(|current| current.session == session_id);
+        let mut pending = match staged {
+            Some(current) => current.pending.as_ref().clone(),
+            None => get::<PendingInvitation>(&self.metadata, key.as_bytes())?.unwrap_or(
+                PendingInvitation {
+                    seed,
+                    paused: false,
+                    invitation: None,
+                    retain_unloaded: false,
+                    observed_removal: None,
+                },
+            ),
         };
+        let unconfirmed = staged.is_some() || pending.invitation.is_none();
+        pending.observed_removal = observed_removal.or(pending.observed_removal);
+        pending.paused = false;
         if pending.invitation.is_none()
             && let Some(stored) =
                 get::<StoredSession>(&self.metadata, format!("session/{session_id}").as_bytes())?
         {
             pending.invitation = Some(stored.invitation);
         }
-        put(&self.metadata, key.as_bytes(), &pending)?;
-        self.invitation_preview(&session_id, &pending)
+        let mut preview = self.invitation_preview(&session_id, &pending)?;
+        if retention == InvitationRetention::Desktop
+            && unconfirmed
+            && !preview.retained
+            && !pending.retain_unloaded
+        {
+            if let Some(local) = self.local_session(&session_id)? {
+                preview.retained = true;
+                // A fresh link to a local-only session opens it directly. The
+                // desktop has no envelope to acknowledge before PrepareSession.
+                if self.app_removed(&local.session.app)? {
+                    *slot =
+                        Some(DesktopInvitation { session: session_id, pending: Box::new(pending) });
+                    return Ok(preview);
+                }
+            } else {
+                *slot = Some(DesktopInvitation { session: session_id, pending: Box::new(pending) });
+                return Ok(preview);
+            }
+        } else {
+            pending.retain_unloaded = pending.invitation.is_none()
+                && (retention == InvitationRetention::Durable || pending.retain_unloaded);
+            self.save_pending_invitation(&key, &pending)?;
+        }
+        if retention == InvitationRetention::Desktop
+            || slot.as_ref().is_some_and(|current| current.session == session_id)
+        {
+            *slot = None;
+        }
+        Ok(preview)
     }
     fn invitation_preview(
         &self,
@@ -1354,10 +1527,17 @@ impl LocalStore {
         validate_version(session_id)?;
         let _guard = self.lock_profile()?;
         let key = format!("invitation/{session_id}");
-        let mut pending: PendingInvitation = required(&self.metadata, &key)?;
+        let mut pending = self.pending_invitation(session_id)?;
         let invitation = Invitation::open(&pending.seed, envelope)?;
         if invitation.session.id != session_id {
             return Err(Error::InvalidInput("invitation identity or credential mismatch"));
+        }
+        if self.pending_join_superseded(&invitation.session.app, Some(&pending))? {
+            let mut tx = self.metadata.begin_write(now_unix_secs())?;
+            tx.del(key.as_bytes())?;
+            tx.commit()?;
+            self.desktop_preview()?.take_if(|current| current.session == session_id);
+            return Err(Error::AccessDenied("this app was removed; join its invitation again"));
         }
         match &pending.invitation {
             Some(existing) if *existing != invitation => {
@@ -1365,11 +1545,16 @@ impl LocalStore {
             }
             Some(_) => {}
             None => {
-                if invitation.session.shared_volume.is_some() {
-                    profile_format::enable_shared_sessions(self)?;
-                }
                 pending.invitation = Some(invitation);
-                put(&self.metadata, key.as_bytes(), &pending)?;
+                pending.retain_unloaded = false;
+                let mut slot = self.desktop_preview()?;
+                if let Some(current) = slot.as_mut().filter(|current| current.session == session_id)
+                {
+                    let preview = self.invitation_preview(session_id, &pending)?;
+                    *current.pending = pending;
+                    return Ok(preview);
+                }
+                self.save_pending_invitation(&key, &pending)?;
             }
         }
         self.invitation_preview(session_id, &pending)
@@ -1382,7 +1567,109 @@ impl LocalStore {
     }
     fn pending_invitation(&self, session_id: &str) -> Result<PendingInvitation> {
         validate_version(session_id)?;
+        if let Some(current) = self.desktop_preview()?.as_ref().filter(|s| s.session == session_id)
+        {
+            return Ok(current.pending.as_ref().clone());
+        }
         required(&self.metadata, format!("invitation/{session_id}"))
+    }
+    fn save_pending_invitation(&self, key: &str, pending: &PendingInvitation) -> Result<()> {
+        if pending
+            .invitation
+            .as_ref()
+            .is_some_and(|invitation| invitation.session.shared_volume.is_some())
+        {
+            profile_format::enable_shared_sessions(self)?;
+        }
+        put(&self.metadata, key.as_bytes(), pending)
+    }
+    #[cfg(feature = "app-host")]
+    pub(crate) fn resolved_desktop_invitation(
+        &self,
+        session: &str,
+    ) -> Result<Option<InvitationPreview>> {
+        let slot = self.desktop_preview()?;
+        let Some(current) = slot.as_ref().filter(|s| s.session == session && !s.pending.paused)
+        else {
+            return Ok(None);
+        };
+        let Some(invitation) = &current.pending.invitation else { return Ok(None) };
+        if self.pending_join_superseded(&invitation.session.app, Some(&current.pending))? {
+            return Ok(None);
+        }
+        self.invitation_preview(session, &current.pending).map(Some)
+    }
+    /// Only the exact live preview can be promoted. Old acknowledgments after a
+    /// pause, replacement, or completed join are harmless.
+    pub(crate) fn retain_desktop_invitation(&self, session: &str) -> Result<()> {
+        validate_version(session)?;
+        let _profile = self.lock_profile()?;
+        let mut slot = self.desktop_preview()?;
+        let Some(current) =
+            slot.as_mut().filter(|current| current.session == session && !current.pending.paused)
+        else {
+            return Ok(());
+        };
+        let invitation = current
+            .pending
+            .invitation
+            .as_ref()
+            .ok_or(Error::InvalidInput("invitation details are unavailable"))?;
+        if self.pending_join_superseded(&invitation.session.app, Some(&current.pending))? {
+            *slot = None;
+            return Ok(());
+        }
+        let key = format!("invitation/{session}");
+        if let Err(error) = self.save_pending_invitation(&key, &current.pending) {
+            current.pending.paused = true;
+            return Err(error);
+        }
+        *slot = None;
+        Ok(())
+    }
+    #[cfg(feature = "app-host")]
+    pub(crate) fn transient_desktop_session(&self) -> Result<Option<String>> {
+        Ok(self.desktop_preview()?.as_ref().map(|s| s.session.clone()))
+    }
+    /// The engine can outlive a desktop process. Drop its transient preview
+    /// and retire unresolved records from hosts that persisted every preview.
+    #[cfg(feature = "app-host")]
+    pub(crate) fn desktop_launch_invitations(
+        &self,
+        in_use: impl Fn(&str) -> bool,
+    ) -> Result<Vec<InvitationPreview>> {
+        let _profile = self.lock_profile()?;
+        self.desktop_preview()?.take();
+        let read = self.metadata.begin_read()?;
+        let prefix = b"invitation/";
+        let mut write = None;
+        let mut previews = Vec::new();
+        for item in read.iter_from(prefix) {
+            let (key, value) = item?;
+            let Some(suffix) = key.strip_prefix(prefix.as_slice()) else { break };
+            let pending: PendingInvitation = decode(&value)?;
+            let id = std::str::from_utf8(suffix)
+                .map_err(|_| Error::corrupt("invalid invitation record key"))?;
+            validate_version(id)?;
+            let preview = self.invitation_preview(id, &pending)?;
+            if preview.received.is_some()
+                || preview.retained
+                || pending.retain_unloaded
+                || in_use(id)
+                || read.has(format!("local-session/{id}").as_bytes())?
+            {
+                previews.push(preview);
+                continue;
+            }
+            if write.is_none() {
+                write = Some(self.metadata.begin_write(now_unix_secs())?);
+            }
+            write.as_mut().expect("write transaction was opened").del(&key)?;
+        }
+        if let Some(write) = write {
+            write.commit()?;
+        }
+        Ok(previews)
     }
     /// Read only the selected capability after the reset owner has stopped the
     /// engine and acquired local.lock. This needs no account/Keychain access.
@@ -1405,6 +1692,11 @@ impl LocalStore {
     pub fn pause_invitation(&self, session_id: &str, paused: bool) -> Result<()> {
         validate_version(session_id)?;
         let _guard = self.lock_profile()?;
+        if let Some(current) = self.desktop_preview()?.as_mut().filter(|s| s.session == session_id)
+        {
+            current.pending.paused = paused;
+            return Ok(());
+        }
         let key = format!("invitation/{session_id}");
         let mut pending: PendingInvitation = required(&self.metadata, &key)?;
         pending.paused = paused;
@@ -1418,17 +1710,33 @@ impl LocalStore {
         validate_version(session_id)?;
         let _guard = self.lock_profile()?;
         let mut tx = self.metadata.begin_write(now_unix_secs())?;
-        tx.del(format!("invitation/{session_id}").as_bytes())?;
+        let key = format!("invitation/{session_id}");
+        let pending =
+            tx.get(key.as_bytes())?.map(|bytes| decode::<PendingInvitation>(&bytes)).transpose()?;
+        tx.del(key.as_bytes())?;
+        let changed = match self.session(session_id) {
+            Ok(session) if self.pending_join_superseded(&session.app, pending.as_ref())? => {
+                tx.commit()?;
+                return Ok(());
+            }
+            Ok(session) if pending.is_some() => {
+                self.stage_app_removed(&mut tx, &session.app, false)?
+            }
+            Ok(_) | Err(Error::NotFound(_)) => false,
+            Err(error) => return Err(error),
+        };
         tx.del(session_list::hidden(session_id).as_bytes())?;
         {
             let _timing = crate::trace::Span::new("storage.commit");
             tx.commit()?;
         }
+        self.committed_account_record(changed);
         Ok(())
     }
     /// Retain a received invitation before bootstrap, preserving all original
     /// identities. Re-import is idempotent and never queues owner registrations.
     pub fn import_invitation(&self, session_id: &str) -> Result<Session> {
+        self.retain_desktop_invitation(session_id)?;
         let pending = self.pending_invitation(session_id)?;
         let invitation = pending.invitation.ok_or(Error::NotFound("registered invitation"))?;
         self.adopt_invitation(&invitation)
@@ -1451,7 +1759,14 @@ impl LocalStore {
                 (invitation.replica_volume()?, invitation.replica_credentials()?);
             if let Some(existing) =
                 get::<Volume>(&self.metadata, format!("volume/{}", volume.id).as_bytes())?
-                && (!existing.same_identity(volume) || self.credentials(volume.id)? != *credentials)
+                && (!existing.same_identity(volume)
+                    || match get::<Credentials>(
+                        &self.metadata,
+                        format!("credentials/{}", volume.id).as_bytes(),
+                    )? {
+                        Some(stored) => stored != *credentials,
+                        None => !self.uses_world_projection(volume.id)?,
+                    })
             {
                 return Err(Error::InvalidInput("conflicting volume invitation"));
             }
@@ -1660,6 +1975,30 @@ impl LocalStore {
         }
         Ok(service)
     }
+    #[cfg(any(
+        feature = "native-runtime",
+        all(feature = "wasm-runtime", feature = "connected-engine")
+    ))]
+    pub(crate) fn guest_display_name(&self) -> tokio::sync::watch::Ref<'_, String> {
+        self.guest_display_name.borrow()
+    }
+
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn subscribe_display_name(&self) -> tokio::sync::watch::Receiver<String> {
+        self.guest_display_name.subscribe()
+    }
+
+    #[cfg(any(feature = "connected-engine", feature = "native-runtime"))]
+    fn publish_display_name(&self, name: &str) -> bool {
+        self.guest_display_name.send_if_modified(|current| {
+            if current == name {
+                return false;
+            }
+            name.clone_into(current);
+            true
+        })
+    }
+
     pub fn display_name(&self) -> Result<Option<String>> {
         get(&self.metadata, b"settings/display-name")
     }
@@ -1680,6 +2019,11 @@ impl LocalStore {
             &crate::store::account::Record::DisplayName { name: name.to_owned() },
         )?;
         tx.commit()?;
+        #[cfg(any(feature = "connected-engine", feature = "native-runtime"))]
+        if self.publish_display_name(name) && !changed {
+            // A saved recovery key can precede the first account publication.
+            self.changes.local_policy_changed();
+        }
         self.committed_account_record(changed);
         Ok(())
     }
@@ -1940,8 +2284,10 @@ impl LocalStore {
             operation: PendingKind::RegisterSession { session: session.clone(), envelope },
         };
         let _profile = self.lock_profile()?;
-        let mut tx = self.metadata.begin_write(now_unix_secs())?;
+        let started = now_unix_secs();
+        let mut tx = self.metadata.begin_write(started)?;
         tx.put(format!("session/{}", session.id).as_bytes(), &encode(&stored)?)?;
+        tx.put(format!("session-start/{}", session.id).as_bytes(), &started.to_le_bytes())?;
         tx.put(format!("pending/{}", pending.id).as_bytes(), &encode(&pending)?)?;
         let account_changed = self.queue_account_record(
             &mut tx,
@@ -1973,12 +2319,15 @@ impl LocalStore {
         }
         Ok(sessions)
     }
-    pub fn session(&self, id: &str) -> Result<Session> {
-        let session = if let Some(local) = self.local_session(id)? {
+    pub(crate) fn catalog_session(&self, id: &str) -> Result<Session> {
+        Ok(if let Some(local) = self.local_session(id)? {
             local.session
         } else {
             self.stored_session(id)?.session
-        };
+        })
+    }
+    pub fn session(&self, id: &str) -> Result<Session> {
+        let session = self.catalog_session(id)?;
         self.require_volume_available(session.replica_volume())?;
         Ok(session)
     }
@@ -2070,8 +2419,10 @@ impl LocalStore {
         // place but not yet made durable.
         let staged =
             if retained.exists() { None } else { Some(self.stage_build(&directory, &path)?) };
-        let _cache =
-            self.blob_cache.lock().map_err(|_| Error::Internal("blob cache lock is poisoned"))?;
+        let _publication = self
+            .build_publication
+            .lock()
+            .map_err(|_| Error::Internal("build publication lock is poisoned"))?;
         let staged = match staged {
             Some(temporary) => Some(temporary),
             None if retained.exists() => None,
@@ -2092,9 +2443,7 @@ impl LocalStore {
                 }
             }
         }
-        let directory_file = fs::File::open(&directory).map_err(io)?;
-        rustix::io::retry_on_intr(|| rustix::fs::fsync(&directory_file))
-            .map_err(|e| io(e.into()))?;
+        initialization::sync_directory(&directory)?;
         let _profile = self.lock_profile()?;
         if self.build_uploaded(build_id)? {
             return Ok(None);
@@ -2137,7 +2486,7 @@ impl LocalStore {
         }
         Ok(())
     }
-    /// Copy and fsync the upload bytes without holding the cache lock. The
+    /// Copy and fsync the upload bytes without holding the build publication lock. The
     /// returned file is published by the rename the lock covers.
     fn stage_build(&self, directory: &Path, source: &Path) -> Result<PathBuf> {
         let bytes = fs::read(source).map_err(io)?;
@@ -2171,7 +2520,7 @@ impl LocalStore {
         if let DatabaseId::Entry(entry) = database {
             let index = self.replica_db(volume, DatabaseId::Index, None)?;
             if IndexSnapshot::new(index.begin_read()?).backing_quarantined(entry)? {
-                return Err(Error::NotFound("accepted backing is pending"));
+                return Err(Error::NotFound(Error::PENDING_BACKING));
             }
         }
         self.replica_db(volume, database, None)
@@ -2198,8 +2547,9 @@ impl LocalStore {
             .join(volume.to_string())
             .join(database.file_name());
         let master = match create {
-            Some(master) => master,
-            None => self.credentials(volume)?.database_key,
+            Some(master) if !self.uses_world_projection(volume)? => master,
+            Some(_) => crate::store::DatabaseId::world_projection_key(volume),
+            None => self.local_database_key(volume)?,
         };
         let key = database.hash_key(&master, volume);
         let opened =
@@ -2417,9 +2767,16 @@ impl LocalStore {
         if let Some(version) = &access.build_id {
             session.resolved_build_id = version.clone();
         }
-        let automatic =
-            local && self.automatic_volumes(id)?.iter().any(|slot| slot.volume == index.volume.id);
-        let grant = if session.replica_volume() != index.volume.id && !automatic {
+        let world = session.is_distinct_world(index.volume.id);
+        if world && index.volume.owner != self.account.id {
+            self.check_world_admission(&session)?;
+            index.admit_world(access.account, &session)?;
+        }
+        let grant = if session.replica_volume() != index.volume.id
+            && !world
+            && !(local
+                && self.automatic_volumes(id)?.iter().any(|slot| slot.volume == index.volume.id))
+        {
             Some(self.personal_grant(access, &session, index.volume.id)?)
         } else {
             None
@@ -2537,8 +2894,10 @@ impl LocalStore {
         if index.volume.owner != access.account {
             return Err(Error::AccessDenied("root owner"));
         }
-        index.provisioned_versions.insert(version.to_owned());
-        self.save_index(&index)
+        if index.provisioned_versions.insert(version.to_owned()) {
+            self.save_index(&index)?;
+        }
+        Ok(())
     }
     pub fn revoke(&self, access: &Access, volume: Id, account: Id, message: &str) -> Result<()> {
         let operations = self.access_operations(access, volume)?;
@@ -3194,6 +3553,101 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "app-host")]
+    fn desktop_invitation_becomes_durable_only_after_the_app_receives_its_details() {
+        // Compare a process restart, a surviving helper with an unseen envelope,
+        // and a live app that receives the registered session.
+        let (_alice_dir, alice, root, _) = setup();
+        let channel = crate::release_channel::ReleaseChannel::Public;
+        let build = crate::identifier::encode(&[0xcd; 32]);
+        let session = alice
+            .create_session(
+                &crate::package::AppIdentity {
+                    publisher: alice.account().id,
+                    app_id: "test".into(),
+                },
+                BuildSelector::Exact { build_id: build.clone() },
+                &build,
+                root.id,
+            )
+            .unwrap();
+        let link = alice.invitation(&session.id, channel).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bob = LocalStore::open(dir.path()).unwrap();
+        let preview = bob.preview_desktop_invitation(&link, channel).unwrap();
+        assert!(!preview.retained && preview.received.is_none());
+        bob.pause_invitation(&session.id, true).unwrap();
+        assert!(bob.pending_invitation_paused(&session.id).unwrap());
+        assert!(bob.pending_invitations().unwrap().is_empty());
+        drop(bob);
+        let bob = LocalStore::open(dir.path()).unwrap();
+        assert!(bob.pending_invitation_preview(&session.id).is_err());
+        bob.preview_desktop_invitation(&link, channel).unwrap();
+        let envelope = alice.session_envelope(&session.id).unwrap();
+        bob.check_invitation_registration(&session.id, &envelope, &session).unwrap();
+        let received = bob.receive_invitation(&session.id, &envelope).unwrap();
+        assert_eq!(received.received.as_ref().unwrap().session, session);
+        assert!(!received.retained);
+        assert_eq!(bob.resolved_desktop_invitation(&session.id).unwrap().as_ref(), Some(&received));
+        assert!(bob.desktop_launch_invitations(|_| false).unwrap().is_empty());
+        assert!(bob.pending_invitation_preview(&session.id).is_err());
+
+        bob.preview_desktop_invitation(&link, channel).unwrap();
+        bob.receive_invitation(&session.id, &envelope).unwrap();
+        bob.pause_invitation(&session.id, true).unwrap();
+        bob.retain_desktop_invitation(&session.id).unwrap();
+        assert!(bob.resolved_desktop_invitation(&session.id).unwrap().is_none());
+        assert!(bob.pending_invitations().unwrap().is_empty());
+        assert_eq!(bob.preview_desktop_invitation(&link, channel).unwrap(), received);
+        bob.retain_desktop_invitation(&crate::identifier::encode(&[5; 32])).unwrap();
+        assert!(bob.pending_invitations().unwrap().is_empty());
+        bob.retain_desktop_invitation(&session.id).unwrap();
+        bob.retain_desktop_invitation(&session.id).unwrap();
+        drop(bob);
+        let bob = LocalStore::open(dir.path()).unwrap();
+        assert_eq!(bob.desktop_launch_invitations(|_| false).unwrap(), [received]);
+        assert!(bob.sessions().unwrap().is_empty());
+
+        // The loaded invitation alone creates a sidebar app. Removal also
+        // supersedes a second resolved link awaiting its UI acknowledgment.
+        let delayed =
+            alice.create_session(&session.app, session.selector.clone(), &build, root.id).unwrap();
+        bob.preview_desktop_invitation(&alice.invitation(&delayed.id, channel).unwrap(), channel)
+            .unwrap();
+        bob.receive_invitation(&delayed.id, &alice.session_envelope(&delayed.id).unwrap()).unwrap();
+        assert_eq!(bob.app_removal_impact(&session.app).unwrap(), AppRemovalImpact::default());
+        assert_eq!(
+            bob.remove_app(&session.app, false, false).unwrap(),
+            AppRemovalResult::Removed { erased_volumes: vec![], cleanup_error: None }
+        );
+        assert!(bob.resolved_desktop_invitation(&delayed.id).unwrap().is_none());
+        bob.retain_desktop_invitation(&delayed.id).unwrap();
+        assert!(bob.pending_invitations().unwrap().is_empty());
+        // A freshly opened link can again be kept or dismissed without
+        // restoring the app's previously joined sessions.
+        bob.preview_desktop_invitation(&link, channel).unwrap();
+        bob.receive_invitation(&session.id, &envelope).unwrap();
+        bob.retain_desktop_invitation(&session.id).unwrap();
+        assert!(bob.app_removed(&session.app).unwrap());
+        assert_eq!(bob.app_removal_impact(&session.app).unwrap(), AppRemovalImpact::default());
+        assert_eq!(
+            bob.remove_app(&session.app, false, false).unwrap(),
+            AppRemovalResult::Removed { erased_volumes: vec![], cleanup_error: None }
+        );
+        assert!(bob.desktop_launch_invitations(|_| false).unwrap().is_empty());
+
+        // An explicit join also owns its loaded session if the management
+        // status acknowledgment has not been delivered yet.
+        let other_dir = tempfile::tempdir().unwrap();
+        let other = LocalStore::open(other_dir.path()).unwrap();
+        other.preview_desktop_invitation(&link, channel).unwrap();
+        other.receive_invitation(&session.id, &envelope).unwrap();
+        assert_eq!(other.import_invitation(&session.id).unwrap(), session);
+        assert!(other.transient_desktop_session().unwrap().is_none());
+        assert!(other.pending_invitation_preview(&session.id).unwrap().retained);
+    }
+
+    #[test]
     fn invitation_preview_survives_pause_restart_and_uri_handoff_without_attaching_data() {
         let (_alice_dir, alice, root, _) = setup();
         let session = alice
@@ -3268,6 +3722,17 @@ mod tests {
         let mut tampered = envelope.clone();
         tampered[20] ^= 1;
         assert!(bob.receive_invitation(&session.id, &tampered).is_err());
+        // The link was opened before an account removal. Learning its app
+        // identity later cannot restore it; explicitly opening the link again can.
+        let mut tx = bob.metadata.begin_write(now_unix_secs()).unwrap();
+        bob.stage_app_removed(&mut tx, &session.app, true).unwrap();
+        tx.commit().unwrap();
+        assert!(matches!(
+            bob.receive_invitation(&session.id, &envelope),
+            Err(Error::AccessDenied(_))
+        ));
+        assert!(bob.pending_invitations().unwrap().is_empty());
+        bob.preview_invitation(&uri, crate::release_channel::ReleaseChannel::Public).unwrap();
         let received = bob.receive_invitation(&session.id, &envelope).unwrap();
         assert_eq!(
             received.received,
@@ -3309,6 +3774,7 @@ mod tests {
         );
         bob.complete_invitation(&session.id).unwrap();
         assert!(bob.pending_invitations().unwrap().is_empty());
+        assert!(!bob.app_removed(&session.app).unwrap());
         assert_eq!(
             bob.invitation(&session.id, crate::release_channel::ReleaseChannel::Public).unwrap(),
             url

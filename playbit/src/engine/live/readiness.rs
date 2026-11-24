@@ -97,11 +97,12 @@ impl LiveReplicas {
         })
     }
 
-    pub(crate) fn start_readiness(&mut self, scope: &ScopeKey, now: Instant) -> Result<u8> {
+    /// An earlier World withdrawal can retire several entries in one recovery plan.
+    pub(crate) fn start_readiness(&mut self, scope: &ScopeKey, now: Instant) -> Result<Option<u8>> {
         let Some(index) = self.entries.iter().position(|entry| entry.key == *scope) else {
-            return Err("live recovery scope was replaced".into());
+            return Ok(None);
         };
-        let Some(retry) = self.entries[index].readiness else { return Ok(0) };
+        let Some(retry) = self.entries[index].readiness else { return Ok(Some(0)) };
         if !self.readiness_current(&self.entries[index], retry) {
             self.entries[index].readiness = None;
             return Err("live readiness recovery generation changed".into());
@@ -110,7 +111,7 @@ impl LiveReplicas {
             return Err("live readiness recovery is not due".into());
         }
         self.entries[index].readiness = Some(Readiness { state: State::Running, ..retry });
-        Ok(retry.gaps)
+        Ok(Some(retry.gaps))
     }
 
     pub(crate) fn defer_readiness(

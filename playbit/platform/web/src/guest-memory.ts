@@ -31,7 +31,7 @@ export function record(memory: WebAssembly.Memory, pointer: number, layout: Reco
     const capacity = view(memory, admit(memory, pointer, 1, 4, layout.alignment, 1)).getUint32(0, true);
     if (capacity > 4096) throw new AbiError(-9);
     if (capacity < layout.minimum) throw new AbiError(input ? -3 : -11);
-    if (layout.fields.some(([offset, width]) => offset < capacity && offset + width > capacity)) throw new AbiError(-3);
+    if (layout.fields.some(([offset, width]) => offset < capacity && offset + width > capacity && (input || offset !== layout.optionalOutputField))) throw new AbiError(-3);
     const region = admit(memory, pointer, capacity, 1, layout.alignment, 4096);
     if (input && capacity > layout.size && bytes(memory, region).subarray(layout.size).some(byte => byte !== 0)) throw new AbiError(-7);
     return region;

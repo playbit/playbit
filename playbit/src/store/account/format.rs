@@ -160,7 +160,7 @@ impl Frame {
     pub(super) fn decode(plain: &[u8]) -> Result<Decoded> {
         let frame = Self::parse(plain)?;
         let expected_authority = match frame.kind.as_str() {
-            "display_name" => Some(false),
+            "display_name" | "app_visibility" => Some(false),
             "volume" | "volume_deleted" | "invitation" | "personal_volumes" | "hosted_volume"
             | "hosted_invitation" => Some(true),
             _ => None,
@@ -234,7 +234,7 @@ impl Frame {
         let mut frame = Self {
             kind: value.kind().into(),
             logical_key: value.logical_key()?,
-            authority: !matches!(value, Record::DisplayName { .. }),
+            authority: !matches!(value, Record::DisplayName { .. } | Record::AppVisibility { .. }),
             required_read: requirements.clone(),
             required_write: requirements,
             payload: Payload(record::encode(value)?),

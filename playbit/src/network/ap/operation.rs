@@ -15,6 +15,29 @@ pub const BUILD_DISPLAY_LIMIT: usize = 132 * 1024;
 /// Decoded bound of a registered invitation envelope; the store seals within it.
 pub const INVITATION_ENVELOPE_LIMIT: usize = 4096;
 
+/// The account replica orders concurrent writes by clock, then by the original
+/// envelope bytes. Use the same order for its service-readable name projection.
+pub fn display_name_version(
+    name: &str,
+    clock: &str,
+    ciphertext: &str,
+) -> Result<(u64, Vec<u8>), &'static str> {
+    use crate::store::account;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    account::validate_display_name(name).map_err(|_| "invalid display name")?;
+    if clock.len() > 20 || !clock.as_bytes().first().is_some_and(|b| matches!(b, b'1'..=b'9')) {
+        return Err("invalid display name clock");
+    }
+    let clock: u64 = clock.parse().map_err(|_| "invalid display name clock")?;
+    if ciphertext.len() > account::MAX_ENVELOPE_BYTES.div_ceil(3) * 4 {
+        return Err("display name envelope too large");
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(ciphertext).map_err(|_| "invalid display name envelope")?;
+    account::validate_envelope_value(kvdb::Clock::from_u64(clock), &bytes)
+        .map_err(|_| "invalid display name version")?;
+    Ok((clock, bytes))
+}
+
 /// Advisory package metadata. Never use this projection to admit executable
 /// code, initialize roots, or authorize access to a volume.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -260,6 +283,15 @@ pub enum ServiceRequest {
     PublishAccount {
         operation_id: String,
     },
+    /// The authenticated account supplies the readable name and its opaque source key.
+    /// AP verifies the version at that key and orders concurrent updates to the same entry.
+    PutAccountDisplayName {
+        operation_id: String,
+        name: String,
+        record_key: String,
+        clock: String,
+        ciphertext: String,
+    },
     /// None uses direct account authority; Some requires session admission on
     /// this connection. Catalog maintenance requires the owner. Named backing
     /// reads check their entry permission independently of catalog Read.
@@ -276,6 +308,14 @@ pub enum ServiceRequest {
         /// Valid only for pulls; named backing identity must match this entry.
         entry_scope: Option<crate::store::EntryId>,
         direction: SyncDirection,
+    },
+    /// ACL-checked publisher World replication in its public Merkle context.
+    WorldReplica {
+        operation_id: String,
+        session_id: String,
+        build_id: String,
+        volume_id: String,
+        request: WorldReplicaRequest,
     },
     /// A persistent volume subscription; None requests owner maintenance.
     /// These fields describe scope and never grant authority by themselves.
@@ -386,7 +426,9 @@ impl ServiceRequest {
             | Self::SyncAccount { operation_id, .. }
             | Self::SubscribeAccount { operation_id }
             | Self::PublishAccount { operation_id }
+            | Self::PutAccountDisplayName { operation_id, .. }
             | Self::SyncDatabase { operation_id, .. }
+            | Self::WorldReplica { operation_id, .. }
             | Self::SubscribeReplica { operation_id, .. }
             | Self::PublishReplica { operation_id, .. }
             | Self::PublishBloblog { operation_id, .. }
@@ -406,6 +448,10 @@ impl ServiceRequest {
         self.validate_identity()?;
         self.validate_running_scope()?;
         match self {
+            Self::PutAccountDisplayName { name, record_key, clock, ciphertext, .. } => {
+                validate_id32(record_key, "invalid display name record key")?;
+                display_name_version(name, clock, ciphertext).map(|_| ())
+            }
             Self::IssuePublisherCertificate { .. }
             | Self::GetPublisherKeyStatus { .. }
             | Self::RevokePublisherKey { .. } => self.validate_publisher(),
@@ -422,10 +468,7 @@ impl ServiceRequest {
                 Ok(())
             }
             Self::GetBuildIdentity { build_id, .. } => {
-                if !crate::identifier::valid(build_id, 32) {
-                    return Err("invalid build identity");
-                }
-                Ok(())
+                validate_id32(build_id, "invalid build identity")
             }
             Self::ListAppBuilds { .. }
             | Self::GetApp { .. }
@@ -454,17 +497,15 @@ impl ServiceRequest {
             Self::PeerReply { .. } => self.validate_peer_reply(),
             Self::VolumeUsage { .. } => self.validate_volume_usage(),
             Self::UploadBlob { .. } | Self::DownloadBlob { .. } => self.validate_upload_blob(),
-            Self::GetBlob { hash, .. } => {
-                if !crate::identifier::valid(hash, 32) {
-                    return Err("invalid blob hash");
-                }
-                Ok(())
-            }
+            Self::GetBlob { hash, .. } => validate_id32(hash, "invalid blob hash"),
             Self::SubscribeReplica { .. }
             | Self::PublishBloblog { .. }
             | Self::GetBloblog { .. } => self.validate_subscribe_replica(),
             Self::SyncDatabase { .. } | Self::PublishReplica { .. } => {
                 self.validate_sync_database()
+            }
+            Self::WorldReplica { session_id, build_id, volume_id, request, .. } => {
+                request.validate_scope(session_id, build_id, volume_id)
             }
             Self::UploadBuild { .. } => self.validate_upload_build(),
         }
@@ -895,6 +936,49 @@ pub enum SyncDirection {
     Push,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WorldReplicaRequest {
+    Open,
+    Sync {
+        database_id: crate::store::DatabaseId,
+        direction: SyncDirection,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_scope: Option<crate::store::EntryId>,
+    },
+    Subscribe {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_scope: Option<crate::store::EntryId>,
+    },
+    Publish {
+        database_id: crate::store::DatabaseId,
+    },
+}
+
+impl WorldReplicaRequest {
+    fn validate_scope(
+        &self,
+        session_id: &str,
+        build_id: &str,
+        volume_id: &str,
+    ) -> Result<(), &'static str> {
+        if !crate::identifier::valid(session_id, 32)
+            || !crate::identifier::valid(build_id, 32)
+            || !crate::identifier::valid(volume_id, 16)
+        {
+            return Err("invalid publisher World scope");
+        }
+        if let WorldReplicaRequest::Sync { database_id, direction, entry_scope: Some(entry) } = self
+            && (matches!(database_id,crate::store::DatabaseId::Entry(id) if id != entry)
+                || *direction == SyncDirection::Push
+                    && *database_id == crate::store::DatabaseId::Revocations)
+        {
+            return Err("entry scope requires matching entry data or index facts");
+        }
+        Ok(())
+    }
+}
+
 /// Resumable invitation progress. Ready is advisory; opening rechecks authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -966,6 +1050,10 @@ pub fn canonical_base64url(value: &str, max_bytes: usize) -> Result<(), bool> {
     Ok(())
 }
 
+fn validate_id32(value: &str, error: &'static str) -> Result<(), &'static str> {
+    crate::identifier::valid(value, 32).then_some(()).ok_or(error)
+}
+
 pub fn is_hex(value: &str, length: usize) -> bool {
     value.len() == length && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
@@ -991,7 +1079,7 @@ mod tests {
         // Exercise every wire operation with valid fields, then corrupt each identity.
         let fixtures: Vec<serde_json::Value> =
             serde_json::from_str(include_str!("../../../tests/fixtures/ap-requests.json")).unwrap();
-        assert_eq!(fixtures.len(), 41);
+        assert_eq!(fixtures.len(), 43);
         for fixture in fixtures {
             let request: ServiceRequest = serde_json::from_value(fixture.clone()).unwrap();
             assert_eq!(request.validate(), Ok(()), "{}", fixture["op"]);

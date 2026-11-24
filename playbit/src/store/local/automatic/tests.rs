@@ -2,7 +2,10 @@
 #![allow(clippy::unwrap_used, reason = "Tests assert isolated fixture operations.")]
 use super::*;
 use crate::package::{Package, VolumeInitializers};
-use crate::store::{DatabaseId, InitialDatabase, InitialDatabaseKind, volume_index::EntryAddress};
+use crate::store::{
+    DatabaseId, InitialDatabase, InitialDatabaseKind,
+    volume_index::{EntryAddress, EntryKind},
+};
 
 fn table() -> crate::store::EntryId {
     crate::store::EntryId::from_bytes([8; 15]).unwrap()
@@ -55,6 +58,43 @@ fn session(store: &LocalStore, package: &Package) -> Session {
 }
 fn access(store: &LocalStore, session: &Session) -> Access {
     Access::session_version(store.account.id, &session.id, &session.resolved_build_id)
+}
+
+#[cfg(all(feature = "connected-engine", feature = "app-host"))]
+#[test]
+fn inspector_activity_keeps_creation_dates_and_groups_roster_devices_by_account() {
+    use crate::session_channel::{Participant, PresentParticipant, SOURCE_BYTES};
+    let (directory, mut store, package) = fixture();
+    store.set_session_activity_wake(|| {});
+    let first = session(&store, &package);
+    let second = session(&store, &package);
+    let sessions = [first.clone(), second.clone()];
+    let mut member = PresentParticipant {
+        participant: Participant::decode(&[4; SOURCE_BYTES]).unwrap(),
+        display_name: "Robin".into(),
+    };
+    let revision = store.delivery_revision();
+    let provider = store.delivery_provider_revision(None, None).0;
+    store.observe_session_participants(&first.id, &[member.clone()]);
+    member.participant.device_id = Id::from_bytes([5; 16]).to_string();
+    member.display_name = "Robin Fernández".into();
+    store.observe_session_participants(&first.id, &[member]);
+    for volume in [first.replica_volume(), second.replica_volume()] {
+        assert_eq!(store.delivery_scope_revision(revision, &[volume]), (revision, None));
+        assert_eq!(store.delivery_snapshot_revision(revision, &[volume]), (revision, None));
+    }
+    assert_eq!(store.delivery_provider_revision(provider, None), (provider, None));
+    let activity = store.session_activity(&sessions).unwrap();
+    let first_activity = &activity[&first.id];
+    assert_eq!(first_activity.participants.len(), 1);
+    assert_eq!(first_activity.participants[0].name, "Robin Fernández");
+    assert!(first_activity.participants[0].last_seen >= first_activity.started.unwrap());
+    assert!(activity[&second.id].participants.is_empty());
+    drop(store);
+    let store = LocalStore::open(directory.path()).unwrap();
+    let reopened = store.session_activity(&sessions).unwrap();
+    assert_eq!(reopened[&first.id].started, first_activity.started);
+    assert!(reopened[&first.id].participants.is_empty());
 }
 
 #[test]
@@ -164,6 +204,104 @@ fn acl_save_preserves_shared_build_provision_clocks_and_delta() {
     assert_eq!(changed_keys().as_slice(), std::slice::from_ref(&new_key));
     assert!(provision_clock(&new_key).unwrap() > original_clock);
     assert_eq!(provision_clock(&original_key), Some(original_clock));
+}
+
+#[test]
+fn projected_world_reopens_without_keys_and_accepts_a_later_credentialed_invite() {
+    let (_owner_dir, owner, package) = fixture();
+    let room = session(&owner, &package);
+    let world = owner.open_automatic_volume(&room.id, Role::Root).unwrap();
+    owner.open_automatic_volume(&room.id, Role::Session).unwrap();
+    let (guest_dir, guest, _) = fixture();
+    let channel = crate::release_channel::ReleaseChannel::Public;
+    let import = |guest: &LocalStore, session: &Session| {
+        guest
+            .import_invitation_link(
+                &owner.invitation(&session.id, channel).unwrap(),
+                &owner.session_envelope(&session.id).unwrap(),
+                channel,
+            )
+            .unwrap();
+    };
+    import(&guest, &room);
+    guest.prepare_world_replica(&room, &world).unwrap();
+    assert!(matches!(guest.credentials(world.id), Err(Error::NotFound(_))));
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&guest.recovery_catalog().unwrap()).unwrap();
+    assert!(
+        catalog["volumes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["volume"]["id"] != serde_json::to_value(world.id).unwrap())
+    );
+    guest
+        .save_recovery_state(&RecoveryState {
+            secret: [7; 16],
+            acknowledged: true,
+            revision: 1,
+            synchronized_digest: None,
+            pending: None,
+        })
+        .unwrap();
+    guest.seed_account_records().unwrap();
+    guest.set_world_denied(&room, true).unwrap();
+    let projected_key =
+        guest.replica_db(world.id, DatabaseId::Index, None).unwrap().meta().hash_key;
+    // The same projected profile recovers databases before and after a second invite
+    // supplies the private World key. The publisher's policy permits the guest to write.
+    let public = Acl {
+        grants: vec![crate::store::object_contract::Grant {
+            subject: crate::store::object_contract::Subject::Public,
+            permissions: vec![Permission::Read, Permission::Write],
+        }],
+    };
+    owner.set_permissions(&Access::owner(owner.account.id), world.id, public).unwrap();
+    let index = guest.db(world.id, DatabaseId::Index).unwrap();
+    owner.index(world.id).unwrap().write(&index, now_unix_secs()).unwrap();
+    drop(index);
+    let recover = |guest: &LocalStore| {
+        let access = Access::owner(guest.account.id);
+        let entry = guest.create_database(&access, world.id, "source", EntryKind::KvDb {}).unwrap();
+        let address = EntryAddress { volume: world.id, entry: entry.id };
+        guest.kv_put(&access, address, b"key", b"saved").unwrap();
+        guest.remove_entry(&access, world.id, entry.id).unwrap();
+        let recovered = guest.recover_entry(&access, address, "source", None).unwrap();
+        let address = EntryAddress { volume: world.id, entry: recovered.id };
+        assert_eq!(guest.kv_read(&access, address, b"key", 0, 64, None).unwrap().bytes, b"saved");
+        let database = DatabaseId::Entry(recovered.id);
+        assert_eq!(
+            guest.db(world.id, database).unwrap().meta().hash_key,
+            database.hash_key(&DatabaseId::world_projection_key(world.id), world.id)
+        );
+        guest.remove_entry(&access, world.id, recovered.id).unwrap();
+    };
+    recover(&guest);
+    drop(guest);
+
+    let guest = LocalStore::open(guest_dir.path()).unwrap();
+    assert!(matches!(guest.check_world_admission(&room), Err(Error::AccessDenied(_))));
+    guest.set_world_denied(&room, false).unwrap();
+    guest.check_world_admission(&room).unwrap();
+    let root_session = owner
+        .create_session(&room.app, room.selector.clone(), &room.resolved_build_id, world.id)
+        .unwrap();
+    import(&guest, &root_session);
+    #[cfg(feature = "connected-engine")]
+    assert_eq!(
+        guest.world_replica_route(world.id, Some(&root_session)).unwrap(),
+        WorldReplicaRoute::CredentialedRoot
+    );
+    assert!(guest.credentials(world.id).unwrap() == owner.credentials(world.id).unwrap());
+    recover(&guest);
+    assert_eq!(
+        guest.replica_db(world.id, DatabaseId::Index, None).unwrap().meta().hash_key,
+        projected_key
+    );
+    assert_ne!(
+        owner.replica_db(world.id, DatabaseId::Index, None).unwrap().meta().hash_key,
+        projected_key
+    );
 }
 
 #[test]
@@ -493,7 +631,7 @@ fn existing_local_binding_and_data_are_not_promoted_on_creation_retry() {
         sync_shared: true,
         user_volume: None,
     };
-    assert_eq!(store.create_session_binding_with_seed(request, seed).unwrap(), old);
+    assert_eq!(store.bind_automatic_session(request, Some(seed), None).unwrap(), old);
     assert!(store.require_replication_supported(shared.id).is_err());
     assert!(store.pending_operations().unwrap().is_empty());
     assert_eq!(
@@ -518,10 +656,10 @@ fn logical_slots_allocate_nothing_and_session_codes_round_trip() {
         sync_shared: true,
         user_volume: None,
     };
-    assert_eq!(store.create_session_binding_with_seed(retry.clone(), seed).unwrap(), first);
+    assert_eq!(store.bind_automatic_session(retry.clone(), Some(seed), None).unwrap(), first);
     retry.resolved_build_id = crate::identifier::encode(&[0x55; 32]);
     retry.selector = BuildSelector::Exact { build_id: retry.resolved_build_id.clone() };
-    assert!(store.create_session_binding_with_seed(retry, seed).is_err());
+    assert!(store.bind_automatic_session(retry, Some(seed), None).is_err());
     assert_eq!(store.session(&first.id).unwrap(), first);
     let a = store.automatic_volumes(&first.id).unwrap();
     let b = store.automatic_volumes(&second.id).unwrap();
@@ -1110,4 +1248,373 @@ fn full_import_catalog_rejects_new_identity_without_poisoning_existing_apps() {
     store.remember_imported_app(&package).unwrap();
     assert_eq!(store.imported_apps().unwrap().len(), 256);
     assert_eq!(store.app_volumes(package.identity().unwrap()).unwrap().len(), 3);
+}
+
+#[test]
+fn app_removal_rechecks_new_data_and_preserves_unchecked_and_external_volumes() {
+    let (_directory, store, package) = fixture();
+    let app = package.identity().unwrap();
+    let session = session(&store, &package);
+    assert_eq!(store.app_removal_impact(app).unwrap(), AppRemovalImpact::default());
+    let user = store.open_automatic_volume(&session.id, Role::UserSession).unwrap();
+    let local = store.open_automatic_volume(&session.id, Role::Local).unwrap();
+    let access = Access::owner(store.account.id);
+    let private = store.create_blob(&access, local.id, "keep", b"saved locally").unwrap();
+    let expected = AppRemovalImpact { local_data: true, user_volumes: true };
+    assert_eq!(
+        store.remove_app(app, false, false).unwrap(),
+        AppRemovalResult::Confirmation(expected)
+    );
+    assert!(!store.app_removed(app).unwrap());
+    assert!(store.remove_app(app, false, true).is_err());
+    store.remove_app(app, true, false).unwrap();
+    store.remove_app(app, true, true).unwrap();
+    #[cfg(feature = "app-host")]
+    {
+        let channel = crate::release_channel::ReleaseChannel::Public;
+        let link = store.session_reference(&session.id).unwrap().link(channel);
+        assert!(store.preview_desktop_invitation(&link, channel).unwrap().retained);
+        assert!(store.app_removed(app).unwrap());
+        store.retain_session(&session.id).unwrap();
+        assert!(!store.app_removed(app).unwrap());
+        assert!(store.transient_desktop_session().unwrap().is_none());
+        assert!(store.pending_invitations().unwrap().is_empty());
+    }
+    store.remember_imported_app(&package).unwrap();
+    assert_eq!(store.read_blob_entry(&access, local.id, private.id).unwrap(), b"saved locally");
+
+    // An ordinary explicit override, even one pointing at an automatic Local
+    // address, retains that volume's separate use and excludes it from erasure.
+    let build = package.id().unwrap();
+    store
+        .create_session_binding(SessionCreation {
+            app: app.clone(),
+            selector: BuildSelector::Exact { build_id: build.clone() },
+            resolved_build_id: build,
+            root_volume: session.root_volume,
+            user_volume: Some(local.id),
+            sync_shared: false,
+        })
+        .unwrap();
+    let protected = store.app_removal_impact(app).unwrap();
+    assert!(protected.user_volumes);
+    assert!(!protected.local_data);
+    store.remove_app(app, true, true).unwrap();
+    assert_eq!(store.volume(user.id).unwrap(), user);
+    assert_eq!(store.read_blob_entry(&access, local.id, private.id).unwrap(), b"saved locally");
+}
+
+#[test]
+fn app_removal_resumes_private_erasure_and_preserves_other_blob_references() {
+    let (directory, store, package) = fixture();
+    let app = package.identity().unwrap();
+    let session = session(&store, &package);
+    let owner = Access::owner(store.account.id);
+    let local = store.open_automatic_volume(&session.id, Role::LocalSession).unwrap();
+    let user = store.open_automatic_volume(&session.id, Role::User).unwrap();
+    use crate::store::browser_drafts::{
+        BrowserDraft, BrowserDraftBody, BrowserDraftOperation, BrowserDraftResult, DraftEncoding,
+        KvDraft,
+    };
+    let draft = |volume| BrowserDraft {
+        id: Id::generate().unwrap(),
+        revision: 1,
+        volume,
+        entry: Some(table()),
+        ancestors: vec![],
+        body: BrowserDraftBody::Kv(KvDraft {
+            creating: true,
+            original_key: None,
+            key_text: "key".into(),
+            value_text: "unpublished edit".into(),
+            key_encoding: DraftEncoding::Text,
+            value_encoding: DraftEncoding::Text,
+            base: None,
+            changed_during_edit: false,
+            uncertain: false,
+            read_unavailable: false,
+            complete_put: false,
+        }),
+    };
+    let discarded = draft(local.id);
+    let kept = draft(user.id);
+    let save = |store: &LocalStore, draft| {
+        store.browser_drafts(
+            store.account.id,
+            BrowserDraftOperation::Upsert { expected_revision: None, draft: Box::new(draft) },
+        )
+    };
+    save(&store, discarded.clone()).unwrap();
+    save(&store, kept.clone()).unwrap();
+    let other = store.create_blob(&owner, user.id, "same", b"shared bytes").unwrap();
+    store.create_blob(&owner, local.id, "same", b"shared bytes").unwrap();
+    store.create_blob(&owner, local.id, "only", b"local bytes").unwrap();
+    store.forget_session(&session.id).unwrap();
+    assert!(store.app_removal_impact(app).unwrap().local_data, "includes hidden sessions");
+    // The owner of an open backing must release it before files can be erased.
+    let held = store.db(local.id, DatabaseId::Index).unwrap();
+    assert!(matches!(store.remove_app(app, true, true).unwrap(),
+        AppRemovalResult::Removed { erased_volumes, cleanup_error: Some(error) }
+        if erased_volumes == [local.id] && error.contains("cleanup will resume")));
+    assert!(store.app_removed(app).unwrap());
+    assert!(
+        !store.has_pending_blob_uploads().unwrap(),
+        "deferred Local cleanup permits idle shutdown"
+    );
+    drop(held);
+    drop(store);
+    let mut services = crate::engine::Services::open(directory.path(), || {}).unwrap();
+    services.await_app_data_recovery();
+    let store = services.store.clone();
+    assert!(store.app_removed(app).unwrap());
+    assert!(store.volume(local.id).is_err());
+    assert!(!store.path.join(crate::paths::VOLUMES).join(local.id.to_string()).exists());
+    assert!(!store.blob_path(blake3::hash(b"local bytes").as_bytes(), false).exists());
+    assert_eq!(store.read_blob_entry(&owner, user.id, other.id).unwrap(), b"shared bytes");
+    let BrowserDraftResult::List(drafts) =
+        store.browser_drafts(store.account.id, BrowserDraftOperation::List).unwrap()
+    else {
+        panic!("expected summaries")
+    };
+    assert_eq!(drafts, vec![kept.summary()]);
+    assert!(save(&store, discarded).is_err(), "late insert cannot restore a discarded draft");
+    assert!(
+        store.open_automatic_volume(&session.id, Role::LocalSession).is_err(),
+        "a queued open cannot reinitialize erased local data before re-add"
+    );
+    store.remember_imported_app(&package).unwrap();
+    let fresh = store.open_automatic_volume(&session.id, Role::LocalSession).unwrap();
+    assert_eq!(fresh.id, local.id);
+    assert!(store.resolve_entry(&owner, fresh.id, "only").is_err());
+}
+
+#[test]
+fn app_removal_can_finish_during_an_independent_blob_import() {
+    struct Input<F>(Option<F>, &'static [u8]);
+    impl<F: FnOnce()> std::io::Read for Input<F> {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if let Some(during_import) = self.0.take() {
+                during_import();
+            }
+            self.1.read(bytes)
+        }
+    }
+    let (_directory, store, package) = fixture();
+    let app = package.identity().unwrap();
+    let local = store.open_app_volume(app, Role::Local).unwrap().id;
+    let retained = store.create_volume("Retained", true).unwrap().id;
+    let owner = Access::owner(store.account.id);
+    let body = b"shared content";
+    store.create_blob(&owner, local, "only pin", body).unwrap();
+    let remove = || {
+        store.remove_app(app, true, true).unwrap();
+        assert!(!store.blob_path(blake3::hash(body).as_bytes(), false).exists());
+    };
+    let copy = store
+        .create_blob_from_reader(&owner, retained, "copy", &mut Input(Some(remove), body))
+        .unwrap();
+    assert_eq!(store.read_blob_entry(&owner, retained, copy.id).unwrap(), body);
+    store.remember_imported_app(&package).unwrap();
+    store.open_app_volume(app, Role::Local).unwrap();
+    let erase_target = || {
+        store.remove_app(app, true, true).unwrap();
+    };
+    let late = b"late private content";
+    assert!(
+        store
+            .create_blob_from_reader(&owner, local, "late", &mut Input(Some(erase_target), late))
+            .is_err()
+    );
+    assert!(!store.blob_path(blake3::hash(late).as_bytes(), false).exists());
+}
+
+#[test]
+fn app_removal_retries_acknowledged_versions_that_share_one_durability_receipt() {
+    let (directory, store, package) = fixture();
+    let app = package.identity().unwrap();
+    let volume = store.open_app_volume(app, Role::Local).unwrap().id;
+    let owner = Access::owner(store.account.id);
+    let make_version = |name| {
+        let entry = store.create_blob(&owner, volume, name, b"one body, two pins").unwrap();
+        store.blob_version(&owner, EntryAddress { volume, entry: entry.id }, None).unwrap()
+    };
+    let first = make_version("first");
+    let second = make_version("second");
+    assert_eq!(first.encrypted_key, second.encrypted_key);
+    for version in [&first, &second] {
+        store.acknowledge_blob_version(&owner, version).unwrap();
+    }
+    let receipts = format!("entry-durable/{volume}/");
+    let pins = format!("entry-content/{}/", hex(&first.digest));
+    let count_pins = |store: &LocalStore| {
+        scan::<crate::store::volume_index::BlobVersion>(&store.metadata, &pins).unwrap().len()
+    };
+    assert_eq!(scan::<bool>(&store.metadata, &receipts).unwrap().len(), 1);
+    assert_eq!(count_pins(&store), 2);
+
+    // The first pin can retire, but the open reader prevents unlinking the
+    // last copy. Reopening must find the remaining acknowledged pin with an
+    // empty upload queue and finish reclaiming the recoverable plaintext.
+    let lease = store.lease_blob_version(&owner, &first).unwrap();
+    assert!(matches!(store.remove_app(app, true, true).unwrap(),
+        AppRemovalResult::Removed { erased_volumes, cleanup_error: Some(_) }
+        if erased_volumes == [volume]));
+    assert_eq!(count_pins(&store), 1);
+    assert_eq!(scan::<bool>(&store.metadata, &receipts).unwrap().len(), 1);
+    assert!(store.blob_path(&first.digest, true).exists());
+    drop(lease);
+    drop(store);
+    let mut services = crate::engine::Services::open(directory.path(), || {}).unwrap();
+    services.await_app_data_recovery();
+    let reopened = &services.store;
+    assert_eq!(count_pins(reopened), 0);
+    assert!(scan::<bool>(&reopened.metadata, &receipts).unwrap().is_empty());
+    assert!(!reopened.blob_path(&first.digest, true).exists());
+    assert!(!reopened.blob_path(&first.digest, false).exists());
+}
+
+#[test]
+fn app_removal_stuck_on_one_volume_allows_other_apps_and_cleanup_after_restart() {
+    let (directory, store, first) = fixture();
+    let other = Package::new(
+        "another-app".into(),
+        "Another app".into(),
+        b"\0asm\x01\0\0\0".to_vec(),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let second = super::super::publisher::install_test_package(&store, other).unwrap();
+    let mut targets = [first, second].map(|package| {
+        let app = package.identity().unwrap();
+        let id = store.open_app_volume(app, Role::Local).unwrap().id;
+        let _held = store.db(id, DatabaseId::Index).unwrap();
+        assert!(matches!(
+            store.remove_app(app, true, true).unwrap(),
+            AppRemovalResult::Removed { cleanup_error: Some(_), .. }
+        ));
+        (id, package)
+    });
+    // Fail the first target in the worker's traversal. The second must still finish.
+    targets.sort_by_key(|(id, _)| id.to_string());
+    let [(stuck, first), (healthy, _)] = targets;
+    let mut tx = store.metadata.begin_write(now_unix_secs()).unwrap();
+    tx.del(super::super::initialization::receipt_key(stuck).as_bytes()).unwrap();
+    tx.put(&super::super::volume_name_marker(stuck), &[]).unwrap();
+    tx.commit().unwrap();
+    drop(store);
+
+    let mut services = crate::engine::Services::open(directory.path(), || {}).unwrap();
+    let unrelated = services.store.create_volume("Unrelated", false).unwrap();
+    assert_eq!(services.store.volume(unrelated.id).unwrap(), unrelated);
+    services.await_app_data_recovery();
+    assert!(services.store.app_data_erasure_pending(stuck).unwrap());
+    assert!(!services.store.app_data_erasure_pending(healthy).unwrap());
+    assert!(!directory.path().join(crate::paths::VOLUMES).join(healthy.to_string()).exists());
+    let log = crate::paths::Paths::for_profile(directory.path()).unwrap().engine_log;
+    assert!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .contains("app cleanup conflicts with retained volume")
+    );
+    services.store.remember_imported_app(&first).unwrap();
+    assert!(matches!(
+        services.store.open_app_volume(first.identity().unwrap(), Role::Local),
+        Err(Error::LocalContention(_))
+    ));
+}
+
+#[test]
+fn app_removal_accepts_a_data_free_app_with_a_large_unrelated_catalog() {
+    let (_directory, store, package) = fixture();
+    let app = package.identity().unwrap();
+    let mut other = app.clone();
+    other.app_id = "another-app".into();
+    // A profile can accumulate hidden local sessions independently of the
+    // visible sidebar limit. Their existence cannot restrict this import.
+    let mut record = store.local_session(&session(&store, &package).id).unwrap().unwrap();
+    record.session.app = other.clone();
+    record.session.root_volume = store.automatic_volume_id(&other, None, Role::Root).unwrap();
+    record.session.shared_volume = None;
+    let mut tx = store.metadata.begin_write(now_unix_secs()).unwrap();
+    for number in 0..4097u32 {
+        record.seed[..4].copy_from_slice(&number.to_le_bytes());
+        record.session.id = crate::store::session_id(&record.seed).unwrap();
+        tx.put(
+            format!("local-session/{}", record.session.id).as_bytes(),
+            &encode(&record).unwrap(),
+        )
+        .unwrap();
+        tx.put(super::super::session_list::hidden(&record.session.id).as_bytes(), &[1]).unwrap();
+    }
+    tx.commit().unwrap();
+    assert_eq!(store.app_removal_impact(app).unwrap(), AppRemovalImpact::default());
+    assert_eq!(
+        store.remove_app(app, false, false).unwrap(),
+        AppRemovalResult::Removed { erased_volumes: vec![], cleanup_error: None }
+    );
+}
+
+#[test]
+fn removing_an_app_can_keep_more_local_volumes_than_one_erasure_can_stage() {
+    let (_directory, store, package) = fixture();
+    let app = package.identity().unwrap();
+    let session = session(&store, &package);
+    let saved = store.open_automatic_volume(&session.id, Role::LocalSession).unwrap();
+    let owner = Access::owner(store.account.id);
+    let file = store.create_blob(&owner, saved.id, "keep", b"private data").unwrap();
+    let mut binding = store.automatic_binding(saved.id).unwrap().unwrap();
+    let mut volume = saved.clone();
+    // The impact scan uses these same two catalog records for each initialized
+    // scope. Only the saved scope needs a physical backing for this check.
+    let mut tx = store.metadata.begin_write(now_unix_secs()).unwrap();
+    for n in 1..=4096u32 {
+        let mut seed = [0; SEED_BYTES];
+        seed[..4].copy_from_slice(&n.to_le_bytes());
+        binding.session = Some(crate::store::session_id(&seed).unwrap());
+        volume.id =
+            store.automatic_volume_id(app, binding.session.as_deref(), binding.role).unwrap();
+        tx.put(binding_key(volume.id).as_bytes(), &encode(&binding).unwrap()).unwrap();
+        tx.put(format!("volume/{}", volume.id).as_bytes(), &encode(&volume).unwrap()).unwrap();
+    }
+    tx.commit().unwrap();
+
+    let impact = AppRemovalImpact { user_volumes: false, local_data: true };
+    assert_eq!(store.app_removal_impact(app).unwrap(), impact);
+    assert_eq!(
+        store.remove_app(app, false, false).unwrap(),
+        AppRemovalResult::Confirmation(impact)
+    );
+    assert!(matches!(store.remove_app(app, true, true), Err(Error::LimitExceeded)));
+    assert!(!store.app_removed(app).unwrap());
+    assert_eq!(
+        store.remove_app(app, true, false).unwrap(),
+        AppRemovalResult::Removed { erased_volumes: vec![], cleanup_error: None }
+    );
+    assert!(store.app_removed(app).unwrap());
+    assert_eq!(store.read_blob_entry(&owner, saved.id, file.id).unwrap(), b"private data");
+
+    // Explicit selections protect these scopes. A checked removal now has
+    // just one target, even though the same large catalog is still present.
+    store.remember_imported_app(&package).unwrap();
+    let mut record = store.local_session(&session.id).unwrap().unwrap();
+    let mut tx = store.metadata.begin_write(now_unix_secs()).unwrap();
+    for n in 1..=4096u32 {
+        record.seed = [0; SEED_BYTES];
+        record.seed[..4].copy_from_slice(&n.to_le_bytes());
+        record.session.id = crate::store::session_id(&record.seed).unwrap();
+        record.user_volume = Some(
+            store.automatic_volume_id(app, Some(&record.session.id), Role::LocalSession).unwrap(),
+        );
+        tx.put(
+            format!("local-session/{}", record.session.id).as_bytes(),
+            &encode(&record).unwrap(),
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    assert_eq!(
+        store.remove_app(app, true, true).unwrap(),
+        AppRemovalResult::Removed { erased_volumes: vec![saved.id], cleanup_error: None }
+    );
+    assert!(store.volume(record.user_volume.unwrap()).is_ok());
 }

@@ -209,8 +209,27 @@ impl GuestInstance {
         self.update_state(|state| state.replace_volumes(volumes))
     }
 
+    /// Update the local account label on the guest's serialized owner.
+    pub fn set_display_name(&mut self, name: &str) -> HostResult<()> {
+        self.update_state(|state| state.set_display_name(name))
+    }
+
+    pub(crate) fn deactivate_with_inputs(
+        &mut self,
+        count: usize,
+    ) -> HostResult<crate::runtime::work::ClosingInputs> {
+        self.update_state(|state| state.deactivate_with_inputs(count))
+    }
+    pub(crate) fn queue_input(
+        &mut self,
+        generation: u64,
+        event: Event,
+        closing: Option<&mut crate::runtime::work::ClosingInputs>,
+    ) -> HostResult<()> {
+        self.update_state(|state| state.queue_event(generation, event, closing))
+    }
     pub fn queue_event(&mut self, generation: u64, event: Event) -> HostResult<()> {
-        self.update_state(|state| state.queue_event(generation, event))
+        self.queue_input(generation, event, None)
     }
 
     /// Signal local result readiness on the serialized runtime worker. Only a
@@ -299,7 +318,7 @@ impl GuestInstance {
         self.read_state(|state| state.has_ready_work(now))
     }
     pub fn deactivate(&mut self) {
-        self.update_state(|state| state.deactivate());
+        self.deactivate_with_inputs(0).expect("an empty closing mailbox always fits");
     }
     pub fn drain_pending(&self) -> bool {
         self.read_state(|state| state.drain_pending())

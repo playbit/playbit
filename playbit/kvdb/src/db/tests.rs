@@ -1633,10 +1633,10 @@ fn put_from_checks_the_value_bound_and_writes_plain_databases_directly() {
 #[test]
 fn streamed_origin_copy_preserves_clock_and_checks_inputs_before_effects() {
     use crate::storage::{SliceValue, ValueRead};
-    struct Bounded;
+    struct Bounded(usize);
     impl ValueRead for Bounded {
         fn len(&self) -> usize {
-            crate::VALUE_SIZE_MAX
+            self.0
         }
         fn read_at(&self, offset: usize, out: &mut [u8]) -> Result<usize> {
             assert!(out.len() <= 4096, "copy never requests a content-sized buffer");
@@ -1648,15 +1648,22 @@ fn streamed_origin_copy_preserves_clock_and_checks_inputs_before_effects() {
     let db = sync_db();
     let origin = Clock::from_u64(9_007_199_254_740_993);
     let mut tx = db.begin_write(T0).unwrap();
+    let before = tx.clock();
+    assert_eq!(
+        tx.put_from_with_clock(b"oversize", &Bounded(crate::VALUE_SIZE_MAX + 1), origin),
+        Err(Error::ValueSize)
+    );
+    assert_eq!(tx.clock(), before);
+    assert!(tx.get(b"oversize").unwrap().is_none());
     assert_eq!(
         tx.put_from_with_clock(b"bad", &SliceValue(b"x"), Clock::ZERO),
         Err(Error::InvalidArgument)
     );
-    tx.put_from_with_clock(b"large", &Bounded, origin).unwrap();
+    tx.put_from_with_clock(b"large", &Bounded(crate::VALUE_SIZE_MAX), origin).unwrap();
     tx.commit().unwrap();
     let read = db.begin_read().unwrap();
     let value = read.value_reader(b"large").unwrap().unwrap();
-    assert_eq!(value.len(), Bounded.len());
+    assert_eq!(value.len(), crate::VALUE_SIZE_MAX);
     assert_eq!(value.clock(), Some(origin));
     assert!(!read.has(b"bad").unwrap());
     db.verify().unwrap();

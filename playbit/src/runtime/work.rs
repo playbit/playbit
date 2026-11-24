@@ -12,6 +12,18 @@ const MAX_ROOTS: usize = MAX_QUEUED_EVENTS + abi::MAX_PENDING_OPERATIONS + 1;
 // remains a finite per-root drain bound, not a guest instruction budget.
 pub(crate) const DRAIN_STEPS: u16 = 2 * 1024 + 128;
 
+/// Each input in an owner's sealed mailbox may still introduce its accepted
+/// work. Discarded inputs never use a runtime queue slot or a root identity.
+#[cfg(any(feature = "native-runtime", feature = "wasm-runtime"))]
+pub(crate) struct ClosingInputs {
+    generation: u64,
+    remaining: usize,
+}
+#[cfg(any(feature = "native-runtime", feature = "wasm-runtime"))]
+pub(crate) fn discard_on_deactivate(kind: abi::EventKind) -> bool {
+    matches!(kind, abi::EventKind::Wake | abi::EventKind::Frame | abi::EventKind::VolumesChanged)
+}
+
 pub(crate) struct Work {
     pub draining: bool,
     pub failed: bool,
@@ -37,6 +49,9 @@ impl Work {
         if self.draining {
             return Err(HostError::Conflict);
         }
+        self.check_root_capacity()
+    }
+    fn check_root_capacity(&self) -> HostResult<()> {
         // The browser bridge returns positive i64 roots and negative ABI errors.
         if !root_fits(self.next) || self.remaining.len() >= MAX_ROOTS {
             return Err(HostError::LimitExceeded);
@@ -45,10 +60,13 @@ impl Work {
     }
     pub fn new_root(&mut self) -> HostResult<u64> {
         self.admit_root()?;
+        Ok(self.allocate_root())
+    }
+    fn allocate_root(&mut self) -> u64 {
         let root = self.next;
         self.next = root.checked_add(1).unwrap_or(0);
         assert!(self.remaining.insert(root, DRAIN_STEPS).is_none(), "accepted roots never repeat");
-        Ok(root)
+        root
     }
     pub fn admit_step(&self) -> HostResult<()> {
         match self.active {
@@ -92,6 +110,30 @@ impl Work {
     pub fn deactivate(&mut self) {
         assert!(self.active.is_none(), "deactivation happens between guest turns");
         self.draining = true;
+    }
+}
+#[cfg(any(feature = "native-runtime", feature = "wasm-runtime"))]
+impl Work {
+    pub fn seal_inputs(&self, generation: u64, count: usize) -> HostResult<ClosingInputs> {
+        if self.draining && count != 0 {
+            return Err(HostError::Conflict);
+        }
+        if count > MAX_QUEUED_EVENTS {
+            return Err(HostError::LimitExceeded);
+        }
+        Ok(ClosingInputs { generation, remaining: count })
+    }
+    pub fn take_closing_input(
+        &mut self,
+        generation: u64,
+        inputs: &mut ClosingInputs,
+    ) -> HostResult<u64> {
+        if !self.draining || inputs.generation != generation || inputs.remaining == 0 {
+            return Err(HostError::Conflict);
+        }
+        inputs.remaining -= 1;
+        self.check_root_capacity()?;
+        Ok(self.allocate_root())
     }
 }
 fn step_allowed(draining: bool, remaining: Option<u16>) -> bool {

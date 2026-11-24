@@ -39,7 +39,11 @@ fn deactivation_preserves_an_edits_readback_root_and_rejects_new_input_and_timer
     assert!(state.wake_deadline.is_none());
     let generation = state.generation();
     assert_eq!(
-        state.queue_event(generation, Event { kind: EventKind::Click, target: 1, data: vec![] }),
+        state.queue_event(
+            generation,
+            Event { kind: EventKind::Click, target: 1, data: vec![] },
+            None
+        ),
         Err(HostError::Conflict)
     );
     assert_eq!(
@@ -167,6 +171,39 @@ fn a_recursive_completion_chain_exhausts_before_another_host_begin_and_reports_f
     state.finish_frame();
     assert!(!state.drain_pending());
     assert!(state.drain_failed(), "exhaustion cannot count as successful Quit");
+}
+
+#[test]
+fn a_sealed_mailbox_admits_only_its_accepted_inputs_during_deactivation() {
+    // Ordinary root admission closes immediately. Only the mailbox's original
+    // generation can introduce two accepted actions during shutdown.
+    let (mut state, _, _) = state();
+    events::take_event(&mut state).unwrap();
+    state.finish_frame();
+    let generation = state.generation();
+    let click = || Event { kind: EventKind::Click, target: 2, data: vec![] };
+    let mut mailbox = state.deactivate_with_inputs(2).unwrap();
+    assert!(state.deactivate_with_inputs(0).is_ok(), "a repeated empty close is harmless");
+    assert!(matches!(state.deactivate_with_inputs(1), Err(HostError::Conflict)));
+    assert_eq!(state.queue_event(generation, click(), None), Err(HostError::Conflict));
+    assert_eq!(
+        state.queue_event(generation + 1, click(), Some(&mut mailbox)),
+        Err(HostError::StaleHandle)
+    );
+    for _ in 0..2 {
+        state.queue_event(generation, click(), Some(&mut mailbox)).unwrap();
+        assert_eq!(events::take_event(&mut state).unwrap().kind, EventKind::Click);
+        assert!(state.work.draining);
+        let root = state.work.active.unwrap();
+        assert_eq!(state.work.remaining[&root], work::DRAIN_STEPS);
+        state.finish_frame();
+    }
+    assert_eq!(
+        state.queue_event(generation, click(), Some(&mut mailbox)),
+        Err(HostError::Conflict)
+    );
+    assert!(!state.drain_pending());
+    assert!(!state.drain_failed());
 }
 
 #[test]

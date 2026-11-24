@@ -34,6 +34,12 @@ pub struct PendingAccountRecord {
     pub clock: Clock,
     pub ciphertext: Vec<u8>,
 }
+#[cfg(feature = "connected-engine")]
+pub(crate) struct DisplayNamePublication {
+    pub name: String,
+    pub record: PendingAccountRecord,
+    pub version: blake3::Hash,
+}
 impl PendingAccountRecord {
     fn parts<'a>(key: &[u8], bytes: &'a [u8]) -> Result<(Clock, &'a [u8])> {
         let clock = Clock::from_u64(u64::from_le_bytes(
@@ -74,6 +80,37 @@ fn key(prefix: &[u8], opaque: &[u8; 32]) -> Vec<u8> {
 }
 
 impl LocalStore {
+    /// Read the winning name and its exact replica version from one profile snapshot.
+    /// An upgraded client can publish a name even after its encrypted outbox was drained.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn account_display_name_publication(
+        &self,
+        reported: Option<blake3::Hash>,
+    ) -> Result<Option<DisplayNamePublication>> {
+        self.require_account_authority()?;
+        let snapshot = self.metadata.begin_read()?;
+        if !snapshot.has(b"settings/display-name")? {
+            return Ok(None);
+        }
+        let cipher = self.unlocked_account_cipher()?;
+        let opaque = cipher.record_key(b"settings/display-name")?;
+        if snapshot.has(&key(DIRTY, &opaque))? {
+            return Ok(None);
+        }
+        let Some(bytes) = snapshot.get(&key(RECORD, &opaque))? else { return Ok(None) };
+        let version = blake3::hash(&bytes);
+        if reported == Some(version) {
+            return Ok(None);
+        }
+        let record = PendingAccountRecord::decode(&opaque, &bytes)?;
+        let Some(Record::DisplayName { name }) =
+            self.open_account_record(&cipher, &opaque, record.clock, &record.ciphertext)?
+        else {
+            return Err(Error::corrupt("invalid account display name record"));
+        };
+        Ok(Some(DisplayNamePublication { name, record, version }))
+    }
+
     /// A failed account admission never deletes credentials or overwrites the
     /// replica. Retain the first authenticated unsupported record as evidence.
     /// This version has no newer authority features and cannot clear this fence.
@@ -440,7 +477,9 @@ impl LocalStore {
                 }
                 Ok(())
             }
-            Record::DisplayName { .. } | Record::VolumeDeleted { .. } => Ok(()),
+            Record::DisplayName { .. }
+            | Record::VolumeDeleted { .. }
+            | Record::AppVisibility { .. } => Ok(()),
         }
     }
 
@@ -501,8 +540,27 @@ impl LocalStore {
             let _validation = crate::trace::Span::new("account.adopt_validate");
             self.open_account_record(&cipher, opaque, clock, &ciphertext)?
         };
+        let visibility = match &decoded {
+            Some(Record::AppVisibility { app, removed }) => {
+                Some((self.removed_app_key(app), *removed))
+            }
+            _ => None,
+        };
         let finish = |tx: &mut WriteTxn<'_, RedbStorage>| {
-            Self::adopt_account_intent(tx, opaque, clock, &ciphertext)
+            if Self::adopt_account_intent(tx, opaque, clock, &ciphertext)? {
+                return Ok(true);
+            }
+            // A previous reader may have saved this optional record without
+            // interpreting it. Repair only the exact already-accepted winner.
+            if let Some((key_name, removed)) = &visibility
+                && tx.has(key_name.as_bytes())? != *removed
+                && let Some(retained) = tx.get(&key(RECORD, opaque))?
+            {
+                return Ok(
+                    PendingAccountRecord::parts(opaque, &retained)? == (clock, ciphertext.as_ref())
+                );
+            }
+            Ok(false)
         };
         let changed: Result<bool> = match decoded {
             None => self.adopt_optional_account_record(opaque, clock, &ciphertext),
@@ -592,6 +650,9 @@ impl LocalStore {
         }
 
         match record {
+            Record::AppVisibility { app, removed } => {
+                self.project_app_visibility(&mut tx, app, *removed)?;
+            }
             Record::DisplayName { name } => {
                 tx.put(b"settings/display-name", &encode(name)?)?;
             }
@@ -613,8 +674,17 @@ impl LocalStore {
 
         let _commit = crate::trace::Span::new("account.adopt_commit");
         tx.commit()?;
+        #[cfg(any(feature = "connected-engine", feature = "native-runtime"))]
+        if let Record::DisplayName { name } = record {
+            self.publish_display_name(name);
+        }
         // Publish the fence before releasing the consent/profile guard.
-        self.changes.observed_changed(None);
+        if cfg!(feature = "connected-engine") && matches!(record, Record::DisplayName { .. }) {
+            // A name from an older peer can still need its central projection.
+            self.changes.account_changed();
+        } else {
+            self.changes.observed_changed(None);
+        }
         Ok(true)
     }
 
@@ -865,13 +935,17 @@ impl LocalStore {
             }
             self.metadata.begin_read()?
         };
-        for (prefix, kind) in [("volume/", 0), ("session/", 1), ("session-mounts/", 2)] {
+        self.seed_volume_records(&source)?;
+        for prefix in ["session/", "session-mounts/"] {
             for entry in source.iter_from(prefix.as_bytes()) {
                 let (name, bytes) = entry?;
                 if !name.starts_with(prefix.as_bytes()) {
                     break;
                 }
-                if kind == 2 {
+                let record = if prefix == "session/" {
+                    let stored: StoredSession = decode(&bytes)?;
+                    Record::Invitation { app_name: stored.app_name, invitation: stored.invitation }
+                } else {
                     let session = std::str::from_utf8(&name[prefix.len()..])
                         .map_err(|_| Error::corrupt("personal volume session is not UTF-8"))?;
                     if self
@@ -880,34 +954,7 @@ impl LocalStore {
                     {
                         continue;
                     }
-                }
-                let record = match kind {
-                    0 => {
-                        let volume: Volume = decode(&bytes)?;
-                        if self.volume_deleted(volume.id)? {
-                            Record::VolumeDeleted { volume: volume.id }
-                        } else {
-                            if !self.replication_supported(volume.id)?
-                                || self.account_volume_requires_invitation(volume.id)?
-                            {
-                                continue;
-                            }
-                            let credentials = source
-                                .get(format!("credentials/{}", volume.id).as_bytes())?
-                                .ok_or(Error::corrupt("volume credentials record is missing"))?;
-                            Record::Volume { volume, credentials: decode(&credentials)? }
-                        }
-                    }
-                    1 => Record::Invitation {
-                        app_name: decode::<StoredSession>(&bytes)?.app_name,
-                        invitation: decode::<StoredSession>(&bytes)?.invitation,
-                    },
-                    _ => Record::PersonalVolumes {
-                        session: std::str::from_utf8(&name[prefix.len()..])
-                            .map_err(|_| Error::corrupt("personal volume session is not UTF-8"))?
-                            .to_owned(),
-                        grants: decode(&bytes)?,
-                    },
+                    Record::PersonalVolumes { session: session.to_owned(), grants: decode(&bytes)? }
                 };
                 self.seed_account_record(&record)?;
             }
@@ -915,8 +962,51 @@ impl LocalStore {
         if let Some(bytes) = source.get(b"settings/display-name")? {
             self.seed_account_record(&Record::DisplayName { name: decode(&bytes)? })?;
         }
+        let prefix = format!("removed-app/{}/", self.account.id);
+        for entry in source.iter_from(prefix.as_bytes()) {
+            let (key, bytes) = entry?;
+            if !key.starts_with(prefix.as_bytes()) {
+                break;
+            }
+            let session_list::RemovedApp { app, .. } = decode(&bytes)?;
+            if key.as_ref() != self.removed_app_key(&app).as_bytes() {
+                return Err(Error::corrupt("removed app identity differs from its key"));
+            }
+            self.seed_account_record(&Record::AppVisibility { app, removed: true })?;
+        }
         let _profile = self.lock_profile()?;
         put(&self.metadata, b"account-seeded", &true)
+    }
+
+    fn seed_volume_records(&self, source: &kvdb::ReadTxn<'_, RedbStorage>) -> Result<()> {
+        for entry in source.iter_from(b"volume/") {
+            let (key, bytes) = entry?;
+            if !key.starts_with(b"volume/") {
+                break;
+            }
+            let volume: Volume = decode(&bytes)?;
+            if self.volume_deleted(volume.id)? {
+                self.seed_account_record(&Record::VolumeDeleted { volume: volume.id })?;
+                continue;
+            }
+            if !self.replication_supported(volume.id)?
+                || self.account_volume_requires_invitation(volume.id)?
+            {
+                continue;
+            }
+            let Some(credentials) = source.get(format!("credentials/{}", volume.id).as_bytes())?
+            else {
+                if self.uses_world_projection(volume.id)? {
+                    continue;
+                }
+                return Err(Error::corrupt("volume credentials record is missing"));
+            };
+            self.seed_account_record(&Record::Volume {
+                volume,
+                credentials: decode(&credentials)?,
+            })?;
+        }
+        Ok(())
     }
 
     fn seed_account_record(&self, record: &Record) -> Result<()> {
@@ -969,6 +1059,8 @@ mod tests {
     fn display_name_is_durable_and_queues_one_validated_account_record() {
         let directory = tempfile::tempdir().unwrap();
         let store = LocalStore::open(directory.path()).unwrap();
+        #[cfg(feature = "connected-engine")]
+        let mut names = store.subscribe_display_name();
         assert!(store.set_display_name("Robin").is_err());
         unlock(&store, true);
         store.set_display_name("Robin 雨 🌱").unwrap();
@@ -976,10 +1068,14 @@ mod tests {
         assert!(
             matches!(plaintext(&store, &pending), Record::DisplayName { name } if name == "Robin 雨 🌱")
         );
+        #[cfg(feature = "connected-engine")]
+        assert_eq!(names.borrow_and_update().as_str(), "Robin 雨 🌱");
         for invalid in ["", " Robin", "Robin ", "Ro\nbin", "\0", &"x".repeat(257)] {
             assert!(store.set_display_name(invalid).is_err());
         }
         store.set_display_name("Robin 雨 🌱").unwrap();
+        #[cfg(feature = "connected-engine")]
+        assert!(!names.has_changed().unwrap());
         assert_eq!(store.pending_account_record(None).unwrap().unwrap(), pending);
         drop(store);
         let store = LocalStore::open(directory.path()).unwrap();
@@ -1010,6 +1106,8 @@ mod tests {
         source.stage_account_record(&changed).unwrap().unwrap();
         source.reconcile_account_records().unwrap();
         assert_eq!(source.display_name().unwrap(), target.display_name().unwrap());
+        #[cfg(feature = "connected-engine")]
+        assert_eq!(source.subscribe_display_name().borrow().as_str(), "Robin updated");
         assert!(source.pending_account_record(None).unwrap().is_none());
     }
 
@@ -1082,6 +1180,81 @@ mod tests {
         assert!(target.pending_account_record(None).unwrap().is_none());
         assert!(!target.adopt_account_record(&record.key).unwrap());
         assert_eq!(target.volumes().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn app_removal_wins_over_recovered_invitations_and_only_an_explicit_join_restores_it() {
+        // The removal is a separate account key. A profile recovering a
+        // capability after removal still holds it without listing the app.
+        let directory = tempfile::tempdir().unwrap();
+        let source = LocalStore::open(directory.path().join("source")).unwrap();
+        let app =
+            crate::package::AppIdentity { publisher: source.account.id, app_id: "todo".into() };
+        let root = source.create_volume("Todo", true).unwrap();
+        let build = crate::identifier::encode(&[0x56; 32]);
+        let session = source
+            .create_session(&app, BuildSelector::Exact { build_id: build.clone() }, &build, root.id)
+            .unwrap();
+        let catalog = source.recovery_catalog().unwrap();
+        let imported = ImportedApp { app: app.clone(), name: "Todo".into(), build_id: build };
+        let import_key = format!("imported-app/{}/{}", app.publisher, app.app_id);
+        put(&source.metadata, import_key.as_bytes(), &imported).unwrap();
+        let mut tx = source.metadata.begin_write(now_unix_secs()).unwrap();
+        // Locked profiles seed this decision once after the recovery key is saved.
+        assert!(!source.stage_app_removed(&mut tx, &app, true).unwrap());
+        tx.commit().unwrap();
+        assert!(source.imported_apps().unwrap().is_empty());
+        assert!(source.retained_sessions().unwrap().is_empty());
+        assert_eq!(source.recovery_catalog().unwrap(), catalog);
+        unlock(&source, true);
+        source.seed_account_records().unwrap();
+        let records = drain(&source);
+        let removal = records
+            .iter()
+            .find(|record| {
+                matches!(plaintext(&source, record), Record::AppVisibility { removed: true, .. })
+            })
+            .unwrap();
+        let delta = record_delta(&source, std::slice::from_ref(removal));
+        let path = directory.path().join("other");
+        let mut other = LocalStore::open(&path).unwrap();
+        other.bind_authenticated_account(source.account.id).unwrap();
+        unlock(&other, true);
+        let channel = crate::release_channel::ReleaseChannel::Public;
+        let link = source.invitation(&session.id, channel).unwrap();
+        assert!(other.preview_invitation(&link, channel).unwrap().received.is_none());
+        // Model a previous reader that accepted this optional presentation
+        // record opaquely. Its exact replay now has a known projection.
+        other
+            .adopt_optional_account_record(&removal.key, removal.clock, &removal.ciphertext)
+            .unwrap();
+        assert!(!other.app_removed(&app).unwrap());
+        other.receive_account_delta(&delta).unwrap();
+        other.import_recovery_catalog(&catalog, || true).unwrap();
+        for record in &records {
+            other
+                .receive_account_delta(&record_delta(&source, std::slice::from_ref(record)))
+                .unwrap();
+        }
+        drop(other);
+        let other = LocalStore::open(&path).unwrap();
+        other.reconcile_account_records().unwrap();
+        assert!(other.retained_sessions().unwrap().is_empty());
+        assert_eq!(other.session(&session.id).unwrap(), session);
+        assert!(other.retain_session(&session.id).is_err(), "a delayed open cannot re-add the app");
+        assert!(other.prepare_retained_invitation(&session.id).is_err());
+        other.complete_invitation(&session.id).unwrap();
+        assert!(other.app_removed(&app).unwrap(), "recovery did not refresh the older link");
+        assert!(other.pending_invitations().unwrap().is_empty());
+        other.preview_invitation(&link, channel).unwrap();
+        other.complete_invitation(&session.id).unwrap();
+        assert_eq!(other.retained_sessions().unwrap(), std::slice::from_ref(&session));
+        let restore = other.pending_account_record(None).unwrap().unwrap();
+        assert_eq!(restore.key, removal.key);
+        source.receive_account_delta(&record_delta(&other, &[restore])).unwrap();
+        source.receive_account_delta(&delta).unwrap();
+        assert_eq!(source.retained_sessions().unwrap(), [session]);
+        assert_eq!(source.imported_apps().unwrap(), [imported]);
     }
 
     #[test]
@@ -2411,6 +2584,7 @@ mod tests {
                     2
                 }
                 Record::DisplayName { .. } => panic!("this fixture has no display name"),
+                Record::AppVisibility { .. } => panic!("this fixture has no removed app"),
                 Record::VolumeDeleted { .. } => panic!("this fixture has no deleted volume"),
                 Record::HostedVolume { .. } | Record::HostedInvitation { .. } => {
                     panic!("this fixture has no automatic scope")

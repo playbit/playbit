@@ -60,6 +60,20 @@ fn pin_prefix(digest: &[u8; 32]) -> String {
     format!("entry-content/{}/", hex(digest))
 }
 
+fn has_other_pin(
+    tx: &kvdb::WriteTxn<'_, RedbStorage>,
+    prefix: &str,
+    pin_key: &str,
+) -> Result<bool> {
+    for row in tx.iter_from(prefix.as_bytes()).take(2) {
+        let (key, _) = row?;
+        if key.starts_with(prefix.as_bytes()) && key.as_ref() != pin_key.as_bytes() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn pending_count_key(digest: &[u8; 32]) -> String {
     format!("entry-pending-content/{}", hex(digest))
 }
@@ -114,6 +128,128 @@ pub(super) fn stamp_publication(kind: &mut EntryKind) -> Result<()> {
 }
 
 impl LocalStore {
+    /// An app's owned Local scopes never publish their files. Reclaim historical
+    /// and orphaned pins too. File bodies are shared by digest across volumes.
+    /// Caller holds the volume gate and has fenced new opens.
+    pub(super) fn remove_local_blob_pins(&self, volume: Id) -> Result<()> {
+        let snapshot = self.metadata.begin_read()?;
+        let durable = format!("entry-durable/{volume}/");
+        // Ordinary Local pins are all pending and therefore indexed by volume.
+        // Explicit local durability receipts also have historical content pins.
+        let has_receipt = snapshot
+            .iter_from(durable.as_bytes())
+            .next()
+            .transpose()?
+            .is_some_and(|(key, _)| key.starts_with(durable.as_bytes()));
+        let prefix = if has_receipt {
+            "entry-content/".to_owned()
+        } else {
+            format!("entry-upload/{volume}/")
+        };
+        for row in snapshot.iter_from(prefix.as_bytes()) {
+            let (key, bytes) = row?;
+            if !key.starts_with(prefix.as_bytes()) {
+                break;
+            }
+            let version: BlobVersion = decode(&bytes)?;
+            if version.address.volume != volume {
+                if has_receipt {
+                    continue;
+                }
+                return Err(Error::corrupt("local blob upload volume differs"));
+            }
+            let digest_prefix = pin_prefix(&version.digest);
+            let pin_key =
+                format!("{}{volume}/{}/{}", digest_prefix, version.address.entry, version.revision);
+            let source_key = if has_receipt { pin_key.clone() } else { upload_key(&version) };
+            if key.as_ref() != source_key.as_bytes() {
+                return Err(Error::corrupt("blob pin identity differs"));
+            }
+            self.remove_local_blob_pin(&version, &digest_prefix, &pin_key)?;
+        }
+        Ok(())
+    }
+
+    fn remove_local_blob_pin(
+        &self,
+        version: &BlobVersion,
+        prefix: &str,
+        pin_key: &str,
+    ) -> Result<()> {
+        {
+            let _profile = self.lock_profile()?;
+            let mut tx = self.metadata.begin_write(now_unix_secs())?;
+            let pin =
+                tx.get(pin_key.as_bytes())?.ok_or(Error::corrupt("local blob pin is missing"))?;
+            if decode::<BlobVersion>(&pin)? != *version {
+                return Err(Error::corrupt("local blob pin differs from retained version"));
+            }
+            drop(pin);
+            if has_other_pin(&tx, prefix, pin_key)? {
+                retire_upload(&mut tx, version)?;
+                tx.del(pin_key.as_bytes())?;
+                tx.commit()?;
+                return Ok(());
+            }
+            let pending = tx
+                .get(pending_count_key(&version.digest).as_bytes())?
+                .map(|bytes| decode::<u64>(&bytes))
+                .transpose()?
+                .unwrap_or(0);
+            if pending != u64::from(tx.has(upload_key(version).as_bytes())?) {
+                return Err(Error::corrupt("last local blob pin disagrees with pending uploads"));
+            }
+            drop(tx);
+            self.unlink_local_blob(&version.digest)?;
+        }
+        // Keep the last pin until both directory changes survive a crash. Let
+        // other profile writers publish new pins while these barriers complete.
+        for recoverable in [false, true] {
+            let path = self.blob_path(&version.digest, recoverable);
+            let parent = path.parent().expect("blob paths always have a parent");
+            if parent.try_exists().map_err(io)? {
+                super::initialization::sync_directory(parent)?;
+            }
+        }
+        let _profile = self.lock_profile()?;
+        let mut tx = self.metadata.begin_write(now_unix_secs())?;
+        retire_upload(&mut tx, version)?;
+        tx.del(pin_key.as_bytes())?;
+        if !has_other_pin(&tx, prefix, pin_key)? {
+            tx.del(pending_count_key(&version.digest).as_bytes())?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn unlink_local_blob(&self, digest: &[u8; 32]) -> Result<()> {
+        let mut cache =
+            self.blob_cache.lock().map_err(|_| Error::Internal("blob cache lock is poisoned"))?;
+        if cache.defer_pinned(&hex(digest), false) {
+            return Err(Error::LocalContention("local app file is still open"));
+        }
+        for recoverable in [false, true] {
+            match fs::remove_file(self.blob_path(digest, recoverable)) {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(io(e)),
+            }
+        }
+        #[cfg(any(
+            feature = "connected-engine",
+            feature = "native-runtime",
+            feature = "wasm-runtime"
+        ))]
+        {
+            let previous = self
+                .blob_eviction_generation
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+                .map_err(|_| Error::LimitExceeded)?;
+            cache.expire_verified(previous + 1);
+        }
+        Ok(())
+    }
+
     pub(super) fn has_entry_blob_pin_text(&self, digest: &str) -> Result<bool> {
         let key = format!("entry-pending-content/{digest}");
         // Unknown files are conservatively retained after interrupted preparation.
@@ -332,25 +468,7 @@ impl LocalStore {
         revision: EntryId,
         source: &mut impl Read,
     ) -> Result<EntryKind> {
-        let (kind, pin) = self.prepare_entry_blob_with_key(
-            EntryAddress { volume, entry },
-            revision,
-            source,
-            &self.credentials(volume)?.blob_key,
-        )?;
-        let _profile = self.lock_profile()?;
-        self.pin_prepared_blob_profile_locked(&pin)?;
-        Ok(kind)
-    }
-
-    pub(super) fn prepare_entry_blob_with_key(
-        &self,
-        address: EntryAddress,
-        revision: EntryId,
-        source: &mut impl Read,
-        blob_key: &[u8; 32],
-    ) -> Result<(EntryKind, BlobVersion)> {
-        self.prepare_entry_blob_with_durability(address, revision, source, blob_key, true)
+        self.prepare_file_blob(volume, entry, revision, source, true)
     }
 
     pub(super) fn prepare_file_blob(
@@ -361,26 +479,36 @@ impl LocalStore {
         source: &mut impl Read,
         durable: bool,
     ) -> Result<EntryKind> {
-        let (kind, pin) = self.prepare_entry_blob_with_durability(
+        let key = self.credentials(volume)?.blob_key;
+        self.prepare_entry_blob_with_key(
             EntryAddress { volume, entry },
             revision,
             source,
-            &self.credentials(volume)?.blob_key,
+            &key,
             durable,
-        )?;
-        let _profile = self.lock_profile()?;
-        self.pin_prepared_blob_profile_locked(&pin)?;
-        Ok(kind)
+            || {
+                let profile = self.lock_profile()?;
+                if self.credentials(volume)?.blob_key != key {
+                    return Err(Error::AccessDenied(
+                        "volume credentials changed during file preparation",
+                    ));
+                }
+                Ok(profile)
+            },
+        )
     }
 
-    fn prepare_entry_blob_with_durability(
+    /// The caller admits publication under the profile writer after staging and
+    /// content verification. Initialization already owns that writer.
+    pub(super) fn prepare_entry_blob_with_key<G>(
         &self,
         address: EntryAddress,
         revision: EntryId,
         source: &mut impl Read,
         blob_key: &[u8; 32],
         durable: bool,
-    ) -> Result<(EntryKind, BlobVersion)> {
+        admit: impl Fn() -> Result<G>,
+    ) -> Result<EntryKind> {
         let EntryAddress { volume, entry } = address;
         let (mut stage, digest, length) = self.stage_entry_input(source, durable)?;
         let encrypted_key = crate::store::seal_blob_to(
@@ -393,16 +521,13 @@ impl LocalStore {
         )?;
         let address = EntryAddress { volume, entry };
         let pin = BlobVersion { address, revision, digest, len_bytes: length, encrypted_key };
-        self.publish_entry_content(&stage, &pin, durable)?;
-        Ok((
-            EntryKind::Blob { len_bytes: length, digest, encrypted_key, published_at_micros: 0 },
-            pin,
-        ))
+        self.publish_entry_content(&stage, &pin, durable, admit)?;
+        Ok(EntryKind::Blob { len_bytes: length, digest, encrypted_key, published_at_micros: 0 })
     }
 
     /// Caller owns the profile guard. Copy, hashing and sealing have completed;
     /// only durable pin and upload bookkeeping share this short transaction.
-    pub(super) fn pin_prepared_blob_profile_locked(&self, pin: &BlobVersion) -> Result<()> {
+    fn pin_prepared_blob_profile_locked(&self, pin: &BlobVersion) -> Result<()> {
         let BlobVersion { address: EntryAddress { volume, entry }, revision, digest, .. } = pin;
         let key = format!("{}{volume}/{entry}/{revision}", pin_prefix(digest));
         let encoded = encode(pin)?;
@@ -445,11 +570,12 @@ impl LocalStore {
         Ok((stage, *hash.finalize().as_bytes(), length))
     }
 
-    fn publish_entry_content(
+    fn publish_entry_content<G>(
         &self,
         stage: &blob_files::BlobStage,
         version: &BlobVersion,
         durable: bool,
+        admit: impl Fn() -> Result<G>,
     ) -> Result<()> {
         let destination = self.blob_path(&version.digest, false);
         for _ in 0..2 {
@@ -457,24 +583,25 @@ impl LocalStore {
             if matches!(existing, blob_files::ExistingBlob::Corrupt { .. }) {
                 return Err(Error::corrupt("retained blob failed verification"));
             }
+            if durable && !existing.sync_verified(&destination)? {
+                continue;
+            }
+            // File publication and its pin must be indivisible to a last-pin eraser.
+            let _profile = admit()?;
             let _cache = self
                 .blob_cache
                 .lock()
                 .map_err(|_| Error::Internal("blob cache lock is poisoned"))?;
-            if existing.publish(stage, &destination, durable)? {
+            // The directory barriers below cover a new link and an existing
+            // link left by an ordinary close.
+            if existing.publish(stage, &destination, false)? {
                 if durable {
-                    // A prior ordinary close may have published this same hash
-                    // without a barrier. Sync the retained inode, not only the
-                    // newly prepared duplicate which may have been discarded.
-                    let file = fs::File::open(&destination).map_err(io)?;
-                    rustix::io::retry_on_intr(|| rustix::fs::fsync(&file))
-                        .map_err(|error| io(error.into()))?;
                     super::initialization::sync_directory(
                         destination.parent().expect("blob parent"),
                     )?;
                     super::initialization::sync_directory(&self.path)?;
                 }
-                return Ok(());
+                return self.pin_prepared_blob_profile_locked(version);
             }
         }
         Err(Error::LocalContention("blob content changed during import"))
@@ -965,10 +1092,15 @@ impl LocalStore {
             if tx.get(durable_key(&version).as_bytes())?.is_some() {
                 continue;
             }
-            if self.volume_deleted(version.address.volume)? {
+            let id = version.address.volume;
+            if tx.has(format!("deleted-volume/{id}").as_bytes())?
+                || tx.has(app_removal::erased_local_volume(id).as_bytes())?
+            {
                 continue;
             }
-            let volume = self.volume(version.address.volume)?;
+            let record =
+                tx.get(format!("volume/{id}").as_bytes())?.ok_or(Error::NotFound("volume"))?;
+            let volume: Volume = decode(&record)?;
             if !volume.share_key_with_service {
                 continue;
             }

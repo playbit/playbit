@@ -11,5 +11,5 @@ cargo fmt --manifest-path playbit/fuzz/Cargo.toml -p playbit-fuzz --check
 # Test the style report.
 python3 -m unittest discover -s scripts -p 'test_style_report.py'
 
-# Report Tiger Style and check tier A regressions.
-python3 scripts/style-report.py --check | tee -a "$GITHUB_STEP_SUMMARY"
+# Check Tiger Style tier A regressions.
+python3 scripts/style-report.py --check

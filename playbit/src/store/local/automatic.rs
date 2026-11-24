@@ -58,6 +58,23 @@ fn binding_key(volume: Id) -> String {
     format!("automatic-volume/{volume}")
 }
 
+impl ImportedApp {
+    fn from_package(package: &crate::package::Package) -> Result<Self> {
+        Ok(Self {
+            app: package
+                .identity()
+                .map_err(|_| Error::AccessDenied("unsigned app import"))?
+                .clone(),
+            build_id: package.id().map_err(|e| Error::System(e.to_string()))?,
+            name: package.name().into(),
+        })
+    }
+
+    fn key(&self) -> String {
+        format!("imported-app/{}/{}", self.app.publisher, self.app.app_id)
+    }
+}
+
 impl LocalStore {
     pub fn is_local_session(&self, id: &str) -> Result<bool> {
         Ok(self.local_session(id)?.is_some())
@@ -142,16 +159,28 @@ impl LocalStore {
             .collect()
     }
     pub fn create_session_binding(&self, request: SessionCreation) -> Result<Session> {
-        self.create_session_binding_with_seed(request, random_array::<SEED_BYTES>()?)
+        self.bind_automatic_session(request, None, None)
     }
     /// A native launch retains its code before creation so an interrupted launch
     /// can resume the same binding without allocating another session.
-    pub(crate) fn create_session_binding_with_seed(
+    pub(crate) fn bind_automatic_session(
         &self,
         request: SessionCreation,
-        seed: Seed,
+        seed: Option<Seed>,
+        package: Option<&crate::package::Package>,
     ) -> Result<Session> {
         self.validate_session_creation(&request)?;
+        let imported = package.map(ImportedApp::from_package).transpose()?;
+        if imported
+            .as_ref()
+            .is_some_and(|app| app.app != request.app || app.build_id != request.resolved_build_id)
+        {
+            return Err(Error::InvalidInput("imported app differs from session selection"));
+        }
+        let seed = match seed {
+            Some(seed) => seed,
+            None => random_array::<SEED_BYTES>()?,
+        };
         let id = SessionKeys::derive(&seed)?.session_id();
         let shared_volume = request
             .sync_shared
@@ -160,10 +189,9 @@ impl LocalStore {
         let session = Session {
             id,
             app: request.app,
-            update_authority: if matches!(request.selector, BuildSelector::App { .. }) {
-                UpdateAuthority::App
-            } else {
-                UpdateAuthority::Creator
+            update_authority: match request.selector {
+                BuildSelector::App { .. } => UpdateAuthority::App,
+                BuildSelector::Exact { .. } => UpdateAuthority::Creator,
             },
             selector: request.selector,
             resolved_build_id: request.resolved_build_id.clone(),
@@ -171,15 +199,35 @@ impl LocalStore {
             shared_volume,
             creator: self.account.id,
         };
-        let retained = LocalSession {
-            session: session.clone(),
-            seed,
-            creation_build: request.resolved_build_id,
-            user_volume: request.user_volume,
-        };
+        self.retain_session_binding(
+            LocalSession {
+                session,
+                seed,
+                creation_build: request.resolved_build_id,
+                user_volume: request.user_volume,
+            },
+            imported.as_ref(),
+        )
+    }
+
+    fn retain_session_binding(
+        &self,
+        retained: LocalSession,
+        imported: Option<&ImportedApp>,
+    ) -> Result<Session> {
+        let session = &retained.session;
         let _profile = self.lock_profile()?;
+        // An explicit override can name another app's private Local volume.
+        // Keep its final binding and the removal inventory serialized.
+        let snapshot = self.metadata.begin_read()?;
+        for volume in Some(session.root_volume).into_iter().chain(retained.user_volume) {
+            if snapshot.has(app_removal::erased_local_volume(volume).as_bytes())? {
+                return Err(Error::NotFound("selected local volume was erased"));
+            }
+        }
+        drop(snapshot);
         if let Some(previous) = self.local_session(&session.id)? {
-            let mut original = retained.session.clone();
+            let mut original = session.clone();
             original.shared_volume = previous.session.shared_volume;
             if previous.session == original
                 && previous.creation_build == retained.creation_build
@@ -190,7 +238,7 @@ impl LocalStore {
             return Err(Error::InvalidInput("session creation code already has another binding"));
         }
         if self.metadata.begin_read()?.has(format!("session/{}", session.id).as_bytes())? {
-            if self.session(&session.id)? == session
+            if self.session(&session.id)? == *session
                 && self.session_scopes(&session.id)?
                     == Some(AppScope::Session {
                         id: session.id.clone(),
@@ -198,7 +246,7 @@ impl LocalStore {
                         user_volume: retained.user_volume,
                     })
             {
-                return Ok(session);
+                return Ok(retained.session);
             }
             return Err(Error::InvalidInput(
                 "session creation code belongs to an ordinary session",
@@ -208,10 +256,19 @@ impl LocalStore {
         if session.shared_volume.is_some() {
             profile_format::enable_shared_sessions(self)?;
         }
-        put(&self.metadata, format!("local-session/{}", session.id).as_bytes(), &retained)?;
+        let started = now_unix_secs();
+        let mut tx = self.metadata.begin_write(started)?;
+        tx.put(format!("session-start/{}", session.id).as_bytes(), &started.to_le_bytes())?;
+        tx.put(format!("local-session/{}", session.id).as_bytes(), &encode(&retained)?)?;
+        let changed = match imported {
+            Some(imported) => self.stage_app_import(&mut tx, imported)?,
+            None => false,
+        };
+        tx.commit()?;
+        self.committed_account_record(changed);
         drop(_profile);
         self.publish_automatic_session(&session.id)?;
-        Ok(session)
+        Ok(retained.session)
     }
     fn validate_session_creation(&self, request: &SessionCreation) -> Result<()> {
         self.require_account_authority()?;
@@ -436,24 +493,80 @@ impl LocalStore {
         self.adopt_session(previous, &updated)
     }
     pub fn remember_imported_app(&self, package: &crate::package::Package) -> Result<()> {
-        let app =
-            package.identity().map_err(|_| Error::AccessDenied("unsigned app import"))?.clone();
-        let imported = ImportedApp {
-            app,
-            build_id: package.id().map_err(|e| Error::System(e.to_string()))?,
-            name: package.name().into(),
-        };
+        let imported = ImportedApp::from_package(package)?;
         let _profile = self.lock_profile()?;
-        let key = format!("imported-app/{}/{}", imported.app.publisher, imported.app.app_id);
-        if !self.metadata.begin_read()?.has(key.as_bytes())? && self.imported_apps()?.len() == 256 {
-            return Err(Error::LimitExceeded);
+        let mut tx = self.metadata.begin_write(now_unix_secs())?;
+        let changed = self.stage_app_import(&mut tx, &imported)?;
+        tx.commit()?;
+        self.committed_account_record(changed);
+        Ok(())
+    }
+
+    // Package updates refresh the selected build for apps previously imported
+    // here. Watching source and publishing a build never change list membership.
+    #[cfg(feature = "app-host")]
+    pub(crate) fn refresh_imported_app(&self, package: &crate::package::Package) -> Result<()> {
+        let imported = ImportedApp::from_package(package)?;
+        let _profile = self.lock_profile()?;
+        let key = imported.key();
+        let mut tx = self.metadata.begin_write(now_unix_secs())?;
+        if tx.has(key.as_bytes())? {
+            tx.put(key.as_bytes(), &encode(&imported)?)?;
+            tx.commit()?;
         }
-        put(&self.metadata, key.as_bytes(), &imported)
+        Ok(())
+    }
+
+    fn stage_app_import(
+        &self,
+        tx: &mut kvdb::WriteTxn<'_, RedbStorage>,
+        imported: &ImportedApp,
+    ) -> Result<bool> {
+        let key = imported.key();
+        if !tx.has(key.as_bytes())? {
+            // Retain hidden package metadata while there is space, so an
+            // explicit rejoin can reuse it. Removed apps don't consume slots
+            // that a new import needs.
+            let mut count = 0;
+            let mut reclaim = None;
+            for entry in tx.iter_from(b"imported-app/") {
+                let (key, value) = entry?;
+                if !key.starts_with(b"imported-app/") {
+                    break;
+                }
+                count += 1;
+                if count > 256 {
+                    return Err(Error::LimitExceeded);
+                }
+                if reclaim.is_none() {
+                    let previous: ImportedApp = decode(&value)?;
+                    if tx.has(self.removed_app_key(&previous.app).as_bytes())? {
+                        reclaim = Some(key.to_vec());
+                    }
+                }
+            }
+            if count == 256 {
+                tx.del(&reclaim.ok_or(Error::LimitExceeded)?)?;
+            }
+        }
+        tx.put(key.as_bytes(), &encode(imported)?)?;
+        self.stage_app_removed(tx, &imported.app, false)
     }
     pub fn imported_apps(&self) -> Result<Vec<ImportedApp>> {
-        let apps = scan(&self.metadata, "imported-app/")?;
-        if apps.len() > 256 {
-            return Err(Error::LimitExceeded);
+        let tx = self.metadata.begin_read()?;
+        let mut apps = Vec::new();
+        for (index, entry) in tx.iter_from(b"imported-app/").enumerate() {
+            let (key, value) = entry?;
+            if !key.starts_with(b"imported-app/") {
+                break;
+            }
+            if index >= 256 {
+                return Err(Error::LimitExceeded);
+            }
+            let app: ImportedApp = decode(&value)?;
+            if !tx.has(self.removed_app_key(&app.app).as_bytes())? {
+                apps.push(app);
+            }
         }
         Ok(apps)
     }
@@ -499,7 +612,10 @@ impl LocalStore {
     }
     pub fn automatic_volumes(&self, id: &str) -> Result<Vec<AutomaticVolumeSlot>> {
         let session = self.session(id)?;
-        ROLES.into_iter().map(|role| self.automatic_slot(&session.app, Some(id), role)).collect()
+        ROLES
+            .into_iter()
+            .map(|role| self.automatic_slot(&session.app, Some(&session), role))
+            .collect()
     }
     #[cfg(all(not(target_os = "ios"), feature = "process"))]
     pub(crate) fn automatic_volume_addresses(
@@ -536,9 +652,10 @@ impl LocalStore {
     fn automatic_slot(
         &self,
         app: &AppIdentity,
-        session: Option<&str>,
+        retained: Option<&Session>,
         role: Role,
     ) -> Result<AutomaticVolumeSlot> {
+        let session = retained.map(|session| session.id.as_str());
         let derived = self.automatic_volume_id(app, session, role)?;
         let user_override = if role == Role::User {
             session.map(|id| self.session_scopes(id)).transpose()?.flatten().and_then(|s| match s {
@@ -548,25 +665,23 @@ impl LocalStore {
         } else {
             None
         };
-        let volume = if let Some(id) = session {
-            match role {
-                Role::Root => self.session(id)?.root_volume,
-                Role::User => user_override.unwrap_or(derived),
-                _ => derived,
-            }
-        } else {
-            derived
+        let volume = match role {
+            Role::Root => retained.map_or(derived, |s| s.root_volume),
+            Role::User => user_override.unwrap_or(derived),
+            _ => derived,
         };
         let overridden = volume != derived || user_override.is_some();
-        let shared = role == Role::Session
-            && session
-                .map(|id| self.session(id))
-                .transpose()?
-                .is_some_and(|session| session.shared_volume == Some(volume));
+        let shared =
+            role == Role::Session && retained.is_some_and(|s| s.shared_volume == Some(volume));
+        let invited_world = session
+            .filter(|_| role == Role::Root && !overridden && app.publisher != self.account.id);
         let creator = session.map(|id| self.local_session(id)).transpose()?.flatten().is_some();
         let state = match self.volume(volume) {
             Ok(_)
-                if (shared || overridden || self.is_automatic_volume(volume)?)
+                if (shared
+                    || overridden
+                    || invited_world.is_some()
+                    || self.is_automatic_volume(volume)?)
                     && self
                         .path
                         .join(crate::paths::VOLUMES)
@@ -576,7 +691,13 @@ impl LocalStore {
                         .map_err(io)?
                     && self.has_volume_index(volume)? =>
             {
-                AutomaticVolumeState::Ready
+                if let Some(id) = invited_world
+                    && !self.invited_world_ready(id, volume)?
+                {
+                    AutomaticVolumeState::Unavailable
+                } else {
+                    AutomaticVolumeState::Ready
+                }
             }
             Ok(_) => AutomaticVolumeState::Unavailable,
             Err(Error::NotFound(_))
@@ -584,10 +705,7 @@ impl LocalStore {
                     || volume != derived
                     || (role == Role::Root && app.publisher != self.account.id)
                     || (role == Role::Session
-                        && session
-                            .map(|id| self.session(id))
-                            .transpose()?
-                            .is_some_and(|session| session.creator != self.account.id)) =>
+                        && retained.is_some_and(|s| s.creator != self.account.id)) =>
             {
                 AutomaticVolumeState::Unavailable
             }
@@ -595,6 +713,23 @@ impl LocalStore {
             Err(error) => return Err(error),
         };
         Ok(AutomaticVolumeSlot { role, volume, state, overridden })
+    }
+    pub(crate) fn invited_world_ready(&self, id: &str, volume: Id) -> Result<bool> {
+        let session = self.session(id)?;
+        if !self.has_volume_index(volume)? || self.session_denial(id)?.is_some() {
+            return Ok(false);
+        }
+        let access = Access::session_version(self.account.id, id, &session.resolved_build_id);
+        let admitted = self
+            .check_authority(&access, volume, None)
+            .and_then(|()| self.check_participant(volume, self.account.id))
+            .and_then(|()| self.check_world_admission(&session))
+            .and_then(|()| self.index(volume)?.admit_world(self.account.id, &session));
+        match admitted {
+            Ok(()) => Ok(true),
+            Err(Error::AccessDenied(_) | Error::ParticipantRevoked { .. }) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
     pub(super) fn automatic_binding(&self, id: Id) -> Result<Option<AutomaticBinding>> {
         get(&self.metadata, binding_key(id).as_bytes())
@@ -730,7 +865,7 @@ impl LocalStore {
         } else {
             session.resolved_build_id.clone()
         };
-        let volume = self.open_automatic_slot(&session.app, Some(id), role, &build)?;
+        let volume = self.open_automatic_slot(&session.app, Some(&session), role, &build)?;
         if role == Role::Root {
             self.publish_automatic_session(id)?;
         }
@@ -739,19 +874,20 @@ impl LocalStore {
     fn open_automatic_slot(
         &self,
         app: &AppIdentity,
-        session: Option<&str>,
+        retained: Option<&Session>,
         role: Role,
         build: &str,
     ) -> Result<Volume> {
-        let slot = self.automatic_slot(app, session, role)?;
+        let slot = self.automatic_slot(app, retained, role)?;
+        if slot.state == AutomaticVolumeState::Lazy {
+            self.check_app_data_erasure(slot.volume, role)?;
+        }
         if slot.state == AutomaticVolumeState::Unavailable {
             return Err(Error::AccessDenied("this app scope's data is unavailable on this device"));
         }
-        let shared = role == Role::Session
-            && session
-                .map(|id| self.session(id))
-                .transpose()?
-                .is_some_and(|session| session.shared_volume == Some(slot.volume));
+        let session = retained.map(|s| s.id.as_str());
+        let shared =
+            role == Role::Session && retained.is_some_and(|s| s.shared_volume == Some(slot.volume));
         if slot.overridden {
             return self.volume(slot.volume);
         }
@@ -762,7 +898,9 @@ impl LocalStore {
             build: build.into(),
         };
         if slot.state == AutomaticVolumeState::Ready {
-            if shared {
+            if shared
+                || (role == Role::Root && session.is_some() && app.publisher != self.account.id)
+            {
                 return self.volume(slot.volume);
             }
             let actual = self

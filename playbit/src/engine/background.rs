@@ -66,6 +66,12 @@ pub(crate) struct Transfer {
     pub(super) diagnostic_read: bool,
 }
 
+impl Transfer {
+    fn reads_app_display(&self) -> bool {
+        self.developer && self.diagnostic_read
+    }
+}
+
 /// What a bounded `Engine::shutdown` reached.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Shutdown {
@@ -82,6 +88,7 @@ pub enum Shutdown {
 pub(crate) enum NetworkResult {
     Enrollment(enrollment::Outcome),
     Synchronized,
+    OwnerSessionPrepared,
     InitializationPending(String),
     SynchronizationPending(remote::Synchronization),
     CheckedUpdate,
@@ -101,6 +108,7 @@ enum NetworkWork {
     ContinueSynchronization(remote::Synchronization),
     InitializeVolumes,
     Join(String),
+    PrepareOwnerSession(String),
     RecoverGaps,
     Reconnect,
     Control(recovery::control::Control),
@@ -173,6 +181,9 @@ impl NetworkTask {
             }
             NetworkWork::Join(id) => {
                 self.join(&id, &apps, &mut updates).map(|()| NetworkResult::Synchronized)
+            }
+            NetworkWork::PrepareOwnerSession(id) => {
+                self.join(&id, &apps, &mut updates).map(|()| NetworkResult::OwnerSessionPrepared)
             }
         };
         let result = match result {
@@ -459,41 +470,41 @@ impl Engine {
     }
     pub(super) fn prepare_session(&mut self, id: &str) -> Result<Reply> {
         self.services.store.retain_session(id)?;
+        self.prepare_existing_session(self.services.store.session(id)?, false)
+    }
+
+    // A surviving process on another device keeps its session authority after
+    // account removal. Its recovery cannot join an invitation or re-list the app.
+    pub(super) fn prepare_existing_session(
+        &mut self,
+        session: Session,
+        recovering_owner: bool,
+    ) -> Result<Reply> {
+        let id = session.id.as_str();
         if self.starting_session(id) {
             return Ok(Reply::Transfer { transfer: self.transfer_status() });
         }
-        let session = self.services.store.session(id)?;
-        if self.services.store.is_local_session(id)? {
-            // A recovered World has an identity but no policy yet. First use
-            // must recover that data, not launch File preparation against it.
-            match self.services.store.volume(session.root_volume) {
-                Ok(_) if !self.services.store.has_volume_index(session.root_volume)? => {
-                    let invitation =
-                        self.services.store.session_reference(id)?.link(self.channel());
-                    self.services.store.preview_invitation(&invitation, self.channel())?;
-                    return self.start_transfer(Some(id.into()));
-                }
-                Ok(_) | Err(crate::store::Error::NotFound(_)) => {}
-                Err(error) => return Err(error.into()),
-            }
-            return self.prepare_local_session(session);
+        let local = self.services.store.is_local_session(id)?;
+        if !local {
+            self.network.builds.retry(&session.resolved_build_id);
         }
-        self.network.builds.retry(&session.resolved_build_id);
-        if !self.services.path.join(crate::paths::BUILDS).join(&session.resolved_build_id).exists()
-            || self
-                .services
-                .store
-                .replica_root(session.replica_volume(), crate::store::DatabaseId::Index)?
-                .is_none()
-            || self
-                .services
-                .store
-                .replica_root(session.replica_volume(), crate::store::DatabaseId::Index)?
-                .is_none()
-        {
-            let invitation = self.invitation(id)?;
-            self.services.store.preview_invitation(&invitation, self.channel())?;
+        if !self.session_data_ready(&session, local)? {
+            if recovering_owner {
+                return self.begin_network_work(NetworkWork::PrepareOwnerSession(id.into()));
+            }
+            self.services.store.prepare_retained_invitation(id)?;
             return self.start_transfer(Some(id.into()));
+        }
+        if local {
+            let path =
+                self.services.path.join(crate::paths::BUILDS).join(&session.resolved_build_id);
+            let package = self.services.store.authenticate_package(
+                crate::package::Package::open(&path)?,
+                crate::store::now_unix_secs(),
+            )?;
+            if package.id()? != session.resolved_build_id || package.identity()? != &session.app {
+                return Err("The cached package differs from the retained app session".into());
+            }
         }
         if let Some(reason) = self.services.store.session_denial(id)? {
             return Err(reason.into());
@@ -504,44 +515,50 @@ impl Engine {
                 id,
                 &session.resolved_build_id,
             ),
-            session.replica_volume(),
+            self.session_admission_volume(&session)?,
         )?;
-        self.services.store.record_session_use(id)?;
+        if !recovering_owner {
+            self.services.store.record_session_use(id)?;
+        }
         Ok(Reply::SessionPrepared(super::reply::PreparedSession {
-            invitation: self.invitation(id)?,
-            session,
+            invitation: self.services.store.session_reference(id)?.link(self.channel()),
             availability: self.availability_cache.clone(),
             update: self.updates.get(id).cloned(),
+            session,
         }))
     }
-    fn prepare_local_session(&mut self, session: crate::store::Session) -> Result<Reply> {
-        let id = session.id.clone();
-        let path = self.services.path.join(crate::paths::BUILDS).join(&session.resolved_build_id);
-        let package = self.services.store.authenticate_package(
-            crate::package::Package::open(&path)?,
-            crate::store::now_unix_secs(),
-        )?;
-        if package.id()? != session.resolved_build_id || package.identity()? != &session.app {
-            return Err("The cached package differs from the retained app session".into());
+    pub(super) fn session_data_ready(&self, session: &Session, local: bool) -> Result<bool> {
+        let store = &self.services.store;
+        if (local || session.shared_volume.is_some())
+            && remote::world_needs_recovery(store, session)?
+        {
+            let room_can_open = session.shared_volume.is_some()
+                && self.network.owner_backing_missing(session.root_volume)
+                && store.shared_session_initialized(&session.id)?;
+            if !room_can_open {
+                return Ok(false);
+            }
         }
-        if let Some(reason) = self.services.store.session_denial(&id)? {
-            return Err(reason.into());
+        if local
+            && (session.shared_volume.is_none()
+                || !store.shared_session_initialized(&session.id)?)
+        {
+            return Ok(true);
         }
-        self.services.store.admit_binding(
-            &Access::session_version(
-                self.services.store.account().id,
-                &id,
-                &session.resolved_build_id,
-            ),
-            session.root_volume,
-        )?;
-        self.services.store.record_session_use(&id)?;
-        Ok(Reply::SessionPrepared(super::reply::PreparedSession {
-            invitation: self.services.store.session_reference(&id)?.link(self.channel()),
-            session,
-            availability: self.availability_cache.clone(),
-            update: self.updates.get(&id).cloned(),
-        }))
+        Ok(self.services.path.join(crate::paths::BUILDS).join(&session.resolved_build_id).is_file()
+            && store
+                .replica_root(session.replica_volume(), crate::store::DatabaseId::Index)?
+                .is_some())
+    }
+    /// Before Shared's first use the local session is admitted against World.
+    /// Once initialized, the replicated Shared policy is the session capability.
+    pub(super) fn session_admission_volume(&self, session: &Session) -> Result<Id> {
+        if session.shared_volume.is_some()
+            && !self.services.store.shared_session_initialized(&session.id)?
+        {
+            return Ok(session.root_volume);
+        }
+        Ok(session.replica_volume())
     }
     pub(super) fn starting_session(&self, id: &str) -> bool {
         self.background.as_ref().is_some_and(|work| work.session.as_deref() == Some(id))
@@ -595,7 +612,7 @@ impl Engine {
             work,
             NetworkWork::SynchronizeSelections(_) | NetworkWork::ContinueSynchronization(_)
         ) || (self.synchronization.is_some()
-            && matches!(work, NetworkWork::Join(_)));
+            && matches!(work, NetworkWork::Join(_) | NetworkWork::PrepareOwnerSession(_)));
         if self.background.is_some() || (!continue_sync && self.network_request_waiter.is_some()) {
             return Ok(Reply::Transfer { transfer: self.transfer_status() });
         }
@@ -605,14 +622,17 @@ impl Engine {
             NetworkWork::Reconnect | NetworkWork::InitializeVolumes | NetworkWork::RecoverGaps
         );
         let session = match &work {
-            NetworkWork::Join(id) => Some(id.clone()),
+            NetworkWork::Join(id) | NetworkWork::PrepareOwnerSession(id) => Some(id.clone()),
             _ => None,
         };
         let recovery_control = match &work {
             NetworkWork::Control(control) => Some(control.kind()),
             _ => None,
         };
-        let prepared = self.prepare_join(session.as_deref())?;
+        let prepared = match &work {
+            NetworkWork::PrepareOwnerSession(id) => Some(self.services.store.session(id)?),
+            _ => self.prepare_join(session.as_deref())?,
+        };
         let mut remote = self.remote.take().ok_or("A network operation is already in progress")?;
         self.network.progress.set(None, &self.completion.wake);
         if starts_bootstrap {
@@ -631,7 +651,7 @@ impl Engine {
             work,
             NetworkWork::Diagnostic(
                 Request::RejectedEntries { .. } | Request::Usage { .. } | Request::FileRead { .. }
-            )
+            ) | NetworkWork::Developer(Request::GetAppDisplay { .. })
         );
         let selection_only = matches!(
             work,
@@ -743,6 +763,7 @@ impl Engine {
         // erase a failed account bootstrap while reopening the sign-in view.
         if !selection_only
             && !transfer.diagnostic
+            && !transfer.diagnostic_read
             && transfer.recovery_control != Some(recovery::control::Kind::Status)
         {
             self.transfer_result = TransferStatus {
@@ -977,7 +998,7 @@ impl Engine {
             },
         );
         if transfer.kind == TransferKind::Running
-            && self.background.is_some()
+            && self.background.as_ref().is_some_and(|work| !work.reads_app_display())
             && let Some(progress) = self.network.progress.snapshot()
         {
             transfer.message = Some(progress.message());
@@ -1012,6 +1033,9 @@ impl Engine {
             }
             if let Some(session) = &transfer.session {
                 self.services.store.pause_invitation(session, true)?;
+            }
+            if transfer.reads_app_display() {
+                return Ok(());
             }
             self.transfer_result = TransferStatus {
                 kind: TransferKind::Canceling,
@@ -1231,6 +1255,7 @@ impl Engine {
         result: std::result::Result<NetworkResult, String>,
         updates: BTreeMap<String, std::result::Result<updates::PreparedUpdate, String>>,
         canceled: bool,
+        diagnostic_read: bool,
         paused_intent: Option<bool>,
     ) -> Result<()> {
         let result = result.and_then(|result| match result {
@@ -1269,21 +1294,23 @@ impl Engine {
             }
             _ => Err("missing developer result".into()),
         });
-        self.transfer_result = match &result {
-            Ok(_) if canceled => TransferStatus {
-                kind: TransferKind::Paused,
-                message: Some(
-                    ("Local update canceled; publication may already have completed").to_string(),
-                ),
-                ..Default::default()
-            },
-            Ok(_) => TransferStatus { kind: TransferKind::Complete, ..Default::default() },
-            Err(error) => TransferStatus {
-                kind: TransferKind::Failed,
-                message: Some(error.to_string()),
-                ..Default::default()
-            },
-        };
+        if !diagnostic_read {
+            self.transfer_result = match &result {
+                Ok(_) if canceled => TransferStatus {
+                    kind: TransferKind::Paused,
+                    message: Some(
+                        "Local update canceled; publication may already have completed".into(),
+                    ),
+                    ..Default::default()
+                },
+                Ok(_) => TransferStatus { kind: TransferKind::Complete, ..Default::default() },
+                Err(error) => TransferStatus {
+                    kind: TransferKind::Failed,
+                    message: Some(error.to_string()),
+                    ..Default::default()
+                },
+            };
+        }
         if self.network_request_waiter.is_some() {
             self.network_response = Some(result);
         }
@@ -1398,7 +1425,12 @@ impl Engine {
         }
         let result = result
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
-            .and_then(|_| self.finish_synchronized_session(&transfer.session));
+            .and_then(|result| {
+                self.finish_synchronized_session(
+                    &transfer.session,
+                    !matches!(result, NetworkResult::OwnerSessionPrepared),
+                )
+            });
         self.transfer_result = self.synchronization_status(result, &transfer.session)?;
         incoming_result
     }
@@ -1422,7 +1454,11 @@ impl Engine {
         }
     }
 
-    fn finish_synchronized_session(&mut self, session: &Option<String>) -> Result<()> {
+    fn finish_synchronized_session(
+        &mut self,
+        session: &Option<String>,
+        complete_invitation: bool,
+    ) -> Result<()> {
         let _timing = crate::trace::Span::new("engine.background_refresh");
         if let Some(session) = session {
             if let Some(update) = self.updates.get(session) {
@@ -1435,10 +1471,12 @@ impl Engine {
                     session,
                     &retained.resolved_build_id,
                 ),
-                retained.replica_volume(),
+                self.session_admission_volume(&retained)?,
             )?;
-            self.services.store.complete_invitation(session)?;
-            self.stop_invitation_watch(session);
+            if complete_invitation {
+                self.services.store.complete_invitation(session)?;
+                self.stop_invitation_watch(session);
+            }
         }
         Ok(())
     }
@@ -1554,7 +1592,13 @@ impl Engine {
             return incoming_result;
         }
         if transfer.developer {
-            self.complete_developer(result, updates, canceled, paused_intent)?;
+            self.complete_developer(
+                result,
+                updates,
+                canceled,
+                transfer.diagnostic_read,
+                paused_intent,
+            )?;
             return incoming_result;
         }
         if transfer.diagnostic {
@@ -1572,6 +1616,9 @@ impl Engine {
     /// by a transfer. Coalesced dirty flags survive until all executing guests
     /// have returned, so no database polling or incidental request is needed.
     fn apply_received_changes(&mut self) -> Result<()> {
+        if self.services.store.take_session_activity_changed() {
+            self.state_changed();
+        }
         if self.network.builds.take_changed() {
             self.state_changed();
         }
@@ -2043,8 +2090,8 @@ pub(crate) mod tests {
                 &engine.services.store,
                 &old.id,
                 &engine.services.path.join(crate::paths::BUILDS),
-                json!({"resolved_build_id":candidate.resolved_build_id,
-                    "selector":candidate.selector}),
+                Some(json!({"resolved_build_id":candidate.resolved_build_id,
+                    "selector":candidate.selector})),
             )
             .unwrap();
             let (sender, remote) = transfer(&mut engine);
@@ -2153,10 +2200,10 @@ pub(crate) mod tests {
                 &engine.services.store,
                 &session.id,
                 &engine.services.path.join(crate::paths::BUILDS),
-                json!({
+                Some(json!({
                     "selector":BuildSelector::Exact {build_id:candidate.resolved_build_id.clone()},
                     "resolved_build_id":candidate.resolved_build_id,
-                }),
+                })),
             )
             .unwrap()),
         );
@@ -2196,10 +2243,10 @@ pub(crate) mod tests {
                 let prepared = updates::prepare_candidate(
                     &engine.runtime, &engine.services.store, &session.id,
                     &engine.services.path.join(crate::paths::BUILDS),
-                    json!({
+                    Some(json!({
                         "selector": BuildSelector::Exact { build_id: candidate.resolved_build_id.clone() },
                         "resolved_build_id": candidate.resolved_build_id,
-                    }),
+                    })),
                 ).unwrap();
                 let (send, remote) = transfer(&mut engine);
                 if canceled {
@@ -2281,10 +2328,10 @@ pub(crate) mod tests {
             &engine.services.store,
             &session.id,
             &engine.services.path.join(crate::paths::BUILDS),
-            json!({
+            Some(json!({
                 "selector":BuildSelector::Exact {build_id:target.resolved_build_id.clone()},
                 "resolved_build_id":target.resolved_build_id,
-            }),
+            })),
         )
         .unwrap();
         let (send, remote) = transfer(&mut engine);
@@ -2672,8 +2719,8 @@ pub(crate) mod tests {
             &engine.services.store,
             &session.id,
             &engine.services.path.join(crate::paths::BUILDS),
-            json!({"resolved_build_id":session.resolved_build_id,
-                "selector":session.selector}),
+            Some(json!({"resolved_build_id":session.resolved_build_id,
+                "selector":session.selector})),
         )
         .unwrap();
         let (sender, remote) = transfer(&mut engine);
@@ -2801,6 +2848,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn app_display_lookup_preserves_transfer_status_and_returns_its_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(directory.path()).unwrap();
+        // Reject the metadata read locally, without depending on an AP fixture.
+        engine.remote.as_mut().unwrap().require_replacement();
+        engine.availability_cache = engine.availability().unwrap();
+        let transfer = TransferStatus {
+            kind: TransferKind::Running,
+            message: Some("Reconnecting…".into()),
+            ..Default::default()
+        };
+        engine.transfer_result = transfer.clone();
+        let request = Request::GetAppDisplay {
+            app: crate::package::AppIdentity {
+                publisher: engine.services.store.account().id,
+                app_id: "test-app".into(),
+            },
+            build: crate::identifier::encode(&[1; 32]),
+        };
+        for cancel in [false, true] {
+            let ticket = engine.begin_network_request(request.clone()).unwrap();
+            engine.network.progress.set(
+                Some(reply::TransferProgress::Connecting { hostname: "example.invalid".into() }),
+                &engine.completion.wake,
+            );
+            assert_eq!(engine.transfer_status(), transfer);
+            if cancel {
+                engine.cancel_transfer().unwrap();
+                assert_eq!(engine.transfer_status(), transfer);
+            }
+            drain_updates(&mut engine);
+            assert_eq!(
+                engine.take_network_request(ticket).unwrap_err().to_string(),
+                "Confirm replacing existing data before signing in"
+            );
+            assert_eq!(engine.transfer_status(), transfer);
+        }
+    }
+
+    #[test]
     fn rejected_catalog_reads_do_not_invalidate_the_catalog() {
         let directory = tempfile::tempdir().unwrap();
         let mut engine = Engine::open(directory.path()).unwrap();
@@ -2849,6 +2936,43 @@ pub(crate) mod tests {
         let current = engine.change_token();
         engine.dispatch_reply(Request::Status).unwrap();
         assert_eq!(engine.change_token(), current, "unchanged status reads must not invalidate");
+    }
+
+    #[test]
+    fn roster_changes_wake_the_session_inspector() {
+        // Verify that real roster changes reach the inspector and an empty
+        // observation does not request another roster update.
+        use crate::session_channel::{Participant, PresentParticipant, SOURCE_BYTES};
+        let directory = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(directory.path()).unwrap();
+        let root = engine.services.store.create_volume("Roster", false).unwrap();
+        let session =
+            engine.create_session(crate::engine::tests::button_package(), root.id).unwrap();
+        engine.complete_background().unwrap();
+        engine.apply_received_changes().unwrap();
+        let before = engine.change_token();
+
+        let mut member = PresentParticipant {
+            participant: Participant::decode(&[4; SOURCE_BYTES]).unwrap(),
+            display_name: "Robin".into(),
+        };
+        engine
+            .services
+            .store
+            .observe_session_participants(&session.id, std::slice::from_ref(&member));
+        member.display_name = "Robin Fernández".into();
+        engine.services.store.observe_session_participants(&session.id, &[member]);
+        engine.complete_background().unwrap();
+        let after = engine.change_token();
+        assert_eq!(after.sequence, before.sequence + 1);
+        let Reply::Status(status) = engine.dispatch_reply(Request::Status).unwrap() else {
+            panic!("status request returns status");
+        };
+        let roster = &status.session_activity[&session.id].participants;
+        assert_eq!(roster.len(), 1);
+        assert_eq!(roster[0].name, "Robin Fernández");
+        engine.services.store.observe_session_participants(&session.id, &[]);
+        assert!(!engine.services.store.take_session_activity_changed());
     }
 
     #[test]

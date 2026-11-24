@@ -44,7 +44,7 @@ impl LocalStore {
         self.replica_db(
             volume,
             crate::store::DatabaseId::Entry(entry),
-            create.then(|| self.credentials(volume).map(|value| value.database_key)).transpose()?,
+            create.then(|| self.local_database_key(volume)).transpose()?,
         )
     }
 

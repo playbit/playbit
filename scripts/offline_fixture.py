@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare explicit isolated offline signing authority for native CI fixtures.
+"""Prepare isolated offline signing authority for local examples and tests.
 
 The root test hook uses a synthetic fixture issuer with valid certificates and
 production package validation. It does not enroll an AP account or grant consent.

@@ -31,6 +31,7 @@ pub(super) struct Account {
     restart: bool,
     blocked: bool,
     cursor: Option<[u8; 32]>,
+    display_name: Option<super::account_name::Publisher>,
     error: Option<PublisherError>,
 }
 impl Account {
@@ -46,6 +47,7 @@ impl Account {
             restart: false,
             blocked: false,
             cursor: None,
+            display_name: None,
             error: None,
         }
     }
@@ -72,6 +74,7 @@ impl Account {
         }
         self.state = state;
         self.connection = None;
+        self.display_name = None;
         self.error = Some(error.clone());
         if let Some(cancel) = self.active.as_mut().and_then(|job| job.cancel.take()) {
             let _ = cancel.send(());
@@ -208,6 +211,11 @@ impl Actor {
                             && account.active.is_none()
                             && account.state == PublishState::Bootstrapping =>
                     {
+                        account.display_name = Some(super::account_name::Publisher::start(
+                            self.store.clone(),
+                            connection.clone(),
+                            self.apply_slots.clone(),
+                        ));
                         account.connection = Some(connection);
                         account.state = PublishState::Ready;
                         account.pending = true;
@@ -352,6 +360,9 @@ impl Actor {
         if account.generation == generation && account.state == PublishState::Ready {
             match result {
                 Ok(Progress::End) => {
+                    if let Some(display_name) = &account.display_name {
+                        display_name.notify();
+                    }
                     account.cursor = None;
                     account.pending = std::mem::take(&mut account.restart);
                     if account.pending {

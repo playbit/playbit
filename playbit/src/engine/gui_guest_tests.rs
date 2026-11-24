@@ -204,6 +204,83 @@ fn bare_legacy_root_browser_keeps_the_granted_session_for_data_operations() {
     guest.kv_put(&access, address, b"score", b"2").unwrap();
     assert_eq!(guest.kv_read(&access, address, b"score", 0, 1, None).unwrap().bytes, b"2");
     engine.tool_contexts.close(handle, &tool).unwrap();
+
+    // An explicit read-only Root can select the same database through a
+    // different app. Keep that mount's ceiling even when the DB grants write.
+    use crate::runtime::host::{DataCall, DataOperation, VolumeRights};
+    use crate::store::object_contract::{Acl, EntryAcl, Grant, Permission, Subject};
+    use playbit_api::abi::syscall::Error as HostError;
+    let guest = engine.services.store.clone();
+    let package =
+        crate::package::signature::testing::signed(&guest, crate::engine::tests::button_package())
+            .unwrap();
+    let bundle = directory.path().join("editor.pbapp");
+    std::fs::write(&bundle, package.to_bytes().unwrap()).unwrap();
+    owner.provision_version(&account, volume, &package.id().unwrap()).unwrap();
+    owner.grant_volume(&account, volume, guest.account().id, false).unwrap();
+    owner
+        .set_entry_permissions(
+            &account,
+            volume,
+            entry.id,
+            EntryAcl::Replace(Acl {
+                grants: vec![Grant {
+                    subject: Subject::Public,
+                    permissions: vec![Permission::Read, Permission::Write],
+                }],
+            }),
+        )
+        .unwrap();
+    receive_test_volume(&owner, &guest, directory.path(), volume, &selected);
+    let editor = crate::engine::developer::create_session(
+        &guest,
+        &engine.runtime,
+        directory.path(),
+        &bundle,
+        Some(volume),
+        None,
+    )
+    .unwrap();
+    let authorized =
+        Access::session_version(guest.account().id, &editor.id, &editor.resolved_build_id);
+    guest.kv_put(&authorized, address, b"score", b"store").unwrap();
+    let (peer, _client) = UnixStream::pair().unwrap();
+    let Reply::Instance(instance) = engine
+        .dispatch_instance(
+            Request::InstanceReserve {
+                request: Id::generate().unwrap(),
+                incarnation: engine.session_instances.incarnation(),
+                session: editor.id,
+                extra_volumes: Box::default(),
+                host_mounts: Box::default(),
+                restore_host_mounts: false,
+            },
+            &peer,
+        )
+        .unwrap()
+    else {
+        panic!("editor instance reservation")
+    };
+    let Reply::InstanceAdmission(admission) =
+        engine.dispatch_instance(Request::InstanceClaim { instance: instance.id }, &peer).unwrap()
+    else {
+        panic!("editor instance admission")
+    };
+    let root = admission.volumes.iter().find(|mount| mount.is_root).unwrap();
+    assert_eq!(root.rights, VolumeRights::READ);
+    let call = DataCall {
+        volume: *volume.as_bytes(),
+        operation: DataOperation::KvPut {
+            entry_id: *entry.id.as_bytes(),
+            key: b"score".to_vec(),
+            value: b"app".to_vec(),
+        },
+    };
+    assert!(matches!(
+        engine.begin_service(admission.context, 1, 1, call, &peer),
+        Err(HostError::AccessDenied)
+    ));
+    assert_eq!(guest.kv_read(&authorized, address, b"score", 0, 8, None).unwrap().bytes, b"store");
 }
 
 #[test]
@@ -675,6 +752,8 @@ fn surviving_owner_reconstructs_only_after_engine_restart_with_fresh_authority()
     let profile = directory.path().to_owned();
     let (ready, receive) = std::sync::mpsc::sync_channel(1);
     let stop = Arc::new(AtomicBool::new(false));
+    // A list-only removal on another device leaves this exact process alive.
+    engine.services.store.remove_app(&prior.session.app, true, false).unwrap();
     drop(engine);
     let engine_stop = stop.clone();
     let service = std::thread::spawn(move || {
@@ -697,6 +776,7 @@ fn surviving_owner_reconstructs_only_after_engine_restart_with_fresh_authority()
         while !engine_stop.load(Ordering::Acquire) {
             queue.run_until(&mut engine, Some(Instant::now() + Duration::from_millis(50))).unwrap();
         }
+        assert!(engine.services.store.app_removed(&prior.session.app).unwrap());
     });
     let incarnation = receive.recv_timeout(Duration::from_secs(5)).unwrap();
     let mut attempted = (admission.context.incarnation, admission.instance.build.clone());
@@ -787,6 +867,7 @@ fn selected_build_reconstruction(
     engine.services.store.adopt_session(&prior.session, &selected).unwrap();
     if hidden {
         engine.services.store.forget_session(&prior.instance.session).unwrap();
+        engine.services.store.remove_app(&prior.session.app, true, false).unwrap();
         assert!(engine.session_instances.owns_context(prior.context));
         assert!(
             !engine
@@ -824,6 +905,7 @@ fn selected_build_reconstruction(
     let profile = directory.path().to_owned();
     let stop = Arc::new(AtomicBool::new(false));
     let engine_stop = stop.clone();
+    let hidden_app = hidden.then(|| prior.session.app.clone());
     let (ready, receive) = std::sync::mpsc::sync_channel(1);
     let service = std::thread::spawn(move || {
         let listener = UnixListener::bind(profile.join(crate::paths::ENGINE_SOCKET)).unwrap();
@@ -831,6 +913,9 @@ fn selected_build_reconstruction(
         ready.send(()).unwrap();
         while !engine_stop.load(Ordering::Acquire) {
             queue.run_until(&mut engine, Some(Instant::now() + Duration::from_millis(50))).unwrap();
+        }
+        if let Some(app) = hidden_app {
+            assert!(engine.services.store.app_removed(&app).unwrap());
         }
     });
     receive.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -1520,6 +1605,43 @@ fn create_serviced(
         task.join().unwrap().unwrap()
     });
     prepared.instantiate().unwrap()
+}
+
+#[test]
+fn rename_allows_full_guest_queue_to_drain_before_retrying_channel_completion() {
+    let (directory, mut engine, admission, package) = fixture();
+    let listener =
+        std::os::unix::net::UnixListener::bind(directory.path().join(crate::paths::ENGINE_SOCKET))
+            .unwrap();
+    let mut queue = crate::engine::admission::AdmissionQueue::new(listener, &engine).unwrap();
+    let wake = engine.completion.wake.clone();
+    let mut guest = create_serviced(
+        directory.path(),
+        admission,
+        package,
+        Arc::new(move || wake.notify()),
+        &mut queue,
+        &mut engine,
+    );
+    guest.inbox.complete_test_roster();
+    let [pending] = guest.inbox.ready()[..] else { panic!("expected a ready channel receive") };
+    guest.inbox.defer(pending);
+    // Started already occupies one slot. A rename uses the last one.
+    for _ in 1..playbit_api::abi::syscall::MAX_QUEUED_EVENTS - 1 {
+        guest
+            .guest
+            .queue_event(
+                guest.generation(),
+                Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+            )
+            .unwrap();
+    }
+    guest.guest.set_display_name("Robin").unwrap();
+    guest.pump().unwrap();
+    assert_eq!(guest.inbox.ready(), [pending]);
+    guest.inbox.defer(pending);
+    guest.pump().unwrap();
+    assert!(!guest.inbox.ready().contains(&pending));
 }
 
 #[test]

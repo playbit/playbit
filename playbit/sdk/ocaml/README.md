@@ -62,14 +62,21 @@ the first admitted data operation does. Local-session data survives stopping and
 resuming. Apps using these scopes require `automatic-volumes.v1` in
 `required_host_features`.
 
-`Session.presence ()` reads the host's current membership snapshot. Refresh it
-on `EventKind.presence_changed`. Each member is a binary tuple of three 16-byte
-IDs in account, device, instance order. `Session.identity ()` supplies the
+A roster-only app calls `Session.join ()` once at startup to start or reuse
+live membership. Read the cached roster immediately, then reread it on the
+first and subsequent `EventKind.presence_changed` events. The first read can
+be empty while joining. `Session.presence ()` returns a binary tuple of three 16-byte
+IDs in account, device, instance order for each member. `Session.identity ()` supplies the
 local context's tuple. The transport can report a different device, so
 `Session.same_instance` compares only the account and instance. Adopt a transport
 tuple only when exactly one member matches, and leave it unresolved when there
 are zero or multiple matches. Match authenticated senders from `Session.message`
 against the full account, device, and instance tuple.
+
+For a name badge, read `(Session.local_participant ()).display_name` at startup
+and again when `event.kind = EventKind.identity_changed`. After joining, use
+`Session.participants ()` for live member names. An unavailable name is `None`.
+Apps requiring these fields and notifications declare `display-names.v1`.
 
 `Session.info ()` reads metadata locally and returns `None` outside a session.
 The record has a 32-byte public `internal_id` and an optional 16-byte invitation

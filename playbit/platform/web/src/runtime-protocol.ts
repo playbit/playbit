@@ -39,6 +39,7 @@ export interface RuntimeMethods {
     retry_update: { args: undefined; result: Record<string, never> };
     close: { args: undefined; result: { closed: true } };
     reconnect: { args: undefined; result: Record<string, never> };
+    watch_recovery: { args: { account: string }; result: Record<string, never> };
     account_changed: { args: undefined; result: Record<string, never> };
     select_personal: { args: RuntimeSelectPersonalArgs; result: RuntimePersonalResult };
     cancel_personal: { args: undefined; result: { canceled: boolean } };
@@ -51,7 +52,7 @@ export type RuntimeRequest<M extends RuntimeMethod = RuntimeMethod> = M extends 
 // The worker calls AP methods by name through the page; the page dispatches dynamically.
 export interface RuntimeApRequest { id: number; method: string; args: unknown[] }
 // The page's answer to one `RuntimeApRequest`: its result, or the failure's message and code.
-export type RuntimeApReply = { id: number; result: unknown; error?: undefined; code?: undefined } | { id: number; error: string; code?: string; result?: undefined };
+export type RuntimeApReply = { id: number; result: unknown; error?: undefined; code?: undefined } | { id: number; error: string; code?: string; serviceCode?: string; result?: undefined };
 // What the page posts to the worker: the reply to a proxied AP call, or a request.
 export type RuntimePageMessage = { apReply: RuntimeApReply; method?: undefined } | (RuntimeRequest & { apReply?: undefined });
 // What the worker posts to the page. Exactly one of the named fields is present;

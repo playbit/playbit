@@ -45,6 +45,7 @@ export interface GuestIdentity {
     device: Uint8Array;
     instance: Uint8Array;
     session: Uint8Array;
+    displayName: string;
 }
 interface Services {
     logConnection?(): Promise<LogConnection>;
@@ -68,9 +69,11 @@ interface Services {
     fileFailure?(error: unknown): void;
     admitOperation?(opcode: number): number;
 }
-const decoder = new TextDecoder("utf-8", { fatal: true });
+const encoder = new TextEncoder(), decoder = new TextDecoder("utf-8", { fatal: true });
 interface Retained { bytes?: Uint8Array<ArrayBuffer>; snapshot?: ResultSnapshot; id?: Uint8Array<ArrayBuffer>; entry?: Uint8Array<ArrayBuffer>; owned?: FileCompletion }
-export type RuntimeOperations = GuestOperations & { data: GuestData<Retained>; reset(): void; refreshVolumes(): void; readonly quitOnLastWindow: boolean; channelEvent(name:string,source:Uint8Array,message:Uint8Array,data:Uint8Array):boolean };
+export const IDENTITY_CHANGED = 0x80000015;
+type EnvironmentChange = 5 | typeof IDENTITY_CHANGED;
+export type RuntimeOperations = GuestOperations & { data: GuestData<Retained>; reset(): void; refreshVolumes(): void; environmentChanged(kind: EnvironmentChange): void; readonly quitOnLastWindow: boolean; channelEvent(name:string,source:Uint8Array,message:Uint8Array,data:Uint8Array):boolean };
 const objectLayout: readonly BufferLayout[] = [[24, L.field, 256], [40, L.value, 4096], [56, null, 1048576]];
 const maximumPageValues = Math.floor((16 * 1024 * 1024 - 64 * 256 * 40 - 1048576 - 64 * 48) / 80);
 const pageLayout: readonly BufferLayout[] = [[32, L.objectInfo, 64], [48, L.field, 16384], [64, L.value, maximumPageValues], [80, null, 1048576]];
@@ -81,6 +84,7 @@ export function guestOperations(services: Services): RuntimeOperations {
     const channelHost=new ChannelHost(()=>services.host());
     const session=()=>{const client=services.channels?.();if(!client)throw new AbiError(-7);return client;};
     let volumeWatch: bigint | undefined;
+    const environmentChanges = new Set<EnvironmentChange>();
     let volumes: { status: number; snapshot?: ResultSnapshot } | undefined;
     const pending = new GuestData<Retained>(services.work, () => services.ready?.(), () => services.revision?.() ?? "");
     const execute = <T>(callback: () => T): Promise<T> => services.execute ? services.execute(callback) : Promise.resolve().then(callback);
@@ -98,6 +102,16 @@ export function guestOperations(services: Services): RuntimeOperations {
         catch (error) { if (error instanceof AbiError && error.status === -9) return; throw error; }
         volumeWatch = undefined;
         services.ready?.();
+    }
+    function flushEnvironmentChanges(): void {
+        for (const kind of environmentChanges) {
+            if (!services.events.some(event => event.kind === kind)) {
+                try { services.work.queue({ kind, target: 0, data: new Uint8Array() }); }
+                catch (error) { if (error instanceof AbiError && error.status === -9) return; throw error; }
+                services.ready?.();
+            }
+            environmentChanges.delete(kind);
+        }
     }
     function begin(kind: number, credit: number, run: () => Promise<{ status: number; value?: Retained }>, authorize: () => number, log?: string): bigint {
         return pending.begin(kind, credit + 256, run, () => authority() || authorize(), undefined, kind === 16 || kind === 14, log);
@@ -177,7 +191,9 @@ export function guestOperations(services: Services): RuntimeOperations {
             const data = new Uint8Array(L.event.size), result = new DataView(data.buffer);
             result.setBigUint64(8, services.work.epoch, true); result.setUint32(16, event.kind, true); result.setUint32(20, event.target, true);
             publishRecord(memory, header, L.event, data);
-            services.work.poll(); if(event.kind===18)session().consumed(event.data.length,event.data.slice(8,88),event.data.slice(88,104)); queueVolumeChange(); return event.data.length;
+            services.work.poll(); if(event.kind===18)session().consumed(event.data.length,event.data.slice(8,88),event.data.slice(88,104));
+            if (!services.work.draining) flushEnvironmentChanges();
+            queueVolumeChange(); return event.data.length;
         } catch (error) {
             if (error instanceof AbiError) return error.status; throw error;
         }
@@ -203,6 +219,11 @@ export function guestOperations(services: Services): RuntimeOperations {
     return {
         admitOperation: services.admitOperation,
         data: pending,
+        environmentChanged(kind) {
+            if (services.work.draining) return;
+            environmentChanges.add(kind);
+            flushEnvironmentChanges();
+        },
         channelEvent(name,source,message,data){
             const handle=channelHost.find(name);if(!handle.length)return false;
             const payload=new Uint8Array(104+data.length);payload.set(handle,0);payload.set(source,8);payload.set(message,88);payload.set(data,104);services.work.queue({kind:18,target:0,data:payload});services.ready?.();return true;
@@ -213,6 +234,7 @@ export function guestOperations(services: Services): RuntimeOperations {
             quitOnLastWindow = undefined;
             volumes = undefined;
             volumeWatch = undefined;
+            environmentChanges.clear();
         },
         get quitOnLastWindow() { return quitOnLastWindow ?? true; },
         pb_session: () => call(()=>{void session().start().catch(()=>{});return channelHost.epoch();}),
@@ -253,16 +275,21 @@ export function guestOperations(services: Services): RuntimeOperations {
             const data = new Uint8Array(L.identity.size), result = new DataView(data.buffer);
             result.setBigUint64(8, services.work.epoch, true); data.set(identity.account, 16); data.set(identity.device, 32);
             data.set(identity.instance, 48); data.set(identity.session, 64); result.setUint32(96, 2, true);
+            if (output.length >= L.identity.size) encoder.encodeInto(identity.displayName, data.subarray(L.identity.offsets.display_name));
             publishRecord(memory, output, L.identity, data); return 0;
         }),
         pb_presence: (pointer, capacity, stride, count) => call(() => {
             const memory = services.memory(), header = admit(memory, count, 1, 4, 4, 1);
             const output = recordArray(memory, pointer, capacity, stride, L.participant, false, 64); disjoint([header, output]);
+            const records = view(memory, output);
+            for (let i = 0; i < capacity; i++) records.setUint32(i * stride + L.participant.offsets.written, 0, true);
             const participants = session().participants; view(memory, header).setUint32(0, participants.length, true);
             if (capacity < participants.length) return -11;
             participants.forEach((participant, i) => {
-                const data = new Uint8Array(L.participant.size); data.set(participant, 8);
-                publishRecord(memory, record(memory, pointer + i * stride, L.participant), L.participant, data);
+                const slot = record(memory, pointer + i * stride, L.participant), data = new Uint8Array(L.participant.size);
+                data.set(participant.source, L.participant.offsets.account_id);
+                if (slot.length >= L.participant.size) encoder.encodeInto(participant.displayName, data.subarray(L.participant.offsets.display_name));
+                publishRecord(memory, slot, L.participant, data);
             }); return 0;
         }),
         pb_quit_on_last_window: intent => {

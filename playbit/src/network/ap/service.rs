@@ -13,8 +13,14 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 pub const PROTOCOL: u8 = 1;
 pub const INCOMPATIBLE_FLAGS: u8 = 4;
 /// Exact optional AP support preconditions. Baseline algorithm names are separate.
-pub const OPTIONAL_FEATURES: &[&str] =
-    &["bloblog-append-v1", SHARED_SESSION, SESSION_PARTICIPANTS_ACL];
+pub const OPTIONAL_FEATURES: &[&str] = &[
+    "bloblog-append-v1",
+    SHARED_SESSION,
+    SESSION_PARTICIPANTS_ACL,
+    WORLD_REPLICA,
+    super::channel::DISPLAY_NAMES_FEATURE,
+];
+pub const WORLD_REPLICA: &str = "world-replica.v1";
 const SHARED_SESSION: &str = "shared-session.v1";
 const SESSION_PARTICIPANTS_ACL: &str = "session-participants-acl.v1";
 mod admission;
@@ -55,6 +61,20 @@ impl ServiceFailure {
     pub fn denial(&self) -> Option<&ServiceDenial> {
         self.denial.as_ref()
     }
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn is_capacity_exhausted(&self) -> bool {
+        self.code == "operation_failed"
+            && self.denial.is_none()
+            && self.message == "AP request capacity exhausted"
+    }
+    // Released credentialed APs report this atomic KV rejection under operation_failed.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn is_kv_append_conflict(&self) -> bool {
+        self.code == "operation_failed"
+            && self.denial.is_none()
+            && self.message
+                == "unauthorized replica entry: access denied: append cannot replace or delete"
+    }
     #[cfg(any(feature = "connected-engine", test))]
     pub(crate) fn is_missing_build_identity(&self) -> bool {
         self.code == "operation_failed"
@@ -74,6 +94,7 @@ impl std::error::Error for ServiceFailure {}
 
 pub(super) fn required_features(request: &ServiceRequest) -> &'static [&'static str] {
     match request {
+        ServiceRequest::WorldReplica { .. } => &[WORLD_REPLICA],
         ServiceRequest::PublishBloblog { .. } | ServiceRequest::GetBloblog { .. } => {
             &["bloblog-append-v1"]
         }
@@ -120,7 +141,13 @@ pub fn response(frame: Frame, operation_id: &str) -> Result<ServiceResponse> {
     if frame.flags != PROTOCOL {
         return Err(IncompatibleProtocol.into());
     }
-    let response: ServiceResponse = serde_json::from_slice(&frame.body)?;
+    validated_response(serde_json::from_slice(&frame.body)?, operation_id)
+}
+
+pub(crate) fn validated_response(
+    response: ServiceResponse,
+    operation_id: &str,
+) -> Result<ServiceResponse> {
     if response.operation_id != operation_id {
         return Err("AP response operation identity differs".into());
     }

@@ -2,6 +2,7 @@
 use playbit_api::abi::syscall::Error;
 use serde::{Deserialize, Serialize};
 pub const SESSION: u8 = 1;
+pub const DISPLAY_NAMES_FEATURE: &str = "session.display-names.v1";
 pub const MAX_NAME_BYTES: usize = 223;
 pub const MAX_CHANNELS: usize = 16;
 pub const MAX_MESSAGE_BYTES: usize = 32 * 1024;
@@ -10,6 +11,9 @@ pub const ACCOUNT_QUEUE_BYTES: usize = 256 * 1024;
 pub const MAX_PARTICIPANTS: usize = 64;
 pub const SOURCE_BYTES: usize = 80;
 pub const PROOF_BYTES: usize = 64;
+pub use playbit_api::abi::environment::DISPLAY_NAME_BYTES;
+// Even escaping each display-name byte as two JSON bytes fits a 64-entry roster.
+pub const MAX_CONTROL_BYTES: usize = 64 * 1024;
 const _: () = assert!(32 + MAX_NAME_BYTES == u8::MAX as usize);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -41,10 +45,53 @@ impl Participant {
         Ok(source)
     }
 }
+/// Account label attached to a transport-authenticated roster entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "app-host", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+#[serde(deny_unknown_fields)]
+pub struct PresentParticipant {
+    #[serde(flatten)]
+    pub participant: Participant,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display_name: String,
+}
+
+/// Empty denotes an unavailable display name or a live clear.
+pub fn display_name(bytes: &[u8]) -> Result<&str, &'static str> {
+    if bytes.len() > DISPLAY_NAME_BYTES {
+        return Err("display name too long");
+    }
+    let name = std::str::from_utf8(bytes).map_err(|_| "invalid display name UTF-8")?;
+    if !name.is_empty() {
+        crate::store::account::validate_display_name(name).map_err(|_| "invalid display name")?;
+    }
+    Ok(name)
+}
+
+/// The fixed-width initial field distinguishes an empty named roster from an ID-only join.
+pub fn subscription_fields(body: &[u8]) -> Result<(&[u8], Option<&str>), &'static str> {
+    let (app, field) = match body.len() {
+        0 | 32 => return Ok((body, None)),
+        DISPLAY_NAME_BYTES => (&[][..], body),
+        length if length == 32 + DISPLAY_NAME_BYTES => body.split_at(32),
+        _ => return Err("invalid membership subscription payload"),
+    };
+    Ok((app, Some(display_name_field(field)?)))
+}
+
+/// A named join or an in-place upgrade carries the same fixed-width field.
+pub fn display_name_field(field: &[u8]) -> Result<&str, &'static str> {
+    if field.len() != DISPLAY_NAME_BYTES {
+        return Err("invalid display name field width");
+    }
+    let end = field.iter().rposition(|&byte| byte != 0).map_or(0, |index| index + 1);
+    display_name(&field[..end])
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Control {
-    Presence { participants: Vec<Participant> },
+    Presence { participants: Vec<PresentParticipant> },
     UpdateAvailable,
 }
 
@@ -121,13 +168,13 @@ pub fn incoming<'a>(
     if kind == 200 && source.is_empty() && body == (-9i32).to_le_bytes() {
         return Ok(Incoming::Overflow);
     }
-    if kind != 3 || body.len() > MAX_MESSAGE_BYTES + 44 {
+    if kind != 3 || body.len() > MAX_CONTROL_BYTES {
         return Err("invalid channel publication");
     }
     if expected.len() > 32 {
         let sender = Participant::decode(source)?;
-        if body.len() < 44 {
-            return Err("truncated channel message");
+        if !(44..=MAX_MESSAGE_BYTES + 44).contains(&body.len()) {
+            return Err("invalid channel message length");
         }
         return Ok(Incoming::Message {
             sender,
@@ -144,7 +191,8 @@ pub fn incoming<'a>(
             return Err("presence capacity exceeded");
         }
         for participant in participants {
-            participant.encode()?;
+            participant.participant.encode()?;
+            display_name(participant.display_name.as_bytes())?;
         }
     }
     Ok(Incoming::Control(control))
@@ -161,7 +209,7 @@ pub fn validate_destination(destination: &[u8]) -> Result<&[u8; 32], &'static st
 #[cfg_attr(feature = "app-host", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
-    Presence { participants: Vec<Participant> },
+    Presence { participants: Vec<PresentParticipant> },
     Message { channel: String, sender: Participant, message_id: String, data: Vec<u8> },
 }
 
@@ -175,29 +223,30 @@ pub(crate) fn validate_events(
     let mut bytes = 0;
     for event in events {
         bytes += match event {
-            Event::Message { channel, data, .. } => data.len() + channel.len() + SOURCE_BYTES + 16,
-            Event::Presence { participants } => participants.len() * SOURCE_BYTES,
-        };
-        if bytes > SESSION_QUEUE_BYTES {
-            return Err("channel event batch exceeds queue budget".into());
-        }
-        match event {
             Event::Presence { participants } => {
                 if participants.len() > MAX_PARTICIPANTS {
                     return Err("too many participants".into());
                 }
-                for p in participants {
-                    p.encode()?;
+                let mut size = 0;
+                for member in participants {
+                    member.participant.encode()?;
+                    display_name(member.display_name.as_bytes())?;
+                    size += SOURCE_BYTES + member.display_name.len();
                 }
+                size
             }
             Event::Message { channel: name, sender, message_id, data } => {
-                destination(&[0; 32], name)?;
-                sender.encode()?;
-                crate::store::Id::parse(message_id)?;
                 if data.len() > MAX_MESSAGE_BYTES {
                     return Err("channel message too large".into());
                 }
+                destination(&[0; 32], name)?;
+                sender.encode()?;
+                crate::store::Id::parse(message_id)?;
+                data.len() + name.len() + SOURCE_BYTES + 16
             }
+        };
+        if bytes > SESSION_QUEUE_BYTES {
+            return Err("channel event batch exceeds queue budget".into());
         }
     }
     Ok(())

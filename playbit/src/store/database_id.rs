@@ -15,6 +15,12 @@ pub enum DatabaseId {
 impl DatabaseId {
     pub const WIRE_BYTES: usize = 16;
 
+    /// Public Merkle parameters for the hosted participant view. These never
+    /// authenticate requests or encrypt any World or peer-transfer contents.
+    pub fn world_projection_key(volume: super::Id) -> [u8; 32] {
+        blake3::derive_key("app.playbit.world-replica.v1", volume.as_bytes())
+    }
+
     pub fn hash_key(self, volume_key: &[u8; 32], volume: super::Id) -> [u8; 32] {
         let mut hash = blake3::Hasher::new_keyed(volume_key);
         hash.update(b"app.playbit.database.v1\0");

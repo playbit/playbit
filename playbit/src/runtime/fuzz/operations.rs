@@ -176,6 +176,7 @@ fn context() -> GuestContext {
         app_name: "Test app".into(),
         app_build: None,
         identity: Identity {
+            display_name: String::new(),
             account_id: [1; 16],
             is_service: false,
             device_id: [2; 16],

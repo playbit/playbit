@@ -56,10 +56,10 @@ impl<P> Capabilities<P> {
         }
     }
     pub fn add_volume(&mut self, volume: AvailableVolume) -> HostResult<Handle> {
-        self.table.allocate(VOLUME, Rights(volume.rights.0), Object::Volume(Rc::new(volume)))
+        self.table.allocate(VOLUME, volume.data_rights(), Object::Volume(Rc::new(volume)))
     }
     pub fn replace_volume(&mut self, handle: Handle, volume: AvailableVolume) -> HostResult<()> {
-        self.table.update_rights(handle, VOLUME, Rights(volume.rights.0))?;
+        self.table.update_rights(handle, VOLUME, volume.data_rights())?;
         *self.table.get_mut(handle, VOLUME, Rights::NONE)? = Object::Volume(Rc::new(volume));
         Ok(())
     }

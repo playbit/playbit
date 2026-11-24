@@ -11,7 +11,6 @@ impl Shell {
         activate: controls::Activate,
         cx: &mut Context<Self>,
     ) -> Entity<controls::Control> {
-        self.rendered_host_controls.push(id);
         let theme = playbit_api::ui::Theme::light();
         let properties = controls::Properties {
             kind: controls::Kind::Button(playbit_api::ui::ButtonStyle::Default),
@@ -19,6 +18,17 @@ impl Shell {
             disabled,
             theme: &theme,
         };
+        self.host_control(id, properties, activate, cx)
+    }
+
+    pub(super) fn host_control(
+        &mut self,
+        id: &'static str,
+        properties: controls::Properties<'_>,
+        activate: controls::Activate,
+        cx: &mut Context<Self>,
+    ) -> Entity<controls::Control> {
+        self.rendered_host_controls.push(id);
         let control = self.host_controls.entry(id).or_insert_with(|| {
             cx.new(|cx| controls::Control::new(0, properties, activate.clone(), cx))
         });

@@ -44,6 +44,20 @@ encrypted replication. Authorized peers and recovered devices import that same
 backing; they never run its initializer. World stays a distinct address and is
 not created merely to share Shared data.
 
+On native clients, once AP admits the original Shared invite, it can also attach
+the publisher’s existing World. AP verifies the session, app, build and World
+identity, then checks the signed-in account’s World catalog access. Both players
+use the same published databases. Each read or write uses the effective
+permissions of the target entry, including a writable entry in a read-only
+World. Shared remains usable when World is private or has yet to be published.
+
+The guest stores its authorized World databases under a separate public Merkle
+hash context. AP translates between that context and the publisher’s existing
+database hashes. The invitation and publisher database and File encryption
+keys stay on their existing paths. A database projection alone cannot open
+encrypted File contents. A reconnect checks World admission again before
+publishing pending changes.
+
 The browser supports `session-volume.v1` for apps that require only Shared.
 A local example profile gets its own session. A Shared invitation opens its
 existing replica with the supplied capability. Both paths use the same signed

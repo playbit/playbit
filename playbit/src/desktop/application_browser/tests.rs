@@ -63,6 +63,239 @@ fn draw(visual: &mut gpui::VisualTestContext) {
 }
 
 #[gpui::test]
+fn loaded_invitation_row_opens_consent_and_becomes_a_retained_session(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (host, window, requests) = scope(cx);
+    let (responses, receive) = async_channel::bounded(1);
+    host.update(cx, |host, cx| Shell::watch_responses(host.send.clone(), receive, cx));
+    let session = host.update(cx, |host, cx| {
+        let mut session = host.applications.catalog[0].clone();
+        session.id = crate::identifier::encode(&[12; 32]);
+        session.app.app_id = "puzzle".into();
+        host.invitation = Some(crate::store::InvitationPreview {
+            session: session.id.clone(),
+            paused: false,
+            retained: false,
+            received: Some(crate::store::ReceivedInvitation {
+                session: session.clone(),
+                root_name: "Daily puzzle".into(),
+            }),
+        });
+        let next = crate::store::SessionReference::new([13; crate::store::SEED_BYTES])
+            .expect("valid link");
+        host.preview_invitation_link(next.clone()).expect("admit newer link");
+        let admission = host.join_preview.expect("newer link has an outstanding preview");
+        host.dismiss_invitation(cx);
+        assert_eq!(
+            host.invitation_link.as_ref().map(|link| link.internal_id()),
+            Some(next.internal_id())
+        );
+        assert_eq!(host.join_preview, Some(admission));
+        assert!(host.invitation.is_none());
+        assert_eq!(host.applications.selected.as_ref(), Some(&session.app));
+        session
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, _| window.activate_window());
+    draw(&mut visual);
+    let position = visual.update(|window, _| {
+        let node = window
+            .accessibility_nodes_for_test()
+            .find(|(_, node)| node.label() == Some("Daily puzzle · Invitation"))
+            .expect("loaded session listed under its app")
+            .1;
+        let bounds = node.bounds().expect("visible invitation");
+        gpui::point(
+            px(((bounds.x0 + bounds.x1) / 2.) as f32),
+            px(((bounds.y0 + bounds.y1) / 2.) as f32),
+        )
+    });
+    while requests.try_recv().is_ok() {}
+    visual.simulate_click(position, Default::default());
+    draw(&mut visual);
+    let Message::Request(first) = requests.try_recv().expect("resume request") else {
+        panic!("invitation action")
+    };
+    assert!(
+        matches!(&first.request, Request::ResumeInvitation { session: id } if id == &session.id)
+    );
+    assert!(requests.is_empty(), "selecting the row only resumes invitation review");
+    host.update(&mut visual, |host, cx| {
+        assert_eq!(host.invitation.as_ref().map(|preview| &preview.session), Some(&session.id));
+        host.dismiss_invitation(cx);
+        assert!(host.select_application_target(Target::Invitation(session.id.clone()), cx));
+    });
+    let Message::Request(second) = requests.try_recv().expect("second resume request") else {
+        panic!("invitation action")
+    };
+    let mut stale = WorkerResponse::from_reply(Ok(Reply::InvitationStatus {
+        invitation_status: Some(InvitationStatus {
+            session: session.id.clone(),
+            state: InvitationState::Ready { build_id: session.resolved_build_id.clone() },
+        }),
+    }));
+    stale.credit = first.credit;
+    responses.try_send(stale).expect("old result");
+    draw(&mut visual);
+    host.read_with(&visual, |host, _| {
+        assert!(host.invitation.as_ref().expect("new review").paused);
+        assert_eq!(host.join_status, InvitationState::Checking);
+    });
+    responses.try_send(worker::retired_response(second)).expect("engine restart");
+    draw(&mut visual);
+    host.update(&mut visual, |host, cx| {
+        assert!(host.invitation.is_none());
+        assert!(host.invitation_resume.is_none());
+        assert_eq!(host.applications.selected.as_ref(), Some(&session.app));
+        let mut catalog = host.applications.catalog.clone();
+        catalog.push(session.clone());
+        host.apply_application_catalog(catalog, cx);
+        let app = host
+            .applications
+            .apps
+            .iter()
+            .find(|app| app.identity == session.app)
+            .expect("retained app");
+        assert_eq!(app.sessions, [session.id]);
+        assert!(app.invitations.is_empty());
+    });
+}
+
+#[gpui::test]
+fn pending_only_app_removal_targets_its_row_and_retires_an_open_review(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (host, window, requests) = scope(cx);
+    let (responses, receive) = async_channel::bounded(1);
+    let pending = host.update(cx, |host, cx| {
+        Shell::watch_responses(host.send.clone(), receive, cx);
+        let mut session = host.applications.catalog[0].clone();
+        session.id = crate::identifier::encode(&[12; 32]);
+        session.app.app_id = "puzzle".into();
+        host.saved_invitations = vec![crate::store::InvitationPreview {
+            session: session.id.clone(),
+            paused: true,
+            retained: false,
+            received: Some(crate::store::ReceivedInvitation {
+                session: session.clone(),
+                root_name: "Daily puzzle".into(),
+            }),
+        }];
+        host.rebuild_application_list();
+        cx.notify();
+        session
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.update(|window, _| window.activate_window());
+    draw(&mut visual);
+    let point = visual.update(|window, _| {
+        let bounds = window
+            .accessibility_nodes_for_test()
+            .find(|(_, node)| node.label() == Some("puzzle"))
+            .expect("app row for the saved invitation")
+            .1
+            .bounds()
+            .expect("visible row");
+        gpui::point(
+            px(((bounds.x0 + bounds.x1) / 2.) as f32),
+            px(((bounds.y0 + bounds.y1) / 2.) as f32),
+        )
+    });
+    while requests.try_recv().is_ok() {}
+    visual.simulate_mouse_down(point, gpui::MouseButton::Right, Default::default());
+    visual.simulate_mouse_up(point, gpui::MouseButton::Right, Default::default());
+    let Message::Request(queued) = requests.try_recv().expect("inspect the clicked app") else {
+        panic!("expected a removal impact request");
+    };
+    assert!(matches!(&queued.request, Request::AppRemovalImpact { account, app }
+        if *account == pending.creator && app == &pending.app));
+    host.update(&mut visual, |host, cx| {
+        assert!(host.select_application_target(Target::Invitation(pending.id.clone()), cx));
+        assert!(host.session_dialog_open(cx));
+    });
+    // A removal on another device refreshes the saved previews before the
+    // clicked row's inspection reply arrives.
+    let mut refreshed = WorkerResponse::from_reply(Ok(Reply::AppRemoved(
+        crate::store::AppRemovalResult::Removed { erased_volumes: vec![], cleanup_error: None },
+    )));
+    refreshed.saved_invitations = Some(Vec::new());
+    responses.try_send(refreshed).expect("account refresh");
+    draw(&mut visual);
+    let mut late =
+        WorkerResponse::from_reply(Ok(Reply::AppRemovalImpact { impact: Default::default() }));
+    late.credit = queued.credit;
+    responses.try_send(late).expect("late inspection");
+    draw(&mut visual);
+    host.read_with(&visual, |host, cx| {
+        assert!(!host.session_dialog_open(cx));
+        assert!(host.invitation.is_none());
+        assert!(host.saved_invitations.is_empty());
+        assert!(!host.applications.apps.iter().any(|row| row.identity == pending.app));
+        assert!(host.applications.removal.is_none());
+    });
+}
+
+#[gpui::test]
+fn ready_saved_invitation_reviews_folder_access_before_joining(cx: &mut gpui::TestAppContext) {
+    let (host, _, requests) = scope(cx);
+    let (responses, receive) = async_channel::bounded(1);
+    let session = host.update(cx, |host, cx| {
+        Shell::watch_responses(host.send.clone(), receive, cx);
+        let mut session = host.applications.catalog[0].clone();
+        session.id = crate::identifier::encode(&[12; 32]);
+        host.saved_invitations = vec![crate::store::InvitationPreview {
+            session: session.id.clone(),
+            retained: false,
+            paused: true,
+            received: Some(crate::store::ReceivedInvitation {
+                session: session.clone(),
+                root_name: "Daily puzzle".into(),
+            }),
+        }];
+        host.rebuild_application_list();
+        while requests.try_recv().is_ok() {}
+        assert!(host.select_application_target(Target::Invitation(session.id.clone()), cx));
+        session
+    });
+    let Message::Request(resume) = requests.try_recv().expect("resume invitation") else {
+        panic!("expected an invitation request")
+    };
+    assert!(
+        matches!(&resume.request, Request::ResumeInvitation { session: id } if id == &session.id)
+    );
+    let mut ready = WorkerResponse::from_reply(Ok(Reply::InvitationStatus {
+        invitation_status: Some(InvitationStatus {
+            session: session.id.clone(),
+            state: InvitationState::Ready { build_id: session.resolved_build_id.clone() },
+        }),
+    }));
+    ready.credit = resume.credit;
+    responses.try_send(ready).expect("deliver ready invitation");
+    cx.run_until_parked();
+    host.update(cx, |host, cx| {
+        let form = host.new_session.as_ref().expect("folder access review").read(cx);
+        assert_eq!(form.reviewed_invitation(), Some(session.id.as_str()));
+        while let Ok(message) = requests.try_recv() {
+            assert!(
+                !matches!(
+                    message,
+                    Message::Request(QueuedRequest { request: Request::StartJoin { .. }, .. })
+                ),
+                "reviewing the invitation does not start the transfer"
+            );
+        }
+        host.dismiss_launch_dialog(cx);
+        assert!(host.new_session.is_none());
+        assert_eq!(host.applications.selected.as_ref(), Some(&session.app));
+        assert!(host.saved_invitations.iter().any(|preview| preview.session == session.id));
+    });
+    assert!(matches!(requests.try_recv(), Ok(Message::Request(QueuedRequest {
+        request: Request::PauseInvitation { session: id }, ..
+    })) if id == session.id));
+}
+
+#[gpui::test]
 fn unavailable_shared_row_cannot_open_or_send_an_action(cx: &mut gpui::TestAppContext) {
     // A recipient's unavailable scope stays visible in the normal columns,
     // but neither a pointer click nor a stale selection may open it.
@@ -183,6 +416,102 @@ fn right_edges(visual: &mut gpui::VisualTestContext) -> [f64; 2] {
 }
 
 #[gpui::test]
+fn volumes_lists_apps_by_name_and_browses_session_data(cx: &mut gpui::TestAppContext) {
+    // Enter through the Volumes tab, traverse the combined sidebar and open a
+    // session volume using only the rendered controls. Enter must stay in the browser.
+    let (host, window, _requests) = scope(cx);
+    let shared = Id::from_bytes([3; 16]);
+    host.update(cx, |host, cx| {
+        let volume = host.scoped_volumes[0].clone();
+        host.volumes.push(crate::store::Volume {
+            name: "Archive".into(),
+            id: Id::from_bytes([2; 16]),
+            ..volume.clone()
+        });
+        host.scoped_volumes.push(crate::store::Volume {
+            name: "Shared".into(),
+            id: shared,
+            ..volume
+        });
+        host.applications.catalog[0].shared_volume = Some(shared);
+        let session = host.applications.catalog[0].clone();
+        host.apply_imported_app_catalog(vec![crate::store::ImportedApp {
+            app: AppIdentity { publisher: host.account.id, app_id: "alpha".into() },
+            build_id: session.resolved_build_id,
+            name: "Alpha".into(),
+        }]);
+        host.applications.slots_session = Some(session.id);
+        host.applications.session_slots = vec![AutomaticVolumeSlot {
+            role: Role::Session,
+            volume: shared,
+            overridden: false,
+            state: AutomaticVolumeState::Ready,
+        }];
+        cx.notify();
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.simulate_resize(gpui::size(px(1500.), px(600.)));
+    visual.update(|window, _| window.activate_window());
+    draw(&mut visual);
+    let click = |label: &str, visual: &mut gpui::VisualTestContext| {
+        let point = visual.update(|window, _| {
+            let bounds = window
+                .accessibility_nodes_for_test()
+                .find(|(_, node)| {
+                    node.role() == gpui::accesskit::Role::Button && node.label() == Some(label)
+                })
+                .expect("visible navigation button")
+                .1
+                .bounds()
+                .expect("button bounds");
+            gpui::point(
+                px(((bounds.x0 + bounds.x1) / 2.) as f32),
+                px(((bounds.y0 + bounds.y1) / 2.) as f32),
+            )
+        });
+        visual.simulate_click(point, Default::default());
+        draw(visual);
+    };
+    click("Volumes", &mut visual);
+    click("Archive", &mut visual);
+    for name in ["Alpha", "Keyboard"] {
+        visual.simulate_keystrokes("down");
+        draw(&mut visual);
+        host.read_with(&visual, |host, _| {
+            let app =
+                host.applications.apps.iter().find(|app| app.name == name).expect("fixture app");
+            assert_eq!(host.applications.selected.as_ref(), Some(&app.identity));
+            assert!(host.sidebar_volumes);
+        });
+    }
+    for key in ["right", "enter", "right"] {
+        visual.simulate_keystrokes(key);
+        draw(&mut visual);
+    }
+    host.read_with(&visual, |host, cx| {
+        assert!(host.sidebar_volumes && host.applications.scope_in_session);
+        let browser = host.browser.as_ref().expect("selected Shared volume").read(cx);
+        assert_eq!(browser.volume.id, shared);
+        assert_eq!(browser.shared_session(), Some([8; 32]));
+        assert!(host.pending_windows.is_empty() && host.log_watch.is_none());
+    });
+    visual.update(|window, _| {
+        assert!(window.accessibility_nodes_for_test().all(|(_, node)| !matches!(
+            node.label(),
+            Some("Open app" | "New instance" | "Share session" | "Log")
+        )));
+    });
+    click("Apps", &mut visual);
+    visual.update(|window, _| {
+        assert!(
+            window
+                .accessibility_nodes_for_test()
+                .any(|(_, node)| node.label() == Some("New instance"))
+        );
+    });
+}
+
+#[gpui::test]
 fn app_column_scrolls_with_data_and_sidebar_stays_fixed(cx: &mut gpui::TestAppContext) {
     let (host, window, _requests) = scope(cx);
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
@@ -223,7 +552,7 @@ fn app_column_scrolls_with_data_and_sidebar_stays_fixed(cx: &mut gpui::TestAppCo
 fn scoped_browser_fills_its_column_across_window_widths(cx: &mut gpui::TestAppContext) {
     // Exercise both embedding depths around their minimum total widths. The preview
     // and navigator must share the browser width even while the outer columns scroll.
-    let (host, window, _requests) = scope(cx);
+    let (host, window, requests) = scope(cx);
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     for session_scope in [false, true] {
         if session_scope {
@@ -244,7 +573,11 @@ fn scoped_browser_fills_its_column_across_window_widths(cx: &mut gpui::TestAppCo
                 ));
             });
         }
-        for width in [1400., 1280., 1250., 1040., 900., 1400.] {
+        let browser =
+            host.read_with(&visual, |host, _| host.browser.clone().expect("scope browser"));
+        let columns = browser
+            .update(&mut visual, |browser, cx| browser.fixture_selected_kv_store(&requests, cx));
+        for width in [1400., 1323., 1297., 1280., 1250., 1040., 900., 1400.] {
             visual.simulate_resize(gpui::size(px(width), px(600.)));
             draw(&mut visual);
             let upper = visual.debug_bounds("browser-upper").expect("browser navigator");
@@ -263,14 +596,19 @@ fn scoped_browser_fills_its_column_across_window_widths(cx: &mut gpui::TestAppCo
             assert_eq!(content.size.width, lower.size.width);
             assert_eq!(content.left(), lower.left());
             assert!((content.bottom() - lower.bottom()).abs() <= px(1.));
+            let metadata = visual.debug_bounds("browser-metadata").expect("store inspector");
+            let header = visual.debug_bounds("kv-header").expect("key-value table header");
+            let directory = columns.bounds_for_item(0).expect("root directory column");
+            assert_eq!(directory.bottom(), lower.top(), "directory at width {width}");
+            assert_eq!(metadata.bottom(), lower.top(), "inspector at width {width}");
+            assert_eq!(metadata.right(), upper.right(), "inspector at width {width}");
+            assert_eq!(header.right(), metadata.left(), "table header at width {width}");
         }
     }
 }
 
 #[gpui::test]
-fn instance_inspector_centers_stop_and_uses_available_metadata_width(
-    cx: &mut gpui::TestAppContext,
-) {
+fn session_and_instance_inspectors_share_the_log_and_align_metadata(cx: &mut gpui::TestAppContext) {
     // Check the actual header button and selectable metadata fields in the full shell.
     let (host, window, _requests) = scope(cx);
     host.update(cx, |host, cx| {
@@ -295,9 +633,49 @@ fn instance_inspector_centers_stop_and_uses_available_metadata_width(
             process: None,
             presentation: 1,
         }];
-        assert!(host.select_application_target(Target::Instance(instance), cx));
+        let sessions = host.applications.catalog.clone();
+        let id = sessions[0].id.clone();
+        let activity = crate::store::SessionActivity {
+            started: Some(1_793_294_220),
+            participants: vec![crate::store::SeenParticipant {
+                account: Id::from_bytes([13; 16]),
+                name: "Robin Fernández".into(),
+                last_seen: 1_793_294_300,
+            }],
+        };
+        host.applications.set_activity(
+            BTreeMap::from([(id, activity)]),
+            &sessions,
+            host.account.id,
+            Some("Anne"),
+        );
+        host.logs.update(cx, |logs, cx| {
+            logs.set(
+                &sessions[0].id,
+                &[crate::ui::app_control::LogEntry::notice("Guest output".into())],
+                cx,
+            )
+        });
     });
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.simulate_resize(gpui::size(px(1041.), px(480.)));
+    draw(&mut visual);
+    let log = visual.debug_bounds("application-log-pane").expect("session log");
+    assert_eq!(log.top(), px(286.));
+    assert_eq!(log.right(), px(1041.));
+    assert!((log.left() - px(240.)).abs() <= px(1.));
+    visual.update(|window, _| {
+        let nodes: Vec<_> = window.accessibility_nodes_for_test().map(|(_, n)| n).collect();
+        for text in ["Participant", "Last seen", "Robin Fernández", "Anne (You)", "Guest output"] {
+            assert!(nodes.iter().any(|n| n.value() == Some(text)), "session shows {text}");
+        }
+        assert!(nodes.iter().any(|n| n.label() == Some("Share")));
+    });
+    host.update(&mut visual, |host, cx| {
+        assert!(host.select_application_target(Target::Instance(Id::from_bytes([10; 16])), cx));
+    });
+    draw(&mut visual);
+    assert_eq!(visual.debug_bounds("application-log-pane"), Some(log));
     for width in [1024., 1200.] {
         visual.simulate_resize(gpui::size(px(width), px(600.)));
         draw(&mut visual);
@@ -324,7 +702,7 @@ fn instance_inspector_centers_stop_and_uses_available_metadata_width(
                 .right()
                 .to_f64();
             assert!((stop.x1 - (right - 10.)).abs() <= 1., "Stop inset: {stop:?}");
-            for key in ["application-id", "application-root-id", "application-state"] {
+            for key in ["application-id", "application-started"] {
                 let editor = &host.read(cx).applications.identifiers[key];
                 let id = text_editor::accessibility_text_ids(editor.entity_id()).0;
                 let field = window
@@ -388,7 +766,7 @@ fn new_session_retires_application_navigation_and_keeps_the_catalog(cx: &mut gpu
             assert!(
                 window
                     .accessibility_nodes_for_test()
-                    .any(|(_, node)| { node.label() == Some("Try a TODO app") }),
+                    .any(|(_, node)| { node.label() == Some("Make an app") }),
                 "New session must show templates after selecting an app"
             );
         });
@@ -406,7 +784,7 @@ fn new_session_retires_application_navigation_and_keeps_the_catalog(cx: &mut gpu
             assert!(
                 window
                     .accessibility_nodes_for_test()
-                    .any(|(_, node)| { node.label() == Some("Try a TODO app") }),
+                    .any(|(_, node)| { node.label() == Some("Make an app") }),
                 "catalog refresh must preserve template navigation"
             );
         });
@@ -429,7 +807,7 @@ fn vertical_column_rails_scroll_their_own_viewports(cx: &mut gpui::TestAppContex
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     // Keep all three columns visible horizontally, with overflow even in the
     // two-row session inspector. No running process or live account is needed.
-    visual.simulate_resize(gpui::size(px(1200.), px(80.)));
+    visual.simulate_resize(gpui::size(px(1200.), px(130.)));
     draw(&mut visual);
     let handles = host.read_with(&visual, |host, cx| {
         [

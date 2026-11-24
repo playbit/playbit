@@ -58,7 +58,9 @@ pub(super) struct Drafts {
     account: Id,
     profile: Option<PathBuf>,
     ready: bool,
-    loading: bool,
+    loading: Option<std::rc::Rc<()>>,
+    erasure: Option<async_channel::Receiver<Vec<Id>>>,
+    reconcile_erasure: Option<crate::package::AppIdentity>,
     records: BTreeMap<Id, Record>,
     pending: BTreeMap<Id, u64>,
     active: Option<Write>,
@@ -74,7 +76,9 @@ impl Drafts {
             account,
             ready: profile.is_none(),
             profile,
-            loading: false,
+            loading: None,
+            erasure: None,
+            reconcile_erasure: None,
             records: BTreeMap::new(),
             pending: BTreeMap::new(),
             active: None,
@@ -85,7 +89,10 @@ impl Drafts {
     }
 
     fn busy(&self) -> bool {
-        self.active.is_some() || self.failed.is_some() || !self.pending.is_empty()
+        self.erasure.is_some()
+            || self.active.is_some()
+            || self.failed.is_some()
+            || !self.pending.is_empty()
     }
 
     fn retained_bytes(&self) -> usize {
@@ -104,7 +111,7 @@ impl Drafts {
     }
 
     fn upsert(&mut self, mut draft: BrowserDraft) -> Result<Id, String> {
-        if !self.ready {
+        if !self.ready || self.erasure.is_some() {
             return Err("Local drafts have not finished loading. Your editor is unchanged.".into());
         }
         let old = self.records.get(&draft.id);
@@ -155,6 +162,9 @@ impl Drafts {
     }
 
     fn remove(&mut self, id: Id) -> bool {
+        if self.erasure.is_some() || !self.ready {
+            return false;
+        }
         let Some(record) = self.records.get_mut(&id).filter(|record| record.draft.is_some()) else {
             return false;
         };
@@ -265,7 +275,7 @@ pub(super) fn configure(account: Id, profile: PathBuf, cx: &mut App) -> Result<(
         if state.account == account && state.profile.as_ref() == Some(&profile) {
             return Ok(());
         }
-        if state.loading || state.busy() {
+        if state.loading.is_some() || state.busy() {
             return Err(
                 "Local drafts are still being saved. Keep this profile open and retry.".into()
             );
@@ -297,7 +307,8 @@ pub(super) fn account(cx: &App) -> Option<Id> {
 }
 
 pub(super) fn ready_for(account: Id, cx: &App) -> bool {
-    cx.try_global::<Drafts>().is_some_and(|state| state.account == account && state.ready)
+    cx.try_global::<Drafts>()
+        .is_some_and(|state| state.account == account && state.ready && state.erasure.is_none())
 }
 
 pub(super) fn get(id: Id, cx: &App) -> Option<Arc<BrowserDraft>> {
@@ -323,6 +334,69 @@ pub(super) fn snapshots(cx: &App) -> Vec<BrowserDraftSummary> {
 
 pub(super) fn snapshots_for(account: Id, cx: &App) -> Vec<BrowserDraftSummary> {
     if ready_for(account, cx) { snapshots(cx) } else { Vec::new() }
+}
+
+pub(super) fn can_erase(account: Id, cx: &App) -> bool {
+    cx.try_global::<Drafts>().is_none_or(|state| {
+        state.account != account
+            || state.ready && !state.busy() && !super::draft_publications::any_pending(cx)
+    })
+}
+
+/// The admission holds this sender through worker completion, independently of the window.
+pub(super) struct ErasureHold {
+    pub(super) receipt: async_channel::Sender<Vec<Id>>,
+    profile: Option<PathBuf>,
+    account: Id,
+}
+
+impl ErasureHold {
+    pub(super) fn same_profile(&self, cx: &App) -> bool {
+        cx.try_global::<Drafts>()
+            .is_some_and(|state| self.account == state.account && self.profile == state.profile)
+    }
+}
+
+pub(super) fn hold_for_erasure(
+    account: Id,
+    app: crate::package::AppIdentity,
+    cx: &mut App,
+) -> Option<ErasureHold> {
+    if self::account(cx) != Some(account) {
+        return None;
+    }
+    assert!(can_erase(account, cx), "checked erasure requires durable editor drafts");
+    let (receipt, receive) = async_channel::bounded::<Vec<Id>>(1);
+    let state = cx.global_mut::<Drafts>();
+    state.erasure = Some(receive.clone());
+    let profile = state.profile.clone();
+    cx.spawn(async move |cx| {
+        let erased = receive.recv().await.ok();
+        let _ = cx.update(|cx| {
+            if !cx
+                .try_global::<Drafts>()
+                .and_then(|state| state.erasure.as_ref())
+                .is_some_and(|current| current.same_channel(&receive))
+            {
+                return;
+            }
+            let state = cx.global_mut::<Drafts>();
+            state.erasure = None;
+            if let Some(erased) = erased {
+                state.records.retain(|_, record| !erased.contains(&record.target.volume));
+                pump(cx);
+            } else if state.profile.is_some() {
+                // All cached edits were durable before admission, and the editors
+                // stayed read-only. Recover the surviving drafts from the profile.
+                state.records.clear();
+                state.ready = false;
+                state.reconcile_erasure = Some(app);
+                load(cx);
+            }
+        });
+    })
+    .detach();
+    Some(ErasureHold { receipt, profile, account })
 }
 
 pub(super) fn pending(cx: &App) -> bool {
@@ -403,7 +477,26 @@ fn invoke(profile: &std::path::Path, account: Id, operation: Operation) -> Resul
     }
 }
 
-fn read_all(profile: &std::path::Path, account: Id) -> Result<BTreeMap<Id, Record>, String> {
+fn read_all(
+    profile: &std::path::Path,
+    account: Id,
+    after_erasure: Option<&crate::package::AppIdentity>,
+) -> Result<BTreeMap<Id, Record>, String> {
+    if let Some(app) = after_erasure {
+        // Concurrent draft reads could overtake a removal whose IPC connection
+        // retired. Inspect this app through the same serial preparation lane first.
+        let request = crate::engine::Request::AppRemovalImpact { account, app: app.clone() };
+        match crate::engine::ipc::call_archive(profile, &request) {
+            Ok(_) => {}
+            Err(error)
+                if error.downcast_ref::<crate::engine::ipc::RejectedReply>().is_some_and(
+                    |rejected| {
+                        rejected.to_string() == crate::store::Error::NotFound("app").to_string()
+                    },
+                ) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
     let Outcome::List(summaries) = invoke(profile, account, Operation::List)? else {
         return Err("The local draft list reply is invalid.".into());
     };
@@ -442,23 +535,38 @@ fn read_all(profile: &std::path::Path, account: Id) -> Result<BTreeMap<Id, Recor
     Ok(records)
 }
 
+pub(super) fn retry_erasure_reload(cx: &mut App) {
+    if cx.try_global::<Drafts>().is_some_and(|state| state.reconcile_erasure.is_some()) {
+        load(cx);
+    }
+}
+
 fn load(cx: &mut App) {
     let state = cx.global_mut::<Drafts>();
-    if state.loading || state.ready {
+    if state.loading.is_some() || state.ready || state.erasure.is_some() {
         return;
     }
     let Some(profile) = state.profile.clone() else { return };
     let account = state.account;
-    state.loading = true;
-    let task = cx.background_executor().spawn(async move { read_all(&profile, account) });
+    let loading = std::rc::Rc::new(());
+    state.loading = Some(loading.clone());
+    let after_erasure = state.reconcile_erasure.clone();
+    let task = cx
+        .background_executor()
+        .spawn(async move { read_all(&profile, account, after_erasure.as_ref()) });
     cx.spawn(async move |cx| {
         let result = task.await;
         let _ = cx.update(|cx| {
             let state = cx.global_mut::<Drafts>();
-            state.loading = false;
+            if !state.loading.as_ref().is_some_and(|current| std::rc::Rc::ptr_eq(current, &loading))
+            {
+                return;
+            }
+            state.loading = None;
             match result {
                 Ok(records) => {
                     state.records = records;
+                    state.reconcile_erasure = None;
                     state.ready = true;
                 }
                 Err(error) => report(&error, cx),
@@ -538,7 +646,12 @@ fn readback(write: &Write, draft: Option<Box<BrowserDraft>>) -> Result<Completio
 
 fn pump(cx: &mut App) {
     let state = cx.global_mut::<Drafts>();
-    if !state.ready || state.paused || state.active.is_some() || state.profile.is_none() {
+    if !state.ready
+        || state.erasure.is_some()
+        || state.paused
+        || state.active.is_some()
+        || state.profile.is_none()
+    {
         return;
     }
     let recovering = state.failed.is_some();
@@ -663,6 +776,109 @@ mod tests {
         state.acknowledge(&write, Some(1), true);
         let first = (**state.records[&first.id].draft.as_ref().unwrap()).clone();
         (state, first)
+    }
+
+    #[gpui::test]
+    fn checked_erasure_waits_for_edits_and_retires_only_committed_volumes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (hold, local_id, kept_id) = cx.update(|cx| {
+            let (mut state, saved) = loaded();
+            let owner = state.account;
+            let mut kept = draft(2, "unfinished edit on another volume");
+            kept.volume = Id::from_bytes([2; 16]);
+            state.upsert(kept.clone()).unwrap();
+            cx.set_global(state);
+            assert!(!can_erase(owner, cx), "unsaved work must finish before erasing");
+            let state = cx.global_mut::<Drafts>();
+            let write = state.next_write().unwrap().unwrap();
+            state.acknowledge(&write, Some(1), true);
+            let app = crate::package::AppIdentity { publisher: owner, app_id: "list".into() };
+            let hold = hold_for_erasure(owner, app, cx).unwrap();
+            assert!(!ready_for(owner, cx), "the editors are read-only while committing erasure");
+            assert!(upsert(draft(1, "late edit"), cx).is_err());
+            hold.receipt.try_send(vec![saved.volume]).unwrap();
+            (hold, saved.id, kept.id)
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(hold.same_profile(cx));
+            assert!(get(local_id, cx).is_none());
+            assert!(get(kept_id, cx).is_some());
+            assert_eq!(cx.global::<Drafts>().records.len(), 1);
+            assert!(cx.global::<Drafts>().pending.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn lost_erasure_receipt_reloads_after_ordered_not_found_and_reconnect(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::engine::{Request, ipc, reply::Reply};
+        let profile = tempfile::tempdir().unwrap();
+        let (mut state, erased) = loaded();
+        let owner = state.account;
+        let mut survivor = draft(2, "retained work");
+        survivor.volume = Id::from_bytes([2; 16]);
+        state.profile = Some(profile.path().into());
+        state.upsert(survivor.clone()).unwrap();
+        let write = state.next_write().unwrap().unwrap();
+        state.acknowledge(&write, Some(1), true);
+        survivor = (**state.records[&survivor.id].draft.as_ref().unwrap()).clone();
+        cx.update(|cx| {
+            cx.set_global(state);
+            let app = crate::package::AppIdentity { publisher: owner, app_id: "list".into() };
+            drop(hold_for_erasure(owner, app, cx));
+        });
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(!ready_for(owner, cx));
+            assert!(get(erased.id, cx).is_none());
+            assert!(
+                cx.global::<Drafts>().reconcile_erasure.is_some(),
+                "disconnection retains the required fence"
+            );
+        });
+        crate::paths::private_directory(profile.path(), "control").unwrap();
+        let socket = std::os::unix::net::UnixListener::bind(
+            profile.path().join(crate::paths::ENGINE_SOCKET),
+        )
+        .unwrap();
+        let saved = survivor.clone();
+        let server = std::thread::spawn(move || {
+            let replies = [
+                Reply::Error { error: crate::store::Error::NotFound("app").to_string() },
+                Reply::BrowserDrafts {
+                    account: owner,
+                    result: Outcome::List(vec![saved.summary()]),
+                },
+                Reply::BrowserDrafts {
+                    account: owner,
+                    result: Outcome::Draft { id: saved.id, draft: Some(Box::new(saved)) },
+                },
+            ];
+            for (index, reply) in replies.into_iter().enumerate() {
+                let (mut stream, _) = socket.accept().unwrap();
+                let bytes = ipc::read(&mut stream).unwrap();
+                let request =
+                    rkyv::api::low::from_bytes::<Request, rkyv::rancor::Error>(&bytes).unwrap();
+                assert!(matches!(
+                    (index, request),
+                    (0, Request::AppRemovalImpact { .. })
+                        | (1, Request::BrowserDrafts { operation: Operation::List, .. })
+                        | (2, Request::BrowserDrafts { operation: Operation::Get { .. }, .. })
+                ));
+                ipc::write(&mut stream, &ipc::codec::encode(&reply, 4096).unwrap()).unwrap();
+            }
+        });
+        cx.update(retry_erasure_reload);
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(ready_for(owner, cx));
+            assert!(get(erased.id, cx).is_none());
+            assert_eq!(get(survivor.id, cx).as_deref(), Some(&survivor));
+        });
+        server.join().unwrap();
     }
 
     #[gpui::test]

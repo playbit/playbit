@@ -25,6 +25,135 @@ pub(super) fn new_named_object(
     (address, object)
 }
 
+#[test]
+#[cfg(feature = "connected-engine")]
+fn blind_world_receipt_covers_only_the_locally_submitted_snapshot() {
+    use crate::store::{
+        DatabaseId,
+        volume_index::{EntryAddress, EntryKind},
+    };
+    let (_directory, store, volume, access) = setup();
+    let entry = store.create_database(&access, volume.id, "save", EntryKind::KvDb {}).unwrap();
+    let address = EntryAddress { volume: volume.id, entry: entry.id };
+    let database = DatabaseId::Entry(entry.id);
+    store.kv_put(&access, address, b"key", b"first").unwrap();
+    store
+        .publish_pending_world_backing(volume.id, database, |snapshot| {
+            // A local write can finish during network I/O. The receipt covers the
+            // frozen outgoing snapshot even when a newer committed value exists.
+            store.kv_put(&access, address, b"key", b"second")?;
+            assert_eq!(snapshot.begin_read()?.get(b"key")?.unwrap().as_ref(), b"first");
+            Ok(())
+        })
+        .unwrap();
+    store
+        .publish_pending_world_backing(volume.id, database, |snapshot| {
+            assert_eq!(snapshot.begin_read()?.get(b"key")?.unwrap().as_ref(), b"second");
+            Err(Error::System("reply lost".into()))
+        })
+        .unwrap_err();
+    let mut retried = false;
+    store
+        .publish_pending_world_backing(volume.id, database, |snapshot| {
+            retried = true;
+            assert_eq!(snapshot.begin_read()?.get(b"key")?.unwrap().as_ref(), b"second");
+            Ok(())
+        })
+        .unwrap();
+    assert!(retried);
+    store
+        .publish_pending_world_backing(volume.id, database, |_| {
+            panic!("the acknowledged local snapshot must not be published again")
+        })
+        .unwrap();
+}
+
+#[test]
+#[cfg(feature = "connected-engine")]
+fn blind_append_replay_advances_past_a_full_batch_of_conflicts() {
+    use super::super::world::{kv_append_key, kv_append_record};
+    use crate::store::{DatabaseId, volume_index::EntryKind};
+    let (directory, store, volume, access) = setup();
+    let entry = store.create_database(&access, volume.id, "saves", EntryKind::KvDb {}).unwrap();
+    let database = DatabaseId::Entry(entry.id);
+    let source = store.db(volume.id, database).unwrap();
+    for key in 0..17 {
+        let mut tx = source.begin_write(now_unix_secs()).unwrap();
+        let marker = kv_append_key(tx.clock());
+        tx.put(&[key], b"local birth").unwrap();
+        tx.local_indexes().put(&marker, &kv_append_record(&[key], b"local birth")).unwrap();
+        tx.commit().unwrap();
+    }
+    drop(source);
+    let mut accepted = vec![];
+    store
+        .publish_pending_world_appends(volume.id, database, |submission| {
+            let tx = submission.begin_read()?;
+            let key = tx.next_key(&[], false)?.unwrap();
+            if key != [16] {
+                return Err(Error::AlreadyExists("World KV append"));
+            }
+            accepted.push(key);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(accepted, [vec![16]]);
+    // A restart retains the sixteen refused births, but never resubmits the accepted one.
+    drop(store);
+    let store = LocalStore::open(directory.path()).unwrap();
+    let mut settled = Vec::new();
+    store
+        .publish_pending_world_appends(volume.id, database, |submission| {
+            for pair in submission.begin_read()?.iter_from(&[]) {
+                let (key, value) = pair?;
+                assert_eq!(value.as_ref(), b"local birth");
+                settled.push(key[0]);
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(settled, (0..16).collect::<Vec<_>>());
+}
+
+#[test]
+#[cfg(feature = "connected-engine")]
+fn world_append_receipt_requires_exact_ap_root_and_exact_birth_contents() {
+    use crate::store::{DatabaseId, volume_index::EntryKind};
+    let (directory, store, volume, access) = setup();
+    let entry = store.create_database(&access, volume.id, "save", EntryKind::KvDb {}).unwrap();
+    let database = DatabaseId::Entry(entry.id);
+    let original = store.db(volume.id, database).unwrap();
+    let mut tx = original.begin_write(now_unix_secs()).unwrap();
+    let clock = tx.clock();
+    let marker = super::super::world::kv_append_key(clock);
+    tx.put(b"same-key", b"original").unwrap();
+    tx.local_indexes()
+        .put(&marker, &super::super::world::kv_append_record(b"same-key", b"original"))
+        .unwrap();
+    tx.commit().unwrap();
+    let conflicting = empty_detached_replica(directory.path(), &original).unwrap();
+    let mut tx = conflicting.database().begin_write(now_unix_secs()).unwrap();
+    tx.put_with_clock(b"same-key", b"independent write", clock).unwrap();
+    tx.commit().unwrap();
+    let other_root = replica_root(conflicting.database()).unwrap();
+    let marked = || original.begin_read().unwrap().local_get(&marker).unwrap().is_some();
+    store.acknowledge_world_append_snapshot(volume.id, database, &original, other_root).unwrap();
+    assert!(marked(), "the outgoing stage differed from the AP receipt");
+    store
+        .acknowledge_world_append_snapshot(volume.id, database, conflicting.database(), other_root)
+        .unwrap();
+    assert!(marked(), "the clock matched but the content differed");
+    store
+        .acknowledge_world_append_snapshot(
+            volume.id,
+            database,
+            &original,
+            replica_root(&original).unwrap(),
+        )
+        .unwrap();
+    assert!(!marked());
+}
+
 fn clear(receiver: &mut CommittedChangeReceiver) {
     while !receiver.drain().records.is_empty() {}
 }
@@ -1387,8 +1516,9 @@ fn current_entry_write_admits_publication_without_catalog_read() {
     assert_eq!(
         store
             .publication_delta(&writer, volume.id, crate::store::DatabaseId::Index, bytes)
-            .unwrap(),
-        bytes
+            .unwrap()
+            .as_deref(),
+        Some(bytes)
     );
     assert!(store.entries(&writer, volume.id, None, 64).is_err());
     assert!(
@@ -1436,8 +1566,9 @@ fn current_entry_write_admits_publication_without_catalog_read() {
                 crate::store::DatabaseId::Index,
                 batch.records[0].bytes()
             )
-            .unwrap(),
-        batch.records[0].bytes()
+            .unwrap()
+            .as_deref(),
+        Some(batch.records[0].bytes())
     );
     assert!(store.read_blob_entry(&writer, volume.id, entry.id).is_err());
 }

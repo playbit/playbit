@@ -15,6 +15,7 @@ struct Probe {
     turns: usize,
     destroyed: usize,
     changes: usize,
+    identity_changes: usize,
     clicks: usize,
     fail: bool,
     #[cfg(target_os = "macos")]
@@ -55,6 +56,7 @@ unsafe extern "C" fn turn(raw: *mut abi::Context, data: *mut c_void) -> i32 {
     for event in context.raw_events() {
         match event.kind {
             EventKind::DataChanged => probe.changes += 1,
+            EventKind::IdentityChanged => probe.identity_changes += 1,
             EventKind::Click => probe.clicks += 1,
             EventKind::Started => {}
             other => panic!("unexpected event {other:?}"),
@@ -278,6 +280,36 @@ fn capacity_generations_scene_validation_and_shutdown() {
     assert_eq!(apps.step(generations[0], Instant::now()), Err(HostError::StaleHandle));
     apps.clear();
     assert_eq!(probes.iter().map(|p| p.destroyed).sum::<usize>(), 1);
+}
+#[test]
+fn display_name_save_wakes_an_attached_guest_with_the_committed_name() {
+    // Save through the account store and read the latest label through the guest SDK.
+    let path = tempfile::tempdir().unwrap();
+    let services = Services::open(path.path(), || {}).unwrap();
+    services
+        .store
+        .save_recovery_state(&crate::store::RecoveryState {
+            secret: [7; 16],
+            acknowledged: true,
+            revision: 0,
+            synchronized_digest: None,
+            pending: None,
+        })
+        .unwrap();
+    services.store.set_display_name("First").unwrap();
+    let root = services.store.create_volume("Root", false).unwrap().id;
+    let mut probe = Probe::default();
+    let mut apps = Apps::new(Arc::new(|| {}));
+    let generation = unsafe { apps.attach(&services, root, table(&mut probe)).unwrap() };
+    apps.advance(generation, |_| {}).unwrap();
+    assert_eq!(probe.identity.unwrap().display_name().unwrap(), Some("First"));
+    assert_eq!(probe.identity_changes, 0);
+    services.store.set_display_name("Zoë 雨").unwrap();
+    assert!(apps.step(generation, Instant::now()).unwrap().ready);
+    apps.advance(generation, |_| {}).unwrap();
+    assert_eq!(probe.identity.unwrap().display_name().unwrap(), Some("Zoë 雨"));
+    assert_eq!(probe.identity_changes, 1);
+    apps.detach(generation).unwrap();
 }
 #[test]
 fn saturated_input_drains_before_deferred_change_and_halt_stays_idle() {

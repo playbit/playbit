@@ -1,7 +1,7 @@
 import { MAX_TEXT_EVENT_BYTES } from "./text-input.ts";
 import { ChannelHost } from "./channel-host.ts";
 import { AbiError } from "./guest-memory.ts";
-import { SessionChannels } from "./session-channels.ts";
+import { SessionChannels, displayNameBytes } from "./session-channels.ts";
 import { encodeId, decodeId, validId } from './identifier.ts';
 import { installationIdentity, admitPublisherStatus } from "./installation.ts";
 import { admitWebProfile } from './profile-format.ts';
@@ -20,7 +20,7 @@ import { guestOperations } from "./guest-operations.ts";
 import { operationSupported } from "./guest-imports.ts";
 import { GuestWork } from "./guest-work.ts";
 import type { GuestEvent, QueuedEvent, WorkExports } from "./guest-work.ts";
-import type { GuestIdentity, ObjectHost, LogConnection } from "./guest-operations.ts";
+import { IDENTITY_CHANGED, type GuestIdentity, type ObjectHost, type LogConnection } from "./guest-operations.ts";
 import { prepareGuest, resolvedSession } from "./updates.ts";
 import type { GuestInstance, SessionResolution } from "./updates.ts";
 import { personalSelections, validateSelection, MAX_PERSONAL_VOLUMES } from "./personal.ts";
@@ -48,8 +48,9 @@ import { unsupportedAccount } from './account-format.ts';
 import type { AccountOutboxRecord } from './account-outbox.ts';
 import { AccountSignal } from './account-notices.ts';
 import { AccountReplica } from './account-replica.ts';
-import type { ApOperation, ApResponse, ApStatus } from './ap-protocol.ts';
-import type { CatalogVolume } from "./recovery.ts";
+import type { ApDescription, ApOperation, ApResponse, ApStatus } from './ap-protocol.ts';
+import { advisoryOperation, type AdvisoryOperation } from './ap-protocol.ts';
+import { base64url, type CatalogVolume } from "./recovery.ts";
 import type { RuntimeOpenArgs, RuntimeSelectPersonalArgs, RuntimeRequest, RuntimePageMessage } from "./runtime-protocol.ts";
 
 // The dedicated runtime Worker global; the webworker library types `self` for any worker.
@@ -183,7 +184,7 @@ interface Profile {
 }
 interface AcceptedInput { root: bigint; event: GuestEvent }
 interface PersonalTask { id: number; canceled: boolean; committing: boolean; replied: boolean }
-interface ApPending { method: string; resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
+interface ApPending { method: string; advisory?: AdvisoryOperation; resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
 // Runs one host operation: directly, or on the local queue while replication owns the turn.
 type Step = <T>(callback: () => T, cleanup?: boolean) => T | Promise<T>;
 // A publication ticket: the host's live-log position, or the account outbox record it came from.
@@ -198,6 +199,11 @@ let engineFailure: Error | undefined;
 let apSequence = 0, updateTask: Promise<void> | null | undefined, retryPending = false, closed = false;
 let replicas: LiveReplication<LiveTicket> | undefined, replicationTask: Promise<void> | null | undefined, recoveryTimer: number | undefined;
 let accountReplica: AccountReplica | undefined, accountOpening: Promise<boolean> | undefined, accountTurn = false;
+let recoveryList: { account: string; stop: AbortController; task: Promise<void> } | undefined;
+interface AccountNamePublication {
+    current: () => boolean; dirty: boolean; unsupported: boolean; delay: number; retry?: number; reported?: string;
+}
+let accountNamePublication: AccountNamePublication | undefined, publishingAccountName = false;
 let recoveryPending = false, recoveryDelay = 250, replicationBlocked = false, closing = false;
 let selections: PersonalSelections = {}, personalCatalog: PersonalCatalogEntry[] = [], activeGrants: PersonalSelection[] = [];
 let personalTask: PersonalTask | undefined, personalRetirement: Promise<void> | undefined;
@@ -218,8 +224,10 @@ let blobs: RuntimeBlobs;
 let files: FileBackend;
 let fileReady: MessageChannel | undefined, fileContinuation: { promise: Promise<void>; resume(): void } | undefined;
 const apPending = new Map<number, ApPending>();
+const advisoryPending = new Set<AdvisoryOperation>();
 // The page's AP client, proxied by method name; the page answers each call with an `apReply`.
 function ap(method: "connect"): Promise<ApStatus>;
+function ap(method: "describe"): Promise<ApDescription>;
 function ap(method: "request", operation: ApOperation, generation?: number): Promise<ApResponse>;
 function ap(method: "begin", operation: ApOperation): Promise<number>;
 function ap(method: "streamRead" | "streamReplica" | "streamNamespaceEvidence", handle: number): Promise<Uint8Array>;
@@ -233,18 +241,22 @@ function ap(method: "accountChanged", account: string): Promise<undefined>;
 function ap(method: string, ...args: unknown[]): Promise<unknown>;
 function ap(method: string, ...args: unknown[]): Promise<unknown> {
     if (accountAuthority() && method !== 'streamClose' && method !== 'channelConsumed' && method !== 'accountChanged') return Promise.reject(unsupportedAccount());
-    if (apPending.size >= 64 && method!=="channelConsumed") return Promise.reject(new Error("Runtime AP request capacity exceeded"));
+    const advisory = advisoryOperation(method, args[0] as ApOperation | undefined);
+    if (advisory && advisoryPending.has(advisory)) return Promise.reject(failure('ap-capacity', 'An advisory AP request is already pending'));
+    if (!advisory && apPending.size - advisoryPending.size >= 64 && method !== 'channelConsumed') return Promise.reject(new Error("Runtime AP request capacity exceeded"));
+    if (advisory) advisoryPending.add(advisory);
     const id = ++apSequence;
-    return new Promise((resolve, reject) => { apPending.set(id, { method, resolve, reject }); self.postMessage({ ap: { id, method, args } }); });
+    return new Promise((resolve, reject) => { apPending.set(id, { method, advisory, resolve, reject }); self.postMessage({ ap: { id, method, args } }); });
 }
 const accountSignal = new AccountSignal(account => ap('accountChanged', account),
     () => self.postMessage({ accountNoticeFailed: true }));
 observeAccountMetadata(account => {
-    if (managed && profile?.account === account && accountAuthority()) pauseAccountActivity();
+    if (replicationAccount() === account && accountAuthority()) pauseAccountActivity();
     accountSignal.notify(account);
 });
 observeStorageFormat(() => { if (!closed) pauseAccountActivity(incompatibleStorage().message); });
-function accountAuthority(): number { return accountOperationStatus(managed ? profile?.account : undefined, 0x7); }
+function replicationAccount(): string | undefined { return recoveryList?.account ?? (managed ? profile?.account : undefined); }
+function accountAuthority(): number { return accountOperationStatus(replicationAccount(), 0x7); }
 function authorizedStep<T>(callback: () => T): Promise<T> {
     // Account staging holds shared authority before entering this actor. Never
     // hold the actor while waiting behind an exclusive quarantine request.
@@ -265,7 +277,7 @@ function pauseAccountActivity(message = unsupportedAccount().message): void {
 }
 function progress(message: string) { self.postMessage({ progress: message }); }
 const stores = new Map<number, OpfsStore>();
-// Set by open() before any store or bridge exists; cleared again by closeStorage().
+// Shared resources for the active storage owner, retired by closeStorage().
 let storageResources: OpfsResources | undefined, storageBridge: OpfsStorageBridge | undefined;
 const events: QueuedEvent[] = [], logs: string[] = [];
 const guestWork = new GuestWork(events, () => host.exports);
@@ -392,17 +404,24 @@ function flushConsumedChannels():void {
 let channelClient:SessionChannels|undefined;
 let channelDevice=new Uint8Array(16);
 let localIdentity: GuestIdentity | undefined;
+let accountProfileRevision = -1n, displayName = '';
 function currentIdentity(): GuestIdentity {
     if (channelClient) return channelClient.identity;
     if (!localIdentity) {
         const account = decodeId(profile.account);
         // As on native, a local guest uses its profile account for the device ID.
         localIdentity = { account, device: managed ? channelDevice : account,
-            instance: random(16), session: decodeId(profile.session.id, 32) };
+            instance: random(16), session: decodeId(profile.session.id, 32), displayName };
     }
     return localIdentity;
 }
-function channelNotice(kind:number,status=-5){if(closed)return;const data=kind===19?new Uint8Array(new Int32Array([status]).buffer):new Uint8Array();guestWork.queue({kind,target:0,data});operationsReady();}
+function channelFailure(status: number): void {
+    if (closed) return;
+    const data = new Uint8Array(new Int32Array([status]).buffer);
+    guestWork.queue({ kind: 19, target: 0, data });
+    operationsReady();
+    void recoverChannels();
+}
 let dataRevision = 0, guestUpdating = false, dataTurnOwner: GuestInstance | undefined;
 const operations = guestOperations({
     waitForEvent: deadline => {
@@ -419,9 +438,23 @@ const operations = guestOperations({
         if(!managed||!profile.seed)throw new AbiError(-1);
         if(!channelClient){
             hostInput(Uint8Array.from(profile.seed));const key=hostOutput(host.exports.pb_session_channel_key()).slice();
-            channelClient=new SessionChannels({...currentIdentity(),build:decodeId(profile.session.resolved_build_id,32),proof:Uint8Array.from(proof),app:profile.session.selector.kind==='app'?profile.session.selector.app:undefined},key,new ChannelHost(()=>host.exports),
-                {connect:async()=>{const connection=await ap('connect');channelDevice=Uint8Array.from(connection.instanceId??[]);return {device:channelDevice,generation:connection.connectionCount};},open:(frame,device,generation)=>ap('beginChannel',frame,device,generation) as Promise<number>,read:handle=>ap('channelRead',handle) as Promise<import('./ap-codec.ts').Frame & {receipt?:number}>,consumed:consumeChannelReceipt,close:handle=>ap('streamClose',handle)},
-                (name,source,message,data)=>operations.channelEvent(name,source,message,data),()=>channelNotice(5),status=>{channelNotice(19,status);void recoverChannels();},()=>{void checkUpdate();});
+            const identity = { ...currentIdentity(), build: decodeId(profile.session.resolved_build_id, 32),
+                proof: Uint8Array.from(proof), app: profile.session.selector.kind === 'app' ? profile.session.selector.app : undefined };
+            channelClient = new SessionChannels(identity, key, new ChannelHost(() => host.exports), {
+                connect: async () => {
+                    const connection = await ap('connect');
+                    channelDevice = Uint8Array.from(connection.instanceId ?? []);
+                    return { device: channelDevice, generation: connection.connectionCount,
+                        displayNames: connection.sessionDisplayNames };
+                },
+                discoverNames: async () => (await ap('describe')).features.includes('session.display-names.v1'),
+                open: (frame, device, generation) => ap('beginChannel', frame, device, generation) as Promise<number>,
+                read: handle => ap('channelRead', handle) as Promise<import('./ap-codec.ts').Frame & { receipt?: number }>,
+                displayName: (handle, name) => ap('channelDisplayName', handle, name),
+                consumed: consumeChannelReceipt,
+                close: handle => ap('streamClose', handle),
+            }, (name, source, message, data) => operations.channelEvent(name, source, message, data),
+            () => operations.environmentChanged(5), channelFailure, () => { void checkUpdate(); });
         }
         return channelClient;
     },
@@ -801,7 +834,7 @@ async function saveProfile() {
         file.truncate(bytes.length); file.flush();
     } finally { file.close(); }
 }
-async function syncDatabase(volume: InvitationVolume | null, database: DatabaseId, direction: "pull" | "push", version = profile.session.resolved_build_id, step: Step = callback => callback(), current = () => !closed && !closing, preparedSlot?: number, entry_scope?: string) {
+async function syncDatabase(volume: InvitationVolume | null, database: DatabaseId, direction: "pull" | "push", version = volume ? profile.session.resolved_build_id : undefined, step: Step = callback => callback(), current = () => !closed && !closing, preparedSlot?: number, entry_scope?: string) {
     const personal = volume && personalSlots.has(volume.id);
     const operation = volume ? { op: "sync_database", operation_id: encodeId(random(16)), session_id: personal ? null : profile.session.id,
         build_id: personal ? null : version, volume_id: volume.id, database_id: database, direction, entry_scope }
@@ -1248,10 +1281,25 @@ async function pullPersonal(session: InvitationSession, grants: PersonalGrant[],
     }
     await saveProfile();
 }
+async function refreshAccountProfile(): Promise<Set<string>> {
+    const snapshot = await accountReplica?.profile();
+    if (!snapshot) return new Set();
+    if (snapshot.revision > accountProfileRevision && !closed && !closing) {
+        if (displayName !== snapshot.displayName) {
+            displayNameBytes(snapshot.displayName);
+            displayName = snapshot.displayName;
+            if (localIdentity) localIdentity.displayName = displayName;
+            channelClient?.setDisplayName(displayName);
+            if (guest) operations.environmentChanged(IDENTITY_CHANGED);
+        }
+        accountProfileRevision = snapshot.revision;
+    }
+    return snapshot.deletedVolumes;
+}
 async function refreshPersonal(latest?: PersonalSelections) {
     if (!managed) return;
     latest ??= await personalSelections(profile.account);
-    const deleted = await accountReplica?.deletedVolumes() ?? new Set<string>();
+    const deleted = await refreshAccountProfile();
     if (deleted.has(profile.root.id)) {
         guestFailure = new Error('A volume used by this app was deleted from your account.');
         self.postMessage({ guestFailure: guestFailure.message });
@@ -1505,7 +1553,49 @@ async function readScopeAddresses(request: ScopeRequest): Promise<ScopeAddresses
     hostInput(bytes);
     return JSON.parse(decoder.decode(hostOutput(host.exports.pb_scope_addresses(bytes.length))));
 }
+async function spool(name: string): Promise<FileSystemSyncAccessHandle> {
+    return (await directory.getFileHandle(name, { create: true })).createSyncAccessHandle();
+}
+async function openStorageResources(): Promise<OpfsResources> {
+    const writerSpools: FileSystemSyncAccessHandle[] = [], stagingSpools: FileSystemSyncAccessHandle[] = [];
+    try {
+        writerSpools.push(await spool("transaction-0.tmp")); writerSpools.push(await spool("transaction-1.tmp"));
+        stagingSpools.push(await spool("replica-entry.tmp")); stagingSpools.push(await spool("replica-journal.tmp"));
+        return new OpfsResources(writerSpools, stagingSpools);
+    } catch (error) { for (const file of [...writerSpools, ...stagingSpools]) file.close(); throw error; }
+}
+// One tab owns the account-only cache. Other recovery lists receive the same
+// IndexedDB projection notices and can take over when the owner leaves.
+function watchRecoveryList(account: string): void {
+    if (!validId(account, 16) || profile || closed || closing) throw Error('Invalid recovery account');
+    if (recoveryList) {
+        if (recoveryList.account !== account) throw Error('Recovery account changed');
+        return;
+    }
+    const stop = new AbortController();
+    const retired = new Promise<void>(resolve => stop.signal.addEventListener('abort', () => resolve(), { once: true }));
+    const task = navigator.locks.request(`playbit-recovery-list:${account}`, { signal: stop.signal }, async () => {
+        try {
+            const origin = await navigator.storage.getDirectory();
+            directory = await origin.getDirectoryHandle(`playbit-recovery-list.${account}`, { create: true });
+            await admitWebProfile(directory);
+            storageResources = await openStorageResources();
+            await loadHost();
+            setScopeAddresses(readScopeAddresses);
+            if (!await openAccountReplica(localStep, account, replicaId())) throw Error('Unlock private credentials before synchronizing');
+            if (!stop.signal.aborted) void connectReplication();
+            await retired;
+        } finally {
+            await replicas?.stop(); await replicationTask;
+            closeStorage();
+        }
+    }).catch(error => {
+        if (!stop.signal.aborted) replicationState({ kind: 'failed', message: String(error.message ?? error) });
+    });
+    recoveryList = { account, stop, task };
+}
 async function open(args: RuntimeOpenArgs) {
+    if (recoveryList) throw Error('The recovery list must close before opening a guest');
     const started = performance.now();
     const installation = await installationIdentity();
     progress("Opening local session storage…");
@@ -1549,13 +1639,7 @@ async function open(args: RuntimeOpenArgs) {
         if (!sharedFormat && profile.session.shared_volume) await admitWebProfile(directory, true);
         await saveProfile();
     }
-    const spool = async (name: string) => (await directory.getFileHandle(name, { create: true })).createSyncAccessHandle();
-    const writerSpools: FileSystemSyncAccessHandle[] = [], stagingSpools: FileSystemSyncAccessHandle[] = [];
-    try {
-        writerSpools.push(await spool("transaction-0.tmp")); writerSpools.push(await spool("transaction-1.tmp"));
-        stagingSpools.push(await spool("replica-entry.tmp")); stagingSpools.push(await spool("replica-journal.tmp"));
-        storageResources = new OpfsResources(writerSpools, stagingSpools);
-    } catch (error) { for (const file of [...writerSpools, ...stagingSpools]) file.close(); throw error; }
+    storageResources = await openStorageResources();
     publication = await VolumePublication.open(await spool('volume-generations.kvdb'), storageResources, () => encodeId(random(16)), yieldPreparation);
     await publication.discardPending(directory);
     const initialization = !managed && profile ? publication.initialization(profile.root.id) : null;
@@ -1653,6 +1737,7 @@ async function open(args: RuntimeOpenArgs) {
         const grants = selections[profile.session.id] ?? [];
         await preparePersonal(profile.session, grants);
         selectPersonal(profile.session.id, grants);
+        await refreshAccountProfile();
     }
     const initialized = performance.now();
     progress(`Opening ${profile.app_name || "app"}…`);
@@ -1664,12 +1749,12 @@ async function open(args: RuntimeOpenArgs) {
         storageBytes: Array.from(stores.values()).reduce((sum, store) => sum + store.end, 0) };
 }
 
-async function openAccountReplica(step: Step = callback => callback()): Promise<boolean> {
-    await requireAccountAuthority(profile.account);
+async function openAccountReplica(step: Step = callback => callback(), account = profile.account, replica = profile.account_replica_id): Promise<boolean> {
+    await requireAccountAuthority(account);
     if (accountReplica) return false;
     if (accountOpening) { await accountOpening; return false; }
     accountOpening = (async () => {
-        const candidate = await AccountReplica.open(profile.account, (name, bytes, current) => localStep(() => {
+        const candidate = await AccountReplica.open(account, (name, bytes, current) => localStep(() => {
             if (closed || closing || !current()) throw Error('Account replica retired');
             if (bytes) hostInput(bytes);
             return hostOutput((host.exports[name] as HostCall)(...(bytes ? [bytes.length] : []))); // pb_account_* exports.
@@ -1680,7 +1765,7 @@ async function openAccountReplica(step: Step = callback => callback()): Promise<
             await step(() => {
                 if (closed || closing) throw Error('Account replica retired');
                 stores.set(0, store);
-                const input = encoder.encode(JSON.stringify({ account: profile.account, replica_id: profile.account_replica_id }));
+                const input = encoder.encode(JSON.stringify({ account, replica_id: replica }));
                 hostInput(input); hostOutput(host.exports.pb_account_open(input.length));
                 accountReplica = candidate;
             });
@@ -1694,6 +1779,9 @@ async function accountChanged() {
     try { await requireAccountAuthority(profile.account); }
     catch (error) { pauseAccountActivity(); throw error; }
     if (await openAccountReplica(localStep)) await replicas?.stop();
+    const previousName = displayName;
+    await refreshAccountProfile();
+    if (previousName !== displayName && accountNamePublication) queueAccountName(accountNamePublication.current);
     replicas?.notify();
     void connectReplication();
 }
@@ -1875,7 +1963,7 @@ function liveOutput(length: number) {
         throw error;
     }
 }
-// One bounded retry timer per owner, only after a transport failure or gap.
+// One bounded retry timer per owner, only after a recoverable failure.
 // Local input keeps its own queue; steady-state replication never polls.
 function scheduleRecovery() {
     if (closed || closing || replicationBlocked || recoveryTimer || !recoveryPending) return;
@@ -1935,8 +2023,44 @@ function recoverChannels():Promise<void>|undefined {
     })().catch(()=>{}).finally(()=>{channelRecovery=undefined;});
     return channelRecovery;
 }
+function queueAccountName(current: () => boolean): void {
+    if (!current()) return;
+    const run = accountNamePublication ??= { current, dirty: false, unsupported: false, delay: 250 };
+    if (run.unsupported) return;
+    run.dirty = true;
+    void publishAccountName();
+}
+// Only the active attempt reads the durable winner. Retry and idle state retain no envelope.
+async function publishAccountName(): Promise<void> {
+    const run = accountNamePublication;
+    if (!run || !run.dirty || run.retry !== undefined || publishingAccountName || !run.current()) return;
+    publishingAccountName = true; run.dirty = false;
+    try {
+        const record = await accountReplica!.displayNameRecord(run.current);
+        if (!record || !run.current() || run.dirty) return;
+        const digest = await crypto.subtle.digest('SHA-256', record.ciphertext);
+        const version = record.clock + '/' + base64url(new Uint8Array(digest));
+        if (!run.current() || run.dirty || record.name !== displayName || run.reported === version) return;
+        await ap('request', { op: 'put_account_display_name', operation_id: encodeId(random(16)),
+            name: record.name, record_key: encodeId(record.key), clock: String(record.clock), ciphertext: base64url(record.ciphertext) });
+        run.reported = version; run.delay = 250;
+    } catch (error) {
+        if (!run.current()) return;
+        const cause = error as { code?: string; serviceCode?: string };
+        if (cause.code === 'ap-rejected' && cause.serviceCode === 'unsupported_operation') {
+            run.unsupported = true; run.dirty = false;
+        } else {
+            run.dirty = true;
+            run.retry = setTimeout(() => { run.retry = undefined; void publishAccountName(); }, run.delay);
+            run.delay = Math.min(run.delay * 2, 30000);
+        }
+    } finally {
+        publishingAccountName = false;
+        if (accountNamePublication?.dirty) void publishAccountName();
+    }
+}
 function connectReplication() {
-    if (!managed || closed || closing || replicationBlocked || accountAuthority()) return;
+    if ((!managed && !(recoveryList && accountReplica)) || closed || closing || replicationBlocked || accountAuthority()) return;
     if (replicationTask || updateTask || personalTask) { recoveryPending = true; return replicationTask; }
     if (replicas?.run && !replicas.run.stopped) return;
     clearTimeout(recoveryTimer); recoveryTimer = undefined; recoveryPending = false;
@@ -1944,18 +2068,23 @@ function connectReplication() {
         const connection=await ap("connect");
         if (closed || closing) return;
         if(channelClient)await channelClient.reconnect(Uint8Array.from(connection.instanceId??[]),connection.connectionCount);
-        await openSession(profile.session);
+        if (!recoveryList) await openSession(profile.session);
         if (closed || closing) return;
         // The account stream, and so every account ticket, exists only once accountReplica is open.
         replicas ??= new LiveReplication<LiveTicket>({ ap, operationId: () => encodeId(random(16)),
             state: replicationState,
             bootstrap: async current => {
+                const step: Step = (callback, cleanup = false) => localStep(() => { if (!cleanup && !current()) throw new Error("Replica bootstrap retired"); return callback(); });
+                if (recoveryList) {
+                    await syncDatabase(null, "index", 'pull', undefined, step, current);
+                    await accountReplica!.adoptTree(current);
+                    return;
+                }
                 // Every subsequent write remains captured, even when its data
                 // also happens to enter one of the outbound snapshots below.
                 await localStep(() => {
                     hostOutput(host.exports.pb_database_retry()); blobs.retry();
                 });
-                const step: Step = (callback, cleanup = false) => localStep(() => { if (!cleanup && !current()) throw new Error("Replica bootstrap retired"); return callback(); });
                 const volumes = [profile.root.id, ...activeGrants.map(grant => grant.volume)];
                 let complete = true;
                 for (const volume of volumes) complete = await catalogReplicaAllowed(volume, step) && complete;
@@ -1969,11 +2098,13 @@ function connectReplication() {
                     await step(() => refreshPersonal());
                     await accountReplica.stagePending(current);
                     await syncDatabase(null, "index", 'push', undefined, step, current);
+                    queueAccountName(current);
                 }
                 await step(refreshScene);
             },
             local: {
                 catchUpLog,
+                retired: () => { clearTimeout(accountNamePublication?.retry); accountNamePublication = undefined; },
                 terminal: (source, terminal, current) => localStep(() => {
                     if (!current()) return;
                     const { volume, entry } = replicaAddress(source), offset = entry ? 31 : 16;
@@ -1986,6 +2117,7 @@ function connectReplication() {
                 }),
                 head: async current => {
                     if (accountAuthority()) throw unsupportedAccount();
+                    if (recoveryList) return null;
                     accountTurn = !accountTurn;
                     if (accountTurn) {
                         const head = await accountReplica?.head(current);
@@ -2025,13 +2157,16 @@ function connectReplication() {
                     : localStep(() => { if (current()) return liveOutput(host.exports.pb_live_ack(ticket)); }),
                 apply: async (source, database, delta, current, evidence) => {
                     if (source === 'account') {
-                        await accountReplica!.apply(delta, current);
+                        const foundName = await accountReplica!.apply(delta, current);
+                        if (recoveryList) return;
                         const latest = await personalSelections(profile.account);
-                        return localStep(async () => {
+                        await localStep(async () => {
                             if (!current()) return;
                             await refreshPersonal(latest);
                             await refreshScene();
                         });
+                        if (foundName) queueAccountName(current);
+                        return;
                     }
                     const { volume, entry: selected } = replicaAddress(source);
                     const entry = database !== 'index' && database !== 'revocations';
@@ -2061,12 +2196,13 @@ function connectReplication() {
                 },
             },
         });
-        const volumes = [profile.root.id, ...activeGrants.map(grant => grant.volume)];
+        const volumes = recoveryList ? [] : [profile.root.id, ...activeGrants.map(grant => grant.volume)];
         const catalogs = [];
         for (const volume of volumes) if (await catalogReplicaAllowed(volume, localStep)) catalogs.push(volume);
         await replicas.start([...(accountReplica ? [{ kind: 'account' } satisfies ReplicaScope] : []), ...catalogs.map((volume): ReplicaScope => ({ kind: 'volume', volume_id: volume,
             session_id: personalSlots.has(volume) ? null : profile.session.id,
             build_id: personalSlots.has(volume) ? null : profile.session.resolved_build_id }))]);
+        if (recoveryList) return;
         await restoreEntrySubscriptions();
         if (accountReplica) {
             void ap("onboarding", 6).then(() => ap("onboarding", 7)).catch(() => {});
@@ -2216,7 +2352,8 @@ self.onmessage = ({ data }: MessageEvent<RuntimePageMessage>) => {
         const pending = apPending.get(data.apReply.id);
         if (!pending) return;
         apPending.delete(data.apReply.id);
-        if (data.apReply.error) pending.reject(Object.assign(new Error(data.apReply.error), { code: data.apReply.code })); else pending.resolve(data.apReply.result);
+        if (pending.advisory) advisoryPending.delete(pending.advisory);
+        if (data.apReply.error) pending.reject(Object.assign(new Error(data.apReply.error), { code: data.apReply.code, serviceCode: data.apReply.serviceCode })); else pending.resolve(data.apReply.result);
         if(pending.method!=='channelConsumed')flushConsumedChannels();
         return;
     }
@@ -2246,6 +2383,11 @@ self.onmessage = ({ data }: MessageEvent<RuntimePageMessage>) => {
     if (data.method === "close") {
         const accepted = work;
         closing = true; clearTimeout(recoveryTimer); recoveryTimer = undefined; recoveryPending = false;
+        if (recoveryList) {
+            recoveryList.stop.abort();
+            void recoveryList.task.then(() => { closed = true; self.postMessage({ id: data.id, result: { closed: true } }); });
+            return;
+        }
         if (personalTask && !personalTask.committing) personalTask.canceled = true;
         controls = controls.catch(() => {}).then(async () => {
             await replicas?.stop(); await replicationTask;
@@ -2290,6 +2432,8 @@ async function handle({ id, method, args }: RuntimeRequest, accepted?: AcceptedI
         let result;
         if (method === "scope_addresses") {
             result = await readScopeAddresses(args);
+        } else if (method === "watch_recovery") {
+            watchRecoveryList(args.account); result = {};
         } else if (method === "open") {
             initializing = true;
             try { result = await open(args); }

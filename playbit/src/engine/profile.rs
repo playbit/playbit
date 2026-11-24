@@ -177,6 +177,17 @@ fn require_personal_profile(home: &Path, profile: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A traced benchmark may retain output in a caller-supplied profile.
+#[cfg(test)]
+pub(crate) fn isolated_benchmark_profile(path: &Path) -> Result<PathBuf> {
+    let profile = path.canonicalize()?;
+    let home = dirs::home_dir().ok_or("Home directory is unavailable")?;
+    for ancestor in profile.ancestors() {
+        require_personal_profile(&home, ancestor)?;
+    }
+    Ok(profile)
+}
+
 fn locations(home: &Path, profile: Option<&Path>) -> Result<Locations> {
     let active = home.join(".playbit-runtime");
     let Some(profile) = profile else {
@@ -708,12 +719,18 @@ pub(super) fn initialize_agent(isolated: Option<(&Path, ReleaseChannel)>) -> Res
     Ok(())
 }
 
+#[cfg(not(test))]
 fn profile_from_environment() -> Result<Option<PathBuf>> {
     let profile = std::env::var_os("PLAYBIT_PROFILE").map(PathBuf::from);
     if profile.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
         return Err("PLAYBIT_PROFILE must not be empty".into());
     }
     profile.as_deref().map(canonical_profile).transpose()
+}
+
+#[cfg(test)]
+fn profile_from_environment() -> Result<Option<PathBuf>> {
+    Ok(Some(tests::fallback_profile()))
 }
 
 /// Resolve once before admitting native work. Discovery/source-only CLI
@@ -802,12 +819,7 @@ pub(crate) fn switch_to(channel: ReleaseChannel) -> Result<()> {
 pub fn current() -> (PathBuf, ReleaseChannel) {
     #[cfg(test)]
     if CURRENT.get().is_none() {
-        return (
-            std::env::var_os("PLAYBIT_PROFILE").map(PathBuf::from).unwrap_or_else(|| {
-                default_path(&dirs::home_dir().expect("test home"), ReleaseChannel::Public)
-            }),
-            ReleaseChannel::Public,
-        );
+        return (tests::fallback_profile(), ReleaseChannel::Public);
     }
     let selected = CURRENT
         .get()
@@ -949,6 +961,91 @@ pub(crate) fn current_uid() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    pub(super) fn fallback_profile() -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+        extern "C" fn cleanup() {
+            if let Some(root) = ROOT.get()
+                && let Err(error) = fs::remove_dir_all(root.path())
+            {
+                eprintln!(
+                    "Could not remove temporary test profile {}: {error}",
+                    root.path().display()
+                );
+            }
+        }
+
+        // Workers share one profile. Keep its sibling channel state under the same
+        // private root, even when the shell points HOME or PLAYBIT_PROFILE at live data.
+        let root = ROOT.get_or_init(|| {
+            let root = tempfile::Builder::new()
+                .prefix("playbit-test-")
+                .permissions(fs::Permissions::from_mode(0o700))
+                .tempdir_in(Path::new("/tmp").canonicalize().expect("temporary directory"))
+                .expect("isolated test profile root");
+            private_directory(&root.path().join("profile")).expect("create test profile");
+            // Statics do not run Drop at exit. The callback only removes this process's root.
+            #[allow(unsafe_code, reason = "The process-exit callback and its state are static.")]
+            let registered = unsafe { libc::atexit(cleanup) };
+            assert_eq!(registered, 0, "register test profile cleanup");
+            root
+        });
+        root.path().join("profile")
+    }
+
+    #[test]
+    fn unit_test_profile_is_isolated_from_the_launch_environment() {
+        // Give each child a disposable home containing both live profile names.
+        const CHILD: &str = "PLAYBIT_TEST_PROFILE_RESULT";
+        if let Some(result) = std::env::var_os(CHILD) {
+            let (profile, channel) = current();
+            let home =
+                dirs::home_dir().expect("fixture home").canonicalize().expect("fixture home");
+            assert!(!profile.starts_with(home));
+            assert_eq!(channel, ReleaseChannel::Public);
+            assert_eq!(std::thread::spawn(current).join().expect("profile worker").0, profile);
+            assert_eq!(resolve_environment().expect("resolve test profile").0, profile);
+            initialize().expect("initialize test profile");
+            assert_eq!(current().0, profile);
+            assert_eq!(
+                isolated_benchmark_profile(&profile).expect("isolated trace output"),
+                profile
+            );
+            if let Some(configured) = std::env::var_os("PLAYBIT_PROFILE") {
+                assert!(isolated_benchmark_profile(Path::new(&configured)).is_err());
+            }
+            fs::write(result, profile.as_os_str().as_encoded_bytes()).expect("report profile");
+            return;
+        }
+
+        let home = tempfile::tempdir().expect("isolated home");
+        let result = home.path().join("result");
+        let public = home.path().join(".playbit");
+        let testing = home.path().join(".playbit-testing");
+        fs::create_dir(&public).expect("public profile fixture");
+        fs::create_dir(&testing).expect("testing profile fixture");
+        for configured in [None, Some(&public), Some(&testing)] {
+            let mut child =
+                std::process::Command::new(std::env::current_exe().expect("test runner"));
+            child
+                .args(["--exact", "engine::profile::tests::unit_test_profile_is_isolated_from_the_launch_environment"])
+                .env(CHILD, &result)
+                .env("HOME", home.path())
+                .env_remove("PLAYBIT_CHANNEL")
+                .env_remove("PLAYBIT_PROFILE");
+            if let Some(configured) = configured {
+                child.env("PLAYBIT_PROFILE", configured);
+            }
+            assert!(child.status().expect("profile test child").success());
+            let profile = fs::read_to_string(&result).expect("child profile");
+            assert!(!Path::new(&profile).exists(), "test profile must be cleaned up at exit");
+            for reserved in [&public, &testing] {
+                assert!(fs::read_dir(reserved).expect("protected profile").next().is_none());
+            }
+        }
+    }
 
     #[test]
     fn personal_testing_binds_only_an_isolated_profile_to_one_owner() {

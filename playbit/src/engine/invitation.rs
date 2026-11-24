@@ -92,6 +92,56 @@ impl Watch {
 }
 
 impl Engine {
+    pub(super) fn desktop_launch_invitations(
+        &mut self,
+    ) -> Result<Vec<crate::store::InvitationPreview>> {
+        if let Some(session) = self.services.store.transient_desktop_session()? {
+            self.cancel_session_open(&session)?;
+            self.stop_invitation_watch(&session);
+        }
+        Ok(self.services.store.desktop_launch_invitations(|id| {
+            self.pending_join.as_deref() == Some(id)
+                || self.starting_session(id)
+                || self.invitation.as_ref().is_some_and(|current| current.session == id)
+        })?)
+    }
+
+    pub(super) fn preview_desktop_invitation(
+        &mut self,
+        link: &str,
+    ) -> Result<crate::store::InvitationPreview> {
+        let prior = self.services.store.transient_desktop_session()?;
+        if let Some(session) = &prior
+            && (self.pending_join.as_deref() == Some(session) || self.starting_session(session))
+        {
+            return Err(
+                "Finish or cancel the pending join before opening another invitation".into()
+            );
+        }
+        let preview = self.services.store.preview_desktop_invitation(link, self.channel())?;
+        if let Some(prior) = prior.filter(|id| id != &preview.session) {
+            self.stop_invitation_watch(&prior);
+        }
+        // Explicitly reopening clears the stored pause. Retire its old status
+        // too, so a refresh before the new watch cannot dismiss this opening.
+        if self.invitation.as_ref().is_some_and(|current| {
+            current.session == preview.session && current.state == InvitationState::Paused
+        }) {
+            self.invitation = None;
+        }
+        Ok(preview)
+    }
+
+    pub(super) fn retain_desktop_invitation(&mut self, session: &str) -> Result<Reply> {
+        // The store matches the exact unpaused preview. A direct preview can
+        // already carry its envelope before this GUI starts a readiness watch.
+        if let Err(error) = self.services.store.retain_desktop_invitation(session) {
+            self.stop_invitation_watch(session);
+            return Err(error.into());
+        }
+        Ok(Reply::InvitationStatus { invitation_status: self.invitation_status() })
+    }
+
     pub(crate) fn watch_invitation(&mut self, session: String, resume: bool) -> Result<Reply> {
         let _timing = crate::trace::Span::new("invitation.observe_local");
         let paused = self.services.store.pending_invitation_paused(&session)?;
@@ -238,6 +288,53 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::engine::Request;
+
+    #[test]
+    fn desktop_relaunch_retires_an_unresolved_watch_and_old_unknown_links() {
+        // Simulate closing only the UI. The engine still owns the old
+        // observer, an explicitly durable CLI capability and a legacy record.
+        let directory = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(directory.path()).unwrap();
+        let channel = engine.channel();
+        let old_link = crate::store::session_link(&[1; crate::store::SEED_BYTES], channel);
+        let old = engine.services.store.restore_invitation_seed(&old_link, channel).unwrap();
+        let cli_link = crate::store::session_link(&[2; crate::store::SEED_BYTES], channel);
+        let cli = engine.services.store.preview_invitation(&cli_link, channel).unwrap();
+        let link = crate::store::session_link(&[3; crate::store::SEED_BYTES], channel);
+        let Reply::InvitationPreview(transient) = engine
+            .dispatch_reply(Request::PreviewDesktopInvitation { invitation: link.clone() })
+            .unwrap()
+        else {
+            panic!("expected desktop preview")
+        };
+        engine
+            .dispatch_reply(Request::WatchInvitation { session: transient.session.clone() })
+            .unwrap();
+        engine
+            .dispatch_reply(Request::PauseInvitation { session: transient.session.clone() })
+            .unwrap();
+        engine
+            .dispatch_reply(Request::PreviewDesktopInvitation { invitation: link.clone() })
+            .unwrap();
+        assert!(engine.invitation_status().is_none());
+        engine
+            .dispatch_reply(Request::WatchInvitation { session: transient.session.clone() })
+            .unwrap();
+        let Reply::Status(status) = engine.dispatch_reply(Request::DesktopLaunch).unwrap() else {
+            panic!("expected desktop status")
+        };
+        assert!(status.invitation_status.is_none());
+        assert_eq!(status.invitations, [cli]);
+        for missing in [old, transient] {
+            assert!(engine.services.store.pending_invitation_preview(&missing.session).is_err());
+        }
+        let Reply::InvitationPreview(reopened) =
+            engine.dispatch_reply(Request::PreviewDesktopInvitation { invitation: link }).unwrap()
+        else {
+            panic!("expected explicit preview")
+        };
+        assert!(!reopened.paused && reopened.received.is_none());
+    }
 
     #[test]
     fn pause_survives_restart_and_resume_only_observes() {

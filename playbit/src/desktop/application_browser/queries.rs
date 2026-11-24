@@ -9,7 +9,15 @@ impl Shell {
         {
             return;
         }
-        let Some(app) = self.applications.selected.clone() else {
+        let Some(app) = self
+            .applications
+            .selected
+            .as_ref()
+            .filter(|id| {
+                self.applications.apps.iter().any(|app| &app.identity == *id && app.can_open)
+            })
+            .cloned()
+        else {
             return;
         };
         let session = self.selected_session_id().map(str::to_owned);
@@ -66,7 +74,11 @@ impl Shell {
     }
 
     pub(in crate::desktop) fn refresh_application_instances(&mut self, cx: &mut Context<Self>) {
-        if self.applications.refreshing || !self.applications.refresh_needed || self.signing_out {
+        if self.sidebar_volumes
+            || self.applications.refreshing
+            || !self.applications.refresh_needed
+            || self.signing_out
+        {
             return;
         }
         let Some(session) = self.selected_session_id().map(str::to_owned) else {
@@ -107,7 +119,7 @@ impl Shell {
                 return Err("The local instance list exceeds its display limits".into());
             }
             match response.into_owned()? {
-                Reply::InstanceOwners(owners) => {
+                Reply::InstanceOwners(mut owners) => {
                     let mut ids = BTreeSet::new();
                     if owners.len() > crate::engine::session_instance::MAX_STARTUP_PROGRESS
                         || owners.iter().any(|owner| {
@@ -121,6 +133,12 @@ impl Shell {
                         return Err(
                             "The local instance list contains invalid owner bindings".into()
                         );
+                    }
+                    for owner in &mut owners {
+                        owner
+                            .instance
+                            .host_mounts
+                            .sort_by(|a, b| a.path.cmp(&b.path).then(a.id.cmp(&b.id)));
                     }
                     Ok(owners)
                 }
@@ -140,20 +158,19 @@ impl Shell {
                     match result {
                         Ok(owners) => {
                             host.applications.owners = owners;
-                            if host.applications.instance.is_some_and(|id| {
-                                !host
-                                    .applications
-                                    .owners
-                                    .iter()
-                                    .any(|owner| owner.instance.id == id)
-                            }) {
-                                host.applications.instance = None;
-                            }
                         }
                         Err(error) => {
                             host.applications.owners.clear();
                             host.applications.instance_error = Some(error.to_string());
                         }
+                    }
+                    if !host.applications.refresh_needed
+                        && host.applications.instance.is_some_and(|id| {
+                            !host.applications.owners.iter().any(|owner| owner.instance.id == id)
+                        })
+                    {
+                        host.applications.instance = None;
+                        host.refresh_logs(cx);
                     }
                 } else {
                     host.applications.refresh_needed = true;

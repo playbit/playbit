@@ -112,7 +112,7 @@ pub(in crate::runtime::wasm) async fn deadline(
 }
 pub(super) fn identity(caller: Caller<'_, impl StoreData>, pointer: u32) -> i64 {
     call(caller, |state, memory| {
-        let output = memory.record(pointer, layout_identity::LAYOUT, false, None)?;
+        let output = memory.record(pointer, layout_identity::OUTPUT, false, None)?;
         output.clear(memory.data);
         let (generation, identity) = environment::identity(state)?;
         output.write(memory.data, layout_identity::GENERATION, &generation.to_le_bytes());
@@ -128,6 +128,12 @@ pub(super) fn identity(caller: Caller<'_, impl StoreData>, pointer: u32) -> i64 
             u32::from(identity.is_service) | (u32::from(identity.session_id.is_some()) << 1);
         output.write(memory.data, layout_identity::FLAGS, &flags.to_le_bytes());
         output.write(memory.data, layout_identity::RESERVED, &0_u32.to_le_bytes());
+        if output.len()
+            >= layout_identity::DISPLAY_NAME + playbit_api::abi::environment::DISPLAY_NAME_BYTES
+        {
+            let name = environment::display_name_field(&identity.display_name);
+            output.write(memory.data, layout_identity::DISPLAY_NAME, &name);
+        }
         output.publish(memory.data, layout_identity::LAYOUT);
         Ok(0)
     })

@@ -56,7 +56,6 @@ def stage(resources, version, guest_name="little-list"):
     config.write_text("[env]\n" + target[0] + "\n\n" + config.read_text())
     (template / "src").mkdir()
     write_template_guest(template, guest_name)
-    shutil.copyfile(repo / "playbit/assets/check-on.svg", template / "icon.svg")
     ocaml_api = resources / "ocaml-sdk"
     generator_dir = repo / "target/ocaml-bindgen"
     generator_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +82,7 @@ def write_template_guest(template, guest_name):
     repo = Path(__file__).resolve().parents[3]
     guest = repo / "guests" / guest_name
     if guest_name == "little-list":
+        shutil.copyfile(guest / "icon.png", template / "icon.png")
         shutil.copytree(guest / "src", template / "src", dirs_exist_ok=True)
         (template / "src/lib.rs").unlink()
         # The installed SDK supplies native linking without the implementation crate.
@@ -90,6 +90,7 @@ def write_template_guest(template, guest_name):
             '#[cfg(not(target_arch = "wasm32"))]\nextern crate playbit;\n\n')
     elif guest_name == "todo":
         # Existing tests retain TODO as their fixture.
+        shutil.copyfile(repo / "playbit/assets/check-on.svg", template / "icon.svg")
         app = (guest / "src/app.rs").read_text()
         # The standalone starter keeps the strict Session selector, without the
         # repository-only ordinary-Root regression branch or Cargo feature.
@@ -124,9 +125,8 @@ def stage_todo_fixture(app, destination):
     for name in ("playbit-api", "native-sdk"):
         (resources / name).symlink_to(app / "Contents/Resources" / name, target_is_directory=True)
     template = resources / "project-template"
-    shutil.copytree(app / "Contents/Resources/project-template", template)
-    # Replace the default guest's source tree, including generated modules.
-    shutil.rmtree(template / "src")
+    shutil.copytree(app / "Contents/Resources/project-template", template,
+                    ignore=shutil.ignore_patterns("src", "icon.png"))
     (template / "src").mkdir()
     write_template_guest(template, "todo")
 

@@ -417,7 +417,7 @@ pub extern "C" fn pb_web_volumes() -> i32 {
                 name_count: name.count,
                 tags_offset: tags.offset,
                 tags_count: tags.count,
-                rights: volume.rights.0,
+                rights: volume.public_rights().0,
                 flags: u32::from(volume.is_root) | volume.backing,
                 // Internal metadata only. Guest enumeration acquires aliases
                 // after validating the complete destination in JavaScript.
@@ -512,6 +512,7 @@ fn supported(opcode: Opcode) -> bool {
 
 pub(super) fn supports(feature: &str) -> bool {
     feature == abi::SESSION_VOLUME_FEATURE
+        || feature == environment::DISPLAY_NAMES_FEATURE
         || (feature == playbit_api::ui::CANVAS_CLEAR_FEATURE && supported(Opcode::ViewSubmit))
         || playbit_api::abi::syscall::REGISTRY
             .iter()
@@ -536,6 +537,8 @@ pub extern "C" fn pb_web_capabilities() -> i32 {
             let name = arrays.bytes(playbit_api::ui::CANVAS_CLEAR_FEATURE.as_bytes())?;
             arrays.ranges.push(name);
         }
+        let name = arrays.bytes(environment::DISPLAY_NAMES_FEATURE.as_bytes())?;
+        arrays.ranges.push(name);
         let record = environment::Capabilities {
             size: size_of::<environment::Capabilities>() as u32,
             written: extent::<environment::Capabilities>(),

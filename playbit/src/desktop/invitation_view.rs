@@ -1,13 +1,13 @@
 //! Invitation consent, joining, and app-opening progress.
 use super::*;
 
-fn invitation_description(joining: bool, state: &InvitationState) -> &'static str {
+pub(super) fn invitation_description(joining: bool, state: &InvitationState) -> &'static str {
     if joining {
         "Downloading app and synchronizing shared data…"
     } else {
         match &state {
             InvitationState::WaitingRegistration => {
-                "Waiting for the sender to connect and register this session. You can leave and resume later."
+                "Waiting for the sender to connect and register this session."
             }
             InvitationState::WaitingApp => {
                 "Waiting for the app upload to finish. This invitation will become available automatically."
@@ -18,7 +18,7 @@ fn invitation_description(joining: bool, state: &InvitationState) -> &'static st
             }
             InvitationState::Ready { .. } => "Ready to join.",
             InvitationState::Failed { .. } => {
-                "Couldn’t check this invitation. Your invitation is saved. Try again when connected."
+                "Couldn’t check this invitation. Try again when connected."
             }
             InvitationState::Denied { .. } => {
                 "Access is unavailable. Ask the sender to check the app’s provisioning and your access, then retry."
@@ -29,42 +29,242 @@ fn invitation_description(joining: bool, state: &InvitationState) -> &'static st
 }
 
 impl Shell {
+    pub(super) fn leave_invitation(&mut self) {
+        self.invitation = None;
+        self.invitation_link = None;
+        self.invitation_resume = None;
+    }
+
     pub(super) fn cancel_invitation_restoration(&mut self) {
         self.restore_pending_invitation = false;
     }
 
-    pub(super) fn restore_startup_invitation(&mut self, cx: &mut Context<Self>) -> bool {
-        // Either status or ordinary-open can arrive first. Explicit navigation
-        // cancels restoration, and later status never changes the chosen page.
-        if self.restore_pending_invitation
-            && self.enrolled.is_some()
-            && self.selected.is_none()
-            && self.invitation.is_none()
-            && self.opening.is_none()
-            && !self.initial_link
+    pub(super) fn restore_startup_opening(&mut self, cx: &mut Context<Self>) {
+        if !self.restore_pending_invitation
+            || self.enrolled.is_none()
+            || self.initial_link
+            || self.selected.is_some()
+            || self.invitation.is_some()
+            || self.opening.is_some()
         {
-            let preview = self.saved_invitations.first().cloned();
-            if preview.as_ref().is_some_and(|preview| preview.retained)
-                && (!self.account_ready() || self.sign_in.is_some())
-            {
-                return false;
+            return;
+        }
+        // Only an already joined session with an unfinished, active opening
+        // may continue on launch. Other saved entries belong in the Apps list.
+        let opening =
+            self.saved_invitations.iter().find(|preview| preview.retained && !preview.paused);
+        if opening.is_some() && (!self.account_ready() || self.sign_in.is_some()) {
+            return;
+        }
+        self.restore_pending_invitation = false;
+        if let Some(preview) = opening
+            && let Err(error) = self.open_retained(preview.session.clone(), cx)
+        {
+            self.joining = false;
+            self.error = error.into();
+        }
+    }
+
+    /// A typed invitation grants no access while its authenticated envelope and
+    /// availability arrive independently. Only an explicit Start begins the transfer.
+    pub(super) fn review_ready_invitation(&mut self, cx: &mut Context<Self>) {
+        if self.join_dialog.is_some() {
+            self.show_invitation_review(cx);
+        }
+    }
+
+    fn show_invitation_review(&mut self, cx: &mut Context<Self>) {
+        if self.joining
+            || self.new_session.as_ref().is_some_and(|form| form.read(cx).is_launch_dialog())
+            || self.join_preview.is_some()
+            || self.invitation_resume.is_some()
+        {
+            return;
+        }
+        let Some(preview) = self.invitation.as_ref().filter(|p| !p.paused) else { return };
+        let Some(received) = &preview.received else { return };
+        let mut received = received.clone();
+        match &self.join_status {
+            InvitationState::Ready { build_id } => {
+                received.session.resolved_build_id.clone_from(build_id)
             }
-            self.restore_pending_invitation = false;
-            if let Some(preview) = preview.filter(|preview| preview.retained) {
-                if preview.paused {
-                    self.sidebar_session = Some(preview.session.clone());
-                    self.opening = Some(preview.session);
-                    self.joining = false;
-                } else if let Err(error) = self.open_retained(preview.session, cx) {
-                    self.joining = false;
-                    self.error = error.into();
+            InvitationState::WaitingPeer => {}
+            _ => return,
+        }
+        let form = cx.new(|_| new_session::Form::invitation(&received, self.send.clone()));
+        self.join_dialog = None;
+        self.join_preview = None;
+        self.show_session_form(form.clone(), cx);
+        self.load_invitation_display(form, received.session, cx);
+    }
+
+    fn load_invitation_display(
+        &self,
+        form: Entity<new_session::Form>,
+        session: crate::store::Session,
+        cx: &mut Context<Self>,
+    ) {
+        let app = session.app;
+        let build = session.resolved_build_id;
+        if let Some(name) = self
+            .applications
+            .imported_apps()
+            .iter()
+            .find(|item| item.app == app && item.build_id == build)
+            .map(|item| item.name.clone())
+            .or_else(|| {
+                self.sessions
+                    .iter()
+                    .find(|row| row.resolved_build_id == build)
+                    .and_then(|row| row.app_name.clone())
+            })
+        {
+            let icon = self.session_icons.get(&build);
+            form.update(cx, |form, cx| {
+                form.set_review(name, build, app, icon);
+                cx.notify();
+            });
+            return;
+        }
+        if !crate::identifier::valid(&build, 32) || app.validate().is_err() {
+            return;
+        }
+        // Closing a review does not cancel a provider read. Bound optional artwork
+        // independently of the preparation slot used to open the next app.
+        static DISPLAY: std::sync::LazyLock<new_session::Preparation> =
+            std::sync::LazyLock::new(Default::default);
+        let Ok(credit) = DISPLAY.acquire() else { return };
+        let profile = profile_path();
+        let job = cx.background_executor().spawn(async move {
+            let _credit = credit;
+            let display = crate::engine::app_display::read(&profile, &build).or_else(|_| {
+                let request = Request::GetAppDisplay { app: app.clone(), build: build.clone() };
+                match ipc::call_archive(&profile, &request)?.into_owned()? {
+                    Reply::Developer(crate::engine::reply::DeveloperReply::Display { .. }) => {
+                        crate::engine::app_display::read(&profile, &build)
+                    }
+                    Reply::Error { error } => Err(error.into()),
+                    _ => Err("Unexpected app display response".into()),
                 }
-            } else {
-                self.invitation = self.saved_invitations.first().cloned();
+            })?;
+            if display.app_id != app.app_id {
+                return Err("App display identity differs from invitation".into());
             }
+            let icon = display.icon.and_then(|hex| {
+                let bytes = (0..hex.len())
+                    .step_by(2)
+                    .map(|pos| u8::from_str_radix(&hex[pos..pos + 2], 16))
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                super::session_icons::decode_review(&bytes).ok()
+            });
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((display.name, build, app, icon))
+        });
+        let form = form.downgrade();
+        cx.spawn(async move |_, cx| {
+            if let Ok((name, build, app, icon)) = job.await {
+                let _ = form.update(cx, |form, cx| {
+                    form.set_review(name, build, app, icon);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub(super) fn start_reviewed_join(
+        &mut self,
+        session: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        if self.joining
+            || !self.account_ready()
+            || !self
+                .invitation
+                .as_ref()
+                .is_some_and(|p| p.session == session && p.received.is_some() && !p.paused)
+            || !matches!(
+                self.join_status,
+                InvitationState::Ready { .. } | InvitationState::WaitingPeer
+            )
+        {
+            return Err("This session is no longer ready. Open the invitation again.");
+        }
+        self.join_preview =
+            Some(self.send.join_dialog_request(Request::StartJoin { session: session.into() })?);
+        self.joining = true;
+        cx.notify();
+        Ok(())
+    }
+
+    pub(super) fn apply_reviewed_transfer(
+        &mut self,
+        transfer: &TransferStatus,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(form) = self
+            .new_session
+            .as_ref()
+            .filter(|form| self.joining && form.read(cx).reviewed_invitation().is_some())
+            .cloned()
+        else {
+            return false;
+        };
+        // Older snapshots may precede the StartJoin admission or concern another
+        // session. Only this form can prepare its instance with the chosen folders.
+        if self.join_preview.is_some()
+            || !transfer
+                .session
+                .as_ref()
+                .is_some_and(|session| form.read(cx).is_waiting_for_join(session))
+        {
             return true;
         }
-        false
+        match transfer.kind {
+            TransferKind::Complete => {
+                self.joining = false;
+                self.leave_invitation();
+                let owner = cx.weak_entity();
+                cx.defer(move |cx| {
+                    if owner
+                        .upgrade()
+                        .is_some_and(|host| host.read(cx).new_session.as_ref() == Some(&form))
+                    {
+                        form.update(cx, |form, cx| form.join_completed(cx));
+                    }
+                });
+            }
+            TransferKind::Failed | TransferKind::Paused => {
+                self.joining = false;
+                let message = transfer
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "The session transfer did not finish.".into());
+                form.update(cx, |form, cx| form.join_failed(message, cx));
+            }
+            _ => {}
+        }
+        true
+    }
+
+    pub(super) fn cancel_reviewed_invitation(&mut self, cx: &mut Context<Self>) -> bool {
+        let reviewed =
+            self.new_session.as_ref().and_then(|form| form.read(cx).reviewed_invitation());
+        let Some(preview) =
+            self.invitation.as_ref().filter(|p| Some(p.session.as_str()) == reviewed)
+        else {
+            return true;
+        };
+        if let Err(error) =
+            self.send.send(Request::PauseInvitation { session: preview.session.clone() })
+        {
+            self.error = error.into();
+            cx.notify();
+            return false;
+        }
+        self.dismiss_invitation(cx);
+        cx.notify();
+        true
     }
 
     fn paused_opening(
@@ -137,39 +337,13 @@ impl Shell {
                         this.pending_windows.remove(&session);
                     }
                     this.joining = false;
+                    this.opening = None;
                 },
                 cx,
             ));
         } else {
             main = self.paused_opening(main, session, cx);
         }
-        main
-    }
-
-    fn paused_invitation(
-        &mut self,
-        mut main: gpui::Stateful<gpui::Div>,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        main = main
-            .child(self.host_text(
-                HostText::InvitationStatus,
-                "Invitation paused. Resume whenever you’re ready.",
-                cx,
-            ))
-            .child(self.host_callback(
-                "resume-preview",
-                "Resume invitation",
-                false,
-                |this, _| {
-                    if let Some(invitation) = &this.invitation {
-                        this.send
-                            .send(Request::ResumeInvitation { session: invitation.session.clone() })
-                            .ok();
-                    }
-                },
-                cx,
-            ));
         main
     }
 
@@ -189,18 +363,9 @@ impl Shell {
         ));
         main = main.child(self.host_callback(
             "join-session",
-            "Join session",
+            "Review session…",
             false,
-            |this, _| {
-                if this.joining {
-                    return;
-                }
-                if let Some(invitation) = &this.invitation {
-                    this.send.send(Request::StartJoin { session: invitation.session.clone() }).ok();
-                    this.joining = true;
-                    this.error.clear();
-                }
-            },
+            Self::show_invitation_review,
             cx,
         ));
         main
@@ -213,13 +378,20 @@ impl Shell {
     ) -> gpui::Stateful<gpui::Div> {
         main = main.child(self.host_callback(
             "pause-invitation",
-            "Cancel for now",
+            "Cancel",
             false,
-            |this, _| {
+            |this, cx| {
                 if let Some(invitation) = &this.invitation {
-                    this.send
+                    match this
+                        .send
                         .send(Request::PauseInvitation { session: invitation.session.clone() })
-                        .ok();
+                    {
+                        Ok(()) => {
+                            this.error.clear();
+                            this.dismiss_invitation(cx);
+                        }
+                        Err(error) => this.error = error.into(),
+                    }
                 }
             },
             cx,
@@ -227,12 +399,24 @@ impl Shell {
         main
     }
 
-    fn available_invitation(
+    pub(super) fn invitation_content(
         &mut self,
         mut main: gpui::Stateful<gpui::Div>,
         invitation: crate::store::InvitationPreview,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        let details = match &invitation.received {
+            Some(received) => format!("Shared data: {}", received.root_name),
+            None => "Session details will appear when the sender makes them available.".to_owned(),
+        };
+        main = main
+            .child(self.host_text(HostText::InvitationTitle, "Join this session", cx).text_2xl())
+            .child(self.host_text(HostText::InvitationRoot, details, cx))
+            .child(self.host_text(
+                HostText::InvitationAuthority,
+                "This invitation gives the app access to its shared root and session data. Your personal volumes stay private.",
+                cx,
+            ));
         let state = self.join_status.clone();
         let description = invitation_description(self.joining, &state);
         main = main.child(self.host_text(HostText::InvitationStatus, description, cx));
@@ -254,28 +438,7 @@ impl Shell {
         }) {
             main = self.join_controls(main, received, cx);
         }
-        main = self.pause_invitation(main, cx);
-        main
-    }
-
-    pub(super) fn invitation_content(
-        &mut self,
-        mut main: gpui::Stateful<gpui::Div>,
-        invitation: crate::store::InvitationPreview,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        main = main.child(self.host_text(HostText::InvitationTitle, "Join this session", cx).text_2xl())
-                        .child(self.host_text(HostText::InvitationRoot, match &invitation.received {
-                            Some(received) => format!("Shared data: {}", received.root_name),
-                            None => "Session details will appear when the sender makes them available.".to_owned(),
-                        }, cx))
-                        .child(self.host_text(HostText::InvitationAuthority, "This invitation gives the app access to its shared root and session data. Your personal volumes stay private.", cx));
-        main = if invitation.paused {
-            self.paused_invitation(main, cx)
-        } else {
-            self.available_invitation(main, invitation, cx)
-        };
-        main
+        self.pause_invitation(main, cx)
     }
 }
 
@@ -291,7 +454,7 @@ mod tests {
         // The first enrolled status must not turn an authorized opening into
         // consent or let its startup continuation resume a durable pause.
         for paused in [false, true] {
-            let (host, window, requests, responses) = test_support::host_with_responses(cx);
+            let (host, _, requests, responses) = test_support::host_with_responses(cx);
             let session = crate::identifier::encode(&[7; 32]);
             let preview = crate::store::InvitationPreview {
                 session: session.clone(),
@@ -311,16 +474,13 @@ mod tests {
                 cx.run_until_parked();
             }
             host.read_with(cx, |host, _| {
-                assert_eq!(host.opening.as_deref(), Some(session.as_str()));
+                assert_eq!(host.opening.as_deref(), (!paused).then_some(session.as_str()));
                 assert_eq!(host.joining, !paused);
                 assert!(host.invitation.is_none());
-                assert_eq!(host.host_controls.contains_key("resume-opening"), paused);
-                assert_eq!(host.host_controls.contains_key("cancel-opening"), !paused);
             });
             if paused {
                 assert!(requests.is_empty());
-                focus_button(window, "resume-opening", cx);
-                press(window, "enter", cx);
+                continue;
             }
             assert!(matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest {
                 request: Request::PrepareSession { session: id }, ..
@@ -364,8 +524,7 @@ mod tests {
                 .unwrap();
             cx.run_until_parked();
             assert!(requests.is_empty(), "late completion cannot resume a canceled opening");
-            focus_button(window, "resume-opening", cx);
-            press(window, "enter", cx);
+            host.update(cx, |host, cx| host.open_retained_session(session.clone(), cx));
             let Message::Request(current) = requests.try_recv().unwrap() else { panic!("resume") };
             let admission = current.credit.as_ref().unwrap().admission();
             let mut response = WorkerResponse::from_reply(Ok(Reply::Transfer {
@@ -390,15 +549,42 @@ mod tests {
     }
 
     #[gpui::test]
-    #[gpui::test]
-    #[gpui::test]
     fn invitation_delivery_matches_session_and_retains_preview(cx: &mut gpui::TestAppContext) {
         let (send, requests, errors) = worker_queue::channel();
         let (responses, receive) = async_channel::bounded(1);
         let host =
             cx.new(|cx| Shell::new((send, receive, errors), async_channel::bounded(4).1, cx));
         drop(requests.try_recv().unwrap());
-        let session = String::from("selected-invitation");
+        let first = crate::store::SessionReference::new([6; crate::store::SEED_BYTES]).unwrap();
+        let latest = crate::store::SessionReference::new([7; crate::store::SEED_BYTES]).unwrap();
+        let previous = first.internal_id().to_owned();
+        let id = latest.internal_id().to_owned();
+        host.update(cx, |host, _| {
+            host.preview_invitation_link(first).unwrap();
+            host.preview_invitation_link(latest).unwrap();
+        });
+        for _ in 0..2 {
+            assert!(matches!(
+                requests.try_recv().unwrap(),
+                Message::Request(QueuedRequest {
+                    request: Request::PreviewDesktopInvitation { .. },
+                    ..
+                })
+            ));
+        }
+        responses
+            .try_send(WorkerResponse::from_reply(Ok(Reply::InvitationPreview(
+                crate::store::InvitationPreview {
+                    session: previous,
+                    paused: false,
+                    retained: false,
+                    received: None,
+                },
+            ))))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(requests.is_empty(), "a superseded preview cannot start a watch");
+        let session = id.clone();
         let allocation = session.as_ptr() as usize;
         responses
             .try_send(WorkerResponse::from_reply(Ok(Reply::InvitationPreview(
@@ -411,9 +597,19 @@ mod tests {
             ))))
             .unwrap();
         cx.run_until_parked();
-        assert!(
-            matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest { request: Request::WatchInvitation { session }, .. }) if session == "selected-invitation")
-        );
+        let Message::Request(watch) = requests.try_recv().unwrap() else {
+            panic!("expected watch")
+        };
+        assert!(matches!(watch.request, Request::WatchInvitation { session } if session == id));
+        let mut checking = WorkerResponse::from_reply(Ok(Reply::InvitationStatus {
+            invitation_status: Some(InvitationStatus {
+                session: id.clone(),
+                state: InvitationState::Checking,
+            }),
+        }));
+        checking.credit = watch.credit;
+        responses.try_send(checking).unwrap();
+        cx.run_until_parked();
         host.read_with(cx, |host, _| {
             assert_eq!(host.invitation.as_ref().unwrap().session.as_ptr() as usize, allocation)
         });
@@ -432,31 +628,26 @@ mod tests {
         });
         let directory = tempfile::tempdir().unwrap();
         let mut engine = crate::engine::Engine::open(directory.path()).unwrap();
-        for state in [InvitationState::Paused, InvitationState::Ready { build_id: "build".into() }]
+        for state in [InvitationState::Ready { build_id: "build".into() }, InvitationState::Paused]
         {
             let Reply::Status(mut status) = engine.dispatch_reply(Request::Status).unwrap() else {
                 panic!("status reply")
             };
             status.enrolled = true;
-            status.invitation_status = Some(InvitationStatus {
-                session: "selected-invitation".into(),
-                state: state.clone(),
-            });
+            status.invitation_status =
+                Some(InvitationStatus { session: id.clone(), state: state.clone() });
             let response = WorkerResponse::from_reply(Ok(Reply::Status(status)));
             responses.try_send(response).unwrap();
             cx.run_until_parked();
             host.read_with(cx, |host, _| {
                 assert_eq!(host.join_status, state);
-                assert_eq!(
-                    host.invitation.as_ref().unwrap().paused,
-                    matches!(state, InvitationState::Paused)
-                );
+                assert_eq!(host.invitation.is_none(), matches!(state, InvitationState::Paused));
             });
         }
     }
 
     #[gpui::test]
-    fn invitation_controls_join_pause_and_resume_the_same_session(cx: &mut gpui::TestAppContext) {
+    fn invitation_controls_join_then_dismiss_the_selected_session(cx: &mut gpui::TestAppContext) {
         let (host, window, requests, responses) = test_support::host_with_responses(cx);
         let invitation = crate::store::InvitationPreview {
             session: "shared-session".into(),
@@ -520,6 +711,13 @@ mod tests {
         });
         focus_button(window, "join-session", cx);
         press(window, "enter", cx);
+        host.read_with(cx, |host, cx| {
+            assert_eq!(
+                host.new_session.as_ref().and_then(|form| form.read(cx).reviewed_invitation()),
+                Some("shared-session")
+            )
+        });
+        assert!(requests.is_empty(), "review waits for Start Session");
         press(window, "enter", cx);
         let queued = requests.try_recv().unwrap();
         assert!(matches!(queued, Message::Request(QueuedRequest {
@@ -534,36 +732,15 @@ mod tests {
         cx.run_until_parked();
         host.read_with(cx, |host, _| assert!(host.joining));
         assert!(requests.is_empty(), "joining owns progress until preparation completes");
-        focus_button(window, "pause-invitation", cx);
-        press(window, "space", cx);
+        press(window, "escape", cx);
         let queued = requests.try_recv().unwrap();
         assert!(matches!(queued, Message::Request(QueuedRequest {
             request: Request::PauseInvitation { ref session }, .. }) if session == "shared-session"));
         drop(queued);
-        host.update(cx, |host, cx| {
-            assert_eq!(host.invitation, Some(invitation.clone()));
-            host.invitation.as_mut().unwrap().paused = true;
-            host.joining = false;
-            cx.notify();
+        host.read_with(cx, |host, _| {
+            assert!(host.invitation.is_none());
+            assert!(!host.joining);
         });
-        cx.run_until_parked();
-        press(window, "tab", cx);
-        cx.update(|cx| {
-            window
-                .update(cx, |host, window, cx| {
-                    assert!(
-                        host.navigation_controls["join"].read(cx).focused(window),
-                        "Tab must work after the focused Pause control disappears"
-                    );
-                })
-                .unwrap()
-        });
-        focus_button(window, "resume-preview", cx);
-        press(window, "enter", cx);
-        let queued = requests.try_recv().unwrap();
-        assert!(matches!(queued, Message::Request(QueuedRequest {
-            request: Request::ResumeInvitation { ref session }, .. }) if session == "shared-session"));
-        drop(queued);
 
         host.update(cx, |host, cx| {
             host.invitation = Some(crate::store::InvitationPreview {
@@ -622,7 +799,7 @@ mod tests {
         ));
         host.read_with(cx, |host, _| {
             assert!(!host.joining);
-            assert_eq!(host.opening.as_deref(), Some("saved-session"));
+            assert!(host.opening.is_none());
         });
     }
 }

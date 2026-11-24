@@ -51,6 +51,13 @@ pub(super) mod tracing;
 pub(super) use handles::resolve_volume;
 use handles::{consume_operation, register_operation, reserve_operation};
 pub(super) mod events;
+#[cfg(all(
+    target_os = "macos",
+    feature = "local-store",
+    feature = "native-runtime",
+    feature = "desktop-ui"
+))]
+pub(crate) use events::menu_contains;
 pub use events::validate_input;
 pub(super) use events::{push_event, queue_due_wake};
 mod files;

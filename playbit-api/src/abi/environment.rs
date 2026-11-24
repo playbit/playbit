@@ -1,6 +1,26 @@
 //! Host platform, caller-owned instance metadata and bounded resource results.
 use super::data::Range;
 use super::operations::Context;
+use super::syscall::Error;
+
+pub const DISPLAY_NAME_BYTES: usize = 256;
+pub const DISPLAY_NAMES_FEATURE: &str = "display-names.v1";
+
+/// Read the optional UTF-8 field only when a host published it in full.
+pub(super) fn display_name(
+    bytes: &[u8; DISPLAY_NAME_BYTES],
+    present: bool,
+) -> Result<Option<&str>, Error> {
+    if !present {
+        return Ok(None);
+    }
+    let len = bytes.iter().position(|&byte| byte == 0).unwrap_or(bytes.len());
+    if bytes[len..].iter().any(|&byte| byte != 0) {
+        return Err(Error::InvalidArgument);
+    }
+    let name = core::str::from_utf8(&bytes[..len]).map_err(|_| Error::InvalidArgument)?;
+    Ok((!name.is_empty()).then_some(name))
+}
 
 /// The host running the app, independent of the app compiler's target.
 /// Web identifies the web host, including browsers on macOS and iOS.
@@ -152,6 +172,16 @@ pub struct Participant {
     pub device_id: [u8; 16],
     pub instance_id: [u8; 16],
     pub build_id: [u8; 32],
+    /// Zero-padded UTF-8. A full-width name occupies every byte.
+    pub display_name: [u8; DISPLAY_NAME_BYTES],
+}
+
+impl Participant {
+    /// The display name, when supplied by the host. An older host can omit this field.
+    pub fn display_name(&self) -> Result<Option<&str>, super::syscall::Error> {
+        let end = core::mem::offset_of!(Self, display_name) + DISPLAY_NAME_BYTES;
+        display_name(&self.display_name, self.written as usize >= end)
+    }
 }
 /// # Safety
 /// Context and all pointers obey the borrowed operation contract in playbit/sys/abi.h.
@@ -221,7 +251,25 @@ pub unsafe fn pb_presence(
 
 #[cfg(test)]
 mod tests {
-    use super::HostPlatform;
+    use super::{DISPLAY_NAME_BYTES, HostPlatform, Participant};
+    #[test]
+    fn display_name_respects_written_and_fixed_width_utf8() {
+        // An older host can leave arbitrary bytes in reused caller storage.
+        let mut row = Participant {
+            written: 88,
+            display_name: [255; DISPLAY_NAME_BYTES],
+            ..Default::default()
+        };
+        assert_eq!(row.display_name(), Ok(None));
+        row.written = row.size;
+        assert_eq!(row.display_name(), Err(super::Error::InvalidArgument));
+        let full = "é".repeat(DISPLAY_NAME_BYTES / 2);
+        row.display_name.copy_from_slice(full.as_bytes());
+        assert_eq!(row.display_name(), Ok(Some(full.as_str())));
+        row.display_name.fill(0);
+        assert_eq!(row.display_name(), Ok(None));
+    }
+
     #[test]
     fn platform_results_keep_errors_and_unknown_values_out_of_the_enum() {
         for (raw, expected) in [
@@ -289,8 +337,9 @@ impl Default for Participant {
             device_id: [0; 16],
             instance_id: [0; 16],
             build_id: [0; 32],
+            display_name: [0; DISPLAY_NAME_BYTES],
         }
     }
 }
 
-super::record::record!(Participant, 88, { account_id: [u8; 16], device_id: [u8; 16], instance_id: [u8; 16], build_id: [u8; 32] });
+super::record::record!(Participant, 88, { account_id: [u8; 16], device_id: [u8; 16], instance_id: [u8; 16], build_id: [u8; 32], display_name: [u8; DISPLAY_NAME_BYTES] }, optional_output: display_name);

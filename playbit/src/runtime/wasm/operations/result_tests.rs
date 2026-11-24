@@ -233,6 +233,7 @@ fn instantiate(
         device_id: [2; 16],
         instance_id: [3; 16],
         build_id: [5; 32],
+        display_name: String::new(),
     });
     let results = Arc::new(Mutex::new(Results::default()));
     let state =
@@ -808,19 +809,37 @@ fn maximum_metadata_arrays_fit() {
                 let mut instance_id = [0; 16];
                 instance_id[..4].copy_from_slice(&index.to_le_bytes());
                 Participant {
-                    account_id: [1; 16],
+                    account_id: [8; 16],
                     device_id: [2; 16],
                     instance_id,
                     build_id: [5; 32],
+                    display_name: "é".repeat(128),
                 }
             })
             .collect();
         store.data_mut().app.set_participants(u64::from(generation), participants).unwrap();
-        record_buffer(memory.data_mut(&mut store), 128, 65536, 1024, participant::SIZEOF);
         let presence =
             instance.get_typed_func::<(u32, u32, u32, u32), i32>(&mut store, "presence").unwrap();
         assert_eq!(presence.call(&mut store, (0, 0, participant::SIZEOF, 160)).unwrap(), -11);
         assert_eq!(number(memory.data(&store), 160), 1024);
+        // Older guests could reserve extra bytes in each slot of their own array.
+        record_buffer(memory.data_mut(&mut store), 128, 65536, 1024, 96);
+        for index in 0..1024 {
+            let offset = 65536 + index * 96;
+            memory.data_mut(&mut store)[offset + 88..offset + 96].fill(0x55);
+        }
+        assert_eq!(presence.call(&mut store, (65536, 1024, 96, 160)).unwrap(), 0);
+        for index in 0..1024 {
+            let offset = 65536 + index * 96;
+            assert_eq!(number(memory.data(&store), offset), 96);
+            assert_eq!(number(memory.data(&store), offset + participant::WRITTEN), 88);
+            assert_eq!(
+                number(memory.data(&store), offset + participant::INSTANCE_ID),
+                index as u32
+            );
+            assert_eq!(&memory.data(&store)[offset + 88..offset + 96], &[0x55; 8]);
+        }
+        record_buffer(memory.data_mut(&mut store), 128, 65536, 1024, participant::SIZEOF);
         assert_eq!(presence.call(&mut store, (65536, 1024, participant::SIZEOF, 160)).unwrap(), 0);
         assert_eq!(
             number(
@@ -832,6 +851,11 @@ fn maximum_metadata_arrays_fit() {
         assert_eq!(
             &memory.data(&store)[65536 + participant::BUILD_ID..65536 + participant::BUILD_ID + 32],
             &[5; 32]
+        );
+        assert_eq!(
+            &memory.data(&store)
+                [65536 + participant::DISPLAY_NAME..65536 + participant::SIZEOF as usize],
+            "é".repeat(128).as_bytes()
         );
         for (pointer, count, output, status) in [
             (65536, 1025, 160, -9),

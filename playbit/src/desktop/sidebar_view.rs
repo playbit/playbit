@@ -75,80 +75,8 @@ impl Shell {
                 browser::ListNavigation::Unhandled => {}
             }
         }
-        if matches!(key, "up" | "down") {
-            self.navigate_sidebar(event, window, cx);
-        } else if self.sidebar_volumes
-            && self.volumes.iter().any(|volume| {
-                self.navigation_controls
-                    .get(&format!("volume-{}", volume.id))
-                    .is_some_and(|control| control.read(cx).focused(window))
-            })
-        {
-            if key == "right"
-                && self.new_session.is_none()
-                && let Some(browser) = &self.browser
-            {
-                browser.update(cx, |browser, cx| browser.focus_entry_list(window, cx));
-            }
-            cx.stop_propagation();
-        }
-    }
-
-    fn navigate_sidebar(
-        &mut self,
-        event: &gpui::KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let next = match event.keystroke.key.as_str() {
-            "up" => false,
-            "down" => true,
-            _ => return,
-        };
-        if self.sidebar_volumes {
-            self.navigate_volume_list(next, window, cx);
-        } else {
-            self.navigate_session_list(next, window, cx);
-        }
-    }
-
-    fn navigate_volume_list(&mut self, next: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.volumes.len() > 256 {
-            return;
-        }
-        let Some(index) = self.volumes.iter().position(|volume| {
-            self.navigation_controls
-                .get(&format!("volume-{}", volume.id))
-                .is_some_and(|control| control.read(cx).focused(window))
-        }) else {
-            return;
-        };
-        let target =
-            if next { (index + 1).min(self.volumes.len() - 1) } else { index.saturating_sub(1) };
-        if target == index {
-            cx.stop_propagation();
-            return;
-        }
-        let volume = self.volumes[target].clone();
-        if let Some(control) =
-            self.navigation_controls.get(&format!("volume-{}", volume.id)).cloned()
-        {
-            if !self.select_volume(volume, cx) {
-                cx.stop_propagation();
-                return;
-            }
-            let pending_before = self.volumes.len() < 256
-                && self
-                    .pending_volume
-                    .as_ref()
-                    .is_some_and(|pending| pending.position(&self.volumes) <= target);
-            self.volume_scroll.scroll_to_item(
-                target + usize::from(pending_before),
-                if next { gpui::ScrollStrategy::Bottom } else { gpui::ScrollStrategy::Top },
-            );
-            control.update(cx, |control, cx| control.focus_from_arrow(window, cx));
-            cx.notify();
-            cx.stop_propagation();
+        if !self.sidebar_volumes && matches!(key, "up" | "down") {
+            self.navigate_session_list(key == "down", window, cx);
         }
     }
 
@@ -185,20 +113,29 @@ impl Shell {
     }
 
     pub(super) fn select_sidebar_session(&mut self, id: String, cx: &mut Context<Self>) -> bool {
+        self.select_browser_session(id, false, cx)
+    }
+
+    pub(super) fn select_browser_session(
+        &mut self,
+        id: String,
+        volumes: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.prepare_browser_navigation(cx) {
             return false;
         }
         self.sidebar_session = Some(id);
-        self.sidebar_volumes = false;
+        self.sidebar_volumes = volumes;
         self.browser = None;
         self.personal = None;
         self.new_session = None;
-        self.invitation = None;
+        self.leave_invitation();
         self.opening = None;
         self.joining = false;
         self.error.clear();
-        self.refresh_logs(cx);
         self.select_application_session(cx);
+        self.refresh_logs(cx);
         cx.notify();
         true
     }
@@ -220,13 +157,16 @@ impl Shell {
                     .map(str::to_owned)
             };
         self.retain_navigation_controls(&sessions, cx);
-        let list = if self.applications.available() {
-            self.application_list(cx)
+        let list = if self.sidebar_volumes {
+            self.volume_list(cx)
         } else {
-            let rows = self.session_rows(&sessions, selected.as_deref(), cx);
+            let rows = if self.applications.available() {
+                self.application_rows(cx)
+            } else {
+                self.session_rows(&sessions, selected.as_deref(), cx)
+            };
             self.session_list(rows, sessions.is_empty(), &theme, cx)
         };
-        let list = if self.sidebar_volumes { self.volume_list(cx) } else { list };
         self.sidebar_frame(join, account, list, &theme, window_active, cx)
     }
     fn invitation_button(&mut self, cx: &mut Context<Self>) -> Entity<controls::Control> {
@@ -262,7 +202,7 @@ impl Shell {
                     this.browser = None;
                     this.selected = None;
                     this.applications.clear_selection();
-                    this.invitation = None;
+                    this.leave_invitation();
                     this.personal = None;
                     this.new_session = None;
                     this.joining = false;
@@ -370,14 +310,14 @@ impl Shell {
                     HostText::EmptySessions,
                     if self.enrolled.is_none() {
                         if self.error.is_empty() {
-                            "Loading sessions…"
+                            "Loading app list…"
                         } else {
-                            "Sessions unavailable"
+                            "The app list failed to load"
                         }
                     } else if sessions_empty {
-                        "No saved sessions"
+                        "Your personal and saved apps appear here\n\nNo apps available; try a featured app, or create an app using a template"
                     } else {
-                        "Session list unavailable"
+                        "The app list failed to load"
                     },
                     cx,
                 )
@@ -412,6 +352,7 @@ impl Shell {
             },
         ));
         let entries = self.volumes.clone();
+        let mut rows = Vec::new();
         if entries.len() > 256 {
             volumes = volumes.child(
                 self.host_text(
@@ -422,19 +363,19 @@ impl Shell {
                 .text_size(ui(13.)),
             );
         } else {
-            let mut rows = Vec::with_capacity(entries.len());
             for volume in entries {
-                let control = self.volume_button(volume.clone(), cx);
                 let editor = self
                     .volume_rename
                     .as_ref()
                     .filter(|rename| rename.volume == volume.id)
                     .map(|rename| rename.editor.clone());
-                let selected = self
-                    .browser
-                    .as_ref()
-                    .is_some_and(|browser| browser.read(cx).volume.id == volume.id);
-                rows.push((control, editor, selected));
+                let selected = !self.applications.root_open
+                    && self
+                        .browser
+                        .as_ref()
+                        .is_some_and(|browser| browser.read(cx).volume.id == volume.id);
+                self.applications.push_volume_row(volume.id, selected);
+                rows.push((self.volume_button(volume, selected, cx), editor, selected));
             }
             if let Some(pending) = &self.pending_volume
                 && rows.len() < 256
@@ -444,62 +385,84 @@ impl Shell {
                     (pending.control.clone(), None, false),
                 );
             }
-            if !rows.is_empty() {
-                volumes = volumes
-                    .child(
-                        gpui::uniform_list("volumes", rows.len(), move |range, _, _| {
-                            range
-                                .map(|i| {
-                                    let (control, editor, selected) = &rows[i];
-                                    let row = if let Some(editor) = editor {
-                                        div()
-                                            .h_full()
-                                            .flex()
-                                            .items_center()
-                                            .gap(ui(6.))
-                                            .px(ui(8.))
-                                            .rounded(ui(4.))
-                                            .when(*selected, |row| {
-                                                row.bg(rgba(theme().color(Role::MenuSelection).0))
-                                            })
-                                            .child(
-                                                gpui::svg()
-                                                    .path("volume-cell")
-                                                    .size(ui(16.))
-                                                    .flex_none()
-                                                    .text_color(if *selected {
-                                                        gpui::white()
-                                                    } else {
-                                                        gpui::black()
-                                                    }),
-                                            )
-                                            .child(div().flex_1().min_w_0().child(editor.clone()))
-                                    } else {
-                                        div().child(control.clone())
-                                    };
-                                    div().h(ui(32.)).px(ui(4.)).child(row)
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .track_scroll(self.volume_scroll.clone())
-                        .w_full()
-                        .h_full(),
-                    )
-                    .child(crate::ui::desktop::scrollbar::Scrollbars::overlay(
-                        &self.volume_scrollbars,
-                    ));
-            }
+        }
+        let apps = self.application_rows(cx);
+        let heading =
+            (!apps.is_empty()).then(|| self.application_section("volume-app-data", "App data", cx));
+        let count = rows.len() + usize::from(heading.is_some()) + apps.len();
+        if count > 0 {
+            volumes = volumes
+                .child(
+                    gpui::uniform_list("volumes", count, move |range, _, _| {
+                        range
+                            .map(|i| {
+                                let frame = div().h(ui(32.)).px(ui(4.));
+                                if i >= rows.len() {
+                                    if i == rows.len() {
+                                        return frame.children(heading.clone());
+                                    }
+                                    return frame.child(apps[i - rows.len() - 1].clone());
+                                }
+                                let (control, editor, selected) = &rows[i];
+                                let row = if let Some(editor) = editor {
+                                    div()
+                                        .h_full()
+                                        .flex()
+                                        .items_center()
+                                        .gap(ui(6.))
+                                        .px(ui(8.))
+                                        .rounded(ui(4.))
+                                        .when(*selected, |row| {
+                                            row.bg(rgba(theme().color(Role::MenuSelection).0))
+                                        })
+                                        .child(
+                                            gpui::svg()
+                                                .path("volume-cell")
+                                                .size(ui(16.))
+                                                .flex_none()
+                                                .text_color(if *selected {
+                                                    gpui::white()
+                                                } else {
+                                                    gpui::black()
+                                                }),
+                                        )
+                                        .child(div().flex_1().min_w_0().child(editor.clone()))
+                                } else {
+                                    div().child(control.clone())
+                                };
+                                frame.child(row)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .track_scroll(self.volume_scroll.clone())
+                    .w_full()
+                    .h_full(),
+                )
+                .child(crate::ui::desktop::scrollbar::Scrollbars::overlay(&self.volume_scrollbars));
+        } else if self.volumes.is_empty() {
+            volumes = volumes.child(
+                self.host_text(
+                    HostText::EmptyVolumes,
+                    concat!(
+                        "Your personal volumes appear here\n\nThey provide synchronized ",
+                        "storage which you can access from within Playbit apps\n\nNo volumes available"
+                    ),
+                    cx
+                )
+                .p(ui(12.))
+                .text_size(ui(13.))
+                .text_color(rgba(theme().color(Role::TextSecondary).0)),
+            );
         }
         volumes
     }
     fn volume_button(
         &mut self,
         volume: crate::store::Volume,
+        selected: bool,
         cx: &mut Context<Self>,
     ) -> Entity<controls::Control> {
         let id = volume.id;
-        let selected =
-            self.browser.as_ref().is_some_and(|browser| browser.read(cx).volume.id == id);
         let selection_active = !selected
             || self.browser.as_ref().is_none_or(|browser| browser.read(cx).is_showing_volume());
         let weak = cx.weak_entity();
@@ -622,7 +585,15 @@ impl Shell {
         volume: crate::store::Volume,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.select_volume_in(volume, None, cx)
+        if !self.select_volume_in(volume, None, cx) {
+            return false;
+        }
+        self.sidebar_volumes = true;
+        if self.log_watch.is_some() {
+            self.refresh_logs(cx);
+        }
+        self.applications.close_scope();
+        true
     }
 
     pub(super) fn select_volume_in(
@@ -639,11 +610,10 @@ impl Shell {
         {
             return false;
         }
-        self.sidebar_volumes = true;
         self.cancel_invitation_restoration();
         self.personal = None;
         self.new_session = None;
-        self.invitation = None;
+        self.leave_invitation();
         self.error.clear();
         if let Some(browser) = self.browser.as_ref().filter(|browser| same_target(browser.read(cx)))
         {
@@ -944,14 +914,17 @@ impl Shell {
             false,
             Rc::new(move |_, cx| {
                 let _ = weak.update(cx, |this, cx| {
-                    if !volumes && !this.prepare_browser_navigation(cx) {
+                    let leave_volume = !volumes && !this.applications.root_open;
+                    if leave_volume && !this.prepare_browser_navigation(cx) {
                         return;
                     }
                     this.sidebar_volumes = volumes;
                     this.new_session = None;
-                    if !volumes {
+                    if leave_volume {
                         this.browser = None;
                     }
+                    this.refresh_logs(cx);
+                    this.refresh_application_instances(cx);
                     cx.notify();
                 });
             }),
@@ -1442,9 +1415,10 @@ mod tests {
                     .update(cx, |host, window, cx| {
                         host.new_session = Some(cx.new(|_| {
                             new_session::Form::new(
-                                new_session::Target::Session(crate::identifier::encode(
-                                    &[0xab; 32],
-                                )),
+                                new_session::Target::Folders {
+                                    session: crate::identifier::encode(&[0xab; 32]),
+                                    index: None,
+                                },
                                 host.send.clone(),
                             )
                         }));

@@ -146,6 +146,7 @@ pub(super) unsafe extern "C" fn pb_identity(
                     flags: u32::from(value.is_service)
                         | (u32::from(value.session_id.is_some()) << 1),
                     reserved: 0,
+                    display_name: environment::display_name_field(&value.display_name),
                     ..abi::Identity::default()
                 },
             )?;

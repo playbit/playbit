@@ -454,24 +454,42 @@ module Session = struct
             done) secret;
         String.init 22 (fun i -> alphabet.[Bytes.get_uint8 digits i])) info.key_secret
 
-  let identity () =
+  type participant = { identity : string; display_name : string option }
+
+  let participant packet offset ~ids ~name =
     let open Borrowed in
-    let packet = create 104 in
-    word packet 0 104;
+    let display_name =
+      if get_word packet (offset + 4) < name + 256 then None
+      else
+        let field = get packet (offset + name) 256 in
+        let length = Option.value (Bytes.index_opt field '\000') ~default:256 in
+        if length = 0 then None else Some (Bytes.sub_string field 0 length)
+    in
+    { identity = Bytes.unsafe_to_string (get packet (offset + ids) 48);
+      display_name }
+
+  let local_participant () =
+    let open Borrowed in
+    let packet = create 360 in
+    word packet 0 360;
     call Opcode.identity packet [ pointer 0 ];
-    record packet 0 104;
+    record ~minimum:104 packet 0 360;
     if Int64.logand (get_wide packet 96) (Int64.lognot 3L) <> 0L then
       raise (Host_error (Int32.of_int Error.internal));
-    get packet 16 48 |> Bytes.unsafe_to_string
+    participant packet 0 ~ids:16 ~name:104
+
+  let identity () = (local_participant ()).identity
 
   let same_instance a b =
     String.length a = 48 && String.length b = 48
     && String.sub a 0 16 = String.sub b 0 16
     && String.sub a 32 16 = String.sub b 32 16
 
-  let presence () =
+  let join () = Borrowed.call Opcode.session (Borrowed.create 0) []
+
+  let participants () =
     let open Borrowed in
-    let participant_bytes = 88 in
+    let participant_bytes = 344 in
     let read capacity =
       let packet = create (4 + capacity * participant_bytes) in
       for i = 0 to capacity - 1 do
@@ -496,14 +514,16 @@ module Session = struct
     if count < 0 || count > capacity then failwith "Playbit presence count";
     List.init count (fun i ->
         let offset = 4 + i * participant_bytes in
-        record packet offset participant_bytes;
-        get packet (offset + 8) 48 |> Bytes.unsafe_to_string)
+        record ~minimum:88 packet offset participant_bytes;
+        participant packet offset ~ids:8 ~name:88)
+
+  let presence () = List.map (fun p -> p.identity) (participants ())
 
   let open_channel name =
     let open Borrowed in
     let length = String.length name in
     if length = 0 || length > 223 then invalid_arg "Playbit channel name length";
-    call Opcode.session (create 0) [];
+    join ();
     let packet = create length in
     put packet 0 (Bytes.unsafe_of_string name);
     begin_handle Opcode.channel_open packet [ pointer 0; Int64.of_int length ]

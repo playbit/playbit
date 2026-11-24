@@ -15,7 +15,7 @@ use std::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::ui::desktop::zoom;
+use crate::ui::desktop::{typography, zoom};
 use crate::ui::text::{Buffer, DeleteUnit, Movement, Selection};
 use gpui::{
     App, Bounds, BoxShadow, ClipboardItem, Context, CursorStyle, DispatchPhase, Element, ElementId,
@@ -39,24 +39,8 @@ fn control_font() -> gpui::Font {
     gpui::Font { weight: gpui::FontWeight::MEDIUM, ..font(crate::ui::desktop::UI_FONT_FAMILY) }
 }
 
-fn code_font() -> gpui::Font {
-    static FEATURES: std::sync::OnceLock<gpui::FontFeatures> = std::sync::OnceLock::new();
-    gpui::Font {
-        features: FEATURES
-            .get_or_init(|| gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])))
-            .clone(),
-        ..control_font()
-    }
-}
-
-fn identifier_font() -> gpui::Font {
-    static FEATURES: std::sync::OnceLock<gpui::FontFeatures> = std::sync::OnceLock::new();
-    gpui::Font {
-        features: FEATURES
-            .get_or_init(|| gpui::FontFeatures(Arc::new(vec![("ss02".into(), 1)])))
-            .clone(),
-        ..control_font()
-    }
+fn tabular_font() -> gpui::Font {
+    gpui::Font { features: typography::tabular_features(), ..control_font() }
 }
 
 actions!(
@@ -582,6 +566,7 @@ pub struct TextEditor {
     base_style: TextEditorStyle,
     masked: bool,
     email_code: bool,
+    tabular_numerals: bool,
     inspector_field: bool,
     text_area: Option<TextAreaMode>,
     validation_underline: Option<Range<usize>>,
@@ -640,6 +625,7 @@ impl TextEditor {
             base_style: TextEditorStyle::default(),
             masked: false,
             email_code: false,
+            tabular_numerals: false,
             inspector_field: false,
             text_area: None,
             validation_underline: None,
@@ -676,6 +662,13 @@ impl TextEditor {
     /// platform/AX text and disabling clipboard export of the private draft.
     pub fn account_key(mut self) -> Self {
         self.masked = true;
+        self
+    }
+
+    /// Use equal-width digits in otherwise proportional field text.
+    #[cfg(all(target_os = "macos", feature = "connected-engine"))]
+    pub(crate) fn tabular_numerals(mut self) -> Self {
+        self.tabular_numerals = true;
         self
     }
     /// One native editor owns all six digits, including grouped clipboard input.
@@ -838,11 +831,11 @@ impl TextEditor {
     }
     fn text_font(&self) -> gpui::Font {
         if self.selectable_id {
-            identifier_font()
+            gpui::Font { features: typography::identifier_features(), ..control_font() }
         } else if self.text_area == Some(TextAreaMode::Binary) {
             font("Menlo")
-        } else if self.email_code {
-            code_font()
+        } else if self.email_code || self.tabular_numerals {
+            tabular_font()
         } else {
             control_font()
         }
@@ -2305,7 +2298,7 @@ impl Element for TextEditorElement {
                         style.font_size,
                         &[TextRun {
                             len: text.len(),
-                            font: code_font(),
+                            font: tabular_font(),
                             color: style.text,
                             letter_spacing: px(0.),
                             background_color: None,
@@ -3616,7 +3609,7 @@ mod accessibility_tests {
                     editor.set_read_only(read_only, &playbit_api::ui::Theme::light(), cx);
                     assert_eq!(editor.base_style.font_size, px(16.));
                 }
-                assert!(code_font().features.tag_value_list().contains(&("tnum".into(), 1)));
+                assert!(tabular_font().features.tag_value_list().contains(&("tnum".into(), 1)));
             })
             .unwrap();
     }
@@ -3737,7 +3730,7 @@ mod accessibility_tests {
     }
 
     #[gpui::test]
-    fn selectable_identifier_requests_ss02_and_copies_the_pointer_selection(
+    fn selectable_identifier_requests_font_features_and_copies_the_pointer_selection(
         cx: &mut gpui::TestAppContext,
     ) {
         // Inspect the rendered font request, then drag a substring and Copy through real key bindings.
@@ -3771,7 +3764,10 @@ mod accessibility_tests {
                 let font = window.text_system().get_font_for_id(gpui::FontId(1)).unwrap();
                 assert_eq!(font.family.as_ref(), crate::ui::desktop::UI_FONT_FAMILY);
                 assert_eq!(font.weight, gpui::FontWeight::MEDIUM);
-                assert_eq!(font.features.tag_value_list(), &[("ss02".into(), 1)]);
+                assert_eq!(
+                    font.features.tag_value_list(),
+                    &[("ss02".into(), 1), ("tnum".into(), 1)]
+                );
                 let position = |offset| {
                     let mut position =
                         layout.position_for_offset(offset, CaretAffinity::Downstream).unwrap();

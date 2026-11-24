@@ -44,8 +44,8 @@ fn resolved_build(engine: &Engine, session: &str, version: &str) -> updates::Pre
         &engine.services.store,
         session,
         &engine.services.path.join(crate::paths::BUILDS),
-        serde_json::json!({"resolved_build_id":version,
-            "selector":BuildSelector::Exact { build_id: version.to_owned() }}),
+        Some(serde_json::json!({"resolved_build_id":version,
+            "selector":BuildSelector::Exact { build_id: version.to_owned() }})),
     )
     .unwrap()
 }
@@ -125,7 +125,15 @@ fn candidate_keeps_session_mounts_and_rejects_stale_selection() {
         engine.services.store.personal_volume_grants(&old.id).unwrap().unwrap()[0].volume,
         personal.id
     );
-    let stale = resolved(&engine, &old.id, &trapping_package());
+    let stale = updates::prepare_candidate(
+        &engine.runtime,
+        &engine.services.store,
+        &old.id,
+        &engine.services.path.join(crate::paths::BUILDS),
+        None,
+    )
+    .unwrap();
+    assert_eq!(stale.candidate, stale.prior);
     let mut package = crate::engine::tests::button_package();
     package = package.renamed("Newer selection").unwrap();
     let newer = resolved(&engine, &old.id, &package);
@@ -164,7 +172,7 @@ fn candidate_validation_rejects_wrong_identity_and_malformed_guest_before_adopti
             &engine.services.store,
             &old.id,
             &engine.services.path.join(crate::paths::BUILDS),
-            resolution
+            Some(resolution)
         )
         .is_err()
     );
@@ -181,7 +189,7 @@ fn candidate_validation_rejects_wrong_identity_and_malformed_guest_before_adopti
             &engine.services.store,
             &old.id,
             &engine.services.path.join(crate::paths::BUILDS),
-            resolution
+            Some(resolution)
         )
         .is_err()
     );

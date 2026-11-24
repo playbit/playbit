@@ -11,6 +11,7 @@ pub(super) struct Task {
     pub token: usize,
     receiver: mpsc::Receiver<std::result::Result<Preparation, String>>,
     cancelled_read: Option<Arc<AtomicBool>>,
+    changes_state: bool,
 }
 
 pub(super) enum Preparation {
@@ -44,6 +45,25 @@ impl Task {
             }
             _ => None,
         };
+        if let Request::AppRemovalImpact { account, app }
+        | Request::RemoveApp { account, app, .. } = &request
+        {
+            app.validate()?;
+            if *account != engine.services.store.account().id {
+                return Err("The selected app belongs to another account".into());
+            }
+        }
+        let purge =
+            matches!(&request, Request::RemoveApp { confirmed: true, delete_local_data: true, .. });
+        let embedded = purge.then(|| engine.embedded_sessions.clone());
+        #[cfg(all(not(target_os = "ios"), feature = "process"))]
+        let owners = if purge {
+            engine.session_instances.writer_candidates(engine.services.store.account().id)?
+        } else {
+            Vec::new()
+        };
+        let changes_state =
+            !matches!(request, Request::PayloadSize { .. } | Request::AppRemovalImpact { .. });
         let store = engine.services.store.clone();
         let runtime = engine.runtime.clone();
         let path = engine.services.path.clone();
@@ -63,6 +83,31 @@ impl Task {
                     return Ok(Preparation::Network(Box::new(request)));
                 }
                 let reply = match request {
+                    Request::AppRemovalImpact { app, .. } => {
+                        Ok(Reply::AppRemovalImpact { impact: store.app_removal_impact(&app)? })
+                    }
+                    Request::RemoveApp { app, confirmed, delete_local_data, .. } => {
+                        if let Some(embedded) = embedded {
+                            // Another device can remove the row before this click arrives.
+                            // In that case its still-running windows keep their local data.
+                            if !store.preflight_app_erasure(&app)? {
+                                store.finish_app_data_removal(&app)?;
+                                let removed = crate::store::AppRemovalResult::Removed {
+                                    erased_volumes: Vec::new(),
+                                    cleanup_error: None,
+                                };
+                                return Ok(Preparation::Reply(Box::new(Reply::AppRemoved(removed))));
+                            }
+                            for session in embedded {
+                                if store.catalog_session(&session)?.app == app {
+                                    return Err("Close the running embedded app before removing its local data".into());
+                                }
+                            }
+                            #[cfg(all(not(target_os = "ios"), feature = "process"))]
+                            stop_writers(&path, &store, &app, &owners)?;
+                        }
+                        Ok(Reply::AppRemoved(store.remove_app(&app, confirmed, delete_local_data)?))
+                    }
                     Request::OpenAppVolume { app, role } => {
                         store.open_app_volume(&app, role).map(Reply::Volume).map_err(Into::into)
                     }
@@ -109,7 +154,8 @@ impl Task {
                         )))
                     }
                     Request::PrepareApp { bundle } => {
-                        developer::cache_package(&store, &runtime, &path, &bundle)?;
+                        let package = developer::cache_package(&store, &runtime, &path, &bundle)?;
+                        store.remember_imported_app(&package)?;
                         Ok(Reply::Developer(DeveloperReply::AppPrepared))
                     }
                     Request::CreateSession { bundle, root, user } => {
@@ -124,11 +170,11 @@ impl Task {
             drop(store);
             let _ = send.send(result);
         })?;
-        Ok(Self { token, receiver, cancelled_read })
+        Ok(Self { token, receiver, cancelled_read, changes_state })
     }
 
     pub fn changes_state(&self) -> bool {
-        self.cancelled_read.is_none()
+        self.changes_state
     }
 
     pub fn cancel_read(&self) {
@@ -159,4 +205,37 @@ impl Drop for Task {
         // sender is already closed and this returns immediately.
         let _ = self.receiver.recv();
     }
+}
+
+/// Wait on the authenticated owner's kernel exit descriptor. The Quit reply only
+/// acknowledges intent, and the app can still be flushing its last writes.
+#[cfg(all(not(target_os = "ios"), feature = "process"))]
+fn stop_writers(
+    path: &std::path::Path,
+    store: &crate::store::LocalStore,
+    app: &crate::package::AppIdentity,
+    owners: &[crate::engine::session_instance::LaunchOwner],
+) -> Result<()> {
+    use crate::ui::app_control::{Exchange, Operation, Reply};
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for owner in owners {
+        if store.catalog_session(&owner.instance.session)?.app != *app {
+            continue;
+        }
+        let Some(identity) = &owner.process else { continue };
+        let Some(process) = crate::engine::process_owner::Owner::recover(identity)? else {
+            continue;
+        };
+        if Instant::now() >= deadline {
+            return Err("Timed out stopping the app. Retry when its windows have closed.".into());
+        }
+        if !matches!(
+            Exchange::connect(path, owner, Operation::Quit)?.receive()?,
+            Reply::Accepted { .. }
+        ) || !crate::engine::readiness::wait_readable(&process.exit, deadline)?
+        {
+            return Err("The app is still running. Close it before removing its local data.".into());
+        }
+    }
+    Ok(())
 }

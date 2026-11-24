@@ -301,9 +301,9 @@ impl LocalStore {
         access: &Access,
         stage: &ReceivedVolume,
         policy: &MetadataPolicy,
-    ) -> Result<()> {
+    ) -> Result<Vec<EntryId>> {
         if !stage.authority_qualified {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let confirmed = ns::receipt::capture(&stage.metadata.begin_read()?, stage.entry_scope)?;
         let index = self.db(stage.volume, DatabaseId::Index)?;
@@ -356,7 +356,14 @@ impl LocalStore {
         })?;
         drop(confirmed_ids);
         let plan = Plan { dictionary, rows: rows.into_values().collect() };
-        plan.write(stage)
+        plan.write(stage)?;
+        // Payload capture has released its decode budget. Keep only the sorted
+        // event IDs needed to recognize accepted retirements during reconciliation.
+        plan.rows
+            .into_iter()
+            .filter(|row| row.status == Status::Confirmed)
+            .map(|row| row.source.id())
+            .collect()
     }
     pub(super) fn preflight_namespace_plan(
         &self,

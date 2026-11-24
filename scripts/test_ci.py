@@ -130,20 +130,20 @@ class Planner(unittest.TestCase):
             with patch.object(ci, 'ROOT', root):
                 self.assertTrue(ci.plan(base)['storage_history']['run'])
 
-    def test_github_outputs_carry_the_workload_and_its_reasons(self):
+    def test_github_outputs_carry_selected_checks_and_storage_workload(self):
         # Local plans and reusable/public GitHub workflows share the decision.
         for changed in (None, ['playbit/src/desktop/sidebar_view.rs'], ['playbit/src/store/mod.rs']):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
-                output, summary = Path(temporary) / 'output', Path(temporary) / 'summary'
+                output = Path(temporary) / 'output'
                 value = dict(base='base', head='head', groups=ci.select(changed),
                              storage_history=ci.storage_history(changed))
-                with patch.dict(os.environ, {'GITHUB_OUTPUT': str(output), 'GITHUB_STEP_SUMMARY': str(summary)}):
+                with patch.dict(os.environ, {'GITHUB_OUTPUT': str(output)}):
                     ci.github_outputs(value)
                 actual = dict(line.split('=', 1) for line in output.read_text().splitlines())
                 self.assertEqual(actual['storage_history'], str(value['storage_history']['run']).lower())
-                self.assertIn('storage history (macos)', summary.read_text())
-                for reason in value['storage_history']['reasons']:
-                    self.assertIn(reason, summary.read_text())
+                self.assertEqual(set(json.loads(actual['selected'])), selected(changed))
+                for name, item in value['groups'].items():
+                    self.assertEqual(actual[name.replace('-', '_')], str(item['run']).lower())
 
 
 class Results(unittest.TestCase):

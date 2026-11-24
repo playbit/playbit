@@ -28,6 +28,10 @@ export function frame(kind, logicalKey, authority, payload, requiredRead = [], r
 export function accountPlain(record) {
     let key, payload;
     switch (record.kind) {
+    case 'app_visibility':
+        key = `optional/app_visibility/${record.app.publisher}/${record.app.app_id}`;
+        payload = variant(8, [1, object([1, id(record.app.publisher)], [2, text(record.app.app_id)])], [2, boolean(record.removed)]);
+        break;
     case 'display_name': key = 'settings/display-name'; payload = variant(1, [1, text(record.name)]); break;
     case 'volume': key = `volume/${record.volume.id}`; payload = variant(2, [1, volume(record.volume)], [2, credentials(record.credentials)]); break;
     case 'volume_deleted': key = `deleted-volume/${record.volume}`; payload = variant(3, [1, id(record.volume)]); break;
@@ -41,5 +45,5 @@ export function accountPlain(record) {
         [2, sequence(record.grants.map(grant => object([1, id(grant.volume)], [2, boolean(grant.write)], [3, id(grant.incarnation)])))]); break;
     default: throw Error('Unsupported test kind');
     }
-    return frame(record.kind, key, record.kind !== 'display_name', join(magic, payload));
+    return frame(record.kind, key, record.kind !== 'display_name' && record.kind !== 'app_visibility', join(magic, payload));
 }

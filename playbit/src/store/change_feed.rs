@@ -511,7 +511,7 @@ impl CommittedChangeFeed {
     }
 
     /// Local publication activity, including changes already drained or dropped
-    /// after a gap. Receiving replica data does not advance these counters.
+    /// after a gap. A received account name also schedules its central profile write.
     #[cfg(any(test, all(not(target_os = "ios"), feature = "process")))]
     pub(crate) fn publication_generation(&self) -> (u64, u64) {
         (

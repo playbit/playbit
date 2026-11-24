@@ -495,15 +495,15 @@ fn remote_session(
 
     let mut session = access.session_id().map(|id| store.session(id)).transpose()?;
     if let Some(session) = &session
-        && session.shared_volume.is_some()
-        && session.root_volume == volume
+        && session.is_distinct_world(volume)
     {
-        // World remains separate from the invitation's Shared capability. The
-        // guest's exact local authority was checked before selecting transport.
-        if store.volume(volume)?.owner != store.account().id {
-            return Err(crate::store::Error::AccessDenied("World transport requires its owner"));
+        if store.volume(volume)?.owner == store.account().id {
+            return Ok(None);
         }
-        return Ok(None);
+        // The guest keeps its session/build on the ordinary bloblog operation.
+        // The local binding and the AP independently require current World access.
+        session.validate_publisher_world(volume)?;
+        store.admit_binding(access, volume)?;
     }
     if let Some(session) = &mut session
         && let Some(build) = access.build_id()

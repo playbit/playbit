@@ -2,6 +2,22 @@
 //! Startup failures carry at most 8 KiB; successful readiness is unchanged.
 use std::{error::Error, fmt, io, path::Path};
 
+/// Invalid command syntax or argument values that the caller can correct.
+#[derive(Debug)]
+pub struct UsageError(String);
+
+impl fmt::Display for UsageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Error for UsageError {}
+
+pub fn usage_error(message: impl fmt::Display) -> Box<dyn Error + Send + Sync> {
+    Box::new(UsageError(message.to_string()))
+}
+
 pub(crate) const MAX_STARTUP_FAILURE_BYTES: usize = 8 * 1024;
 const MAX_REASON_BYTES: usize = 4096;
 
@@ -82,11 +98,12 @@ fn diagnostic(profile: &Path, error: &(dyn Error + 'static), opening_profile: bo
     let mut text = error.to_string();
     // Remote/IPC boundaries may have erased the concrete store error. Known
     // compatibility and readiness guidance never calls for replacing a profile.
-    if text == StoreError::UNSUPPORTED_VOLUME_FORMAT
-        || text == crate::network::ap::service::INCOMPATIBLE_PROTOCOL
-        || text == crate::network::ap::service::SHARED_SERVICE_UPGRADE_REQUIRED
+    let reason = super::remote::sync_failure_parts(&text).map_or(text.as_str(), |(_, cause)| cause);
+    if reason == StoreError::UNSUPPORTED_VOLUME_FORMAT
+        || reason == crate::network::ap::service::INCOMPATIBLE_PROTOCOL
+        || reason == crate::network::ap::service::SHARED_SERVICE_UPGRADE_REQUIRED
         || matches!(
-            text.as_str(),
+            reason,
             "waiting for initial database synchronization"
                 | "waiting for initial volume synchronization"
         )

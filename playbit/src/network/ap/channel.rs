@@ -32,6 +32,24 @@ pub fn acknowledgement(frame: &Frame, kind: u8, destination: &[u8]) -> Result<()
 mod tests {
     use super::*;
     #[test]
+    fn subscription_names_preserve_absence_empty_and_full_width() {
+        let app = [1; 32];
+        assert_eq!(subscription_fields(&[]), Ok((&[][..], None)));
+        assert_eq!(subscription_fields(&app), Ok((app.as_slice(), None)));
+        let mut field = [0; DISPLAY_NAME_BYTES];
+        assert_eq!(subscription_fields(&field), Ok((&[][..], Some(""))));
+        field[..3].copy_from_slice("雨".as_bytes());
+        assert_eq!(
+            subscription_fields(&[app.as_slice(), &field].concat()),
+            Ok((app.as_slice(), Some("雨")))
+        );
+        field[4] = b'x';
+        assert!(subscription_fields(&field).is_err());
+        let name = "雪".repeat(85) + "x";
+        assert_eq!(name.len(), DISPLAY_NAME_BYTES);
+        assert_eq!(subscription_fields(name.as_bytes()), Ok((&[][..], Some(name.as_str()))));
+    }
+    #[test]
     fn destinations_preserve_exact_name_bytes_and_frame_boundaries() {
         let session = [42; 32];
         for name in ["a/b", "\0", "é", "e\u{301}"] {

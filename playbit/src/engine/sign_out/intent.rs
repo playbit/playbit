@@ -116,7 +116,7 @@ impl Intent {
                 let channel = crate::engine::profile::for_profile(profile)?;
                 let store = LocalStore::open_for_reset(profile, lock)?;
                 let preview = store
-                    .preview_invitation(&crate::store::session_link(seed, channel), channel)?;
+                    .restore_invitation_seed(&crate::store::session_link(seed, channel), channel)?;
                 store.pause_invitation(&preview.session, *paused)?;
                 Ok(Some(store.pending_invitation_preview(&preview.session)?))
             }

@@ -124,6 +124,7 @@ impl Apps {
             app_name: "Native app".into(),
             app_build: None,
             identity: Identity {
+                display_name: services.store.guest_display_name().clone(),
                 account_id: *account.as_bytes(),
                 is_service: false,
                 device_id: *account.as_bytes(),
@@ -304,6 +305,14 @@ impl Apps {
         self.running_gauge.set(0);
     }
     pub fn input(&mut self, generation: u64, event: Event) -> HostResult<()> {
+        self.admit_input(generation, event, None)
+    }
+    pub(crate) fn admit_input(
+        &mut self,
+        generation: u64,
+        event: Event,
+        closing: Option<&mut crate::runtime::work::ClosingInputs>,
+    ) -> HostResult<()> {
         let index = self.index(generation)?;
         let app = &mut self.running[index];
         if let Some(error) = app.blocked {
@@ -313,7 +322,7 @@ impl Apps {
             validate_input(app.scene.as_ref().ok_or(HostError::Conflict)?, &event)?;
         }
         // Surface geometry is checked by the runtime independently of a scene.
-        app.instance.queue_event(generation, event)
+        app.instance.queue_input(generation, event, closing)
     }
     /// Coalesce actual committed changes; gaps require a fresh app read as well
     /// as the host's own recovery. This never pumps an app inside a store callback.
@@ -399,6 +408,9 @@ impl Apps {
             app.blocked = Some(HostError::Unavailable);
             return Err(HostError::Unavailable);
         }
+        // A save publishes the name before advancing the revision. Read them
+        // in the opposite order so an unseen name always leaves work pending.
+        app.instance.set_display_name(&app.store.guest_display_name())?;
         app.observed_revision = revision;
         app.dirty |= changed.is_some();
         if app.dirty && !app.draining {
@@ -423,7 +435,7 @@ impl Apps {
 
             match result {
                 Ok(()) => {}
-                Err(HostError::LimitExceeded) => app.inbox.defer(token),
+                Err(HostError::LimitExceeded | HostError::WouldBlock) => app.inbox.defer(token),
                 Err(error) => return Err(error),
             }
         }
@@ -448,12 +460,19 @@ impl Apps {
         }
         Ok(())
     }
-    pub fn deactivate(&mut self, generation: u64) -> HostResult<()> {
+    pub(crate) fn deactivate_with_inputs(
+        &mut self,
+        generation: u64,
+        count: usize,
+    ) -> HostResult<crate::runtime::work::ClosingInputs> {
         let index = self.index(generation)?;
         let app = &mut self.running[index];
+        let closing = app.instance.deactivate_with_inputs(count)?;
         app.draining = true;
-        app.instance.deactivate();
-        Ok(())
+        Ok(closing)
+    }
+    pub fn deactivate(&mut self, generation: u64) -> HostResult<()> {
+        self.deactivate_with_inputs(generation, 0).map(|_| ())
     }
     pub fn drain_pending(&self, generation: u64) -> HostResult<bool> {
         let app = &self.running[self.index(generation)?];
@@ -497,7 +516,7 @@ fn scopes(volumes: &[AvailableVolume]) -> (Vec<StoreId>, Vec<StoreId>) {
         .collect();
     let writable = volumes
         .iter()
-        .filter(|volume| volume.rights.0 & VolumeRights::WRITE.0 != 0)
+        .filter(|volume| volume.data_rights().contains(VolumeRights::KV_WRITE))
         .map(|volume| StoreId::from_bytes(volume.id))
         .collect();
     (read, writable)

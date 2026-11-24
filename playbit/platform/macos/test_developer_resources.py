@@ -81,13 +81,15 @@ class DeveloperResourcesTests(unittest.TestCase):
             self.assertIn("pub fn playbit_app()", app)
             files = [path for path in template.rglob("*") if path.is_file()]
             self.assertEqual(sorted(str(path.relative_to(template)) for path in files), sorted([
-                ".cargo/config.toml", ".gitignore", "Cargo.toml", "icon.svg",
+                ".cargo/config.toml", ".gitignore", "Cargo.toml", "icon.png",
                 "playbit-volumes.json", "playbit.toml"] + [f"src/{path}" for path in sources]))
             self.assertEqual((template / "playbit-volumes.json").read_bytes(),
                              (repo / "guests/little-list/playbit-volumes.json").read_bytes())
             self.assertNotIn("root", tomllib.loads((template / "playbit.toml").read_text()))
             self.assertLess(sum(path.stat().st_size for path in files), 512 * 1024)
             self.assertEqual((template / "playbit.toml").read_bytes(), (repo / "guests/little-list/playbit.toml").read_bytes())
+            icon = tomllib.loads((template / "playbit.toml").read_text())["icon"]
+            self.assertEqual((template / icon).read_bytes(), (repo / "guests/little-list" / icon).read_bytes())
             self.assertTrue((resources / "native-sdk/rust/main.rs").is_file())
             self.assertFalse((resources / "native-sdk/rust/build.rs").exists())
             self.assertFalse((template / "build.rs").exists())

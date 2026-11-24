@@ -1,6 +1,7 @@
 //! Control rendering keeps appearance, input wiring and accessibility separate.
 //! Surface overrides retain their order; all variants share the same input semantics.
 use super::*;
+use crate::ui::desktop::typography;
 
 struct Appearance {
     scale: f32,
@@ -419,7 +420,7 @@ impl Control {
                 self.popup_context.as_ref().filter(|context| !context.detail.is_empty()),
                 |v, context| {
                     v.child(
-                        div()
+                        typography::tabular_numerals(div())
                             .debug_selector(|| "popup-context-detail".into())
                             .min_w_0()
                             .max_w(gpui::relative(0.4))
@@ -460,7 +461,6 @@ impl Control {
     fn copy_surface(&self, copy: &CopyValue, appearance: &Appearance) -> gpui::Div {
         let sp = |logical| appearance.pixels(logical);
         let Appearance { focused, pressed, .. } = *appearance;
-        static FEATURES: std::sync::OnceLock<gpui::FontFeatures> = std::sync::OnceLock::new();
         let active = self.press.hovered || focused;
         let label = if active && copy.copied {
             format!("✓ {} copied:", self.label)
@@ -497,11 +497,8 @@ impl Control {
                     .text_color(rgba(if active { 0x000000cc } else { 0x00000080 }))
                     .child(copy.value.clone()),
             );
-        surface.text_style().get_or_insert_with(Default::default).font_features = Some(
-            FEATURES
-                .get_or_init(|| gpui::FontFeatures(std::sync::Arc::new(vec![("ss02".into(), 1)])))
-                .clone(),
-        );
+        surface.text_style().get_or_insert_with(Default::default).font_features =
+            Some(typography::identifier_features());
         surface
     }
 
@@ -572,9 +569,9 @@ impl Control {
             surface = self.sidebar_surface(icon, window, appearance.focused, appearance.pressed);
         }
         if let Some(style) = self.session_style {
-            surface = self.session_surface(style, appearance, window.is_window_active());
+            surface = self.session_surface(style, appearance);
         }
-        let dim = self.session_style.is_some_and(|style| !matches!(style, SessionStyle::Tab(_)));
+        let dim = self.session_style.is_some();
         surface.when(dim && !self.disabled && !window.is_window_active(), |v| v.opacity(0.6))
     }
 
@@ -629,15 +626,9 @@ impl Control {
             })
     }
 
-    fn session_surface(
-        &self,
-        style: SessionStyle,
-        appearance: &Appearance,
-        window_active: bool,
-    ) -> gpui::Div {
+    fn session_surface(&self, style: SessionStyle, appearance: &Appearance) -> gpui::Div {
         let sp = |value| appearance.pixels(value);
-        let selected = matches!(style, SessionStyle::Tab(true));
-        let mut surface = div()
+        let surface = div()
             .flex()
             .items_center()
             .justify_center()
@@ -645,52 +636,46 @@ impl Control {
             .text_color(rgba(if self.disabled { 0x00000055 } else { 0x000000e6 }))
             .when(appearance.focused, |v| v.border_2().border_color(self.color(Role::FocusRing)));
         match style {
-            SessionStyle::Tab(_) => surface
-                .h(sp(44.))
-                .px(sp(8.))
-                .text_size(sp(13.))
-                .line_height(sp(16.))
-                .letter_spacing(px(0.13 * appearance.scale))
-                .border_b_2()
-                .border_color(rgba(if selected { 0x000000ff } else { 0 }))
-                .when(!selected && !self.disabled, |v| v.text_color(rgba(0x00000099)))
-                .child(
-                    div().opacity(if window_active { 1. } else { 0.6 }).child(self.label.clone()),
-                ),
             SessionStyle::Template => surface
-                .w(sp(200.))
-                .h(sp(162.))
+                .size_full()
                 .rounded(sp(5.))
                 .bg(rgb(if appearance.pressed { 0xaaaaaa } else { 0xbebebe }))
                 .text_size(sp(16.))
+                .line_height(sp(20.))
                 .child(self.label.clone()),
-            SessionStyle::Recent => {
-                surface = surface
-                    .w(sp(88.))
-                    .h(sp(90.))
-                    .flex_col()
-                    .gap(sp(7.))
-                    .rounded(sp(5.))
-                    .when(appearance.pressed, |v| v.bg(rgba(0x00000014)));
+            SessionStyle::AppTile { bundled_icon } => {
+                let source = bundled_icon
+                    .map(gpui::ImageSource::from)
+                    .or_else(|| self.app_icon.clone().map(Into::into));
+                let icon = match source {
+                    Some(source) => {
+                        gpui::img(source).size(sp(APP_TILE_ICON_POINTS)).into_any_element()
+                    }
+                    None => svg()
+                        .path("app-default")
+                        .size(sp(APP_TILE_ICON_POINTS))
+                        .text_color(rgba(if self.disabled { 0x00000055 } else { 0x000000cc }))
+                        .into_any_element(),
+                };
                 surface
+                    .size_full()
+                    .flex_col()
+                    .justify_start()
+                    .pt(sp(8.))
+                    .px(sp(if bundled_icon.is_some() { 8. } else { 4. }))
+                    // The 16-point line box supplies the rest of the gap to the caption's ink.
+                    .gap(sp(4.))
+                    .rounded(sp(6.))
+                    .when(!self.disabled, |v| v.text_color(rgb(0)))
+                    .child(icon)
                     .child(
                         div()
-                            .size(sp(48.))
-                            .when(self.app_icon.is_none(), |v| {
-                                v.child(svg().path("app-default").size(sp(48.)).text_color(rgba(
-                                    if self.disabled { 0x00000055 } else { 0x000000cc },
-                                )))
-                            })
-                            .children(
-                                self.app_icon.clone().map(|icon| gpui::img(icon).size(sp(48.))),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .max_w_full()
-                            .text_ellipsis()
+                            .w_full()
+                            .text_center()
+                            .truncate()
                             .text_size(sp(11.))
                             .line_height(sp(16.))
+                            .letter_spacing(px(0.))
                             .child(self.label.clone()),
                     )
             }
@@ -715,25 +700,6 @@ impl Control {
                     ),
                 )
                 .child(self.label.clone()),
-            SessionStyle::Stop => surface
-                .size(sp(24.))
-                .rounded(sp(6.))
-                .bg(rgba(if appearance.pressed {
-                    0x00000033
-                } else if self.press.hovered && !self.disabled {
-                    0x00000014
-                } else {
-                    0
-                }))
-                .child(div().size(sp(10.)).rounded(sp(1.)).bg(rgba(if self.disabled {
-                    0x0000004d
-                } else if appearance.pressed || self.press.hovered {
-                    0x000000ff
-                } else if appearance.focused {
-                    0x000000e6
-                } else {
-                    0x000000cc
-                }))),
         }
     }
 
@@ -752,9 +718,7 @@ impl Control {
             .items_center()
             .max_w_full()
             .h(sp(self.button_size.map_or(
-                if matches!(self.session_style, Some(SessionStyle::Tab(_))) {
-                    44.
-                } else if self.table_cells.is_some() {
+                if self.table_cells.is_some() {
                     super::super::table::ROW_HEIGHT
                 } else if self.navigation.is_some() {
                     32.
@@ -775,6 +739,17 @@ impl Control {
         }
         if let Some((width, height)) = self.button_size {
             root = root.w(sp(width)).h(sp(height)).flex_none();
+        }
+        if matches!(self.session_style, Some(SessionStyle::AppTile { .. })) && !self.disabled {
+            // Resolve pointer feedback against the hitbox in this frame, including during a drag.
+            root = root.rounded(sp(6.));
+            if self.press.key.is_some() {
+                root = root.bg(rgba(0x00000033));
+            } else {
+                root = root.hover(|v| {
+                    v.bg(rgba(if self.press.pointer { 0x00000033 } else { 0x00000014 }))
+                });
+            }
         }
         if self.toolbar_icon.is_some()
             || self.sidebar_icon.is_some()
@@ -842,11 +817,7 @@ impl Control {
                 }
                 cx.notify();
             }
-            if this.press.pointer
-                || this.copy_value.is_some()
-                || this.sidebar_icon.is_some()
-                || matches!(this.session_style, Some(SessionStyle::Stop))
-            {
+            if this.press.pointer || this.copy_value.is_some() || this.sidebar_icon.is_some() {
                 cx.notify();
             }
         }))
@@ -1029,7 +1000,11 @@ impl Control {
 
     fn accessibility_details(&self, node: &mut gpui::accesskit::Node) {
         if let Some(detail) = &self.navigation_detail {
-            node.set_description(format!("Record {detail}"));
+            node.set_description(if self.sidebar_row {
+                detail.to_string()
+            } else {
+                format!("Record {detail}")
+            });
         }
         if let Some(context) = &self.popup_context
             && !context.detail.is_empty()
@@ -2000,7 +1975,9 @@ mod tests {
                 match presentation {
                     0 => control = control.toolbar_icon("add"),
                     1 => control.set_sidebar_icon(SidebarIcon::Glyph("add"), false, false, cx),
-                    _ => control.set_session_style(SessionStyle::Recent, cx),
+                    _ => {
+                        control.set_session_style(SessionStyle::AppTile { bundled_icon: None }, cx)
+                    }
                 }
                 control
             });

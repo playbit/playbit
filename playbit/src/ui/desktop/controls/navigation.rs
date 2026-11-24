@@ -61,8 +61,9 @@ impl Control {
     }
 
     pub fn set_navigation_detail(&mut self, value: &str, cx: &mut Context<Self>) {
-        if self.navigation_detail.as_ref().is_none_or(|detail| detail.as_ref() != value) {
-            self.navigation_detail = Some(value.to_owned().into());
+        let detail = (!value.is_empty()).then_some(value);
+        if self.navigation_detail.as_ref().map(|value| value.as_ref()) != detail {
+            self.navigation_detail = detail.map(|text| text.to_owned().into());
             cx.notify();
         }
     }
@@ -196,19 +197,22 @@ impl Control {
             .when_some(self.navigation_detail.clone(), |v, hint| {
                 v.child(
                     div()
-                        .flex_none()
+                        .max_w(gpui::relative(0.45))
+                        .truncate()
                         .text_size(sp(11.))
-                        .text_color(foreground.alpha(0.6))
+                        .text_color(foreground.alpha(if self.sidebar_row { 0.4 } else { 0.6 }))
                         .child(hint),
                 )
-                .child(
-                    svg()
-                        .path("menu-submenu")
-                        .w(sp(8.))
-                        .h(sp(16.))
-                        .flex_none()
-                        .text_color(foreground.alpha(0.6)),
-                )
+                .when(!self.sidebar_row, |v| {
+                    v.child(
+                        svg()
+                            .path("menu-submenu")
+                            .w(sp(8.))
+                            .h(sp(16.))
+                            .flex_none()
+                            .text_color(foreground.alpha(0.6)),
+                    )
+                })
             })
             .when(self.navigation_child, |view| {
                 view.child(

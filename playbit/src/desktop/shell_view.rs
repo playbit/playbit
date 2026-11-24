@@ -31,8 +31,6 @@ pub(super) struct Shell {
     pub(super) crash_report_profile: Option<std::path::PathBuf>,
     pub(super) crash_reports_pending: bool,
     pub(super) sending_crash_reports: Entity<bool>,
-    pub(super) session_tab: SessionTab,
-    pub(super) tab_change_pending: Option<SessionTab>,
     pub(super) initial_link: bool,
     pub(super) pending_database: Option<crate::store::DatabaseReference>,
     pub(super) url_generation: u64,
@@ -48,6 +46,8 @@ pub(super) struct Shell {
     pub(super) alerted_error: String,
     pub(super) startup_prompt: bool,
     pub(super) invitation: Option<crate::store::InvitationPreview>,
+    pub(super) invitation_link: Option<crate::store::SessionReference>,
+    pub(super) invitation_resume: Option<u64>,
     pub(super) saved_invitations: Vec<crate::store::InvitationPreview>,
     pub(super) volumes: Vec<crate::store::Volume>,
     pub(super) scoped_volumes: Vec<crate::store::Volume>,
@@ -89,13 +89,15 @@ pub(super) struct Shell {
     pub(super) rendered_host_text: u64,
     pub(super) logs: Entity<LogView>,
     pub(super) log_watch: Option<log::Watch>,
-    pub(super) log_session: Option<String>,
+    pub(super) log_session: Option<(String, Option<crate::store::Id>)>,
     pub(super) log_generation: u64,
     pub(super) session_action_busy: bool,
     pub(super) recent_sessions: Vec<String>,
     pub(super) join_dialog: Option<Entity<text_editor::TextEditor>>,
-    pub(super) join_dialog_focus: bool,
+    pub(super) join_preview: Option<u64>,
+    pub(super) session_dialog_id: Option<gpui::EntityId>,
     pub(super) welcome_scrollbars: Entity<crate::ui::desktop::scrollbar::Scrollbars>,
+    pub(super) making_project: bool,
 }
 
 fn sessions_min_size(scale: f32) -> gpui::Size<gpui::Pixels> {
@@ -183,19 +185,7 @@ impl Shell {
     pub(super) fn show_sessions(host: &Entity<Self>, cx: &mut App) {
         host.update(cx, |host, cx| {
             host.initial_link = false;
-            if host.restore_startup_invitation(cx)
-                && let Some(invitation) = &host.invitation
-            {
-                if let Some(state) = &host.invitation_status
-                    && state.session == invitation.session
-                {
-                    host.join_status = state.state.clone();
-                } else if !invitation.paused {
-                    host.send
-                        .send(Request::WatchInvitation { session: invitation.session.clone() })
-                        .ok();
-                }
-            }
+            host.restore_startup_opening(cx);
             cx.notify();
         });
         if host.read(cx).enrolled.is_none() && !host.read(cx).error.is_empty() {
@@ -229,8 +219,6 @@ impl Shell {
         host.update(cx, |host, _| {
             if host.sessions_window.is_some() {
                 host.sessions_window = None;
-                host.session_tab = SessionTab::Log;
-                host.tab_change_pending = None;
             }
         });
         // open_window performs its first render synchronously. Do not hold a
@@ -257,6 +245,9 @@ impl Shell {
                 let host = entity.downgrade();
                 window.on_window_should_close(cx, move |_, cx| {
                     host.update(cx, |host, cx| {
+                        if host.modal_open(cx) {
+                            return false;
+                        }
                         host.browser.as_ref().is_none_or(|browser| {
                             browser.update(cx, |browser, cx| browser.retain_local_drafts(cx))
                         })
@@ -309,7 +300,12 @@ pub(super) fn maybe_send_crash_reports(cx: &mut Context<Shell>, shell: &mut Shel
 }
 
 impl Shell {
-    fn shell_main(&mut self, _theme: &Theme, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn shell_main(
+        &mut self,
+        window: &Window,
+        theme: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let mut main = div()
             .id("main-content")
             .overflow_y_scroll()
@@ -321,10 +317,10 @@ impl Shell {
             .flex_col()
             .gap_4();
         main = if let Some(browser) = &self.browser
-            && self.new_session.is_none()
+            && self.inline_session_form(cx).is_none()
         {
             div().id("volume-browser").flex_1().min_h_0().min_w_0().child(browser.clone())
-        } else if let Some(form) = self.new_session.clone() {
+        } else if let Some(form) = self.inline_session_form(cx).cloned() {
             let scrollbars = form.update(cx, |form, cx| form.scrollbars(cx));
             let handle = scrollbars.read(cx).handle();
             // Constrain the parent before measuring the form's percentage width,
@@ -361,12 +357,14 @@ impl Shell {
             main.child(self.personal_panel(cx))
         } else if let Some(session) = self.opening.clone() {
             self.opening_content(main, session, cx)
-        } else if let Some(invitation) = self.invitation.clone() {
+        } else if let Some(invitation) =
+            self.invitation.clone().filter(|_| !self.session_dialog_open(cx))
+        {
             self.invitation_content(main, invitation, cx)
         } else if self.selected_session_id().is_some() {
             self.session_log_content(cx)
         } else {
-            self.welcome_content(cx)
+            self.welcome_content(window, theme, cx)
         };
         main
     }
@@ -374,14 +372,14 @@ impl Shell {
         if self.enrolled.is_none() {
             "Playbit".into()
         } else if let Some(browser) = &self.browser
-            && self.new_session.is_none()
+            && self.inline_session_form(cx).is_none()
         {
             browser.read(cx).volume.name.clone()
-        } else if let Some(form) = &self.new_session {
-            form.read(cx).title().into()
+        } else if self.inline_session_form(cx).is_some() {
+            new_session::FOLDER_ACCESS_TITLE.into()
         } else if self.personal.is_some() {
             "Volume access".into()
-        } else if self.invitation.is_some() {
+        } else if self.invitation.is_some() && !self.session_dialog_open(cx) {
             "Invitation".into()
         } else if self.selected_session_id().is_some() {
             "Session".into()
@@ -399,8 +397,8 @@ impl Shell {
         let new_session = self.selected_session_id().is_none()
             && self.browser.is_none()
             && self.personal.is_none()
-            && self.invitation.is_none()
-            && self.new_session.is_none();
+            && (self.invitation.is_none() || self.session_dialog_open(cx))
+            && self.inline_session_form(cx).is_none();
         div()
             .h(ui(44.))
             .min_h(px(44.))
@@ -410,14 +408,15 @@ impl Shell {
             .items_center()
             .px(ui(16.))
             .bg(rgba(theme.color(Role::WindowBackground).0))
-            .border_b_1()
-            .border_color(rgba(theme.color(Role::Separator).0))
+            .when(!new_session, |header| {
+                header.border_b_1().border_color(rgba(theme.color(Role::Separator).0))
+            })
             .font_family(UI_FONT_FAMILY)
             .text_size(ui(14.))
             .line_height(ui(24.))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(super::theme::section_title_color(window.is_window_active()))
-            .when(new_session, |header| header.bg(rgb(0xf6f6f6)).pr(ui(10.)))
+            .when(new_session, |header| header.pr(ui(10.)))
             .justify_between()
             .child(self.host_text(HostText::PanelTitle, panel_title, cx))
             .when(new_session, |header| {
@@ -437,21 +436,15 @@ impl Shell {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        if self.browser.is_some() && self.new_session.is_none() {
+        let inline_form = self.inline_session_form(cx).is_some();
+        if self.browser.is_some() && !inline_form {
             return div().h_full().flex_1().min_w_0().flex().flex_col().child(main);
         }
-        if self.sidebar_volumes && self.browser.is_none() && self.new_session.is_none() {
+        if self.sidebar_volumes && self.browser.is_none() && !inline_form {
             return div().h_full().flex_1().bg(rgba(theme.color(Role::PanelBackground).0));
         }
         let panel_title = self.panel_title(cx);
-        let header = if self.selected_session_id().is_some()
-            && self.browser.is_none()
-            && self.new_session.is_none()
-        {
-            self.session_header(window, cx)
-        } else {
-            self.panel_header(window, theme, panel_title, cx)
-        };
+        let header = self.panel_header(window, theme, panel_title, cx);
         div()
             .h_full()
             .flex_1()
@@ -465,7 +458,7 @@ impl Shell {
     fn repair_control_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A completed action can replace the focused control (Resume → Join,
         // for example). Keep keyboard navigation reachable after that change.
-        if self.account_name_open {
+        if self.modal_open(cx) {
             return;
         }
         if self.host_controls.iter().any(|(id, control)| {
@@ -539,7 +532,7 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_action_filter(
-            self.account_name_open
+            self.modal_open(cx)
                 .then_some(account_menu::dialog_action as fn(&dyn gpui::Action) -> bool),
         );
         self.present_feedback(window, cx);
@@ -603,9 +596,9 @@ impl Render for Shell {
         let status = self.status_bar(window, &theme, cx);
 
         let content = if let Some(content) = self.application_browser_content(window, cx) {
-            self.application_columns_viewport(content, cx)
+            content
         } else {
-            let main = self.shell_main(&theme, cx);
+            let main = self.shell_main(window, &theme, cx);
             self.shell_content(main, window, &theme, cx)
         };
         self.finish_application_render(cx);
@@ -624,7 +617,7 @@ impl Render for Shell {
                     }
                 }),
             );
-        self.with_account_modal(background, window, cx)
+        self.with_modal(background, window, cx)
     }
 }
 

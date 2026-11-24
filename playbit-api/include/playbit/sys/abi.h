@@ -179,6 +179,8 @@ enum {
     PB_EVENT_CHANNEL_MESSAGE = 18, // handle (8), participant (80), message ID (16), bytes
     PB_EVENT_CHANNEL_STATUS = 19 // target=0, little-endian int32_t status
 };
+// Reread identity.read after this advisory event (target zero, empty payload).
+#define PB_EVENT_IDENTITY_CHANGED UINT32_C(0x80000015)
 // Host identity is independent of the app compilation target. Web means
 // the web host, including Safari on macOS/iOS. Platform identity does not
 // describe the surface, input facilities or resource envelope.
@@ -287,6 +289,7 @@ typedef struct PBEvent {
     uint32_t kind;
     uint32_t target;
 } PBEvent;
+enum { PB_DISPLAY_NAME_BYTES = 256 };
 typedef struct PBIdentity {
     uint32_t size;
     uint32_t written;
@@ -297,6 +300,9 @@ typedef struct PBIdentity {
     uint8_t session_id[32];
     uint32_t flags; // bit 0: service, bit 1: session present; other bits zero
     uint32_t reserved;
+    // Zero-padded UTF-8, possibly full-width. Empty when unavailable.
+    // A capacity ending inside this field leaves every byte of the field untouched.
+    uint8_t display_name[PB_DISPLAY_NAME_BYTES];
 } PBIdentity;
 
 enum { PB_SESSION_HAS_KEY_SECRET = 1, PB_SESSION_CODE_CHARS = 22 };
@@ -666,6 +672,9 @@ typedef struct PBParticipant {
     uint8_t device_id[16];
     uint8_t instance_id[16];
     uint8_t build_id[32];
+    // Zero-padded UTF-8, possibly full-width. Empty when unavailable.
+    // A capacity ending inside this field leaves every byte of the field untouched.
+    uint8_t display_name[PB_DISPLAY_NAME_BYTES];
 } PBParticipant;
 static inline PBSysResult pb_capabilities(PBContext* context, PBCapabilities* output) {
     return pb_syscall_invoke(context, 0x1, (uint64_t)(uintptr_t)output, 0, 0, 0, 0, 0);
@@ -673,6 +682,8 @@ static inline PBSysResult pb_capabilities(PBContext* context, PBCapabilities* ou
 static inline PBSysResult pb_startup_arguments(PBContext* context, PBArguments* output) {
     return pb_syscall_invoke(context, 0x6, (uint64_t)(uintptr_t)output, 0, 0, 0, 0, 0);
 }
+// Read the cached roster. Call pb_session at startup for live membership and read
+// again on each PB_EVENT_PRESENCE_CHANGED. The initial snapshot can be empty.
 static inline PBSysResult pb_presence(PBContext* context, PBParticipant* data, uint32_t capacity,
     uint32_t stride, uint32_t* count) {
     return pb_syscall_invoke(context, 0xa, (uint64_t)(uintptr_t)data, capacity, stride,
@@ -1178,7 +1189,8 @@ static inline PBSysResult pb_object_query_take(
 }
 
 // Return the current session's positive app-generation token, or a negative PBStatus.
-// This is local and does not wait for AP. Use pb_identity for the 32-byte session ID.
+// Starts or reuses live membership without waiting for the first roster.
+// Use pb_identity for the 32-byte session ID.
 static inline PBSysResult pb_session(PBContext* context) {
     return pb_syscall_invoke(context,19,0,0,0,0,0,0);
 }

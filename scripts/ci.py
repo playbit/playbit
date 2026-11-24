@@ -105,19 +105,10 @@ def plan(base=None, head='HEAD', full=False):
 def github_outputs(value):
     groups = value['groups']
     output = {name.replace('-', '_'): str(item['run']).lower() for name, item in groups.items()}
+    output['selected'] = json.dumps([name for name, item in groups.items() if item['run']])
     output['storage_history'] = str(value['storage_history']['run']).lower()
     with open(os.environ['GITHUB_OUTPUT'], 'a') as file:
         file.writelines(f'{key}={item}\n' for key, item in output.items())
-    summary = os.environ.get('GITHUB_STEP_SUMMARY')
-    if summary:
-        with open(summary, 'a') as file:
-            file.write(f"Base: `{value['base']}`; tested source: `{value['head']}`\n\n")
-            for name, item in groups.items():
-                reasons = ', '.join(item['reasons']) or 'No affected inputs'
-                file.write(f"- {name}: {'run' if item['run'] else 'skip'} — {reasons}\n")
-            item = value['storage_history']
-            reasons = ', '.join(item['reasons']) or 'No affected inputs'
-            file.write(f"- storage history (macos): {'run' if item['run'] else 'skip'} — {reasons}\n")
 
 
 def validate_results(expected, results):

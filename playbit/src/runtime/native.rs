@@ -161,8 +161,27 @@ impl NativeInstance {
     pub fn replace_volumes(&mut self, volumes: Vec<AvailableVolume>) -> HostResult<bool> {
         self.state().replace_volumes(volumes)
     }
+    /// Update the local account label on the guest's serialized owner.
+    pub fn set_display_name(&mut self, name: &str) -> HostResult<()> {
+        self.state().set_display_name(name)
+    }
+
+    pub(crate) fn deactivate_with_inputs(
+        &mut self,
+        count: usize,
+    ) -> HostResult<crate::runtime::work::ClosingInputs> {
+        self.state().deactivate_with_inputs(count)
+    }
+    pub(crate) fn queue_input(
+        &mut self,
+        generation: u64,
+        event: Event,
+        closing: Option<&mut crate::runtime::work::ClosingInputs>,
+    ) -> HostResult<()> {
+        self.state().queue_event(generation, event, closing)
+    }
     pub fn queue_event(&mut self, generation: u64, event: Event) -> HostResult<()> {
-        self.state().queue_event(generation, event)
+        self.queue_input(generation, event, None)
     }
     pub fn notify_data(&mut self, generation: u64, token: u64) -> Result<(), HostError> {
         self.state().notify_data(generation, token)
@@ -200,7 +219,7 @@ impl NativeInstance {
         self.state().has_ready_work(now)
     }
     pub fn deactivate(&mut self) {
-        self.state().deactivate();
+        self.deactivate_with_inputs(0).expect("an empty closing mailbox always fits");
     }
     pub fn drain_pending(&self) -> bool {
         self.state().drain_pending()

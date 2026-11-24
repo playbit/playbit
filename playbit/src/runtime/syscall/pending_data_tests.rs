@@ -178,6 +178,7 @@ pub(in crate::runtime) fn state() -> (State, Rc<RefCell<Records>>, VolumeHandle)
         app_name: "Async fixture".into(),
         app_build: None,
         identity: Identity {
+            display_name: String::new(),
             account_id: [5; 16],
             is_service: false,
             device_id: [6; 16],

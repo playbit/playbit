@@ -106,8 +106,12 @@ fn session_participant_grant_is_bound_to_its_shared_volume_and_current_entry_acl
     let ordinary = DataActor::for_session(guest, &session, &world).unwrap();
     assert!(metadata.authorize(ordinary, Permission::Read).is_err());
     assert!(
-        DataActor::session_participant(guest, &session, &Volume { personal: true, ..volume })
-            .is_err()
+        DataActor::session_participant(
+            guest,
+            &session,
+            &Volume { personal: true, ..volume.clone() }
+        )
+        .is_err()
     );
 
     let index = db();
@@ -134,6 +138,41 @@ fn session_participant_grant_is_bound_to_its_shared_volume_and_current_entry_acl
                 .is_ok(),
             allowed
         );
+    }
+
+    #[cfg(feature = "connected-engine")]
+    {
+        let captured = db();
+        let entry = id(4);
+        // Isolate this birth so both replicas share its complete causal cut.
+        let local = db();
+        receive(&captured, &put(&local, 4, record("temporary", 10), WALL), 128);
+        delete(&local, 4, WALL + 1);
+        let retirement = |actor, captured_defaults: &Acl| {
+            snapshot(&local)
+                .retirement_for(
+                    entry,
+                    &volume,
+                    actor,
+                    metadata.default_permissions(),
+                    &snapshot(&captured),
+                    captured_defaults,
+                )
+                .unwrap()
+        };
+        assert!(retirement(actor, metadata.default_permissions()).is_some());
+        assert!(retirement(guest.into(), metadata.default_permissions()).is_none());
+        let read_only = Acl {
+            grants: vec![Grant {
+                subject: Subject::SessionParticipants,
+                permissions: vec![Permission::Read],
+            }],
+        };
+        assert!(retirement(actor, &read_only).is_none());
+        let mut tx = captured.begin_write(WALL + 2).unwrap();
+        set_permissions(&mut tx, entry, &EntryAcl::Replace(read_only)).unwrap();
+        tx.commit().unwrap();
+        assert!(retirement(actor, metadata.default_permissions()).is_none());
     }
 }
 
@@ -557,6 +596,65 @@ fn deletion_wins_newer_rename_and_delayed_delete_cannot_retire_recreated_name() 
             assert_invariants(db);
         }
     }
+}
+
+#[test]
+#[cfg(feature = "connected-engine")]
+fn owner_retirement_repair_requires_a_qualified_delete_matching_birth_and_current_write() {
+    let local = db();
+    let captured = db();
+    let volume = Volume {
+        id: Id::from_bytes([1; 16]),
+        owner: Id::from_bytes([2; 16]),
+        name: "Retirement".into(),
+        personal: false,
+        share_key_with_service: true,
+    };
+    let defaults = Acl::default();
+    let birth = put(&local, 10, record("temporary", 1), WALL);
+    receive(&captured, &birth, 128);
+    let repair = |ap: &Db<MemStorage>| {
+        snapshot(&local)
+            .retirement_for(
+                id(10),
+                &volume,
+                volume.owner.into(),
+                &defaults,
+                &snapshot(ap),
+                &defaults,
+            )
+            .unwrap()
+    };
+    assert!(repair(&captured).is_none());
+    delete(&local, 10, WALL + 1);
+    let retired = repair(&captured).unwrap();
+    let projection = db();
+    let mut tx = projection.begin_write(WALL + 2).unwrap();
+    retired.copy_into(&mut tx).unwrap();
+    tx.commit().unwrap();
+    let source = local.begin_read().unwrap();
+    let submission = projection.begin_read().unwrap();
+    assert_eq!(submission.iter().count(), 2);
+    for key in [meta_key(RETIRED, id(10)).to_vec(), revision_key(id(10), id(250)).to_vec()] {
+        let (clock, bytes) = source.get_with_clock(&key).unwrap().unwrap();
+        let (sent_clock, sent_bytes) = submission.get_with_clock(&key).unwrap().unwrap();
+        assert_eq!((sent_clock, sent_bytes.as_ref()), (clock, bytes.as_ref()));
+    }
+
+    // A physically received retirement without local authorship or qualification
+    // cannot enter the selected writer's recovery path.
+    let mut tx = captured.begin_write(WALL + 2).unwrap();
+    retired.copy_into(&mut tx).unwrap();
+    tx.commit().unwrap();
+    assert!(!snapshot(&captured).header(id(10)).unwrap().deleted);
+    assert!(snapshot(&captured).selected_retirement(id(10)).unwrap().is_none());
+    let different = db();
+    put(&different, 10, record("different incarnation", 2), WALL);
+    assert!(repair(&different).is_none());
+    let mut tx = captured.begin_write(WALL + 2).unwrap();
+    set_permissions(&mut tx, id(10), &EntryAcl::Replace(Acl::default())).unwrap();
+    tx.commit().unwrap();
+    assert!(repair(&captured).is_none());
 }
 
 #[test]

@@ -216,6 +216,8 @@ fn existing_project_init_retains_source_and_selects_the_calling_publishers_root(
     let manifest = fs::read(source.path().join("playbit.toml")).unwrap();
     let code = source.path().join("src/app.rs");
     fs::write(&code, "// user work\n").unwrap();
+    let readme = source.path().join("README.md");
+    fs::write(&readme, "# My app\n").unwrap();
     let again =
         init(&[], source.path(), &|request| call_for(Id::from_bytes([2; 16]), request)).unwrap();
     let copied =
@@ -224,6 +226,7 @@ fn existing_project_init_retains_source_and_selects_the_calling_publishers_root(
     assert_ne!(first["volume"], copied["volume"]);
     assert_eq!(fs::read(source.path().join("playbit.toml")).unwrap(), manifest);
     assert_eq!(fs::read_to_string(code).unwrap(), "// user work\n");
+    assert_eq!(fs::read_to_string(readme).unwrap(), "# My app\n");
 }
 
 #[test]
@@ -469,6 +472,9 @@ fn init_creates_destination_directories() {
         assert_eq!(manifest.name, "Nested app");
         assert!(Id::parse(result["volume"].as_str().unwrap()).is_ok());
         assert!(destination.join(".git").is_dir());
+        let readme = fs::read_to_string(destination.join("README.md")).unwrap();
+        assert!(readme.contains("/Playbit.app/Contents/MacOS"));
+        assert!(readme.contains("\npb run\n"));
         assert!(
             destination
                 .join(if language == "rust" { "src/app.rs" } else { "src/app.ml" })

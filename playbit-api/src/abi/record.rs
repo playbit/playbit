@@ -21,6 +21,8 @@ pub trait Record: Copy {
     /// Oldest complete published allocation, including its tail padding.
     const MIN_SIZE: u32;
     const FIELDS: &'static [Field];
+    /// A caller may have reserved part of this output field before it was published.
+    const OPTIONAL_OUTPUT_FIELD: Option<u32> = None;
 }
 
 /// SDK storage initialization. Byte arrays are scalar spans, not record arrays.
@@ -28,6 +30,7 @@ pub trait Element: Copy {
     const RECORD: bool;
     const MIN_SIZE: u32;
     const FIELDS: &'static [Field];
+    const OPTIONAL_OUTPUT_FIELD: Option<u32> = None;
     fn initialize(&mut self);
 }
 impl Element for u8 {
@@ -48,7 +51,10 @@ pub fn admit<T: Record>(size: u32, output: bool) -> Result<(), Error> {
     }
     for field in T::FIELDS {
         let end = field.offset + field.width;
-        if field.offset < size && size < end {
+        if field.offset < size
+            && size < end
+            && (!output || Some(field.offset) != T::OPTIONAL_OUTPUT_FIELD)
+        {
             return Err(Error::InvalidArgument);
         }
     }
@@ -165,12 +171,13 @@ pub unsafe fn write_native<T: Record>(pointer: *mut T, value: T) -> Result<(), E
 }
 
 macro_rules! record {
-    ($ty:ty, $minimum:expr, {$($name:ident: $kind:ty),* $(,)?}) => {
+    ($ty:ty, $minimum:expr, {$($name:ident: $kind:ty),* $(,)?} $(, optional_output: $optional:ident)?) => {
         const _: fn(&$ty) = |record| {
             $(let _: &$kind = &record.$name;)*
         };
         impl $crate::abi::record::Record for $ty {
             const MIN_SIZE: u32 = $minimum;
+            $(const OPTIONAL_OUTPUT_FIELD: Option<u32> = Some(core::mem::offset_of!($ty, $optional) as u32);)?
             const FIELDS: &'static [$crate::abi::record::Field] = &[
                 $crate::abi::record::Field { name: "size", kind: "u32", offset: 0, width: 4 },
                 $crate::abi::record::Field { name: "written", kind: "u32", offset: 4, width: 4 },
@@ -183,6 +190,7 @@ macro_rules! record {
         }
         impl $crate::abi::record::Element for $ty {
             const RECORD: bool = true;
+            const OPTIONAL_OUTPUT_FIELD: Option<u32> = <$ty as $crate::abi::record::Record>::OPTIONAL_OUTPUT_FIELD;
             const MIN_SIZE: u32 = <$ty as $crate::abi::record::Record>::MIN_SIZE;
             const FIELDS: &'static [$crate::abi::record::Field] =
                 <$ty as $crate::abi::record::Record>::FIELDS;
@@ -215,6 +223,15 @@ mod tests {
         assert_eq!(extent::<Extended>(12), 12);
         assert_eq!(extent::<Extended>(32), 16);
         assert_eq!(admit::<Extended>(14, false), Err(Error::InvalidArgument));
+        assert_eq!(admit::<Extended>(14, true), Err(Error::InvalidArgument));
+        assert_eq!(
+            admit::<crate::abi::operations::Identity>(128, false),
+            Err(Error::InvalidArgument)
+        );
+        assert_eq!(
+            admit::<crate::abi::environment::Participant>(96, false),
+            Err(Error::InvalidArgument)
+        );
         assert_eq!(admit::<Extended>(8, true), Err(Error::BufferTooSmall));
         assert_eq!(admit::<Extended>(8, false), Err(Error::InvalidArgument));
         assert_eq!(admit::<Extended>(MAX_RECORD_BYTES + 1, false), Err(Error::LimitExceeded));

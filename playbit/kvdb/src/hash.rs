@@ -20,12 +20,17 @@ use crate::encoding::{ENT_FLAG_TOMBSTONE, EntVal};
 /// with an empty value. Only the tombstone bit is hashed; other (future)
 /// flags must not affect identity.
 pub fn entry_hash(hash_key: &[u8; 32], key: &[u8], flags: u8, userval: &[u8]) -> [u8; 32] {
+    let mut h = entry_hasher(hash_key, key, flags);
+    h.update(userval);
+    *h.finalize().as_bytes()
+}
+
+pub(crate) fn entry_hasher(hash_key: &[u8; 32], key: &[u8], flags: u8) -> blake3::Hasher {
     let mut h = blake3::Hasher::new_keyed(hash_key);
     h.update(&(key.len() as u32).to_le_bytes());
     h.update(key);
     h.update(&[flags & ENT_FLAG_TOMBSTONE]);
-    h.update(userval);
-    *h.finalize().as_bytes()
+    h
 }
 
 /// Canonical entry hash read in bounded chunks.
@@ -35,10 +40,7 @@ pub fn entry_hash_from(
     flags: u8,
     value: &dyn crate::storage::ValueRead,
 ) -> crate::error::Result<[u8; 32]> {
-    let mut h = blake3::Hasher::new_keyed(hash_key);
-    h.update(&(key.len() as u32).to_le_bytes());
-    h.update(key);
-    h.update(&[flags & ENT_FLAG_TOMBSTONE]);
+    let mut h = entry_hasher(hash_key, key, flags);
     let mut buf = [0; 4096];
     let mut offset = 0;
     while offset < value.len() {

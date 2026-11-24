@@ -49,11 +49,12 @@ impl ManagedGuest {
     pub fn create(
         runtime: Runtime,
         wasm: &[u8],
-        context: GuestContext,
+        mut context: GuestContext,
         host: Box<dyn Host>,
         validate_view: fn(&ViewNode) -> Result<(), String>,
     ) -> Result<Self, RuntimeError> {
         let mut active = runtime.create_guest(wasm, context.clone(), host)?;
+        super::instance::apply_local_name(&context.identity, &mut context.participants);
         let frame = active.pump()?;
         let mut managed = Self {
             runtime,
@@ -264,12 +265,23 @@ impl ManagedGuest {
         self.active.deferred_update()
     }
 
+    pub fn set_display_name(&mut self, name: &str) -> Result<(), HostError> {
+        if self.context.identity.display_name == name {
+            return Ok(());
+        }
+        self.active.set_display_name(name)?;
+        name.clone_into(&mut self.context.identity.display_name);
+        super::instance::apply_local_name(&self.context.identity, &mut self.context.participants);
+        Ok(())
+    }
+
     pub fn set_participants(
         &mut self,
         generation: u64,
-        participants: Vec<Participant>,
+        mut participants: Vec<Participant>,
     ) -> Result<(), HostError> {
         self.active.set_participants(generation, participants.clone())?;
+        super::instance::apply_local_name(&self.context.identity, &mut participants);
         self.context.participants = participants;
         Ok(())
     }
@@ -320,6 +332,7 @@ mod tests {
             app_name: "Test app".into(),
             app_build: None,
             identity: Identity {
+                display_name: String::new(),
                 account_id: [1; 16],
                 is_service: false,
                 device_id: [2; 16],

@@ -8,7 +8,9 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.applications.available() || self.sidebar_volumes || self.new_session.is_some() {
+        if self.applications.columns.is_empty()
+            || self.new_session.is_some() && !self.sidebar_volumes
+        {
             return false;
         }
         if self.navigate_application_browser(key, window, cx) {
@@ -26,9 +28,11 @@ impl Shell {
         let Some((column, index)) = focused else {
             return false;
         };
+        let from_column = column;
+        let row = &self.applications.columns[column][index];
         if key == "right"
-            && column == if self.applications.scope_in_session { 2 } else { 1 }
-            && self.applications.root_open
+            && row.selected
+            && matches!(row.target, Target::Volume(_) | Target::Scope { .. })
             && let Some(browser) = &self.browser
         {
             browser.update(cx, |browser, cx| browser.focus_entry_list(window, cx));
@@ -53,16 +57,35 @@ impl Shell {
         if let Some((column, index)) = target {
             let row = &rows[column][index];
             let target = row.target.clone();
-            let key = row.key.clone();
+            let control_key = row.key.clone();
             let selected = row.selected;
-            if (selected || self.select_application_target(target, cx))
-                && let Some(control) = self.navigation_controls.get(&key)
+            if ((selected && column == from_column) || self.select_application_target(target, cx))
+                && let Some(control) = self.navigation_controls.get(&control_key)
             {
+                if column == 0 {
+                    self.reveal_sidebar_row(index, key == "down");
+                }
                 control.update(cx, |control, cx| control.focus_from_arrow(window, cx));
             }
         }
         cx.stop_propagation();
         true
+    }
+
+    fn reveal_sidebar_row(&self, index: usize, down: bool) {
+        let strategy = if down { gpui::ScrollStrategy::Bottom } else { gpui::ScrollStrategy::Top };
+        if !self.sidebar_volumes {
+            self.session_scroll.scroll_to_item(index, strategy);
+            return;
+        }
+        let app = matches!(self.applications.columns[0][index].target, Target::Application(_));
+        let pending_before = self.volumes.len() < 256
+            && self
+                .pending_volume
+                .as_ref()
+                .is_some_and(|pending| pending.position(&self.volumes) <= index);
+        self.volume_scroll
+            .scroll_to_item(index + usize::from(app) + usize::from(pending_before), strategy);
     }
 
     fn navigate_application_browser(

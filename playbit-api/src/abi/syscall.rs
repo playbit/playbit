@@ -503,6 +503,8 @@ pub enum EventKind {
     ChannelStatus = 19,
     /// Capture generation snapshot at callback entry; not a wake source.
     TraceConfig = 20,
+    /// Advisory, target zero, empty payload. Reread the identity display name.
+    IdentityChanged = 0x8000_0015,
 }
 
 /// Canvas pointer coordinates are local integer coordinates, including edges.

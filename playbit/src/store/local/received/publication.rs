@@ -287,7 +287,7 @@ impl LocalStore {
         {
             return Err(Error::AccessDenied("received publication binding"));
         }
-        if stage.database_key != self.credentials(stage.volume)?.database_key {
+        if stage.database_key != self.local_database_key(stage.volume)? {
             return Err(Error::AccessDenied("staged database credentials changed"));
         }
         stage.verify_publication(pending)
@@ -304,7 +304,24 @@ impl LocalStore {
             return Err(Error::corrupt("pending publication changed before commit"));
         }
         if let Some(entry) = pending.entry_scope {
-            self.restrict_catalog_locked(stage.volume, entry)?;
+            // A selected World capture includes current volume permissions. Only
+            // preserve a previous full cut while that broader authority still holds.
+            let preserve_catalog = pending.authority_qualified
+                && (self.has_world_attachment(stage.volume)?
+                    || pending
+                        .access
+                        .session_id()
+                        .map(|id| self.session(id))
+                        .transpose()?
+                        .is_some_and(|session| session.is_distinct_world(stage.volume)))
+                && self.has_qualified_catalog(stage.volume, pending.authority_generation)?
+                && super::super::entries::granted(
+                    MetadataPolicy::read(&stage.metadata)?
+                        .authorize(self.account.id, Permission::Read),
+                )?;
+            if !preserve_catalog {
+                self.restrict_catalog_locked(stage.volume, entry)?;
+            }
         }
         if pending.authority_qualified {
             self.clear_authority_locked(
@@ -371,7 +388,7 @@ impl LocalStore {
             self.path.join(crate::paths::RECEIVED).join(pending.operation.to_string()),
         );
         directory.retain(true);
-        let credentials = self.credentials(pending.volume)?;
+        let database_key = self.local_database_key(pending.volume)?;
         let metadata =
             open_replica(&directory.0.join(DatabaseId::Index.file_name()), STAGED_CACHE_BYTES)?;
         let revocations = open_replica(
@@ -382,10 +399,14 @@ impl LocalStore {
             operation: pending.operation,
             volume: pending.volume,
             identity: self.volume(pending.volume)?,
-            database_key: credentials.database_key,
+            database_key,
             authority_generation: pending.authority_generation,
             authority_entry_generation: pending.authority_entry_generation,
             authority_qualified: pending.authority_qualified,
+            #[cfg(feature = "connected-engine")]
+            pending_backing: None,
+            #[cfg(feature = "connected-engine")]
+            owner_baseline: None,
             entry_scope: pending.entry_scope,
             metadata,
             revocations,

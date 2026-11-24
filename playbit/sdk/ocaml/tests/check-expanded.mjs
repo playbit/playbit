@@ -141,13 +141,14 @@ instance = new WebAssembly.Instance(module, {playbit: {pb_syscall(op, ...slots) 
     }
     if (opcode('Identity',op)) {
         const p = Number(slots[0]);
-        assert(u32(p) === 104 && u32(p+4) === 0 && slots.slice(1).every(s => s === 0n), 'identity record capacity');
-        set32(p+4, 104);
+        assert(u32(p) === 360 && u32(p+4) === 0 && slots.slice(1).every(s => s === 0n), 'identity record capacity');
+        set32(p+4, identityCalls === 0 ? 104 : 360);
+        bytes(p+104, 256).set(Buffer.from("Zoë"));
         set64(p+8, 0x1234567800000001n);
         bytes(p+16, 48).set(identity(0));
         bytes(p+64, 32).fill(99);
         set32(p+96, 2);
-        if (++identityCalls === 2) set32(p+100, 0x80000000);
+        if (++identityCalls === 3) set32(p+100, 0x80000000);
         return 0n;
     }
     if (opcode('SessionInfo',op)) {
@@ -165,22 +166,25 @@ instance = new WebAssembly.Instance(module, {playbit: {pb_syscall(op, ...slots) 
     if (opcode('Presence',op)) {
         const call = ++presenceCalls;
         const records = Number(slots[0]), count = Number(slots[3]);
-        const capacity = call === 2 ? 18 : 16;
-        assert(slots[1] === BigInt(capacity) && slots[2] === 88n && records === count+4
+        assert(sessionCalls === 1 && channelOpens === 0, 'roster-only membership');
+        const capacity = call === 3 || call === 5 ? 18 : 16;
+        assert(slots[1] === BigInt(capacity) && slots[2] === 344n && records === count+4
                && slots.slice(4).every(s => s === 0n), 'presence exact scalar layout');
         assert(u32(count) === 0, 'presence output count initialized');
         for (let i=0; i<capacity; i++) {
-            assert(u32(records+88*i) === 88 && u32(records+88*i+4) === 0, 'presence input capacity');
+            assert(u32(records+344*i) === 344 && u32(records+344*i+4) === 0, 'presence input capacity');
         }
-        if (call === 1) {
+        if (call === 2 || call === 4) {
             set32(count, 18);
             return BigInt(abi['Error::BufferTooSmall']);
         }
-        const actual = call === 2 ? 17 : 0;
+        if (call === 1 || call === 3) enqueue('PresenceChanged', Buffer.alloc(0));
+        const actual = call === 3 || call === 5 ? 17 : 0;
         set32(count, actual);
         for (let i=0; i<actual; i++) {
-            const p = records + i*88;
-            set32(p+4, 88);
+            const p = records + i*344;
+            set32(p+4, i === 0 ? 88 : 344);
+            bytes(p+88, 256).set(Buffer.from(call === 5 && i === 1 ? "月" : "小"));
             bytes(p+8, 48).set(identity(i));
             bytes(p+56, 32).fill(99);
         }
@@ -192,7 +196,7 @@ instance = new WebAssembly.Instance(module, {playbit: {pb_syscall(op, ...slots) 
         return 7n;
     }
     if (opcode('ChannelOpen',op)) {
-        assert(sessionCalls === channelOpens+1 && slots[1] === 7n && slots.slice(2).every(s => s === 0n), 'channel open name extent and session');
+        assert(sessionCalls === channelOpens+2 && slots[1] === 7n && slots.slice(2).every(s => s === 0n), 'channel open name extent and session');
         assert(text.decode(bytes(slots[0], slots[1])) === 'live/é', 'channel open exact UTF-8 name');
         assert(liveChannel === null, 'channel must be closed before allocating a fresh handle');
         liveChannel = ++channelOpens === 1 ? channel : reopenedChannel;
@@ -385,7 +389,7 @@ instance = new WebAssembly.Instance(module, {playbit: {pb_syscall(op, ...slots) 
 instance.exports.pb_main();
 assert(passed && submitted===4 && entryCalls===2 && volumeCalls===21 && pending===null && audioTakes===2 && soundPlays===3, 'all expanded bindings exercised and consumed');
 assert(disposedAliases===90 && liveAliases.size===0, 'all aliases released across six automatic roles, released Root prefix, missing roots and excessive capacity');
-assert(identityCalls===2 && infoCalls===6 && presenceCalls===3 && sessionCalls===2 && channelOpens===2 && subscribeTakes===2
+assert(identityCalls===3 && infoCalls===6 && presenceCalls===6 && sessionCalls===3 && channelOpens===2 && subscribeTakes===2
        && unsubscribeTakes===2 && closes===2 && staleCalls===1 && liveChannel===null && !subscribed
        && publicationCalls===2 && wakeCalls===3 && clockCalls===1 && eventRetries===1
        && channelOperations.size===0 && events.length===0, 'live session and wake fixtures complete');

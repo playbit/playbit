@@ -2988,3 +2988,161 @@ fn sender_rejects_unbounded_or_unordered_batches_before_emitting_responses() {
         assert_eq!(sender.write_output(&mut [0; 100]).unwrap(), 0);
     }
 }
+
+#[test]
+fn cross_context_snapshots_match_independent_merkle_trees_and_stream_only_their_headers() {
+    let public = [0x35; 32];
+    for fanout in [2, 4, 128] {
+        let build = |key| {
+            let mut options = CreateOptions::syncable(key, 11);
+            options.branch_factor = fanout;
+            Db::create(MemStorage::new(), &options).unwrap()
+        };
+        let canonical = build(HASH_KEY);
+        let projected = build(public);
+        let empty = build(public);
+        let publish = |db: &Db<MemStorage>| {
+            let mut tx = db.begin_write_with_delta(T0 + 1, 1024).unwrap();
+            tx.put(b"one", b"moved").unwrap();
+            tx.put(b"two", &[7; 73]).unwrap();
+            let CommittedDelta::Bytes(bytes) = tx.commit_with_delta().unwrap() else {
+                panic!("test delta fits its limit");
+            };
+            bytes
+        };
+        let mut sender = SyncSender::new(&canonical).unwrap();
+        let mut scan = sender.projection_scan(public).unwrap();
+        assert!(scan.advance().unwrap());
+        assert_eq!(scan.finish().unwrap(), None);
+        for db in [&canonical, &projected] {
+            let mut tx = db.begin_write(T0).unwrap();
+            for num in 0..319u16 {
+                let bytes = vec![num as u8; usize::from(num) % 33];
+                tx.put(&num.to_be_bytes(), &bytes).unwrap();
+            }
+            tx.put(b"large", &vec![3; 300 * 1024]).unwrap();
+            tx.del(&91u16.to_be_bytes()).unwrap();
+            tx.commit().unwrap();
+        }
+        sender = SyncSender::new(&canonical).unwrap();
+        let mut scan = sender.projection_scan(public).unwrap();
+        assert!(!scan.advance().unwrap());
+        while !scan.advance().unwrap() {}
+        let root = scan.finish().unwrap();
+        assert_eq!(root, projected.begin_read().unwrap().root_hash().unwrap());
+        sender.use_projection(public, root).unwrap();
+        let mut request = Vec::new();
+        let mut receiver =
+            SyncReceiver::new(&empty, Lww, TestStaging::default(), T0 + 1, &mut request).unwrap();
+        let mut output = Vec::new();
+        drain_sender(&mut sender, &request, &mut output).unwrap();
+        let mut expected = Vec::new();
+        drain_sender(&mut SyncSender::new(&projected).unwrap(), &request, &mut expected).unwrap();
+        assert_eq!(output.len(), expected.len());
+        assert!(output == expected, "every encoded leaf and header matches the public context");
+        request.clear();
+        let mut status = SyncStatus::Running;
+        for chunk in output.chunks(89) {
+            status = receiver.process(chunk, &mut request).unwrap();
+        }
+        assert_eq!(status, SyncStatus::Done);
+        receiver.finish().unwrap();
+        assert_eq!(root, empty.begin_read().unwrap().root_hash().unwrap());
+        // An unpublished independent tree must accept an ordinary sender's range
+        // while preserving all original clocks and its own Merkle root.
+        let direct = build(public);
+        request.clear();
+        let mut receiver = SyncReceiver::new_projection(
+            &direct,
+            HASH_KEY,
+            Lww,
+            TestStaging::default(),
+            T0 + 1,
+            &mut request,
+        )
+        .unwrap();
+        output.clear();
+        drain_sender(&mut SyncSender::new(&canonical).unwrap(), &request, &mut output).unwrap();
+        request.clear();
+        assert_eq!(receiver.process(&output, &mut request).unwrap(), SyncStatus::Done);
+        receiver.finish().unwrap();
+        assert_eq!(root, direct.begin_read().unwrap().root_hash().unwrap());
+        let mut delta = publish(&canonical);
+        let wanted = publish(&projected);
+        let unchanged = delta.clone();
+        assert_eq!(rekey_delta(&mut delta, 1024, &public, &HASH_KEY), Err(Error::HashKeyMismatch));
+        assert_eq!(delta, unchanged);
+        rekey_delta(&mut delta, 1024, &HASH_KEY, &public).unwrap();
+        assert_eq!(delta, wanted);
+    }
+}
+
+#[test]
+fn projection_requires_syncable_storage_and_a_complete_matching_range() {
+    let plain = Db::create(MemStorage::new(), &CreateOptions::plain()).unwrap();
+    let key = [0x82; 32];
+    let mut out = Vec::new();
+    assert!(matches!(
+        SyncReceiver::new_projection(&plain, key, Lww, TestStaging::default(), T0, &mut out),
+        Err(Error::Mode)
+    ));
+    assert!(matches!(
+        PreparedSync::new_projection(
+            &plain,
+            key,
+            TestStaging::default(),
+            TestStaging::default(),
+            128,
+            &mut out
+        ),
+        Err(Error::Mode)
+    ));
+    assert!(out.is_empty());
+    let db = mk_db();
+    let source = db.begin_read().unwrap();
+    assert!(matches!(ProjectionScan::new(&source, key, 1), Err(Error::InvalidArgument)));
+    drop(source);
+    put_all(&db, T0, &[(b"record", &vec![9; 4 * DEFAULT_MSG_CAP])]);
+    let sender = SyncSender::new(&db).unwrap();
+    let mut partial = sender.projection_scan(key).unwrap();
+    assert!(!partial.advance().unwrap());
+    assert_eq!(partial.finish(), Err(Error::Protocol));
+    let mut staged = TestStaging::default();
+    staged.append(b"old spool").unwrap();
+    let mut overflow = vec![0; DEFAULT_MSG_CAP];
+    assert!(matches!(
+        PreparedSync::new_projection(&db, key, staged, TestStaging::default(), 128, &mut overflow),
+        Err(Error::Capacity)
+    ));
+    let before = db.begin_read().unwrap().root_hash().unwrap();
+    let mut rx =
+        SyncReceiver::new_projection(&db, key, Lww, TestStaging::default(), T0, &mut out).unwrap();
+    let response = pull_response(S_NODIFF, 1, [1; 32], db.clock());
+    assert_eq!(rx.process(&response, &mut Vec::new()), Err(Error::Protocol));
+    assert!(rx.finish().is_err());
+    assert_eq!(db.begin_read().unwrap().root_hash().unwrap(), before);
+}
+
+#[test]
+fn a_started_projected_range_keeps_its_context_and_only_serves_leaves() {
+    let source = mk_db();
+    let public_key = [24; 32];
+    put_all(&source, T0, &[(b"v", &vec![31; 4 * DEFAULT_MSG_CAP])]);
+    let mut options = CreateOptions::syncable(public_key, 1);
+    options.branch_factor = source.meta().branch_factor;
+    let target = Db::create(MemStorage::new(), &options).unwrap();
+    let mut sender = SyncSender::new(&source).unwrap();
+    let mut scan = sender.projection_scan(public_key).unwrap();
+    while !scan.advance().unwrap() {}
+    let root = scan.finish().unwrap();
+    sender.use_projection(public_key, root).unwrap();
+    let mut request = Vec::new();
+    let mut rx = SyncReceiver::new(&target, Lww, TestStaging::default(), T0, &mut request).unwrap();
+    let mut reply = Vec::new();
+    drain_sender(&mut sender, &request, &mut reply).unwrap();
+    assert_eq!(sender.use_projection(HASH_KEY, root), Err(Error::Protocol));
+    assert_eq!(sender.process(&frame(T_NODES_REQ, 0, &[])), Err(Error::Protocol));
+    assert_eq!(rx.process(&reply, &mut Vec::new()).unwrap(), SyncStatus::Done);
+    rx.finish().unwrap();
+    assert_eq!(target.begin_read().unwrap().root_hash().unwrap(), root);
+}

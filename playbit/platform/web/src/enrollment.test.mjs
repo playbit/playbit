@@ -16,7 +16,7 @@ function page() {
     const element = () => ({ children: [], value: "", append(...items) { this.children.push(...items); }, focus() {} });
     const onboarding = { children: [], replaceChildren(...items) { this.children = items; } };
     const error = { textContent: "Prior authentication timeout" }, invitation = { url: "https://playbit.app/s#retained" };
-    const context = vm.createContext({ encodeId, decodeId, validId, updateFrames() {}, onboarding, error, invitation, enrollment: null, parseAccountKey,
+    const context = vm.createContext({ encodeId, decodeId, validId, recoveryListAccount: undefined, updateFrames() {}, onboarding, error, invitation, enrollment: null, parseAccountKey,
         window: { addEventListener: (name, handler) => listeners.set(name, handler) }, accountSignal: { close() {} },
         URL, history: { replaceState() {} }, document: { createElement: element }, status: value => { message = value; },
         textElement: (_tag, text) => ({ ...element(), textContent: text }),

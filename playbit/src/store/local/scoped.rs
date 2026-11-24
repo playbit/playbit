@@ -15,6 +15,7 @@ pub struct ScopedSnapshot<'db> {
     entry: EntryId,
     policy: DatabasePolicy,
     controls: bool,
+    world_projection: bool,
     current: Option<volume_index::namespace::source::cut::current::Record>,
 }
 impl<'db> ScopedSnapshot<'db> {
@@ -28,6 +29,48 @@ impl<'db> ScopedSnapshot<'db> {
         version: Option<&str>,
     ) -> Result<Self> {
         Self::capture(source, database, policy, actor, version, true)
+    }
+
+    /// A terminal selected Index pull returns only the qualified birth and
+    /// deletion to a current reader/writer. The service also needs entry Read.
+    pub fn retirement_confirmation(
+        source: &'db Database,
+        policy: &DatabasePolicy,
+        actor: DataActor,
+        entry: EntryId,
+    ) -> Result<Self> {
+        let snapshot = source.begin_read()?;
+        let index = volume_index::IndexSnapshot::new(source.begin_read()?);
+        let volume = policy.volume.volume();
+        let defaults = policy.volume.default_permissions();
+        index.authorize_retained_read(volume, defaults, actor, entry)?;
+        index.authorize_retained_read(
+            volume,
+            defaults,
+            crate::store::catalog::PLAYBIT_REPLICA_PRINCIPAL,
+            entry,
+        )?;
+        if !index.source_granted(volume, defaults, actor, entry, Permission::Write)? {
+            return Err(Error::AccessDenied("entry retirement requires Write"));
+        }
+        let mut current =
+            volume_index::namespace::source::cut::current::Record::read(&snapshot, entry)?
+                .filter(|record| record.deletion.is_some())
+                .ok_or(Error::NotFound("qualified retirement"))?;
+        current.name = None;
+        current.parent = None;
+        current.content = None;
+        Ok(Self {
+            source,
+            snapshot,
+            prefixes: vec![volume_index::birth_source_key(entry).to_vec()],
+            database: DatabaseId::Index,
+            entry,
+            policy: policy.clone(),
+            controls: false,
+            world_projection: false,
+            current: Some(current),
+        })
     }
 
     /// Reconciliation preserves raw source clocks and LWW. Detached received
@@ -98,6 +141,7 @@ impl<'db> ScopedSnapshot<'db> {
             entry,
             policy: DatabasePolicy::reserved(policy.volume.clone(), database)?,
             controls: true,
+            world_projection: false,
             current,
         })
     }
@@ -153,13 +197,26 @@ impl<'db> ScopedSnapshot<'db> {
             entry,
             policy,
             controls: false,
+            world_projection: false,
             current: None,
         })
     }
 
+    #[cfg(feature = "connected-engine")]
+    pub(super) fn only_revision_history(mut self) -> Self {
+        self.prefixes.retain(|key| volume_index::is_entry_history(key));
+        self
+    }
+
     /// Projection runs after releasing the source guard, against this pinned cut.
     pub fn project(self, scratch: &Path) -> Result<OutboundReplica> {
-        let projected = empty_detached_replica(scratch, self.source)?;
+        let projected = if self.world_projection {
+            let volume = self.policy.volume.volume().id;
+            let hash = self.database.hash_key(&DatabaseId::world_projection_key(volume), volume);
+            super::empty_replica_with_hash(scratch, hash, self.source.meta().branch_factor)?
+        } else {
+            empty_detached_replica(scratch, self.source)?
+        };
         self.merge_pages(projected.database(), || {
             if fs::metadata(projected._directory.0.join("replica.kvdb")).map_err(io)?.len()
                 > DISK_BYTES
@@ -169,6 +226,10 @@ impl<'db> ScopedSnapshot<'db> {
             Ok(())
         })?;
         Ok(projected)
+    }
+    pub fn project_world(mut self, scratch: &Path) -> Result<OutboundReplica> {
+        self.world_projection = true;
+        self.project(scratch)
     }
 
     /// The caller retains publication ordering and a durable replay intent for
@@ -212,7 +273,7 @@ impl<'db> ScopedSnapshot<'db> {
                     .as_ref()
                     .is_some_and(|page| rows == PAGE_ROWS || page.len() + bytes.len() > PAGE_BYTES)
                 {
-                    self.replay_page(target, &page.take().expect("checked pending page"))?;
+                    self.replay_page(target, page.take().expect("checked pending page"))?;
                     checkpoint()?;
                     rows = 0;
                 }
@@ -229,7 +290,7 @@ impl<'db> ScopedSnapshot<'db> {
             }
         }
         if let Some(page) = page {
-            self.replay_page(target, &page)?;
+            self.replay_page(target, page)?;
             checkpoint()?;
         }
         self.finish_projection(target, charged)?;
@@ -264,7 +325,15 @@ impl<'db> ScopedSnapshot<'db> {
         Ok(())
     }
 
-    fn replay_page(&self, target: &Database, bytes: &[u8]) -> Result<()> {
+    fn replay_page(&self, target: &Database, mut bytes: Vec<u8>) -> Result<()> {
+        if self.world_projection {
+            kvdb::sync::rekey_delta(
+                &mut bytes,
+                PAGE_BYTES,
+                &self.source.meta().hash_key,
+                &target.meta().hash_key,
+            )?;
+        }
         let rejected = std::cell::RefCell::new(None);
         let resolver = |delta: &kvdb::sync::Delta<'_>| {
             let admission =
@@ -294,7 +363,7 @@ impl<'db> ScopedSnapshot<'db> {
             }
         };
         let mut receiver = kvdb::DeltaReceiver::new(target, resolver, 0, PAGE_BYTES)?;
-        receiver.process(bytes)?;
+        receiver.process(&bytes)?;
         if let Some(error) = rejected.borrow_mut().take() {
             return Err(error);
         }

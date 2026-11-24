@@ -154,7 +154,7 @@ unsafe fn write_volumes(
                     name_count: name.count,
                     tags_offset: tags.offset,
                     tags_count: tags.count,
-                    rights: volume.rights.0,
+                    rights: volume.public_rights().0,
                     flags: u32::from(volume.is_root) | metadata[index].1,
                     grant_id: metadata[index].0,
                     role: volume.role,

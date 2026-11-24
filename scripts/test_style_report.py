@@ -2,8 +2,12 @@
 """Exercise exclusions, tier boundaries, and regression behavior with small sources."""
 import copy
 import importlib.util
+import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -101,7 +105,8 @@ trait Read {\n    fn parse(&self);\n}
         current = {'tier_a': {'playbit/kvdb/src': new}, 'directories': {'playbit/src/engine': new}}
         errors = style.violations(current, baseline)
         self.assertEqual(len(errors), 2)
-        self.assertTrue(all('playbit/kvdb/src' in e and 'baseline=' in e and 'current=' in e for e in errors))
+        self.assertIn('playbit/kvdb/src: bare unwrap count increased from 0 to 1', errors)
+        self.assertIn('playbit/kvdb/src/db.rs:5: long is 80 lines (limit 70)', errors)
         current['tier_a']['playbit/kvdb/src'] = old
         self.assertEqual(style.violations(current, baseline), [])
 
@@ -118,6 +123,33 @@ trait Read {\n    fn parse(&self);\n}
         new, _ = self.measure('// header\n' + source)
         self.assertEqual(old['long_functions'][0]['lines'], 80)
         self.assertEqual(style.violations({'tier_a': {'playbit/kvdb/src': new}}, {'tier_a': {'playbit/kvdb/src': old}}), [])
+
+    def test_check_publishes_only_regressions_and_logs_every_location(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / 'scripts'
+            scripts.mkdir()
+            script = shutil.copy(style.__file__, scripts)
+            baseline = style.report(root, check_only=True)
+            (scripts / 'style-baseline.json').write_text(json.dumps(baseline))
+            summary = root / 'summary'
+            env = os.environ | {'GITHUB_STEP_SUMMARY': str(summary)}
+            command = [sys.executable, script, '--check']
+            passed = subprocess.run(command, env=env, capture_output=True, text=True, check=True)
+            self.assertEqual(passed.stdout.splitlines(), ['PASS: no tier A regressions.'])
+            self.assertFalse(summary.exists())
+
+            path = root / 'playbit/kvdb/src/db.rs'
+            path.parent.mkdir(parents=True)
+            path.write_text(''.join(f'fn long_{n}() {{' + '\n' * 71 + '}\n' for n in range(12)))
+            failed = subprocess.run(command, env=env, capture_output=True, text=True)
+            self.assertEqual(failed.returncode, 1)
+            self.assertEqual(len(failed.stderr.splitlines()), 12)
+            self.assertIn('long_11 is 72 lines', failed.stderr)
+            published = summary.read_text()
+            self.assertIn('playbit/kvdb/src/db.rs:1: long_0 is 72 lines', published)
+            self.assertEqual(published.count('- `'), 10)
+            self.assertIn('2 more in the job log', published)
 
     def test_tier_scopes_and_decoder_coverage(self):
         # Mixed platform trees must not transfer tier B metrics to A.
@@ -136,6 +168,7 @@ trait Read {\n    fn parse(&self);\n}
                 p.write_text(source)
             with patch.object(style, 'crate_counts', return_value={}):
                 report = style.report(root)
+            self.assertEqual(style.report(root, check_only=True)['tier_a'], report['tier_a'])
             names = {f['name']: f['covered'] for f in report['decoders']}
             self.assertEqual(names, {'decode_bytes': True, 'validate_item': True, 'parse_missing': False,
                                      'decode_web': False})

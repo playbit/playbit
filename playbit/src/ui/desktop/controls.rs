@@ -118,12 +118,11 @@ impl AssetSource for Assets {
             }
             "app-default" => Some(Cow::Borrowed(include_bytes!("../../../assets/app-default.svg"))),
             "upgrade" => Some(Cow::Borrowed(include_bytes!("../../../assets/upgrade.svg"))),
-            "session-overflow" => {
-                Some(Cow::Borrowed(include_bytes!("../../../assets/session-overflow.svg")))
+
+            "session-log-clear" => {
+                Some(Cow::Borrowed(include_bytes!("../../../assets/session-log-clear.svg")))
             }
-            "session-clear" => {
-                Some(Cow::Borrowed(include_bytes!("../../../assets/session-clear.svg")))
-            }
+
             "session-start" => {
                 Some(Cow::Borrowed(include_bytes!("../../../assets/session-start.svg")))
             }
@@ -171,6 +170,17 @@ impl AssetSource for Assets {
                 Some(Cow::Borrowed(include_bytes!("../../../assets/permission-popup-glyph.svg")))
             }
             "volume" => Some(Cow::Borrowed(include_bytes!("../../../assets/volume.png"))),
+            "little-list" | "football" => {
+                use std::io::Read;
+                let icon = super::bundled_example_dir(path)?.join("icon.png");
+                let limit = crate::package::codec::MAX_ICON_BYTES;
+                let mut bytes = Vec::new();
+                std::fs::File::open(icon)?.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+                if bytes.len() > limit {
+                    return Err(std::io::Error::other("Bundled example icon exceeds 1 MiB").into());
+                }
+                Some(Cow::Owned(bytes))
+            }
             "volume-cell" => Some(Cow::Borrowed(include_bytes!("../../../assets/volume-cell.svg"))),
             "menu-rename" => Some(Cow::Borrowed(include_bytes!("../../../assets/menu-rename.svg"))),
             "menu-delete" => Some(Cow::Borrowed(include_bytes!("../../../assets/menu-delete.svg"))),
@@ -231,8 +241,7 @@ impl AssetSource for Assets {
             "app-placeholder".into(),
             "app-default".into(),
             "upgrade".into(),
-            "session-overflow".into(),
-            "session-clear".into(),
+            "session-log-clear".into(),
             "session-start".into(),
             "session-share".into(),
             "add".into(),
@@ -262,6 +271,8 @@ impl AssetSource for Assets {
             "menu-check".into(),
             "menu-submenu".into(),
             "volume".into(),
+            "little-list".into(),
+            "football".into(),
             "entry-object-db".into(),
             "entry-kv-db".into(),
             "entry-append-log".into(),
@@ -280,14 +291,14 @@ pub enum Kind {
     Popup,
 }
 
+pub(crate) const APP_TILE_ICON_POINTS: f32 = 48.;
+
 /// Presentation for the session header and app launcher; input stays shared.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SessionStyle {
-    Tab(bool),
     Template,
-    Recent,
+    AppTile { bundled_icon: Option<&'static str> },
     Share,
-    Stop,
 }
 
 #[derive(Clone, Copy)]
@@ -384,6 +395,8 @@ pub struct Control {
     copy_value: Option<CopyValue>,
     kind: Kind,
     popup_items: Vec<MenuEntry>,
+    #[cfg(target_os = "macos")]
+    pub(super) prepare_guest_menu: Option<popup::PrepareGuestMenu>,
     popup_context: Option<PopupContext>,
     popup_update_action: Option<u32>,
     popup_open: bool,
@@ -550,6 +563,8 @@ impl Control {
             copy_value: None,
             kind,
             popup_items: Vec::new(),
+            #[cfg(target_os = "macos")]
+            prepare_guest_menu: None,
             popup_context: None,
             popup_update_action: None,
             popup_open: false,
@@ -596,9 +611,8 @@ impl Control {
         if self.session_style != Some(style) {
             self.session_style = Some(style);
             self.button_size = match style {
-                SessionStyle::Template => Some((200., 162.)),
-                SessionStyle::Recent => Some((88., 90.)),
-                SessionStyle::Stop => Some((24., 24.)),
+                SessionStyle::Template => Some((200., 146.)),
+                SessionStyle::AppTile { .. } => Some((96., 80.)),
                 _ => None,
             };
             cx.notify();
@@ -726,6 +740,7 @@ impl Control {
             } else if self.sidebar_icon.is_some() {
                 request = request.above_button();
             }
+            request.prepare_guest = self.prepare_guest_menu.clone();
             request.opening_press = self.press.pointer;
             request.update_action = self.popup_update_action;
             cx.defer(move |cx| popup::open(request, cx));
@@ -896,7 +911,7 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         // Every specialized family uses the same scale for its surface and root hit target.
-        for family in 0..15 {
+        for family in 0..13 {
             for state in 0..4 {
                 let window = cx.add_window(|window, cx| {
                     let kind = match family {
@@ -931,11 +946,10 @@ mod tests {
                             control = control.navigation();
                             control.set_sidebar_row();
                         }
-                        10 => control.set_session_style(SessionStyle::Tab(true), cx),
-                        11 => control.set_session_style(SessionStyle::Template, cx),
-                        12 => control.set_session_style(SessionStyle::Recent, cx),
-                        13 => control.set_session_style(SessionStyle::Share, cx),
-                        14 => control.set_session_style(SessionStyle::Stop, cx),
+                        10 => control.set_session_style(SessionStyle::Template, cx),
+                        11 => control
+                            .set_session_style(SessionStyle::AppTile { bundled_icon: None }, cx),
+                        12 => control.set_session_style(SessionStyle::Share, cx),
                         _ => {}
                     }
                     control.press.hovered = state == 1 || state == 2;

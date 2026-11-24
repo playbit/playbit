@@ -677,9 +677,7 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
     constant float2 *unit_vertices [[buffer(SpriteInputIndex_Vertices)]],
     constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
     constant Size_DevicePixels *viewport_size
-    [[buffer(SpriteInputIndex_ViewportSize)]],
-    constant Size_DevicePixels *atlas_size
-    [[buffer(SpriteInputIndex_AtlasTextureSize)]]) {
+    [[buffer(SpriteInputIndex_ViewportSize)]]) {
 
   float2 unit_vertex = unit_vertices[unit_vertex_id];
   PolychromeSprite sprite = sprites[sprite_id];
@@ -687,7 +685,8 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
       to_device_position(unit_vertex, sprite.bounds, viewport_size);
   float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
                                                  sprite.content_mask.bounds);
-  float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
+  float2 tile_position = unit_vertex * float2(sprite.tile.bounds.size.width,
+                                             sprite.tile.bounds.size.height);
   return PolychromeSpriteVertexOutput{
       device_position,
       tile_position,
@@ -700,13 +699,17 @@ fragment float4 polychrome_sprite_fragment(
     constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
     texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
   PolychromeSprite sprite = sprites[input.sprite_id];
-  constexpr sampler atlas_texture_sampler(mag_filter::linear,
+  constexpr sampler atlas_texture_sampler(coord::pixel, mag_filter::linear,
                                           min_filter::linear);
-  constexpr sampler pixel_texture_sampler(mag_filter::nearest,
+  constexpr sampler pixel_texture_sampler(coord::pixel, mag_filter::nearest,
                                           min_filter::nearest);
+  // Clamp after interpolation so magnified edge pixels sample only this tile.
+  float2 tile_size = float2(sprite.tile.bounds.size.width, sprite.tile.bounds.size.height);
+  float2 tile_origin = float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y);
+  float2 position = tile_origin + clamp(input.tile_position, float2(0.5f), tile_size - 0.5f);
   float4 sample = sprite.pad != 0
-      ? atlas_texture.sample(pixel_texture_sampler, input.tile_position)
-      : atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+      ? atlas_texture.sample(pixel_texture_sampler, position)
+      : atlas_texture.sample(atlas_texture_sampler, position);
   float distance =
       quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
 

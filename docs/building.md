@@ -34,6 +34,18 @@ leaving checked-in manifests and your normal profile untouched. Subsequent
 builds reuse Cargo artifacts. GPUI is built as a dependency; its upstream
 example apps are excluded from the kit.
 
+The Mac launcher installs the published Little List and Football packages from
+`playbit/platform/macos/examples` with their original Playbit signatures. Public and shared Testing each select the
+package signed by Playbit in that environment. Personal development environments
+keep their original sealed templates signed by the opening developer. Little
+List source lives in `guests/little-list`. Football source and its launcher icon
+come from the public `playbit/apps` revision pinned in the Mac packaging script.
+For the official room-private Little List source variant, follow `guests/little-list/README.md`.
+Updating a bundled example requires a new publication by its publisher. Add its
+exact build ID, signed build admission and signer status. Retain released build
+pins and evidence so existing offline sessions continue to open.
+Mac packaging and ordinary opens require no publisher credentials.
+
 Apple app icons are shared Icon Composer sources in `playbit/platform/macos/`.
 Packaging selects `icon-debug.icon` for Debug and `icon.icon` for Release.
 Debug apps use the name Playbit Debug and a `.debug` bundle identifier so both
@@ -119,7 +131,10 @@ python3 -m http.server 8876 --bind 127.0.0.1 --directory target/web
 
 The build installs pinned esbuild and TypeScript through npm when needed,
 compiles the Rust web runtime and example Wasm, and bundles TypeScript for the
-page and workers. Tests load TypeScript using Node's type stripping.
+page and workers. A debug build signs the three example apps with a temporary
+offline publisher. The browser verifies them using the public issuer and signed
+key status in `target/web/example-publisher.json`. Release web builds use the
+selected Playbit publisher profile. Tests load TypeScript using Node's type stripping.
 
 Open `http://127.0.0.1:8876/tests/reconnect-browser.html` in Chrome for the
 reconnect regression. It exercises the actual worker and replication driver

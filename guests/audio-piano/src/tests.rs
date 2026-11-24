@@ -17,6 +17,7 @@ fn context() -> GuestContext {
         app_name: "Piano headless test".into(),
         app_build: None,
         identity: Identity {
+            display_name: String::new(),
             account_id: [1; 16],
             device_id: [2; 16],
             instance_id: [3; 16],

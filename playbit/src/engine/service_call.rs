@@ -347,12 +347,10 @@ fn ceiling(
         .iter()
         .find(|grant| grant.volume == volume)
         .ok_or(HostError::AccessDenied)?;
-    if rights.contains(crate::runtime::host::VolumeRights::SCHEMA)
-        || (rights.contains(crate::runtime::host::VolumeRights::WRITE) && !grant.write)
-    {
-        Err(HostError::AccessDenied)
-    } else {
+    if super::session_context::personal_rights(grant.write).for_data().contains(rights) {
         Ok(())
+    } else {
+        Err(HostError::AccessDenied)
     }
 }
 
@@ -383,7 +381,7 @@ pub(super) fn automatic_instance_rights(
         volume,
         address.overridden,
     )
-    .map(Some)
+    .map(|rights| Some(rights.for_data()))
     .map_err(|error| match error.downcast::<crate::store::Error>() {
         Ok(error) => crate::runtime::store_bridge::error(*error),
         Err(_) => HostError::InvalidArgument,
@@ -441,7 +439,7 @@ fn check_binding(
             store.personal_volume_grants(&instance.session).map_err(error)?.unwrap_or_default();
         if !selected.iter().any(|grant| {
             grant.volume == volume
-                && (!rights.contains(crate::runtime::host::VolumeRights::WRITE) || grant.write)
+                && super::session_context::personal_rights(grant.write).for_data().contains(rights)
         }) {
             return Err(HostError::AccessDenied);
         }

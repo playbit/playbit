@@ -11,12 +11,15 @@ const MAX_SCHEMA_BYTES: u64 = 1024 * 1024;
 
 pub fn generate(arguments: &[String]) -> Result<()> {
     if arguments.is_empty() {
-        return Err("expected pb schema-gen SCHEMA.json...".into());
+        return Err(crate::usage_error("expected pb schema-gen SCHEMA.json..."));
     }
     for argument in arguments {
         let path = Path::new(argument);
         if path.extension().is_none_or(|extension| extension != "json") {
-            return Err(format!("schema path must end in .json: {}", path.display()).into());
+            return Err(crate::usage_error(format!(
+                "schema path must end in .json: {}",
+                path.display()
+            )));
         }
         generate_file(path).map_err(|error| format!("schema {}: {error}", path.display()))?;
     }

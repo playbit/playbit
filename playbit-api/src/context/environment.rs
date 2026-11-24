@@ -120,6 +120,8 @@ impl Context<'_> {
         }
         Ok(Arguments { arguments, bytes })
     }
+    /// Read cached session members. Start live membership with [Self::session] and reread
+    /// on each [super::EventKind::PresenceChanged], including the first roster update.
     pub fn presence<'a>(
         &mut self,
         participants: &'a mut [ffi::Participant],

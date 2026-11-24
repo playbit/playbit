@@ -57,7 +57,10 @@ The host reads the four-byte size before other fields. Before effects, it checks
 alignment, byte arithmetic, the published minimum size and the full claimed
 memory span. The 4 KiB record limit excludes referenced payloads and arrays,
 which have separate bounds. A size ending inside a field returns
-`InvalidArgument`. Missing appended fields use zero/default values. Unknown input
+`InvalidArgument`, except for the optional `display_name` output in `PBIdentity`
+and `PBParticipant`. If that entire field does not fit, the host preserves the
+reserved bytes and publishes the preceding fields. Missing appended fields use
+zero/default values. Unknown input
 tail bytes must be zero; otherwise the host returns `Unsupported` before effects.
 Implicit padding has no meaning. Native readers copy complete fields into
 zero-initialized locals, never borrowing the newest struct layout from a shorter
@@ -369,6 +372,13 @@ are unchanged; none may carry `OPTIONAL_EVENT_KIND_BIT` (`0x80000000`).
 | 4–6, 10, 15, 17 (`DataChanged`, `PresenceChanged`, `UpdateAvailable`, `Wake`, `SurfaceChanged`, `VolumesChanged`) | Existing data, environment and execution notifications |
 | 7–9, 16 (`ObjectCreationReady`, `FileCopyReady`, `FileSelectionReady`, `DataReady`) | Operation completion |
 | 18–19 (`ChannelMessage`, `ChannelStatus`) | Ordered channel data and terminal state |
+
+`IdentityChanged` (`0x80000015`) uses advisory ID 21. Target zero and an
+empty payload tell a guest to reread the local display name from `identity.read`.
+For a live roster, call `pb_session` once at startup to start or reuse membership.
+The first `presence.read` may be empty. Reread on the first and subsequent
+`PresenceChanged` events, which cover membership and participant display names.
+The [syscall reference](../../syscalls.md#events) defines their record tails.
 
 Future unknown IDs with that high bit set are optional **advisory** notifications.
 The ID with that bit removed must not reuse an existing ID. Baseline consumers

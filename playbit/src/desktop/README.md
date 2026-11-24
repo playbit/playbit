@@ -15,9 +15,13 @@ Each view keeps its presentation and UI behavior together:
 | `shell_view` | Main window, navigation, focus, and overlays |
 | `sidebar_view` | Session and volume lists and sidebar controls |
 | `ap_status` | Passive AP connection indicator, hover label, and native tooltip |
-| `session_view` | Session tab strip, toolbar, tab selection, and content |
+| `application_browser` | App and session columns, participant and instance inspectors, and the shared log pane |
+| `session_view` | Session launch, sharing and log observation |
 | `session_log_view` | Log rows, display history, clearing, and scrolling |
-| `welcome_view` | Recent apps and templates |
+| `welcome_view` | New session launcher for recent apps, bundled examples and project templates |
+| `session_dialog` | Presentation and keyboard focus shared by the New Session and Join Session dialogs |
+| `join_dialog` | Session ID and invitation entry, validation, and lookup progress |
+| `new_session` | App review, device-local directory permissions, and session launch |
 | `invitation_view` | Invitation consent and opening progress |
 
 `log` supplies event-driven log updates without depending on the UI. `session`

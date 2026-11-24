@@ -28,6 +28,7 @@ export async function accountRecordCases(decode, { benchmark = false } = {}) {
         [`session/${id}`, { kind: 'invitation', app_name: null, invitation }],
         [`session/${id}`, { kind: 'invitation', app_name: 'Notes 雨 🌱', invitation }],
         ['settings/display-name', { kind: 'display_name', name: 'Robin 雨 🌱' }],
+        [`optional/app_visibility/${account}/todo`, { kind: 'app_visibility', app: invitation.session.app, removed: true }],
     ];
     const open = async (logical, plain, decoder = decode) => {
         const key = await cipher.recordKey(encoder.encode(logical)), clock = 1n;

@@ -6,15 +6,19 @@
 // at every caller. Lost recipients do not release in-flight credit or trigger
 // operation replay.
 mod account;
+mod account_name;
 use super::blob::{BlobTransfers, BlobTransport};
 use super::completion::Wake;
+use super::remote::sync_failure::{self, Cause};
 use crate::engine::Result;
 use crate::network::ap::{
-    ApConnection, ClientError, operation::ServiceRequest, replication::PublicationAck,
+    ApConnection, ClientError,
+    operation::{ServiceRequest, SyncDirection},
+    replication::PublicationAck,
     service_client,
 };
 use crate::store::{
-    Id, LocalStore, Session,
+    Id, LocalStore, Session, WorldReplicaRoute,
     change_feed::{CommittedChange, CommittedChangeKind, CommittedChangeReceiver, FeedStatus},
 };
 #[cfg(test)]
@@ -53,12 +57,25 @@ const ERROR_LIMIT: usize = 128;
 pub(crate) struct PublisherError {
     bytes: [u8; ERROR_LIMIT],
     len: u8,
+    database: Option<crate::store::DatabaseId>,
 }
 impl PublisherError {
     fn new(value: impl fmt::Display) -> Self {
-        let mut result = Self { bytes: [0; ERROR_LIMIT], len: 0 };
+        Self::for_database(None, value)
+    }
+    pub(super) fn for_database(
+        database: Option<crate::store::DatabaseId>,
+        value: impl fmt::Display,
+    ) -> Self {
+        let mut result = Self { bytes: [0; ERROR_LIMIT], len: 0, database };
         let _ = fmt::write(&mut result, format_args!("{value}"));
         result
+    }
+    pub(super) fn at_scope(self, key: PublishKey) -> sync_failure::Cause {
+        match self.database {
+            Some(database) => sync_failure::target_database(key, database, self),
+            None => sync_failure::target(key, self),
+        }
     }
     pub(crate) fn as_str(&self) -> &str {
         std::str::from_utf8(&self.bytes[..usize::from(self.len)])
@@ -112,6 +129,7 @@ impl From<Id> for PublishKey {
 pub(crate) struct PublishScope {
     pub(crate) volume: Id,
     pub(crate) entry: Option<crate::store::EntryId>,
+    pub(super) route: WorldReplicaRoute,
     session: Option<([u8; 32], [u8; 32])>,
 }
 impl PublishScope {
@@ -122,6 +140,7 @@ impl PublishScope {
         Ok(Self {
             volume,
             entry: None,
+            route: WorldReplicaRoute::Ordinary,
             session: session
                 .map(|s| {
                     Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
@@ -132,25 +151,43 @@ impl PublishScope {
                 .transpose()?,
         })
     }
+    pub(super) fn for_volume(
+        store: &LocalStore,
+        volume: Id,
+        session: Option<&Session>,
+    ) -> Result<Self> {
+        let mut scope = Self::new(volume, session)?;
+        scope.route = store.world_replica_route(volume, session)?;
+        Ok(scope)
+    }
     fn key(&self) -> PublishKey {
         PublishKey { volume: self.volume, entry: self.entry }
     }
     fn request(&self, kind: CommittedChangeKind) -> Result<ServiceRequest> {
         let operation_id = Id::generate()?.to_string();
         let volume_id = self.volume.to_string();
-        let session_id = self.session.as_ref().map(|(id, _)| crate::identifier::encode(id));
-        let build_id = self.session.as_ref().map(|(_, id)| crate::identifier::encode(id));
-        Ok(match kind {
-            CommittedChangeKind::Database(database_id) => ServiceRequest::PublishReplica {
+        let CommittedChangeKind::Database(database_id) = kind else {
+            return Err("local capability discovery is not an AP publication".into());
+        };
+        if self.route == WorldReplicaRoute::PublisherWorld {
+            let (session, build) =
+                self.session.ok_or("publisher World projection requires its session")?;
+            return Ok(ServiceRequest::WorldReplica {
                 operation_id,
                 volume_id,
-                session_id,
-                build_id,
-                database_id,
-            },
-            CommittedChangeKind::VolumeAvailable => {
-                return Err("local capability discovery is not an AP publication".into());
-            }
+                session_id: crate::identifier::encode(&session),
+                build_id: crate::identifier::encode(&build),
+                request: crate::network::ap::operation::WorldReplicaRequest::Publish {
+                    database_id,
+                },
+            });
+        }
+        Ok(ServiceRequest::PublishReplica {
+            operation_id,
+            volume_id,
+            database_id,
+            session_id: self.session.as_ref().map(|(id, _)| crate::identifier::encode(id)),
+            build_id: self.session.as_ref().map(|(_, id)| crate::identifier::encode(id)),
         })
     }
 }
@@ -338,7 +375,7 @@ struct Fence {
     targets: Vec<FenceTarget>,
     remaining: usize,
     status: FeedStatus,
-    reply: Reply<Vec<FencedVolume>>,
+    reply: Reply<Vec<FencedVolume>, Cause>,
     _admission: FenceAdmission,
 }
 struct FenceAdmission(Arc<AtomicBool>);
@@ -351,8 +388,8 @@ impl Fence {
     fn check(
         &self,
         status: FeedStatus,
-        mut settled: impl FnMut(FencedVolume) -> std::result::Result<u64, Box<PublisherError>>,
-    ) -> std::result::Result<bool, Box<PublisherError>> {
+        mut settled: impl FnMut(FencedVolume) -> Result<u64>,
+    ) -> Result<bool> {
         if status.closed.is_some() || status != self.status {
             return Err(PublisherError::new(
                 "committed-change feed changed during publication fence",
@@ -366,19 +403,19 @@ impl Fence {
         Ok(complete)
     }
 }
-struct Reply<T> {
-    send: oneshot::Sender<std::result::Result<T, PublisherError>>,
+struct Reply<T, E = PublisherError> {
+    send: oneshot::Sender<std::result::Result<T, E>>,
     // Shared with incoming checkpoint commands; cancellation is not settlement.
     _permit: OwnedSemaphorePermit,
 }
-impl<T> Reply<T> {
+impl<T, E> Reply<T, E> {
     fn is_closed(&self) -> bool {
         self.send.is_closed()
     }
     fn send(
         self,
-        result: std::result::Result<T, PublisherError>,
-    ) -> std::result::Result<(), Box<std::result::Result<T, PublisherError>>> {
+        result: std::result::Result<T, E>,
+    ) -> std::result::Result<(), Box<std::result::Result<T, E>>> {
         let Self { send, _permit: permit } = self;
         // The caller may immediately submit its next bounded command.
         drop(permit);
@@ -413,7 +450,7 @@ enum Command {
     Fence {
         volumes: Box<[PublishKey; VOLUME_LIMIT]>,
         count: usize,
-        reply: Reply<Vec<FencedVolume>>,
+        reply: Reply<Vec<FencedVolume>, Cause>,
         admission: FenceAdmission,
     },
     Disconnect {
@@ -493,9 +530,7 @@ impl Publisher {
         clippy::type_complexity,
         reason = "The one-use result pairs the permit-owning reply with its typed receiver."
     )]
-    fn reply<T>(
-        &self,
-    ) -> Result<(Reply<T>, oneshot::Receiver<std::result::Result<T, PublisherError>>)> {
+    fn reply<T, E>(&self) -> Result<(Reply<T, E>, oneshot::Receiver<std::result::Result<T, E>>)> {
         let permit = self
             .control_slots
             .clone()
@@ -576,7 +611,7 @@ impl Publisher {
         let mut fixed = Box::new([PublishKey::from(Id::from_bytes([0; 16])); VOLUME_LIMIT]);
         fixed[..volumes.len()].copy_from_slice(volumes);
         self.send(Command::Fence { volumes: fixed, count: volumes.len(), reply, admission })?;
-        result.await.map_err(|_| "replica publisher closed during fence")?.map_err(Into::into)
+        result.await.map_err(|_| "replica publisher closed during fence")?
     }
     /// A deliberate bootstrap abandonment, not a lost owner. The caller hands
     /// the token back instead of dropping it so this generation is retired as
@@ -619,15 +654,9 @@ impl Publisher {
             .filter(|slot| slot.pending)
             .map(|slot| {
                 slot.pending = false;
-                PublishNotice {
-                    volume: slot.notice.volume,
-                    entry: slot.notice.entry,
-                    account_ready: slot.notice.account_ready,
-                    generation: slot.notice.generation,
-                    state: slot.notice.state,
-                    excluded_publication: slot.notice.excluded_publication,
-                    error: slot.notice.error.take(),
-                }
+                // Draining delivers a transition once. Its terminal cause still
+                // describes this generation until another notice replaces it.
+                slot.notice.clone()
             })
             .collect();
         PublisherNotices { volumes, error: notices.error.take() }
@@ -738,6 +767,18 @@ impl Publisher {
             PublishHealth::Ready
         }
     }
+    pub(crate) fn failed_publication(&self, volume: Id) -> Option<sync_failure::Cause> {
+        let notices = self.signals.notices.lock().expect("mutex is not poisoned");
+        let slot = notices.volumes.iter().find(|slot| {
+            slot.notice.volume == volume
+                && slot.notice.entry.is_none()
+                && slot.notice.state == PublishState::Failed
+        })?;
+        let cause = slot.notice.error.clone()?;
+        drop(notices);
+        Some(cause.at_scope(volume.into()))
+    }
+
     pub(crate) fn state(&self, volume: impl Into<PublishKey>) -> Option<(u64, PublishState)> {
         let volume = volume.into();
         self.signals
@@ -748,6 +789,26 @@ impl Publisher {
             .iter()
             .find(|slot| slot.notice.volume == volume.volume && slot.notice.entry == volume.entry)
             .map(|slot| (slot.notice.generation, slot.notice.state))
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_database_failure(
+        &self,
+        volume: Id,
+        generation: u64,
+        database: crate::store::DatabaseId,
+        reason: &str,
+    ) {
+        let cause = PublisherError::for_database(Some(database), reason);
+        self.signals.volume(PublishNotice {
+            volume,
+            entry: None,
+            account_ready: false,
+            generation,
+            state: PublishState::Failed,
+            excluded_publication: None,
+            error: Some(cause),
+        });
     }
 
     #[cfg(test)]
@@ -876,7 +937,7 @@ impl Volume {
     /// Returns a non-terminal diagnostic to report with the next notice: the
     /// lane keeps its phase and its remaining queued changes.
     fn settle(&mut self, result: VolumeJobResult) -> Option<PublisherError> {
-        let mut diagnostic = result.diagnostic;
+        let mut diagnostic = result.diagnostic.map(|cause| *cause);
         let settled = match result.result {
             Ok(Some(_)) => true,
             Ok(None) => {
@@ -963,8 +1024,8 @@ struct VolumeJobResult {
     publication: u64,
     records: u64,
     result: std::result::Result<Option<PublicationAck>, JobError>,
-    /// Local bookkeeping that failed after the publication itself settled.
-    diagnostic: Option<PublisherError>,
+    /// An independent bookkeeping error after settlement. Allocate only on failure.
+    diagnostic: Option<Box<PublisherError>>,
 }
 #[allow(
     clippy::large_enum_variant,
@@ -1283,12 +1344,12 @@ impl Actor {
         &mut self,
         volumes: Box<[PublishKey; VOLUME_LIMIT]>,
         count: usize,
-        reply: Reply<Vec<FencedVolume>>,
+        reply: Reply<Vec<FencedVolume>, Cause>,
         admission: FenceAdmission,
     ) {
         if self.fence.is_some() {
             drop(admission);
-            let _ = reply.send(Err(PublisherError::new("publication fence is busy")));
+            let _ = reply.send(Err("publication fence is busy".into()));
             return;
         }
         let targets = (*volumes)
@@ -1296,21 +1357,26 @@ impl Actor {
             .take(count)
             .map(|volume| {
                 let state = self.volumes.get(&volume).ok_or_else(|| {
-                    PublisherError::new("publication fence volume is not initialized")
+                    sync_failure::target(volume, "publication fence volume is not initialized")
                 })?;
                 if !matches!(state.phase, Phase::Ready { .. }) {
-                    return Err(PublisherError::new(
-                        "publication fence volume requires bootstrap or recovery",
-                    )
-                    .into());
+                    let cause = state.error.clone().unwrap_or_else(|| {
+                        PublisherError::new(
+                            "publication fence volume requires bootstrap or recovery",
+                        )
+                    });
+                    return Err(if matches!(state.phase, Phase::Disconnected) || self.stopping {
+                        cause.into()
+                    } else {
+                        cause.at_scope(volume)
+                    });
                 }
                 Ok(FenceTarget {
                     scope: FencedVolume { volume, generation: state.generation },
                     accepted: 0,
                 })
             })
-            .collect::<std::result::Result<Vec<_>, Box<PublisherError>>>()
-            .map_err(|error| *error);
+            .collect::<Result<Vec<_>>>();
         match targets {
             Ok(targets) => {
                 self.fence = Some(Fence {
@@ -1366,18 +1432,18 @@ impl Actor {
             return;
         };
         let result = fence.check(self.status, |scope| {
-            let state = self
-                .volumes
-                .get(&scope.volume)
-                .ok_or_else(|| PublisherError::new("publication fence volume was removed"))?;
+            let state = self.volumes.get(&scope.volume).ok_or_else(|| {
+                sync_failure::target(scope.volume, "publication fence volume was removed")
+            })?;
             if state.generation != scope.generation || !matches!(state.phase, Phase::Ready { .. }) {
-                return Err(state
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| {
-                        PublisherError::new("publication fence generation or readiness changed")
-                    })
-                    .into());
+                let cause = state.error.clone().unwrap_or_else(|| {
+                    PublisherError::new("publication fence generation or readiness changed")
+                });
+                return Err(if matches!(state.phase, Phase::Disconnected) || self.stopping {
+                    cause.into()
+                } else {
+                    cause.at_scope(scope.volume)
+                });
             }
             Ok(state.settled)
         });
@@ -1389,9 +1455,8 @@ impl Actor {
                 }
                 let Fence { targets, reply, _admission: admission, .. } =
                     self.fence.take().expect("fence readiness was checked before consuming it");
-                let result = result
-                    .map(|_| targets.into_iter().map(|target| target.scope).collect())
-                    .map_err(|error| *error);
+                let result =
+                    result.map(|_| targets.into_iter().map(|target| target.scope).collect());
                 drop(admission);
                 let _ = reply.send(result);
             }
@@ -1757,7 +1822,7 @@ impl Actor {
             diagnostic = state.settle(result);
         }
         let mut notice = state.notice(volume);
-        notice.error = diagnostic.or(notice.error);
+        notice.error = notice.error.or(diagnostic);
         self.signals.volume(notice);
     }
 }
@@ -1821,8 +1886,9 @@ async fn publish(
     mut cancelled: oneshot::Receiver<()>,
 ) -> JobResult {
     let _timing = crate::trace::Interval::new("replication.publish_batch");
-    let publication =
-        records.last().expect("publication batches contain at least one record").sequence();
+    let last = records.last().expect("publication batches contain at least one record");
+    let publication = last.sequence();
+    let kind = last.kind();
     let count = records.len() as u64;
     let mut diagnostic = None;
     let result = publish_records(
@@ -1835,14 +1901,22 @@ async fn publish(
         &mut cancelled,
         &mut diagnostic,
     )
-    .await;
+    .await
+    .map_err(|mut error| {
+        if let JobError::Failed(cause) = &mut error
+            && let CommittedChangeKind::Database(database) = kind
+        {
+            cause.database = Some(database);
+        }
+        error
+    });
     JobResult::Volume(VolumeJobResult {
         volume: scope.key(),
         generation,
         publication,
         records: count,
         result,
-        diagnostic,
+        diagnostic: diagnostic.map(Box::new),
     })
 }
 
@@ -1868,20 +1942,27 @@ async fn publish_records(
     let kind = records[0].kind();
     let (records, projected, access) =
         prepare_publication(&store, &slots, scope, records, cancelled).await?;
-    let Some(ProjectedPublication { bytes: projected, blobs }) = projected else {
+    let Some(ProjectedPublication { bytes: projected, blobs, acknowledge_appends }) = projected
+    else {
         // The current service policy excludes this complete creation.
         // No network operation and no fabricated durable acknowledgment.
         return Ok(None);
     };
     let ack = publish_delta(connection, scope, kind, &projected, cancelled).await?;
-    if kind == CommittedChangeKind::Database(crate::store::DatabaseId::Index) {
+    if let CommittedChangeKind::Database(database) = kind
+        && (database == crate::store::DatabaseId::Index || acknowledge_appends)
+    {
         let permit = cancellable(slots.clone().acquire_owned(), cancelled)
             .await?
             .map_err(PublisherError::new)?;
         let receipt_store = store.clone();
         let receipt = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            receipt_store.acknowledge_provider_delta(volume, &projected)
+            if database == crate::store::DatabaseId::Index {
+                receipt_store.acknowledge_provider_delta(volume, &projected)
+            } else {
+                receipt_store.acknowledge_world_kv_appends(volume, database, &projected)
+            }
         })
         .await
         .map_err(PublisherError::new)?;
@@ -1931,6 +2012,7 @@ async fn publish_delta(
 }
 
 struct ProjectedPublication {
+    acknowledge_appends: bool,
     bytes: Vec<u8>,
     blobs: Vec<crate::store::volume_index::BlobVersion>,
 }
@@ -2004,10 +2086,12 @@ async fn prepare_publication(
     };
     let work_access = access.clone();
     let selected = scope.entry;
+    let route = scope.route;
 
     let (records, projected) = tokio::task::spawn_blocking(move || {
         let store = work_store;
-        let projected = project_publication(&store, &work_access, volume, kind, &records, selected);
+        let projected =
+            project_publication(&store, &work_access, volume, kind, &records, selected, route);
         drop(permit);
         (records, projected)
     })
@@ -2023,6 +2107,7 @@ fn project_publication(
     kind: CommittedChangeKind,
     records: &[Arc<CommittedChange>],
     selected: Option<crate::store::EntryId>,
+    route: WorldReplicaRoute,
 ) -> crate::store::Result<Option<ProjectedPublication>> {
     let mut combined = None;
     if records.len() > 1 {
@@ -2059,13 +2144,26 @@ fn project_publication(
             Err(crate::store::Error::InvalidInput("local discovery is not a publication"))
         }
         CommittedChangeKind::Database(database) => {
-            let bytes = store.publication_delta(access, volume, database, bytes)?;
+            let Some(mut bytes) = store.publication_delta(access, volume, database, bytes)? else {
+                return Ok(None);
+            };
             let blobs = if database == crate::store::DatabaseId::Index {
                 crate::store::volume_index::published_blob_versions(volume, &bytes)?
             } else {
                 Vec::new()
             };
-            Ok(Some(ProjectedPublication { bytes, blobs }))
+            if route == WorldReplicaRoute::CredentialedRoot {
+                super::replication::rekey_credentialed_root_delta(
+                    store,
+                    volume,
+                    database,
+                    SyncDirection::Push,
+                    &mut bytes,
+                )?;
+            }
+            let acknowledge_appends = matches!(database, crate::store::DatabaseId::Entry(_))
+                && store.has_world_attachment(volume)?;
+            Ok(Some(ProjectedPublication { bytes, blobs, acknowledge_appends }))
         }
     }
 }
@@ -2098,7 +2196,7 @@ mod tests {
             Err(_) => runtime().spawn(async {}).abort_handle(),
         }
     }
-    fn test_reply<T>() -> (Reply<T>, oneshot::Receiver<std::result::Result<T, PublisherError>>) {
+    fn test_reply<T, E>() -> (Reply<T, E>, oneshot::Receiver<std::result::Result<T, E>>) {
         let (send, receive) = oneshot::channel();
         (
             Reply {
@@ -2334,6 +2432,7 @@ mod tests {
                 CommittedChangeKind::Database(crate::store::DatabaseId::Index),
                 records,
                 None,
+                WorldReplicaRoute::Ordinary,
             )
             .unwrap()
             .unwrap();
@@ -2414,10 +2513,17 @@ mod tests {
         let records: Vec<_> = receiver.drain().records.into_iter().map(Arc::new).collect();
         assert_eq!(records.len(), 2);
         let kind = CommittedChangeKind::Database(crate::store::DatabaseId::Index);
-        let ProjectedPublication { bytes: projected, .. } =
-            project_publication(&store, &owner, volume.id, kind, &records, Some(first.id))
-                .unwrap()
-                .unwrap();
+        let ProjectedPublication { bytes: projected, .. } = project_publication(
+            &store,
+            &owner,
+            volume.id,
+            kind,
+            &records,
+            Some(first.id),
+            WorldReplicaRoute::Ordinary,
+        )
+        .unwrap()
+        .unwrap();
         let source_entries = |bytes: &[u8]| {
             let mut entries = Vec::new();
             kvdb::sync::visit_delta(bytes, crate::store::MAX_REPLICA_DELTA_BYTES, |key, state| {
@@ -2436,9 +2542,17 @@ mod tests {
             "projection retains originating clocks and canonical bytes"
         );
         assert!(
-            project_publication(&store, &owner, volume.id, kind, &records[1..], Some(first.id))
-                .unwrap()
-                .is_none()
+            project_publication(
+                &store,
+                &owner,
+                volume.id,
+                kind,
+                &records[1..],
+                Some(first.id),
+                WorldReplicaRoute::Ordinary
+            )
+            .unwrap()
+            .is_none()
         );
     }
 
@@ -2581,7 +2695,7 @@ mod tests {
         }
     }
 
-    fn fence_command(volumes: &[Id], reply: Reply<Vec<FencedVolume>>) -> Command {
+    fn fence_command(volumes: &[Id], reply: Reply<Vec<FencedVolume>, Cause>) -> Command {
         let mut fixed = Box::new([PublishKey::from(Id::from_bytes([0; 16])); VOLUME_LIMIT]);
         for (slot, volume) in fixed.iter_mut().zip(volumes) {
             *slot = (*volume).into();
@@ -2596,7 +2710,7 @@ mod tests {
     fn fence_fixture(
         actor: &Actor,
         volumes: &[Id],
-    ) -> (Fence, oneshot::Receiver<std::result::Result<Vec<FencedVolume>, PublisherError>>) {
+    ) -> (Fence, oneshot::Receiver<Result<Vec<FencedVolume>>>) {
         let (reply, receive) = test_reply();
         (
             Fence {
@@ -2771,17 +2885,30 @@ mod tests {
             actor.fence = Some(fence);
             actor.check_fence();
             let error = _result.await.unwrap().unwrap_err();
-            assert!(error.as_str().contains("generation"));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "Couldn’t sync volume {}\npublication fence generation or readiness changed",
+                    id(2)
+                )
+            );
 
             let (fence, result) = fence_fixture(&actor, &[id(2)]);
             actor.fence = Some(fence);
-            actor
-                .volumes
-                .get_mut(&(id(2)).into())
-                .unwrap()
-                .invalidate(Phase::Failed, PublisherError::new("uncertain AP acknowledgment"));
+            let database = crate::store::DatabaseId::Entry(
+                crate::store::EntryId::from_bytes([7; 15]).unwrap(),
+            );
+            let mut failure = PublisherError::new("uncertain AP acknowledgment");
+            failure.database = Some(database);
+            actor.volumes.get_mut(&(id(2)).into()).unwrap().invalidate(Phase::Failed, failure);
             actor.check_fence();
-            assert_eq!(result.await.unwrap().unwrap_err().as_str(), "uncertain AP acknowledgment");
+            assert_eq!(
+                result.await.unwrap().unwrap_err().to_string(),
+                format!(
+                    "Couldn’t sync database {database} in volume {}\nuncertain AP acknowledgment",
+                    id(2)
+                )
+            );
         });
     }
 
@@ -2794,11 +2921,34 @@ mod tests {
                 if let Some(phase) = phase {
                     actor.ensure_volume((id(2)).into()).unwrap().phase = phase;
                 }
+                let expected_cause = if actor.volumes.contains_key(&id(2).into()) {
+                    "publication fence volume requires bootstrap or recovery"
+                } else {
+                    "publication fence volume is not initialized"
+                };
                 let (reply, result) = test_reply();
                 actor.command(fence_command(&[id(2)], reply));
-                assert!(result.await.unwrap().is_err());
+                assert_eq!(
+                    result.await.unwrap().unwrap_err().to_string(),
+                    format!("Couldn’t sync volume {}\n{expected_cause}", id(2))
+                );
                 assert!(actor.fence.is_none());
             }
+            // An uninitialized entry is distinct from the existing volume-wide target.
+            let volume = id(2);
+            let missing = crate::store::EntryId::from_bytes([9; 15]).unwrap();
+            let mut keys = Box::new([PublishKey::from(volume); VOLUME_LIMIT]);
+            keys[0] = PublishKey { volume, entry: Some(missing) };
+            let (reply, result) = test_reply();
+            actor.begin_fence(keys, 2, reply, FenceAdmission(Arc::new(AtomicBool::new(true))));
+            assert_eq!(
+                result.await.unwrap().unwrap_err().to_string(),
+                format!("Couldn’t sync database {missing} in volume {volume}\npublication fence volume is not initialized"),
+            );
+            actor.disconnect();
+            let (reply, result) = test_reply();
+            actor.command(fence_command(&[volume], reply));
+            assert_eq!(result.await.unwrap().unwrap_err().to_string(), "AP connection disconnected; recovery required");
         });
     }
 
@@ -2874,7 +3024,7 @@ mod tests {
             assert_eq!(slots.available_permits(), COMMAND_LIMIT - 1);
             let (reply, busy) = test_reply();
             actor.command(fence_command(&[id(2)], reply));
-            assert!(busy.await.unwrap().unwrap_err().as_str().contains("busy"));
+            assert_eq!(busy.await.unwrap().unwrap_err().to_string(), "publication fence is busy");
             assert_eq!(slots.available_permits(), COMMAND_LIMIT - 1);
             actor.check_fence(); // Explicit target-readiness failure settles it.
             assert_eq!(slots.available_permits(), COMMAND_LIMIT);
@@ -3411,7 +3561,7 @@ mod tests {
             assert_eq!(actor.volumes[&(id(2)).into()].generation, new.generation);
             // Finish transfers the same lease through this reply type. If the
             // requester vanishes after settlement, the queued lease is dropped.
-            let (reply, finished) = test_reply();
+            let (reply, finished) = test_reply::<PublicationLease, PublisherError>();
             reply.send(Ok(new.lease)).unwrap();
             drop(finished);
             actor.cancel_dropped_leases();

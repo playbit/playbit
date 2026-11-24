@@ -41,6 +41,18 @@ impl Shell {
         self.pending_database = None;
         match url {
             Ok(url) => {
+                if self.join_dialog.is_some() {
+                    self.cancel_join_dialog(cx);
+                    if self.join_dialog.is_some() {
+                        return;
+                    }
+                } else if self.new_session.is_some()
+                    && self.invitation.is_some()
+                    && !self.cancel_reviewed_invitation(cx)
+                {
+                    return;
+                }
+                self.join_preview = None;
                 if url.starts_with("file:") {
                     if file_document::is_app(&url) {
                         self.show_app_document(url, cx);
@@ -63,13 +75,20 @@ impl Shell {
                 self.cancel_invitation_restoration();
                 // A link to a session this device already holds opens it at once;
                 // the preview reply also reports that for links seen before status.
-                let retained = crate::store::parse_session_link(&url, self.channel)
-                    .ok()
-                    .and_then(|seed| crate::store::session_id(&seed).ok())
-                    .filter(|id| self.sessions.iter().any(|s| s.id == *id));
-                let result = match retained {
-                    Some(id) => self.open_retained(id, cx),
-                    None => self.send.send(Request::PreviewInvitation { invitation: url }),
+                let reference = crate::store::SessionReference::from_link(&url, self.channel);
+                let result = match reference {
+                    Ok(reference)
+                        if self.sessions.iter().any(|s| s.id == reference.internal_id()) =>
+                    {
+                        self.open_retained(reference.internal_id().to_owned(), cx)
+                    }
+                    Ok(reference) => self.preview_invitation_link(reference),
+                    Err(error) => {
+                        self.error = error.to_string();
+                        self.show_initial_feedback(cx);
+                        cx.notify();
+                        return;
+                    }
                 };
                 if let Err(error) = result {
                     self.error = error.into();
@@ -80,6 +99,21 @@ impl Shell {
         self.show_initial_feedback(cx);
         cx.notify();
     }
+    pub(super) fn preview_invitation_link(
+        &mut self,
+        reference: crate::store::SessionReference,
+    ) -> Result<(), &'static str> {
+        let request =
+            Request::PreviewDesktopInvitation { invitation: reference.link(self.channel) };
+        self.join_preview = Some(if self.join_dialog.is_some() {
+            self.send.join_dialog_request(request)?
+        } else {
+            self.send.enqueue(request)?
+        });
+        self.invitation_link = Some(reference);
+        Ok(())
+    }
+
     fn open_database_document(&mut self, url: String, cx: &mut Context<Self>) {
         let guard = match file_document::begin() {
             Ok(guard) => guard,
@@ -161,7 +195,13 @@ impl Shell {
                             return;
                         }
                         this.error = error.into();
-                        this.joining = false;
+                        if !this
+                            .new_session
+                            .as_ref()
+                            .is_some_and(|form| form.read(cx).reviewed_invitation().is_some())
+                        {
+                            this.joining = false;
+                        }
                         this.show_initial_feedback(cx);
                         cx.notify();
                     })
@@ -223,6 +263,7 @@ impl Shell {
         if response.recovery_action.is_some() && self.recovery_busy == response.recovery_action {
             self.recovery_busy = None;
         }
+        self.finish_app_removal(response, cx);
         self.engine_response(response, cx);
         true
     }
@@ -257,6 +298,15 @@ impl Shell {
             );
         }
         if response.engine_recovered {
+            drafts::retry_erasure_reload(cx);
+            if let Some(link) = self.invitation_link.clone()
+                && self.invitation.as_ref().is_some_and(|preview| {
+                    preview.session == link.internal_id() && preview.received.is_none()
+                })
+                && let Err(error) = self.preview_invitation_link(link)
+            {
+                self.error = error.into();
+            }
             self.engine_recovering = false;
             self.recovery_notice.take();
             cx.notify();
@@ -264,6 +314,18 @@ impl Shell {
         if response.engine_lost && !self.engine_recovering {
             self.ap_status.update(cx, |indicator, cx| indicator.set(None, cx));
             self.engine_recovering = true;
+            if self.join_dialog.is_some() {
+                self.join_preview = None;
+                self.join_status =
+                    InvitationState::Failed { message: worker_queue::INTERRUPTED.into() };
+            } else if self.joining
+                && self.invitation.is_some()
+                && let Some(form) = &self.new_session
+            {
+                self.joining = false;
+                self.join_preview = None;
+                form.update(cx, |form, cx| form.join_failed(worker_queue::INTERRUPTED.into(), cx));
+            }
             if self.recovery_busy.take().is_some()
                 && let Some(editor) = &self.name_editor
             {
@@ -356,6 +418,10 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> bool {
         if let Some(transfer) = transfer_status {
+            if self.apply_reviewed_transfer(&transfer, cx) {
+                self.last_transfer = transfer;
+                return true;
+            }
             if self.last_transfer == transfer
                 && !matches!(
                     transfer.kind,
@@ -368,7 +434,9 @@ impl Shell {
                 TransferKind::Complete => {
                     if let Some(session) = transfer.session.as_deref()
                         && self.joining
-                        && self.opening.as_deref().is_none_or(|id| id == session)
+                        && self.opening.as_deref().or_else(|| {
+                            self.invitation.as_ref().map(|preview| preview.session.as_str())
+                        }) == Some(session)
                     {
                         self.opening = Some(session.into());
                         if let Err(error) = self.prepare_session(session.into(), cx) {
@@ -388,21 +456,23 @@ impl Shell {
                         {
                             self.launches.remove(session);
                         }
-                        if !preparing
-                            && (self.opening.as_deref() == Some(session)
-                                || self
-                                    .invitation
-                                    .as_ref()
-                                    .is_some_and(|invitation| invitation.session == session))
-                        {
+                        if !preparing && self.opening.as_deref() == Some(session) {
                             self.joining = false;
-                        }
-                        if transfer.kind == TransferKind::Paused
-                            && !preparing
-                            && let Some(invitation) = &mut self.invitation
-                            && invitation.session == session
+                            if transfer.kind == TransferKind::Paused {
+                                self.opening = None;
+                            }
+                        } else if !preparing
+                            && self.joining
+                            && self
+                                .invitation
+                                .as_ref()
+                                .is_some_and(|invitation| invitation.session == session)
                         {
-                            invitation.paused = true;
+                            if transfer.kind == TransferKind::Paused {
+                                self.dismiss_invitation(cx);
+                            } else {
+                                self.joining = false;
+                            }
                         }
                     }
                 }
@@ -494,19 +564,26 @@ impl Shell {
     fn apply_invitation_status(
         &mut self,
         invitation_status: Option<Option<InvitationStatus>>,
+        cx: &mut Context<Self>,
     ) -> bool {
         let mut invitation_changed = false;
         if let Some(state) = invitation_status {
             invitation_changed = self.invitation_status.as_ref().map(|s| (&s.session, &s.state))
                 != state.as_ref().map(|s| (&s.session, &s.state));
             if let Some(state) = &state
-                && let Some(invitation) = &mut self.invitation
-                && state.session == invitation.session
+                && self.invitation_resume.is_none()
+                && self.join_preview.is_none()
+                && self.invitation.as_ref().is_some_and(|invitation| {
+                    invitation.session == state.session && !invitation.paused
+                })
             {
                 self.join_status = state.state.clone();
-                invitation.paused = matches!(state.state, InvitationState::Paused);
-                if invitation.paused {
-                    self.joining = false;
+                if state.state == InvitationState::Paused {
+                    if self.new_session.is_none() {
+                        self.dismiss_invitation(cx);
+                    } else if let Some(preview) = &mut self.invitation {
+                        preview.paused = true;
+                    }
                 }
             }
             self.invitation_status = state;
@@ -530,6 +607,12 @@ impl Shell {
         let sessions_changed =
             session_rows.as_ref().is_some_and(|sessions| sessions != &self.sessions);
         if let Some(sessions) = session_rows {
+            if self.selected.as_ref().is_some_and(|prepared| {
+                self.sessions.iter().any(|row| row.id == prepared.session.id)
+                    && !sessions.iter().any(|row| row.id == prepared.session.id)
+            }) {
+                self.selected = None;
+            }
             self.sessions = sessions;
             if self
                 .sidebar_session
@@ -537,6 +620,9 @@ impl Shell {
                 .is_some_and(|id| !self.sessions.iter().any(|row| &row.id == id))
             {
                 self.sidebar_session = None;
+            }
+            if self.selected_session_id().is_none() && self.log_session.is_some() {
+                self.refresh_logs(cx);
             }
         }
         let profile_changed = status_account_profile.as_ref().is_some_and(|profile| {
@@ -572,7 +658,37 @@ impl Shell {
         );
         let mut saved_invitations_changed =
             saved_invitations.as_ref().is_some_and(|saved| saved != &self.saved_invitations);
-        if let Some(saved) = saved_invitations {
+        if let Some(mut saved) = saved_invitations {
+            if saved.len() > application_browser::MAX_SESSIONS {
+                saved.truncate(application_browser::MAX_SESSIONS);
+                self.error = "The invitation list can show up to 256 sessions.".into();
+            }
+            // Removing an app also retires its saved invitation review. Canceling
+            // an old review must not put the row back into the sidebar.
+            if let Some(current) = &self.invitation
+                && self.saved_invitations.iter().any(|old| {
+                    old.session == current.session && !old.retained && old.received.is_some()
+                })
+                && !saved.iter().any(|item| item.session == current.session)
+                && !self.sessions.iter().any(|row| row.id == current.session)
+            {
+                if self.new_session.as_ref().is_some_and(|form| {
+                    form.read(cx).reviewed_invitation() == Some(current.session.as_str())
+                }) {
+                    self.new_session = None;
+                }
+                self.joining = false;
+                if self
+                    .invitation_link
+                    .as_ref()
+                    .is_some_and(|link| link.internal_id() != current.session)
+                {
+                    self.invitation = None;
+                    self.invitation_resume = None;
+                } else {
+                    self.dismiss_join_dialog(cx);
+                }
+            }
             if let Some(current) = &mut self.invitation
                 && let Some(updated) =
                     saved.iter().find(|preview| preview.session == current.session)
@@ -583,8 +699,25 @@ impl Shell {
                 saved_invitations_changed = true;
             }
             self.saved_invitations = saved;
+            if saved_invitations_changed
+                && response.application_catalog.is_none()
+                && response.imported_apps.is_none()
+            {
+                self.rebuild_application_list();
+            }
         }
-        let invitation_changed = self.apply_invitation_status(response.invitation_status.take());
+        if let Some(credit) = &response.credit
+            && self.invitation_resume == Some(credit.admission())
+        {
+            self.invitation_resume = None;
+            if response.result.is_err() {
+                self.dismiss_invitation(cx);
+            } else if let Some(invitation) = &mut self.invitation {
+                invitation.paused = false;
+            }
+        }
+        let invitation_changed =
+            self.apply_invitation_status(response.invitation_status.take(), cx);
         RowsChanged {
             sessions: sessions_changed,
             profile: profile_changed || backup_changed,
@@ -599,20 +732,36 @@ impl Shell {
         invitation_preview: Option<crate::store::InvitationPreview>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if let Some(preview) = invitation_preview {
+        if let Some(mut preview) = invitation_preview {
+            let Some(link) =
+                self.invitation_link.as_ref().filter(|link| link.internal_id() == preview.session)
+            else {
+                return false;
+            };
+            let input = link.link(self.channel);
+            self.join_preview = None;
+            self.invitation_resume = None;
             self.restore_pending_invitation = false;
             if preview.retained {
+                self.join_dialog = None;
                 if let Err(error) = self.open_retained(preview.session, cx) {
                     self.error = error.into();
                 }
                 return true;
             }
+            if preview.received.is_none()
+                && let Some(cached) =
+                    self.saved_invitations.iter().find(|p| p.session == preview.session)
+            {
+                preview.received.clone_from(&cached.received);
+            }
             self.opening = None;
             self.joining = false;
-            self.send.send(Request::WatchInvitation { session: preview.session.clone() }).ok();
-            self.invitation = Some(preview);
-            self.selected = None;
+            self.open_join_entry(&input, cx);
             self.join_status = InvitationState::Checking;
+            let watch = Request::WatchInvitation { session: preview.session.clone() };
+            self.invitation = Some(preview);
+            self.lookup_join_dialog(watch);
             self.error.clear();
         }
         true
@@ -634,18 +783,21 @@ impl Shell {
             if self.opening.as_deref() == Some(&id) {
                 self.opening = None;
                 self.joining = false;
-                self.invitation = None;
+                self.leave_invitation();
             }
             cx.notify();
         }
     }
     fn watch_startup_invitation(&mut self) {
         if let Some(invitation) = &self.invitation {
+            if invitation.paused {
+                return;
+            }
             if let Some(state) = &self.invitation_status
                 && state.session == invitation.session
             {
                 self.join_status = state.state.clone();
-            } else if !self.joining && !invitation.paused {
+            } else if !self.joining {
                 self.send
                     .send(Request::WatchInvitation { session: invitation.session.clone() })
                     .ok();
@@ -674,8 +826,10 @@ impl Shell {
         if let Some(state) = status_recovery {
             self.apply_recovery(state, cx);
         }
-        self.restore_startup_invitation(cx);
-        self.watch_startup_invitation();
+        self.restore_startup_opening(cx);
+        if self.join_dialog.is_none() && self.new_session.is_none() {
+            self.watch_startup_invitation();
+        }
         self.refresh_session_icons(cx);
         self.first_account_update = true;
         maybe_send_crash_reports(cx, self);
@@ -712,7 +866,13 @@ impl Shell {
                     self.pending_windows.remove(id);
                 }
                 self.error = error;
-                if session.as_deref().is_none_or(|id| self.opening.as_deref() == Some(id)) {
+                let reviewed_transfer = self
+                    .new_session
+                    .as_ref()
+                    .is_some_and(|form| form.read(cx).reviewed_invitation().is_some());
+                if !reviewed_transfer
+                    && session.as_deref().is_none_or(|id| self.opening.as_deref() == Some(id))
+                {
                     self.joining = false;
                     if launch_failed {
                         // Preparation already succeeded. Resume would repeat the same
@@ -746,6 +906,9 @@ impl Shell {
 
         let initializing = self.enrolled.is_none();
         if !self.begin_response(&mut response, cx) {
+            return;
+        }
+        if !self.receive_invitation_admission(&response, cx) {
             return;
         }
         self.finish_pending_volume(&response, cx);
@@ -814,12 +977,26 @@ impl Shell {
                 self.reconcile_launches(cx);
             }
         }
-        let changed = self.apply_status_rows(&mut response, cx);
+        let viewing_app_volume = self.applications.root_open;
+        let mut changed = self.apply_status_rows(&mut response, cx);
+        if let Some(activity) = response.session_activity.take() {
+            self.applications.set_activity(
+                activity,
+                response.application_catalog.as_deref().unwrap_or_default(),
+                self.account.id,
+                self.account_profile.display_name.as_deref(),
+            );
+        }
         if let Some(apps) = response.imported_apps.take() {
+            changed.sessions |= apps != self.applications.imported_apps();
             self.apply_imported_app_catalog(apps);
         }
         if let Some(sessions) = response.application_catalog.take() {
             self.apply_application_catalog(sessions, cx);
+        }
+        if viewing_app_volume && !self.applications.root_open && self.prepare_browser_navigation(cx)
+        {
+            self.browser = None;
         }
         if let Some(id) = response.volume_label.take() {
             if let Some(volume) = response.volume_created.take()
@@ -854,6 +1031,7 @@ impl Shell {
         if !self.apply_invitation_preview(response.invitation_preview.take(), cx) {
             return;
         }
+        self.review_ready_invitation(cx);
         self.apply_prepared(response.prepared.take(), cx);
         if !self.finish_response(response, changed, browser_failed, cx) {
             return;
@@ -925,6 +1103,8 @@ impl Shell {
             signing_out: false,
             sign_out_error: None,
             invitation: None,
+            invitation_link: None,
+            invitation_resume: None,
             saved_invitations: Vec::new(),
             volumes: Vec::new(),
             scoped_volumes: Vec::new(),
@@ -971,13 +1151,13 @@ impl Shell {
             recent_sessions: Vec::new(),
             applications: Default::default(),
             join_dialog: None,
-            join_dialog_focus: false,
+            join_preview: None,
+            session_dialog_id: None,
             welcome_scrollbars: cx.new(|_| crate::ui::desktop::scrollbar::Scrollbars::new(false)),
+            making_project: false,
             log_watch: None,
             log_session: None,
             log_generation: 0,
-            session_tab: SessionTab::Log,
-            tab_change_pending: None,
             session_icons: Default::default(),
             session_scroll,
             volume_scroll,
@@ -999,9 +1179,9 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Self {
         let (send, receive, errors) = worker;
+        send.send(Request::DesktopLaunch).ok();
         Self::watch_urls(urls, cx);
         Self::watch_errors(send.clone(), errors, cx);
-        send.send(Request::Status).ok();
         Self::watch_responses(send.clone(), receive, cx);
         Self::with_editors(send, cx)
     }
@@ -1161,6 +1341,12 @@ mod status_bar_tests {
                     host.resume_sign_in_destination(cx);
                 }
                 _ => {
+                    host.invitation = Some(crate::store::InvitationPreview {
+                        session: id.clone(),
+                        retained: false,
+                        paused: false,
+                        received: None,
+                    });
                     host.joining = true;
                     host.apply_transfer_response(
                         Some(TransferStatus {

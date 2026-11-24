@@ -317,6 +317,7 @@ impl Guest {
             app_name: title.clone(),
             app_build: Some(super::session_context::decode_session_id(&admission.instance.build)?),
             identity: Identity {
+                display_name: admission.display_name.clone(),
                 account_id: *admission.instance.account.as_bytes(),
                 is_service: false,
                 device_id: *admission.instance.account.as_bytes(),
@@ -375,7 +376,14 @@ impl Guest {
         self.scene.as_ref()
     }
     pub fn input(&mut self, event: Event) -> std::result::Result<(), HostError> {
-        if self.draining {
+        self.admit_input(event, None)
+    }
+    pub(crate) fn admit_input(
+        &mut self,
+        event: Event,
+        closing: Option<&mut crate::runtime::work::ClosingInputs>,
+    ) -> std::result::Result<(), HostError> {
+        if self.draining && closing.is_none() {
             return Err(HostError::Conflict);
         }
         if self.inbox.failure().is_some() {
@@ -385,13 +393,19 @@ impl Guest {
             validate_input(self.scene.as_ref().ok_or(HostError::Conflict)?, &event)?;
         }
         // Surface geometry is checked by the runtime independently of a scene.
-        self.guest.queue_event(self.generation(), event)
+        self.guest.queue_input(self.generation(), event, closing)
     }
     /// Readiness injection and guest execution stay on this exact owner thread.
     /// Consuming a completion can begin a dependent read on the same turn.
     pub fn pump(&mut self) -> Result<Frame> {
         if let Some(failure) = self.inbox.failure() {
             return Err(failure.into());
+        }
+        if let Some(name) = self.inbox.take_display_name() {
+            self.guest
+                .set_display_name(&name)
+                .map_err(|error| format!("Invalid account display name: {error:?}"))?;
+            self.admission.display_name = name;
         }
         if let Some(volumes) = self.inbox.take_volumes() {
             self.guest
@@ -422,7 +436,7 @@ impl Guest {
 
             if let Err(error) = result {
                 self.inbox.defer(ready);
-                if error != HostError::LimitExceeded {
+                if !matches!(error, HostError::LimitExceeded | HostError::WouldBlock) {
                     return Err(format!(
                         "Guest completion belongs to a retired operation: {error:?}"
                     )
@@ -449,9 +463,16 @@ impl Guest {
     pub fn accepted_work_pending(&self) -> bool {
         self.guest.drain_pending() || !self.inbox.idle()
     }
-    pub fn deactivate(&mut self) {
+    pub(crate) fn deactivate_with_inputs(
+        &mut self,
+        count: usize,
+    ) -> std::result::Result<crate::runtime::work::ClosingInputs, HostError> {
+        let closing = self.guest.deactivate_with_inputs(count)?;
         self.draining = true;
-        self.guest.deactivate();
+        Ok(closing)
+    }
+    pub fn deactivate(&mut self) {
+        self.deactivate_with_inputs(0).expect("an empty closing mailbox always fits");
     }
     pub fn drain_failed(&self) -> bool {
         // I/O may finish between these observations. Check waiting first so

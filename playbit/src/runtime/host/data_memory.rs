@@ -100,10 +100,11 @@ impl DataResult {
                         Event::Presence { participants } => {
                             participants.iter().try_fold(vector(participants)?, |bytes, p| {
                                 bytes.checked_add(
-                                    p.account_id.capacity()
-                                        + p.device_id.capacity()
-                                        + p.instance_id.capacity()
-                                        + p.build_id.capacity(),
+                                    p.participant.account_id.capacity()
+                                        + p.participant.device_id.capacity()
+                                        + p.participant.instance_id.capacity()
+                                        + p.participant.build_id.capacity()
+                                        + p.display_name.capacity(),
                                 )
                             })?
                         }

@@ -110,8 +110,9 @@ let () =
        || Obj.tag (Obj.repr refreshed.volume) <> Obj.custom_tag
     then failwith "volume identity changed with its rights";
     assert_host_error Error.limit_exceeded Data.root_volume;
-    let operation = Data.resolve volume "pixel-plays" in
     if Session.identity () <> identity 0 then failwith "local identity fields";
+    if (Session.local_participant ()).display_name <> Some "Zoë"
+       || EventKind.identity_changed <> 0x80000015l then failwith "local name";
     assert_host_error Error.internal Session.identity;
     let info = Option.get (Session.info ()) in
     if info.internal_id <> String.make 32 'c' || info.key_secret <> Some "session-seed-v1!"
@@ -124,8 +125,18 @@ let () =
     if Session.info () <> None then failwith "missing session";
     assert_host_error Error.unsupported Session.info;
     assert_host_error Error.internal Session.info;
-    let members = Session.presence () in
-    if members <> List.init 17 identity then failwith "presence tuples after capacity retry";
+    Session.join ();
+    if Session.participants () <> [] then failwith "roster before first update";
+    ignore (next_event EventKind.presence_changed);
+    let members = Session.participants () in
+    if List.map (fun (p : Session.participant) -> p.identity) members <> List.init 17 identity
+       || (List.hd members).display_name <> None || (List.nth members 1).display_name <> Some "小"
+       then failwith "presence names after capacity retry";
+    ignore (next_event EventKind.presence_changed);
+    let renamed = Session.participants () in
+    if List.map (fun (p : Session.participant) -> p.identity) renamed
+       <> List.map (fun (p : Session.participant) -> p.identity) members
+       || (List.nth renamed 1).display_name <> Some "月" then failwith "peer renamed";
     if Session.presence () <> [] then failwith "empty presence";
     let me = identity 0 in
     let other_device = String.sub me 0 16 ^ String.make 16 '!' ^ String.sub me 32 16 in
@@ -137,6 +148,7 @@ let () =
     then failwith "instance tuple comparison";
     assert_invalid (fun () -> ignore (Session.open_channel ""));
     assert_invalid (fun () -> ignore (Session.open_channel (String.make 224 'x')));
+    let operation = Data.resolve volume "pixel-plays" in
     let channel = Session.open_channel "live/é" in
     let subscription = Session.subscribe channel in
     (match Session.take subscription with Session.Pending -> () | _ -> failwith "missing pending subscription");

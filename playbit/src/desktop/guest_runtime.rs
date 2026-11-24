@@ -37,14 +37,18 @@ pub(super) fn cdhash(path: &Path) -> Result<[u8; 20]> {
 
 /// The dynamic code requirement binds these exact template bytes to the
 /// running app's sealed Info.plist, even if its installation path changes.
-pub(super) fn verify_little_list_template(bytes: &[u8]) -> Result<()> {
+pub(super) fn verify_template(
+    example: &super::new_session::Example,
+    seal_suffix: &str,
+    bytes: &[u8],
+) -> Result<()> {
     let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
     let digest = crate::identifier::encode(digest.as_ref());
     let requirement: SecRequirement =
-        format!("info[PlaybitLittleListTemplateSHA256] = \"{digest}\"").parse()?;
-    SecCode::for_self(Flags::NONE)?
-        .check_validity(Flags::NONE, &requirement)
-        .map_err(|_| "Playbit couldn’t verify the bundled Little List template.".into())
+        format!("info[{}{seal_suffix}] = \"{digest}\"", example.seal_key).parse()?;
+    SecCode::for_self(Flags::NONE)?.check_validity(Flags::NONE, &requirement).map_err(|_| {
+        format!("Playbit couldn’t verify the bundled {} template.", example.name).into()
+    })
 }
 
 /// dyld has already checked this image against the launcher's signed library

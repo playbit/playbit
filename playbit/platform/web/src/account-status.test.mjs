@@ -10,7 +10,7 @@ const source = stripTypeScriptTypes(await readFile(new URL('./app.ts', import.me
 const functions = source.slice(source.indexOf('async function refreshAccountPending()'), source.indexOf('window.addEventListener("online"'));
 test('live app status retains pending or unknown account intent and local action failures', async () => {
     let pending = {}, failure = false, text; const calls = [];
-    const context = vm.createContext({ encodeId, decodeId, validId, engineFailure:undefined, guestFailure:undefined, opened: false, call: async method => calls.push(method), accountPending: undefined, replicationState: {kind:'live'}, enrollment: {account:'fixture'},
+    const context = vm.createContext({ encodeId, decodeId, validId, engineFailure:undefined, guestFailure:undefined, opened: false, refreshRecoveredAppVisibility: async () => {}, call: async method => calls.push(method), accountPending: undefined, replicationState: {kind:'live'}, enrollment: {account:'fixture'},
         recoveryVisible:false, personalProgress:undefined, status: value => {text=value;}, error:{textContent:'Access could not be connected'},
         pendingAccountRecord: async (kind, account) => {assert.equal(kind,'personal'); assert.equal(account,'fixture'); if(failure) throw Error('IDB failed'); return pending;} });
     vm.runInContext(functions, context);
@@ -29,6 +29,43 @@ test('live app status retains pending or unknown account intent and local action
     assert.match(text,/status unavailable/);
     context.recoveryVisible=true; text='Account key required';
     await context.refreshAccountPending(); assert.equal(text,'Account key required');
+});
+
+test('the signed-in recovery list follows account projections before a guest opens and keeps invitation actions', async () => {
+    const app = { publisher: 'publisher', app_id: 'list' }, retained = { session: { app, id: 'session' } };
+    let removed = false, joined = false;
+    const makeNode = () => ({ dataset: {}, children: [], isConnected: true,
+        querySelectorAll() { return this.children; },
+        replaceChildren(...children) { for (const old of this.children) old.isConnected = false; this.children = children; } });
+    const onboarding = { ...makeNode(), querySelector(id) { return this.children.find(child => '#' + child.id === id); },
+        append(...children) { this.children.push(...children); } };
+    const calls = [];
+    const context = vm.createContext({
+        opened: false, invitation: { session_id: 'fresh-invitation' }, enrollment: { account: 'account' }, onboarding, status() {},
+        selectedChannel: 'public', recoveryListAccount: undefined, error: {}, recoveryVisible: true, guestFailure: undefined, replicationState: undefined,
+        recoveryClient: { catalog: async () => ({}), state: async () => ({ catalog: { invitations: [retained] } }) },
+        removedAppsIn: async () => removed ? new Set(['publisher/list']) : new Set(), pendingAccountRecord: async () => null,
+        document: { createElement: makeNode }, textElement: makeNode,
+        action: (textContent, onclick) => ({ ...makeNode(), textContent, onclick }), replicaCapability: () => ({ volume: { name: 'Little List' } }),
+        call: async (method, args) => calls.push([method, args.account]), retainedInvitation: async entry => ({ session_id: entry.session.id }),
+        showJoin: () => { joined = true; }, persistInvitation() {}, showInvitationHeader() {}, paused: false, canJoin: true,
+    });
+    vm.runInContext(source.slice(source.indexOf('let recoveryRender ='), source.indexOf('function recoveryAction()')) + functions, context);
+    await context.showRecoveredApps();
+    assert.deepEqual(calls, [['watch_recovery', 'account']]);
+    const rows = onboarding.querySelector('#recovered-app-list'), original = rows.children[0];
+    assert.equal(original.textContent, 'Little List');
+    await context.refreshAccountPending(); assert.equal(rows.children[0], original, 'unrelated notices preserve focus');
+    removed = true;
+    await original.onclick();
+    assert.equal(joined, false, 'a committed removal wins before its notice reaches the visible row');
+    assert.equal(context.invitation.session_id, 'fresh-invitation');
+    await context.refreshAccountPending(); assert.equal(rows.children.length, 0);
+    assert.equal(onboarding.children.at(-1).textContent, 'Continue invitation');
+    removed = false; await context.refreshAccountPending(); assert.equal(rows.children.length, 1);
+    await rows.children[0].onclick();
+    assert.equal(joined, true); assert.equal(context.invitation.session_id, 'session');
+    assert.equal(calls.length, 1, 'the recovery list does not start a guest');
 });
 
 test('transient reconnect keeps local-save status and terminal failures retain their action', () => {
@@ -52,7 +89,7 @@ test('transient reconnect keeps local-save status and terminal failures retain t
 test('guest failure survives live replication and account status notifications', async () => {
     let text;
     const context = vm.createContext({ encodeId, decodeId, validId, engineFailure:undefined, guestFailure:'Crash Demo is halted. Reload it to continue.',
-        opened:false, replicationState:undefined, recoveryVisible:false, personalProgress:undefined,
+        opened:false, refreshRecoveredAppVisibility: async () => {}, replicationState:undefined, recoveryVisible:false, personalProgress:undefined,
         enrollment:{account:'fixture'}, pendingAccountRecord:async()=>null,
         status:value=>text=value, error:{textContent:''} });
     vm.runInContext(functions,context);

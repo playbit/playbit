@@ -278,10 +278,6 @@ impl Shell {
             window.focus(&editor.focus_handle(cx));
             #[cfg(all(target_os = "macos", not(test)))]
             crate::ui::desktop::appearance::set_content_modal(window, true);
-            let host = cx.weak_entity();
-            window.on_window_should_close(cx, move |_, cx| {
-                host.upgrade().is_none_or(|host| !host.read(cx).account_name_open)
-            });
             window.refresh();
             editor.update(cx, |editor, cx| editor.select_all(cx));
         }
@@ -384,13 +380,20 @@ impl Shell {
         )
     }
 
-    pub(super) fn with_account_modal(
+    pub(super) fn modal_open(&self, cx: &App) -> bool {
+        self.account_name_open || self.session_dialog_open(cx) || self.app_removal_dialog_open()
+    }
+
+    pub(super) fn with_modal(
         &mut self,
         background: gpui::Div,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let overlay = self.join_overlay(window, cx).or_else(|| self.account_overlay(window, cx));
+        let overlay = self
+            .session_overlay(window, cx)
+            .or_else(|| self.app_removal_overlay(window, cx))
+            .or_else(|| self.account_overlay(window, cx));
         self.retire_host_text();
         let Some(overlay) = overlay else {
             return background.into_any_element();

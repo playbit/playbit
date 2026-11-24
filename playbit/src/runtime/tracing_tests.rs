@@ -8,7 +8,7 @@ fn context() -> GuestContext {
     GuestContext {
         app_name: "Private fixture".into(),
         app_build: None,
-        identity: Identity { account_id: [1; 16], device_id: [2; 16], instance_id: [3; 16], session_id: None, is_service: false },
+        identity: Identity { display_name: String::new(), account_id: [1; 16], device_id: [2; 16], instance_id: [3; 16], session_id: None, is_service: false },
         volumes: vec![AvailableVolume { backing: playbit_api::abi::data::VOLUME_PLAYBIT, source_epoch: [0; 16], id: [4; 16], name: "Root".into(), tags: vec![], rights: VolumeRights::READ, is_root: true, role: 0 }],
         startup_arguments: BTreeMap::new(),
         trace_catalog: Some(std::sync::Arc::from(br#"{"version":1,"names":[{"name":"app.turn","kind":"span","description":"Fixture stage"},{"name":"app.inner","kind":"span","description":"Fixture stage"},{"name":"app.rows","kind":"mark","description":"Fixture value"}]}"#.as_slice())),

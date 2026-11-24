@@ -81,7 +81,9 @@ impl Owner {
         Ok(root)
     }
     fn queue(&mut self, root: u64, kind: u32, bytes: usize) -> Result<u64> {
-        if !matches!(kind, 1..=6 | 10..=15 | 17..=19) || self.inputs.get(&root) != Some(&bytes) {
+        let supported = matches!(kind, 1..=6 | 10..=15 | 17..=19)
+            || (kind == playbit_api::abi::syscall::EventKind::IdentityChanged as u32 && bytes == 0);
+        if !supported || self.inputs.get(&root) != Some(&bytes) {
             return Err(Error::InvalidArgument);
         }
         let key =

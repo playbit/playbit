@@ -1,3 +1,4 @@
+use crate::usage_error;
 use playbit::engine::{
     Request, Result,
     reply::{DeveloperReply, Reply},
@@ -53,7 +54,7 @@ pub(super) fn init(
     profile: &Path,
     call: &impl Fn(Request) -> Result<Reply>,
 ) -> Result<Value> {
-    let options = InitOptions::parse(args)?;
+    let options = InitOptions::parse(args).map_err(usage_error)?;
     let started = Instant::now();
     let destination = directory.join(options.path.unwrap_or("."));
     let destination: PathBuf = destination.components().collect();
@@ -109,7 +110,7 @@ pub(super) fn init(
     })()
     .map_err(|error| project.recovery_error(error))?;
     project.finish()?;
-    playbit::diagnostic!("Creating .git src playbit.toml icon.svg");
+    playbit::diagnostic!("Created .git, src, playbit.toml, the app icon and README.md");
     playbit::diagnostic!(
         "Run the app with `pb run` and use `pb schema-gen src/schema.json` if you change the schema"
     );
@@ -296,14 +297,14 @@ impl Options {
             if !allowed.contains(&flag)
                 || (!seen.insert(key) && !matches!(flag, "--mount" | "--fs"))
             {
-                return Err(format!("unexpected or repeated argument: {arg}").into());
+                return Err(usage_error(format!("unexpected or repeated argument: {arg}")));
             }
             if matches!(
                 flag,
                 "--release" | "--native" | "--template" | "--verbose" | "--trace" | "--dev"
             ) {
                 if inline.is_some() {
-                    return Err(format!("{flag} does not take a value").into());
+                    return Err(usage_error(format!("{flag} does not take a value")));
                 }
                 match flag {
                     "--release" => value.release = true,
@@ -319,11 +320,11 @@ impl Options {
             let next = inline
                 .or_else(|| args.next().map(String::as_str))
                 .filter(|next| !next.starts_with("--"))
-                .ok_or_else(|| format!("missing value for {flag}"))?;
-            value.set_option(flag, next)?;
+                .ok_or_else(|| usage_error(format!("missing value for {flag}")))?;
+            value.set_option(flag, next).map_err(usage_error)?;
         }
         if value.template && value.native {
-            return Err("--template supports only Wasm packages".into());
+            return Err(usage_error("--template supports only Wasm packages"));
         }
         Ok(value)
     }
@@ -682,10 +683,9 @@ fn package_build(
 
 pub(super) fn create_session(args: &[String], directory: &Path) -> Result<Request> {
     let options = Options::parse(args, &["--root-volume", "--user-volume"], true)?;
-    let bundle = options
-        .name
-        .filter(|name| name.ends_with(".pbapp"))
-        .ok_or("expected pb session create APP.pbapp [--root-volume ID] [--user-volume ID]")?;
+    let bundle = options.name.filter(|name| name.ends_with(".pbapp")).ok_or_else(|| {
+        usage_error("expected pb session create APP.pbapp [--root-volume ID] [--user-volume ID]")
+    })?;
     Ok(Request::CreateSession {
         bundle: directory.join(bundle),
         root: options.root,
@@ -717,7 +717,7 @@ pub(super) fn run(
         && options.app.is_none()
         && directory.join(playbit::package::MANIFEST_FILE).is_file();
     if !source_run && (options.namespace.is_some() || options.release) {
-        return Err("--namespace, --dev and --release require a source build".into());
+        return Err(usage_error("--namespace, --dev and --release require a source build"));
     }
     let _sdk = if source_run {
         Some(options.enter_sdk(directory, &options.manifest(directory)?)?)
@@ -797,7 +797,7 @@ fn run_options(
         ],
         true,
     )?;
-    validate_run(&options)?;
+    validate_run(&options).map_err(usage_error)?;
     if let Some(session) = options.session.as_deref() {
         options.session = Some(crate::session_argument(session, channel)?);
     }
@@ -1149,9 +1149,9 @@ pub(super) fn publish(
         Options::parse(args, &["--notes", "--namespace", "--dev", "--sdk", "--verbose"], true)?;
     let bundle = if let Some(name) = &options.name {
         if !name.ends_with(".pbapp") || options.namespace.is_some() {
-            return Err(
-                "publish expects signed APP.pbapp; namespaces require rebuilding source".into()
-            );
+            return Err(usage_error(
+                "publish expects signed APP.pbapp; namespaces require rebuilding source",
+            ));
         }
         directory.join(name)
     } else {
@@ -1201,14 +1201,14 @@ pub(super) fn app_lifecycle(
     call: &impl Fn(Request) -> Result<Reply>,
 ) -> Result<Reply> {
     if args.len() != 2 {
-        return Err("expected pb app enable|disable|delete PUBLISHER/APP-ID".into());
+        return Err(usage_error("expected pb app enable|disable|delete PUBLISHER/APP-ID"));
     }
-    let app = app_identity(&args[1])?;
+    let app = app_identity(&args[1]).map_err(usage_error)?;
     let request = match args[0].as_str() {
         "enable" => Request::SetAppEnabled { app, enabled: true },
         "disable" => Request::SetAppEnabled { app, enabled: false },
         "delete" => Request::DeleteApp { app },
-        _ => return Err("expected pb app enable, disable or delete".into()),
+        _ => return Err(usage_error("expected pb app enable, disable or delete")),
     };
     call(request)
 }

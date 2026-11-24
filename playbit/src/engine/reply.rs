@@ -297,12 +297,17 @@ pub struct Status {
     pub sessions: Vec<crate::store::Session>,
     #[serde(skip)]
     pub session_references: std::collections::BTreeMap<String, String>,
+    #[serde(skip)]
+    pub(crate) session_activity: std::collections::BTreeMap<String, crate::store::SessionActivity>,
     pub imported_apps: Vec<crate::store::ImportedApp>,
     pub app_names: std::collections::BTreeMap<String, String>,
     pub builds: std::collections::BTreeMap<String, super::builds::BuildState>,
     pub recent_sessions: Vec<String>,
     pub updates: std::collections::BTreeMap<String, super::UpdateStatus>,
     pub invitations: Vec<crate::store::InvitationPreview>,
+    /// An authenticated preview awaiting acknowledgment from the active desktop.
+    #[serde(skip)]
+    pub(crate) desktop_invitation: Option<crate::store::InvitationPreview>,
     pub enrolled: bool,
     pub email: Option<String>,
     pub invitation_status: Option<InvitationStatus>,
@@ -560,6 +565,10 @@ pub enum Reply {
         #[rkyv(with = rkyv::with::AsBox)]
         receipt: KvRenameReceipt,
     },
+    AppRemovalImpact {
+        impact: crate::store::AppRemovalImpact,
+    },
+    AppRemoved(crate::store::AppRemovalResult),
 }
 // Small controls share this root. Large payloads live out of line through
 // rkyv's AsBox adapter, without changing their owned Rust representation.
@@ -574,6 +583,8 @@ impl ArchivedReply {
     pub fn matches_request(&self, request: &super::Request) -> bool {
         use super::Request as Q;
         match request {
+            Q::AppRemovalImpact { .. } => matches!(self, Self::AppRemovalImpact { .. }),
+            Q::RemoveApp { .. } => matches!(self, Self::AppRemoved(_)),
             Q::WorkOffline { enabled } => {
                 matches!(self, Self::WorkOffline { enabled: found } if found == enabled)
             }
@@ -611,13 +622,13 @@ impl ArchivedReply {
                 self.matches_process(request)
             },
             #[rustfmt::skip]
-            request @ (Q::LocalProtocol | Q::Status | Q::WaitChanges { .. }
+            request @ (Q::LocalProtocol | Q::Status | Q::DesktopLaunch | Q::WaitChanges { .. }
             | Q::OrderSessions { .. } | Q::ForgetSession { .. } | Q::CacheBudget { .. }
             | Q::SetDisplayName { .. } | Q::AcceptAgreement { .. } | Q::PrepareSignIn | Q::SavedAccount | Q::RetryAccountKeyBackup
             | Q::RequestCode { .. } | Q::SignIn { .. } | Q::SignInWithKey { .. } | Q::Sync
             | Q::StartSync | Q::StartJoin { .. } | Q::TransferStatus | Q::CancelTransfer
             | Q::CheckUpdates { .. } | Q::RetrySessionInfo { .. } | Q::PrepareSession { .. } | Q::Disconnect | Q::Join { .. }
-            | Q::PreviewInvitation { .. } | Q::WatchInvitation { .. }
+            | Q::PreviewInvitation { .. } | Q::PreviewDesktopInvitation { .. } | Q::RetainDesktopInvitation { .. } | Q::WatchInvitation { .. }
             | Q::ResumeInvitation { .. } | Q::PauseInvitation { .. } | Q::Provision { .. }
             | Q::Permissions { .. } | Q::Revoke { .. } | Q::LabelVolume { .. }
             | Q::CreateVolume { .. } | Q::InitializeRoot { .. } | Q::InitializeApp { .. } | Q::AppVolumes { .. } | Q::AutomaticVolumes { .. } | Q::OpenAppVolume { .. } | Q::OpenAutomaticVolume { .. } | Q::SessionReference { .. } | Q::PersonalVolumes { .. }
@@ -748,7 +759,7 @@ impl ArchivedReply {
         use super::Request as Q;
         match request {
             Q::LocalProtocol => matches!(self, Self::Protocol { .. }),
-            Q::Status => matches!(self, Self::Status(_)),
+            Q::Status | Q::DesktopLaunch => matches!(self, Self::Status(_)),
             Q::WaitChanges { .. } => matches!(self, Self::Changes(_)),
             Q::OrderSessions { .. } => matches!(self, Self::OrderSessions { .. }),
             Q::ForgetSession { .. } => matches!(self, Self::ForgetSession { .. }),
@@ -772,8 +783,12 @@ impl ArchivedReply {
             }
             Q::Disconnect => matches!(self, Self::Disconnected { .. }),
             Q::Join { .. } => matches!(self, Self::Session(_)),
-            Q::PreviewInvitation { .. } => matches!(self, Self::InvitationPreview(_)),
-            Q::WatchInvitation { .. } | Q::ResumeInvitation { .. } => {
+            Q::PreviewInvitation { .. } | Q::PreviewDesktopInvitation { .. } => {
+                matches!(self, Self::InvitationPreview(_))
+            }
+            Q::WatchInvitation { .. }
+            | Q::ResumeInvitation { .. }
+            | Q::RetainDesktopInvitation { .. } => {
                 matches!(self, Self::InvitationStatus { .. })
             }
             Q::PauseInvitation { .. } => matches!(self, Self::InvitationPaused { .. }),

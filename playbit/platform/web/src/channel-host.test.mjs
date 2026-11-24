@@ -47,7 +47,7 @@ test('the Rust boundary validates control identities, scoped envelopes and authe
     for(const bad of [{...frame,destination:boundary.destination(session,'other')},{...frame,source:source.slice(1)},{...frame,body:body.slice(1)}])assert.throws(()=>boundary.receive(destination,bad),AbiError);
     const participant={account_id:encodeId(source.slice(0,16)),device_id:encodeId(source.slice(16,32)),instance_id:encodeId(source.slice(32,48)),build_id:encodeId(source.slice(48))};
     const control={type:AP.PUBLISH,flags:0,destination:session,source:new Uint8Array(),body:utf8.encode(JSON.stringify({kind:'presence',participants:[participant]}))};
-    assert.deepEqual(boundary.receive(session,control),{kind:'presence',participants:[source]});
+    assert.deepEqual(boundary.receive(session,control),{kind:'presence',participants:[{source,displayName:''}]});
     assert.throws(()=>boundary.receive(session,{...control,source}),AbiError);
     assert.throws(()=>boundary.receive(session,{...control,body:utf8.encode(JSON.stringify({kind:'presence',participants:[{...participant,account_id:'bad'}]}))}),AbiError);
     assert.deepEqual(boundary.receive(session,{...control,body:utf8.encode('{"kind":"update_available"}')}),{kind:'update'});

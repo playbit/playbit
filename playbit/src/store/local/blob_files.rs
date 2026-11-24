@@ -477,6 +477,23 @@ pub(super) enum ExistingBlob {
     Corrupt { fingerprint: Fingerprint, retained: BlobStage, destination: PathBuf },
 }
 impl ExistingBlob {
+    /// A prior ordinary close may have linked this inode without syncing it.
+    /// Sync before taking the profile writer. Publication rechecks its fingerprint
+    /// and uses the already-synced stage if the inspected file disappears.
+    pub(super) fn sync_verified(&self, target: &Path) -> Result<bool> {
+        let Self::Verified(expected) = self else { return Ok(true) };
+        let file = match fs::File::open(target) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(io(error)),
+        };
+        if Fingerprint::read(&file.metadata().map_err(io)?) != *expected {
+            return Ok(false);
+        }
+        rustix::io::retry_on_intr(|| rustix::fs::fsync(&file)).map_err(|error| io(error.into()))?;
+        Ok(true)
+    }
+
     /// Both inputs are prepared outside gates. The caller retains its cache
     /// guard and current admission through publication; quarantine is durable
     /// before an unchanged corrupt target is replaced with verified bytes.

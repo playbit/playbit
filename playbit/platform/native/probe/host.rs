@@ -65,6 +65,7 @@ fn context(seed: u8) -> GuestContext {
         app_name: "Test app".into(),
         app_build: None,
         identity: Identity {
+            display_name: "Zoë".into(),
             account_id: [seed; 16],
             is_service: false,
             device_id: [seed + 1; 16],

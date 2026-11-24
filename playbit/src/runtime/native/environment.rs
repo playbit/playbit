@@ -161,6 +161,7 @@ pub(super) unsafe extern "C" fn pb_presence(
                         device_id: participant.device_id,
                         instance_id: participant.instance_id,
                         build_id: participant.build_id,
+                        display_name: environment::display_name_field(&participant.display_name),
                         ..abi::Participant::default()
                     },
                 )?;

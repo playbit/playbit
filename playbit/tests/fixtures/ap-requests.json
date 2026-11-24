@@ -653,6 +653,14 @@
     "operation_id": "NCX9PNbvZtwyXe5YjATFzi"
   },
   {
+    "op": "put_account_display_name",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "name": "Zoë",
+    "record_key": "11111111111111111111111111111111",
+    "clock": "9007199254740993",
+    "ciphertext": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  },
+  {
     "op": "sync_database",
     "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
     "session_id": null,
@@ -1025,5 +1033,13 @@
     "op": "get_build_identity",
     "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
     "build_id": "CZ8YUVdk7znjrUmnb5n7kgySk9yRAsQDYmyCxzfSky9t"
+  },
+  {
+    "op": "world_replica",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "session_id": "CZ8YUVdk7znjrUmnb5n7kgySk9yRAsQDYmyCxzfSky9t",
+    "build_id": "CZ8YUVdk7znjrUmnb5n7kgySk9yRAsQDYmyCxzfSky9t",
+    "volume_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "request": { "kind": "open" }
   }
 ]

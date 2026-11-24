@@ -33,6 +33,7 @@ mod personal;
 pub mod process_log;
 mod release_channel;
 mod session;
+mod session_dialog;
 mod session_icons;
 mod session_log_view;
 mod session_view;
@@ -79,7 +80,6 @@ use gpui::{
 };
 use host_text::Text as HostText;
 use session_log_view::LogView;
-use session_view::SessionTab;
 use shell_view::{Shell, maybe_send_crash_reports};
 use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 #[cfg(test)]

@@ -1,24 +1,46 @@
-// Live session channels. AP owns membership; only participant hosts handle plaintext.
+// AP owns session membership. Hosts encrypt and decrypt named-channel messages.
 import { ChannelHost } from './channel-host.ts';
 import { AP } from './ap-codec.ts';
 import type { Frame, FrameInput } from './ap-codec.ts';
 import { AbiError } from './guest-memory.ts';
 import { failure } from './errors.ts';
 const concat=(...parts:Uint8Array[]):Uint8Array<ArrayBuffer>=>{const result=new Uint8Array(parts.reduce((n,p)=>n+p.length,0));let at=0;for(const p of parts){result.set(p,at);at+=p.length;}return result;};
+const utf8 = new TextEncoder();
+const DISPLAY_NAME_BYTES = 256;
+export function displayNameBytes(name: string): Uint8Array<ArrayBuffer> {
+    if (typeof name !== 'string' || name.length > DISPLAY_NAME_BYTES || !name.isWellFormed()
+        || /^\p{White_Space}|\p{White_Space}$|\p{Cc}/u.test(name)) throw Error('Invalid account display name');
+    const bytes = utf8.encode(name);
+    if (bytes.length > DISPLAY_NAME_BYTES) throw Error('Invalid account display name');
+    return bytes;
+}
+function displayNameField(name: string): Uint8Array<ArrayBuffer> {
+    const field = new Uint8Array(DISPLAY_NAME_BYTES);
+    field.set(displayNameBytes(name));
+    return field;
+}
 export interface ChannelTransport {
-    connect():Promise<{device:Uint8Array;generation:number}>;
+    connect():Promise<{device:Uint8Array;generation:number;displayNames?:boolean}>;
+    discoverNames(): Promise<boolean>;
     open(frame:FrameInput,device:Uint8Array,generation:number):Promise<number>;
     read(handle:number):Promise<Frame & {receipt?:number}>;
+    displayName(handle: number, name: Uint8Array): Promise<unknown>;
     consumed(receipt:number):void;
     close(handle:number):Promise<unknown>;
 }
-interface Identity { session:Uint8Array;account:Uint8Array;device:Uint8Array;instance:Uint8Array;build:Uint8Array;proof:Uint8Array;app?:{publisher:string;app_id:string} }
+interface Identity { session:Uint8Array;account:Uint8Array;device:Uint8Array;instance:Uint8Array;build:Uint8Array;proof:Uint8Array;displayName:string;app?:{publisher:string;app_id:string} }
+interface Participant { source: Uint8Array; displayName: string }
 export class SessionChannels {
     readonly identity:Identity;
     private readonly transport:ChannelTransport;
     private readonly protocol:ChannelHost;
     private readonly key:Promise<CryptoKey>;
     private own:Promise<number>|undefined;
+    private controlHandle?: number;
+    private advertisedName = '';
+    private refreshingName = false;
+    private nameMode: 'unknown' | 'unsupported' | 'opt-in' | 'named' = 'unknown';
+    private nameRetry?: ReturnType<typeof setTimeout>;
     private readonly subscriptions=new Map<string,number>();
     private readonly desired=new Map<string,symbol>();
     private readonly opening=new Map<string,Promise<void>>();
@@ -28,7 +50,7 @@ export class SessionChannels {
     private retained=0;
     private readonly receipts=new Map<string,number[]>();
     private stopped=false;
-    participants:Uint8Array[]= [];
+    participants: Participant[] = [];
     private readonly deliver:(name:string,source:Uint8Array,message:Uint8Array,data:Uint8Array)=>boolean|void;
     private readonly presence:()=>void;
     private readonly failed:(status:number)=>void;
@@ -39,20 +61,82 @@ export class SessionChannels {
     }
     destination(name:string):Uint8Array<ArrayBuffer>{return this.protocol.destination(this.identity.session,name);}
     private frame(type:number,destination:Uint8Array,payload:Uint8Array):FrameInput{return {type,flags:1,destination,source:concat(this.identity.instance,this.identity.build),body:concat(this.identity.proof,payload)};}
+    setDisplayName(name: string): void {
+        this.identity.displayName = name;
+        let changed = false;
+        for (const participant of this.participants) {
+            if (this.isLocalInstance(participant.source) && participant.displayName !== name) {
+                participant.displayName = name;
+                changed = true;
+            }
+        }
+        if (changed) this.presence();
+        void this.refreshName();
+    }
+    private isLocalInstance(source: Uint8Array): boolean {
+        const { account, device, instance } = this.identity;
+        return account.every((byte, i) => byte === source[i])
+            && device.every((byte, i) => byte === source[16 + i])
+            && instance.every((byte, i) => byte === source[32 + i]);
+    }
+    private async refreshName(delay = 250): Promise<void> {
+        const handle = this.controlHandle, epoch = this.epoch;
+        if (this.stopped || handle === undefined || this.nameMode === 'unsupported' || this.refreshingName || this.nameRetry !== undefined) return;
+        this.refreshingName = true;
+        try {
+            if (this.nameMode === 'unknown') {
+                const supported = await this.transport.discoverNames();
+                if (epoch !== this.epoch) return;
+                this.nameMode = supported ? 'opt-in' : 'unsupported';
+                if (!supported) return;
+            }
+            while (this.nameMode === 'opt-in' || this.advertisedName !== this.identity.displayName) {
+                const name = this.identity.displayName;
+                // The first padded field on a baseline stream opts into named rosters.
+                await this.transport.displayName(handle, this.nameMode === 'opt-in' ? displayNameField(name) : displayNameBytes(name));
+                if (epoch !== this.epoch) return;
+                this.nameMode = 'named';
+                this.advertisedName = name;
+            }
+        } catch (error) {
+            if (epoch !== this.epoch) return;
+            const code = (error as { code?: string } | null)?.code;
+            // Capacity rejects before dispatch. A transport failure during a write
+            // can leave the subscription's encoding uncertain, so retire that stream.
+            if (code === 'ap-capacity' || this.nameMode === 'unknown' && code === 'ap-transport') {
+                this.nameRetry = setTimeout(() => {
+                    if (epoch !== this.epoch) return;
+                    this.nameRetry = undefined;
+                    void this.refreshName(Math.min(delay * 2, 8000));
+                }, delay);
+            } else if (this.nameMode === 'unknown') this.nameMode = 'unsupported';
+            else this.disconnected(-5);
+        } finally {
+            if (epoch === this.epoch) this.refreshingName = false;
+        }
+    }
     start():Promise<number>{
         if(this.stopped)return Promise.reject(new AbiError(-7));
         if(this.identity.app)return Promise.reject(failure("unsupported", "App-following sessions are not supported in the browser yet. Open this app in Playbit."));
         if(!this.own){
             const epoch=this.epoch;
-            this.own=this.transport.connect().then(({device,generation})=>{
+            let name: string;
+            this.own=this.transport.connect().then(({device,generation,displayNames})=>{
                 if(this.stopped)throw new AbiError(-7);
                 if(epoch!==this.epoch)throw failure('ap-transport','Session channel connection was superseded');
                 this.identity.device=device;this.connectionGeneration=generation;
-                return this.transport.open(this.frame(AP.SUBSCRIBE,this.identity.session,new Uint8Array()),this.identity.device,generation);
+                name = this.identity.displayName;
+                this.nameMode = displayNames === undefined ? 'unknown' : displayNames ? 'named' : 'unsupported';
+                // The fixed-width join field requests names even when our own is empty.
+                const field = displayNames ? displayNameField(name) : new Uint8Array();
+                return this.transport.open(this.frame(AP.SUBSCRIBE, this.identity.session, field), device, generation);
             }).then(handle=>{
                 if(this.stopped||epoch!==this.epoch){void this.transport.close(handle);throw this.stopped?new AbiError(-7):failure('ap-transport','Session channel connection was superseded');}
                 this.connected=true;
-                void this.controls(handle,epoch).catch(()=>{if(epoch===this.epoch)this.disconnected(-5);});
+                this.controlHandle = handle;
+                this.advertisedName = name;
+                void this.controls(handle, epoch).catch(() => { if (epoch === this.epoch) this.disconnected(-5); });
+                void this.refreshName();
                 return handle;
             }).catch(error=>{if(epoch===this.epoch)this.disconnected(-5);throw error;});
         }
@@ -60,12 +144,13 @@ export class SessionChannels {
     }
     private disconnected(status:number):void{
         if(this.stopped)return;
-        this.epoch++;this.connected=false;
+        clearTimeout(this.nameRetry); this.nameRetry = undefined;
+        this.epoch++;this.connected=false;this.controlHandle=undefined;this.refreshingName=false;
         const own=this.own;this.own=undefined;
         if(own)void own.then(handle=>this.transport.close(handle)).catch(()=>{});
         for(const handle of this.subscriptions.values())void this.transport.close(handle);
         this.subscriptions.clear();this.opening.clear();
-        this.participants=[];this.presence();this.failed(status);
+        this.setParticipants([]);this.failed(status);
     }
     async reconnect(device:Uint8Array,generation:number):Promise<void>{
         if(this.stopped)return;
@@ -81,8 +166,19 @@ export class SessionChannels {
             const control=this.protocol.receive(this.identity.session,frame);
             if(control.kind==='update'){this.updated();continue;}
             if(control.kind!=='presence')throw new Error('Expected Rust session control result');
-            this.participants=control.participants;this.presence();
+            for (const participant of control.participants) {
+                if (this.isLocalInstance(participant.source)) participant.displayName = this.identity.displayName;
+            }
+            this.setParticipants(control.participants);
         }
+    }
+    private setParticipants(participants: Participant[]): void {
+        if (participants.length === this.participants.length && participants.every(({ source, displayName }, i) => {
+            const before = this.participants[i];
+            return displayName === before.displayName && source.every((byte, j) => byte === before.source[j]);
+        })) return;
+        this.participants = participants;
+        this.presence();
     }
     async command(name:string,action:number,data:Uint8Array<ArrayBuffer>):Promise<void>{
         const destination=this.destination(name);this.protocol.command(name,action,data.length);
@@ -153,5 +249,13 @@ export class SessionChannels {
         this.retained=Math.max(0,this.retained-bytes);
         if(source&&message){const key=this.deliveryKey(source,message),receipts=this.receipts.get(key),receipt=receipts?.shift();if(!receipts?.length)this.receipts.delete(key);if(receipt!==undefined)this.transport.consumed(receipt);}
     }
-    close():void{for(const receipts of this.receipts.values())for(const receipt of receipts)this.transport.consumed(receipt);this.receipts.clear();this.retained=0;this.stopped=true;this.epoch++;this.connected=false;this.desired.clear();for(const handle of this.subscriptions.values())void this.transport.close(handle);this.subscriptions.clear();if(this.own)void this.own.then(handle=>this.transport.close(handle)).catch(()=>{});}
+    close(): void {
+        clearTimeout(this.nameRetry);
+        for (const receipts of this.receipts.values()) for (const receipt of receipts) this.transport.consumed(receipt);
+        this.receipts.clear(); this.retained = 0; this.stopped = true; this.epoch++; this.connected = false;
+        this.desired.clear();
+        for (const handle of this.subscriptions.values()) void this.transport.close(handle);
+        this.subscriptions.clear();
+        if (this.own) void this.own.then(handle => this.transport.close(handle)).catch(() => {});
+    }
 }

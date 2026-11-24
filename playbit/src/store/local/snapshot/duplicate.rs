@@ -76,15 +76,14 @@ impl LocalStore {
                         None,
                     )?;
                     let mut file = source.open_blob(&version)?;
-                    let (kind, pin) = self.prepare_entry_blob_with_key(
+                    info.kind = self.prepare_entry_blob_with_key(
                         EntryAddress { volume: volume.id, entry: header.id },
                         info.created_revision,
                         &mut file,
                         &credentials.blob_key,
+                        true,
+                        || self.lock_profile(),
                     )?;
-                    let _profile = self.lock_profile()?;
-                    self.pin_prepared_blob_profile_locked(&pin)?;
-                    info.kind = kind;
                 } else if matches!(info.kind, EntryKind::Directory {}) {
                     pending.extend(snapshot.children(Some(header.id))?);
                     if pending.len() > volume_index::namespace::MAX_ENTRIES {

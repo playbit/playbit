@@ -55,8 +55,29 @@ pub struct AvailableVolume {
     pub role: u32,
 }
 
+impl AvailableVolume {
+    pub(crate) fn data_rights(&self) -> VolumeRights {
+        self.rights.for_data()
+    }
+    #[cfg(any(target_arch = "wasm32", feature = "wasm-runtime", feature = "native-runtime"))]
+    pub(crate) fn public_rights(&self) -> VolumeRights {
+        VolumeRights(self.rights.0 & VolumeRights::ALL.0)
+    }
+}
+
+impl VolumeRights {
+    /// Internal admission to an entry-addressed KV mutation. The store checks
+    /// the current entry ACL. Guest-visible volume and file rights stay separate.
+    pub(crate) const KV_WRITE: Self = Self(8);
+
+    pub(crate) const fn for_data(self) -> Self {
+        if self.contains(Self::WRITE) { Self(self.0 | Self::KV_WRITE.0) } else { self }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Identity {
+    pub display_name: String,
     pub account_id: Id,
     pub is_service: bool,
     pub device_id: Id,
@@ -66,6 +87,7 @@ pub struct Identity {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Participant {
+    pub display_name: String,
     pub account_id: Id,
     pub device_id: Id,
     pub instance_id: Id,

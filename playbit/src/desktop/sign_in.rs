@@ -50,7 +50,21 @@ impl Shell {
         self.send = retired;
         let profile = profile_path();
         let retained_invitation = self.invitation.clone();
-        let invitation = retained_invitation.as_ref().map(|invitation| invitation.session.clone());
+        // A link that has never resolved lives only for this GUI launch. Carry it
+        // through a same-launch profile change without journaling its capability.
+        let link = self
+            .invitation_link
+            .as_ref()
+            .filter(|link| {
+                retained_invitation.as_ref().is_some_and(|preview| {
+                    preview.received.is_none() && preview.session == link.internal_id()
+                })
+            })
+            .cloned();
+        let invitation = retained_invitation
+            .as_ref()
+            .filter(|preview| preview.received.is_some())
+            .map(|preview| preview.session.clone());
         let job = cx.background_executor().spawn(async move {
             let result = (|| -> crate::engine::Result<_> {
                 std::fs::create_dir_all(&profile)?;
@@ -99,6 +113,12 @@ impl Shell {
                     fresh.invitation = invitation.clone();
                     if change != ProfileChange::Replace(true) {
                         fresh.opening = host.opening.take();
+                    }
+                    if matches!(change, ProfileChange::Reset | ProfileChange::SignOut)
+                        && let Some(link) = link
+                        && let Err(error) = fresh.preview_invitation_link(link)
+                    {
+                        fresh.error = error.into();
                     }
                     fresh.enrolled = Some(false);
                     fresh.restore_pending_invitation = false;
@@ -260,13 +280,20 @@ impl Shell {
             }
             return;
         }
-        if let Some(invitation) = &self.invitation
-            && !invitation.paused
+        if self.join_preview.is_some()
+            || self.invitation_resume.is_some()
+            || self
+                .new_session
+                .as_ref()
+                .is_some_and(|form| form.read(cx).reviewed_invitation().is_some())
         {
-            match self.send.send(Request::StartJoin { session: invitation.session.clone() }) {
-                Ok(()) => self.joining = true,
-                Err(error) => self.error = error.into(),
-            }
+            return;
+        }
+        if let Some(preview) = self.invitation.as_ref().filter(|p| !p.paused) {
+            let session = preview.session.clone();
+            let input = self.invitation_link.as_ref().map(|link| link.link(self.channel));
+            self.open_join_entry(input.as_deref().unwrap_or(&session), cx);
+            self.lookup_join_dialog(Request::WatchInvitation { session });
         }
     }
     pub(super) fn apply_sign_in_response(
@@ -516,7 +543,7 @@ mod tests {
         });
     }
     #[gpui::test]
-    fn completion_resumes_only_one_unpaused_invitation(cx: &mut gpui::TestAppContext) {
+    fn completion_rechecks_one_unpaused_invitation_before_review(cx: &mut gpui::TestAppContext) {
         let (host, _, requests) = super::super::test_support::host(cx);
         host.update(cx, |host, cx| {
             host.invitation = Some(crate::store::InvitationPreview {
@@ -532,7 +559,7 @@ mod tests {
             host.resume_sign_in_destination(cx);
         });
         assert!(matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest {
-            request: Request::StartJoin { session }, ..
+            request: Request::WatchInvitation { session }, ..
         }) if session == "pending-journey"));
         assert!(requests.is_empty());
     }

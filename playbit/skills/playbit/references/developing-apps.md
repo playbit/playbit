@@ -103,6 +103,14 @@ no history, offline send queue or replay. Reconnect restores subscriptions;
 interrupted sends can report `Error::Uncertain`. Persistent data always uses the
 root volume and its ordinary permissions.
 
+For a name badge, call `Context::identity` and use the returned record's
+`display_name()` at startup and on `IdentityChanged`. A roster-only app calls
+`context.session()?` once at startup to start or reuse live membership, then
+reads the cached roster with `context.presence(&mut rows)`. The first read can
+be empty while joining. Reread on the first and subsequent `PresenceChanged`
+events and use each participant's `display_name()?`. Names are optional and
+can change. Key the roster by participant IDs.
+
 ## Verification tools
 
 Use `pb session instances SESSION` to identify the running GUI owner. Read

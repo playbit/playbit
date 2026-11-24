@@ -1,6 +1,6 @@
 // Explicit wasm32 layouts verified against the independent Rust/C compiler fixture.
 // Append fields only; retain the published minimum and complete field boundaries.
-export interface RecordLayout { minimum: number; size: number; alignment: number; fields: readonly (readonly [number, number])[] }
+export interface RecordLayout { minimum: number; size: number; alignment: number; fields: readonly (readonly [number, number])[]; optionalOutputField?: number }
 export const ABI = {
     entryHandle: {
         minimum: 32, size: 32, alignment: 8,
@@ -103,9 +103,9 @@ export const ABI = {
         offsets: { size: 0, written: 4, arguments_data: 8, arguments_capacity: 12, arguments_count: 16, arguments_stride: 20, bytes_data: 24, bytes_capacity: 28, bytes_count: 32 },
     },
     participant: {
-        minimum: 88, size: 88, alignment: 4,
-        fields: [[0, 4], [4, 4], [8, 16], [24, 16], [40, 16], [56, 32]],
-        offsets: { size: 0, written: 4, account_id: 8, device_id: 24, instance_id: 40, build_id: 56 },
+        minimum: 88, size: 344, alignment: 4, optionalOutputField: 88,
+        fields: [[0, 4], [4, 4], [8, 16], [24, 16], [40, 16], [56, 32], [88, 256]],
+        offsets: { size: 0, written: 4, account_id: 8, device_id: 24, instance_id: 40, build_id: 56, display_name: 88 },
     },
     fileReference: {
         minimum: 32, size: 32, alignment: 8,
@@ -138,9 +138,9 @@ export const ABI = {
         offsets: { size: 0, written: 4, generation: 8, kind: 16, target: 20 },
     },
     identity: {
-        minimum: 104, size: 104, alignment: 8,
-        fields: [[0, 4], [4, 4], [8, 8], [16, 16], [32, 16], [48, 16], [64, 32], [96, 4], [100, 4]],
-        offsets: { size: 0, written: 4, generation: 8, account_id: 16, device_id: 32, instance_id: 48, session_id: 64, flags: 96, reserved: 100 },
+        minimum: 104, size: 360, alignment: 8, optionalOutputField: 104,
+        fields: [[0, 4], [4, 4], [8, 8], [16, 16], [32, 16], [48, 16], [64, 32], [96, 4], [100, 4], [104, 256]],
+        offsets: { size: 0, written: 4, generation: 8, account_id: 16, device_id: 32, instance_id: 48, session_id: 64, flags: 96, reserved: 100, display_name: 104 },
     },
     app: {
         minimum: 24, size: 24, alignment: 4,

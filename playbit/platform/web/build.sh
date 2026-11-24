@@ -18,6 +18,18 @@ cargo rustc --locked "$@" --target wasm32-unknown-unknown -p playbit --lib --cra
 cargo rustc --locked "$@" --target wasm32-unknown-unknown -p todo --lib --crate-type cdylib
 cargo build --locked "$@" --target wasm32-unknown-unknown -p micro-kart -p shared-note
 cargo build --locked -p playbit --bin pb --bin playbit-engine --bin playbit-mcp --no-default-features --features process
+
+if [ "$profile" = debug ]; then
+    # The browser verifies every example against one publisher, even in a local build.
+    signer_dir=$(mktemp -d /tmp/pb-web.XXXXXX)
+    trap 'rm -rf "$signer_dir"' EXIT
+    trap 'exit 1' HUP INT TERM
+    PLAYBIT_PROFILE=$(cd "$signer_dir" && pwd -P)/profile
+    export PLAYBIT_PROFILE
+    unset PLAYBIT_CHANNEL PLAYBIT_TESTING_CREDENTIALS
+    python3 scripts/offline_fixture.py "$PLAYBIT_PROFILE"
+fi
+
 pb_packager="$repo/target/debug/pb"
 for project in todo micro-kart shared-note; do
     (cd "guests/$project" && "$pb_packager" bundle "$@")

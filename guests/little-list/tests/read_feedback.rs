@@ -76,6 +76,7 @@ impl Fixture {
             app_name: "Little List".into(),
             app_build: None,
             identity: Identity {
+                display_name: String::new(),
                 account_id: [5; 16],
                 device_id: [6; 16],
                 instance_id: [7; 16],

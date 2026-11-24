@@ -116,6 +116,38 @@ needs an updated sync service. Root-backed registrations without
 The Shared binding independently requires `shared-session.v1` in central-record
 admission.
 
+`world-replica.v1` admits the `world_replica` exchange for a hosted
+publisher World. Each request includes an authenticated session and build, the
+app-derived World ID, and a `request` object tagged by `kind`. AP checks the
+registered session, the publisher's ownership, the provisioned build, current
+participant revocations, and the caller's ordinary World Read permission.
+Individual reads and changes also require the current entry permissions.
+Shared participant rights apply only to the Shared volume.
+
+- `open` returns `{"volume": Volume | null}`. The descriptor comes from the
+  World index. An absent or inaccessible World leaves the Shared invitation usable.
+  A provisioned World awaiting its first index or revocations upload returns the
+  initial-database synchronization wait. The client keeps that session's World
+  inaccessible and retries with bounded backoff while Shared stays usable.
+- `sync` carries `database_id`, `direction` and an optional `entry_scope`.
+  `subscribe` also accepts an optional `entry_scope`. They use the same
+  snapshot, receipt, event and checkpoint framing as ordinary replicas.
+  Selected controls retain their entry and history filters.
+- `publish` carries `database_id` and a bounded committed delta. The service
+  validates the current writer and each change before committing it.
+
+Projected kvdb trees derive their Merkle master with BLAKE3 context
+`app.playbit.world-replica.v1` and the 16-byte World ID, followed by the
+ordinary per-database derivation. AP translates authorized logical records
+between the publisher tree and this public tree, preserving clocks and
+tombstones. A full projected pull computes the public root on the pinned source
+and streams the ordinary sorted snapshot range when roots differ. A full
+projected push requests the sender's range and stages only logical differences
+against AP's pinned source. Both paths use the ordinary bounded value frames.
+This exchange transmits no owner database, peer or file secret.
+The original database exchange remains available to separately credentialed
+clients. Bloblog pages and appends use the ordinary scoped Bloblog operations.
+
 Advertisement never replaces authorization. AP relays opaque client replica
 bytes unchanged; transport support does not imply record read/write support.
 Record and package specifications define their own required feature names.
@@ -1004,6 +1036,18 @@ digest of the complete frame. Other transfer kinds carry `namespace` status
 `unavailable` and send no acceptance frame. Enforce the evidence limit from the
 AP frame header before allocating its body.
 
+A selected Index pull for a qualified retired entry returns its immutable birth
+and selected deletion to a participant who currently has both Read and Write on
+that entry. The service must retain Read. AP admits the account, session and
+revocations under the ordinary selected-entry ordering guards. This projection
+contains exactly those two sources and their existing scoped acceptance evidence.
+The birth retains all original fields, including its initial permissions. The
+projection omits live ACL overrides, history, siblings, and backing records. A client
+replaying an offline deletion verifies the same birth and the qualified deletion
+that AP selected. A concurrent winner confirms only its own exact event.
+This receipt leaves data-access fences intact, including on a later reconnect. An older AP that denies the terminal pull leaves
+confirmation pending.
+
 Acceptance is computed from the full pinned canonical Index before projection,
 then intersected with source payloads actually delivered to this reader. A
 selected head's opaque dependencies are not independently attested. The contribution
@@ -1038,8 +1082,10 @@ in the [package contract](../../package/README.md#authenticated-publisher).
 
 `upload_build` verifies the package signature and current publisher-key status.
 `get_build_identity` returns `{app, admission}`, where `admission` is an issuer-signed
-receipt for that exact build. A client trusts the issuer only through its
-independently authenticated AP connection. Cached bytes or display metadata alone
+receipt for that exact build. A client normally pins its issuer through an independently authenticated AP
+connection. The Mac launcher also carries exact-build receipts, an issuer pin and
+signed signer status for its bundled examples so they can open offline. That pin
+applies only to those exact published builds. Cached bytes or display metadata alone
 cannot establish authorship or authorize execution. Current revocation remains
 binding even when a retained receipt permits an expired certificate's exact build.
 
@@ -1095,6 +1141,34 @@ the 80-byte source: account, authenticated device, app instance, build. Further
 frames retain the exact admitted destination and operation kind. Guests cannot
 publish on the own channel. Own-channel subscription bodies may append the
 selected app's 32-byte update-channel hash after the proof for code notifications.
+After discovering the exact AP feature `session.display-names.v1`, a participating
+instance opts into named rosters by appending its UTF-8 account display name
+after the optional hash, right-padded with zeros to exactly 256 bytes. A full
+256-byte name has no padding. An all-zero field opts in with no current name.
+Without a cached advertisement, the host joins immediately with a baseline
+subscription and receives the original ID-only roster. Discovery runs independently
+on the authenticated connection. Members share the pending request and back off
+after a transient failure. An AP that omits the feature continues serving the
+baseline roster.
+
+If discovery later advertises the feature, an admitted baseline member can opt in
+on its existing stream. It sends SUBSCRIBE with flags=1, its original destination,
+empty source, and just the 256-byte padded display name. The AP delivers the
+current named roster without a second SUBSCRIBE acknowledgement. A nonempty
+opt-in name consumes one rename credit before fanout. The same membership and
+routing credit remain active throughout the change. After opt-in,
+a participating instance can refresh its name with a SUBSCRIBE frame, flags=1, its
+original destination, empty source and its unpadded UTF-8 name (empty to clear).
+The AP reads these names over the authenticated transport. Nonempty names must
+fit 256 UTF-8 bytes and contain no surrounding whitespace or control characters.
+The AP skips refreshes that match the last accepted name on that stream.
+Each distinct refresh consumes one account credit before the router
+updates or publishes the roster. Each account has a burst of 64 credits (one per
+possible routing stream), replenished at 64 credits/second across its connections.
+Exhaustion terminates the updating stream. Only named subscribers receive
+rename updates. ID-only subscribers retain their queued membership changes
+across a burst of renames. Opting in preserves pending app update notifications.
+A superseded stream cannot change or remove the replacement member.
 
 A local App follower uses a separate public code observer: a SUBSCRIBE frame with
 flags=1, empty source/body and destination equal to the app's 32-byte update hash.
@@ -1113,11 +1187,15 @@ message ID, 12-byte nonce and AES-256-GCM ciphertext/tag for at most 32 KiB plai
 AEAD context is the domain `app.playbit.session.channel.v1`, destination byte
 length (u16 LE), exact destination, 80-byte source and message ID. Derive the
 32-byte message key with BLAKE3 derive_key context `app.playbit.session.messages.v1`
-and the session seed. Keys and plaintext remain at participant hosts.
+and the session seed. Application message keys and plaintext remain at participant hosts.
 
 AP own-channel data consists of server-authored initial/changed membership
 snapshots and build-update notifications. Membership lists at most 64 app instances
-with account/device/instance/build IDs; observer-only subscriptions add no member.
+with account/device/instance/build IDs. A roster entry may include
+`display_name` as a JSON string. The AP associates this label with the
+authenticated member. An absent label means that the name is unavailable.
+Own-channel control JSON is bounded to 64 KiB. Observer-only subscriptions add
+no member.
 Closing the member stream removes the instance. Slow consumers observe terminal
 failure/gap. There is no history, offline send queue or publication retry.
 
@@ -1292,6 +1370,22 @@ snapshot on pull or durable merged state on push. `PublishAccount` takes one
 bounded delta and returns the usual `PublicationAck`. Account publication never
 confers a service database grant or access to plaintext blob keys.
 
+`PutAccountDisplayName` stores a readable profile name under the authenticated
+account ID. The request includes `name`, the account record's opaque 32-byte
+`record_key` in canonical base58, its unsigned decimal `clock`, and its
+original envelope as unpadded base64url `ciphertext`. AP checks the version
+against the account's committed replica entry before storing the supplied
+name. The name follows the account's 256-byte UTF-8 validation rules.
+The authenticated client asserts the plaintext label and its source key. Clients
+derive this key from `settings/display-name` using the private account lookup key.
+Only a client with the recovery secret can verify the logical key and decrypt the
+name. For updates from the same source, AP compares clocks numerically and breaks
+ties by the original envelope bytes. Replaying an older version of that entry
+leaves the newer name in place. An account can replace a mistaken source with a
+different committed entry even when the new source's clock is lower. A successful
+response has no data. Clients can publish an already-synchronized name when
+they connect, including after upgrading a profile that has no pending account writes.
+
 The account kvdb's public hash key is BLAKE3 derive-key with context
 `app.playbit.account.tree.v1` and the 16-byte account ID as input. This is a tree
 hashing parameter, not an encryption key. Clients derive two 32-byte keys with
@@ -1423,6 +1517,15 @@ the same ordering boundary. Apply queued changes through that marker before
 reporting caught up. This closes the pull/subscription race without a new pull
 for every publication.
 
+An owner with a previously acknowledged Index can requalify its catalog and
+ready entries from one authenticated AP cut while a named backing awaits its
+first upload. An invited World reader can use the same partial capture. Their
+volume-stream checkpoints require initialized Index and Revocations and order
+events for the authorized stream. Each pending backing needs its own verified
+snapshot before new data becomes readable. Existing rejected bytes remain
+quarantined when permission is later granted. The client retries missing
+snapshots through its bounded initialization schedule.
+
 Before replacing a subscription, abort and join its receive task, then await
 its admitted storage applies through the account's event-driven retirement
 notifier. Canceling an async wait does not cancel a durable blocking write.
@@ -1551,8 +1654,13 @@ for these events. Joining independently rechecks provisioning and authorization.
 
 Native `WatchInvitation` starts one selected local observer and returns cached
 state immediately. `Status.invitation_status` carries its session and state;
-the ordinary local change feed announces updates. `PauseInvitation` durably
-saves pause, retires the observer and cancels only that invitation's transfer.
+the ordinary local change feed announces updates. A macOS link stays in memory
+until the requesting desktop process receives the authenticated session details
+and acknowledges them to the local engine. A new macOS launch drops any
+unacknowledged preview, including one that resolved after the app quit.
+`PauseInvitation` retires the observer and cancels only that invitation's
+transfer. It saves the pause with the preview, in memory for an unresolved
+macOS link.
 `ResumeInvitation` clears pause and observes again; it does not join or choose
 personal volumes. AP waits run on the existing network runtime. A new account
 connection replaces the selected observer; stale/canceled tasks cannot publish

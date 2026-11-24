@@ -401,6 +401,8 @@ pub fn required(request: &R) -> Result<usize> {
         | R::SetAppEnabled { app, .. }
         | R::DeleteApp { app }
         | R::CreateAppSession { app, .. }
+        | R::AppRemovalImpact { app, .. }
+        | R::RemoveApp { app, .. }
         | R::AppVolumes { app }
         | R::OpenAppVolume { app, .. } => b.add(app.app_id.len())?,
         R::InitializeApp { app_id, .. } => b.add(app_id.len())?,
@@ -445,6 +447,8 @@ pub fn required(request: &R) -> Result<usize> {
         | R::GrantVolume { email: text, .. } | R::SignIn { code: text, .. }
         | R::RecoverCredentials { secret: text }
         | R::Join { invitation: text } | R::PreviewInvitation { invitation: text }
+        | R::PreviewDesktopInvitation { invitation: text }
+        | R::RetainDesktopInvitation { session: text }
         | R::Provision { version: text, .. } | R::PersonalVolumes { session: text }
         | R::LabelVolume { label: text, .. }
         | R::RecoverEntry { name: text, .. } | R::RenameEntry { name: text, .. }
@@ -550,12 +554,13 @@ pub fn required(request: &R) -> Result<usize> {
         | R::DeleteVolume { .. } | R::DuplicateVolume { .. } | R::DuplicateEntry { .. }
         | R::LocalProtocol | R::AcceptAgreement { .. } | R::Entries { .. } | R::DirectoryEntries { .. } | R::VolumeDetails { .. } | R::EntryDetails { .. }
         | R::EntryRevisions { .. } | R::RejectedEntries { .. } | R::Objects { .. } | R::ReadObject { .. }
-        | R::RemoveObject { .. } | R::RemoveEntry { .. } | R::Status | R::WaitChanges { .. }
+        | R::RemoveObject { .. } | R::RemoveEntry { .. } | R::Status | R::DesktopLaunch | R::WaitChanges { .. }
         | R::UiZoom { .. } | R::CacheBudget { .. } | R::Usage { .. } | R::PayloadSize { .. }
         | R::PrepareSignIn | R::SavedAccount | R::RetryAccountKeyBackup
         | R::RecoveryStatus | R::PrepareRecovery | R::SaveRecovery | R::Sync | R::StartSync
         | R::TransferStatus | R::CancelTransfer | R::Disconnect | R::WorkOffline { .. } | R::ListApps { .. }
         | R::SetAppEnabled { .. } | R::DeleteApp { .. }
+        | R::AppRemovalImpact { .. } | R::RemoveApp { .. }
         | R::CreateAppSession { .. } | R::AppVolumes { .. } | R::OpenAppVolume { .. } => {}
     }
     Ok(b.0)

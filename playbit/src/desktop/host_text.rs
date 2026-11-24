@@ -9,11 +9,15 @@ pub(super) enum Text {
     ReleaseChannel,
     ChannelSwitch,
     JoinDialogTitle,
+    AppRemovalTitle,
+    AppRemovalDetail,
     RecentApps,
+    FeaturedApps,
     Templates,
     NameDialogTitle,
     NameDialogLabel,
     EmptySessions,
+    EmptyVolumes,
     VolumeCapacity,
     ArtworkError,
     PanelTitle,
@@ -77,8 +81,10 @@ impl Shell {
                 | Text::OpeningTitle
                 | Text::InvitationTitle
                 | Text::ConsentTitle
+                | Text::AppRemovalTitle
                 | Text::JoinDialogTitle
                 | Text::RecentApps
+                | Text::FeaturedApps
                 | Text::Templates
         );
         let live = matches!(
@@ -225,10 +231,13 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        assert_eq!(
-            snapshot(window, cx).iter().filter(|(_, n)| n.label() == Some("Example")).count(),
-            1
+        let nodes = snapshot(window, cx);
+        assert!(
+            nodes
+                .iter()
+                .any(|(_, n)| n.role() == Role::Heading && n.label() == Some("Recent apps"))
         );
+        assert_eq!(nodes.iter().filter(|(_, n)| n.label() == Some("Example")).count(), 1);
         cx.update(|cx| {
             window
                 .update(cx, |host, window, cx| {
@@ -244,21 +253,36 @@ mod tests {
     }
 
     #[gpui::test]
-    fn templates_create_a_private_root_only_on_activation(cx: &mut gpui::TestAppContext) {
+    fn empty_launcher_offers_bundled_examples_and_a_new_project(cx: &mut gpui::TestAppContext) {
         let (host, window, requests) = test_support::host(cx);
 
         cx.run_until_parked();
         let nodes = snapshot(window, cx);
 
-        assert!(nodes.iter().any(|(_, n)| n.label() == Some("Templates")));
-        assert!(nodes.iter().any(|(_, n)| n.label() == Some("Try a TODO app")));
+        let headings: Vec<_> = nodes
+            .iter()
+            .filter(|(_, n)| n.role() == Role::Heading)
+            .filter_map(|(_, n)| n.label())
+            .collect();
+        assert!(headings.contains(&"Featured apps") && headings.contains(&"Templates"));
+        assert!(!headings.contains(&"Recent apps"));
+        for label in ["Little List", "Football", "Make an app"] {
+            assert!(
+                nodes.iter().any(|(_, n)| n.role() == Role::Button && n.label() == Some(label))
+            );
+        }
 
         assert!(requests.try_recv().is_err(), "showing examples must not fetch or join anything");
-        test_support::focus_button(window, "example-open-1", cx);
+        test_support::focus_button(window, "football", cx);
         test_support::press(window, "enter", cx);
         assert!(requests.try_recv().is_err(), "folder permissions are reviewed before launch");
         host.read_with(cx, |host, _| assert!(host.new_session.is_some()));
-        assert!(snapshot(window, cx).iter().any(|(_, node)| node.label() == Some("Open session")));
+        let nodes = snapshot(window, cx);
+        assert!(nodes.iter().any(|(_, node)| node.label() == Some("Start Session")));
+        assert!(nodes.iter().any(|(_, node)| node.label() == Some("Cancel")));
+        test_support::press(window, "escape", cx);
+        assert!(host.read_with(cx, |host, _| host.new_session.is_none()));
+        assert!(requests.try_recv().is_err());
     }
 
     #[gpui::test]
@@ -275,7 +299,7 @@ mod tests {
             });
             cx.run_until_parked();
             let nodes = snapshot(window, cx);
-            for text in ["Sign in to Playbit", "No saved sessions", "Back"] {
+            for text in ["Sign in to Playbit", "Featured apps", "Back"] {
                 assert!(
                     !nodes.iter().any(|(_, n)| n.label() == Some(text) || n.value() == Some(text)),
                     "{text}"
@@ -317,10 +341,8 @@ mod tests {
                 "Access is unavailable",
             ),
             (InvitationState::Ready { build_id: "fixture".into() }, "Ready to join."),
-            (InvitationState::Paused, "Invitation paused."),
         ] {
             host.update(cx, |host, cx| {
-                host.invitation.as_mut().unwrap().paused = matches!(state, InvitationState::Paused);
                 host.join_status = state;
                 cx.notify();
             });

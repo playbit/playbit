@@ -81,12 +81,17 @@ impl Synchronization {
             |connection| remote.sync_registrations(store, connection, self.scope.selected()),
         );
         match result {
-            Ok(deferred) if !deferred.is_empty() => {
-                self.volumes.retain(|volume| !deferred.contains(volume));
-                self.total = self.volumes.len();
-                self.retain_error(Err(wire::SharedServiceUpgradeRequired.into()));
+            Ok(deferred) => {
+                if let Some(&first) = deferred.first() {
+                    self.volumes.retain(|volume| !deferred.contains(volume));
+                    self.total = self.volumes.len();
+                    self.retain_error(Err(sync_failure::volume(
+                        store,
+                        first,
+                        wire::SharedServiceUpgradeRequired,
+                    )));
+                }
             }
-            Ok(_) => {}
             Err(error) => {
                 self.retain_error(Err(error));
                 self.next = self.volumes.len();
@@ -113,10 +118,13 @@ impl Synchronization {
             let deferred = result
                 .as_ref()
                 .is_err_and(|error| error.is::<wire::SharedServiceUpgradeRequired>());
-            self.retain_error(result);
+            self.retain_error(result.map_err(|error| sync_failure::volume(store, volume, error)));
             if !deferred && let Some(live) = &remote.live {
                 self.retain_error(
-                    remote.runtime.block_on(live.publisher().account_volume_ready(volume)),
+                    remote
+                        .runtime
+                        .block_on(live.publisher().account_volume_ready(volume))
+                        .map_err(|error| sync_failure::volume(store, volume, error)),
                 );
             }
             self.next += 1;
@@ -147,8 +155,12 @@ impl Synchronization {
             Some(TransferProgress::Sessions { current: self.next, total: self.total }),
             &remote.completion,
         );
-        match remote.sync_session(store, session) {
-            Ok(()) => self.synchronized.push(index),
+        match remote.sync_required_session(store, session) {
+            Ok(()) => {
+                self.synchronized.push(index);
+                let world = remote.sync_optional_world(store, session);
+                self.retain_error(world);
+            }
             Err(error) if error.is::<SessionBuildUnavailable>() => {
                 self.unavailable_sessions.insert(session.id.clone());
             }
@@ -159,6 +171,7 @@ impl Synchronization {
                 {
                     listener.abort();
                 }
+                let error = sync_failure::volume(store, session.replica_volume(), error);
                 self.retain_error(Err(error));
             }
         }
@@ -187,11 +200,15 @@ impl Synchronization {
             Some(TransferProgress::Files { current: self.next, total: self.total }),
             &remote.completion,
         );
-        self.retain_error(remote.sync_blob_selected(
-            store,
-            volume,
-            self.synchronized.iter().map(|index| &self.sessions[*index]),
-        ));
+        self.retain_error(
+            remote
+                .sync_blob_selected(
+                    store,
+                    volume,
+                    self.synchronized.iter().map(|index| &self.sessions[*index]),
+                )
+                .map_err(|error| sync_failure::volume(store, volume, error)),
+        );
         Ok(())
     }
 
@@ -269,13 +286,19 @@ mod tests {
             crate::trace::Interval::new("replication.sync"),
         )
         .unwrap();
-        state.retain_error(Err("first volume failed".into()));
+        let first = store.create_volume("first\nwaiting for an authorized peer", true).unwrap();
+        let cause = sync_failure::volume(&store, first.id, "access denied: volume permission");
+        assert!(!waiting_peer(cause.as_ref()), "a name cannot select private-peer recovery");
+        state.retain_error(Err(cause));
         state.retain_error(Ok(()));
         state.retain_error(Err("later volume failed".into()));
         state.phase = Phase::Finish;
         assert_eq!(
             state.advance(&mut remote, &store).unwrap_err().to_string(),
-            "first volume failed"
+            format!(
+                "Couldn’t sync volume \"first\\nwaiting for an authorized peer\" ({})\naccess denied: volume permission",
+                first.id
+            )
         );
     }
 }

@@ -18,12 +18,13 @@ export interface PersonalGrant { volume: string; write: boolean }
 export interface PersonalSelection extends PersonalGrant { incarnation: string }
 export interface PersonalVolumesRecord { kind: "personal_volumes"; session: string; grants: PersonalSelection[] }
 export interface DisplayNameRecord { kind: "display_name"; name: string }
+export interface AppVisibilityRecord { kind: "app_visibility"; app: Invitation["session"]["app"]; removed: boolean }
 export interface VolumeRecord { kind: "volume"; volume: InvitationVolume; credentials: VolumeCredentials }
 export interface VolumeDeletedRecord { kind: "volume_deleted"; volume: string }
 export interface InvitationRecord { kind: "invitation"; invitation: Invitation; app_name: string | null }
 export interface HostedVolumeRecord { kind: "hosted_volume"; volume: InvitationVolume; credentials: VolumeCredentials; scope: AppScope }
 export interface HostedInvitationRecord { kind: "hosted_invitation"; invitation: Invitation; app_name: string | null; scope: AppScope }
-export type AccountRecord = HostedVolumeRecord | HostedInvitationRecord | PersonalVolumesRecord | DisplayNameRecord | VolumeRecord | VolumeDeletedRecord | InvitationRecord;
+export type AccountRecord = HostedVolumeRecord | HostedInvitationRecord | PersonalVolumesRecord | DisplayNameRecord | AppVisibilityRecord | VolumeRecord | VolumeDeletedRecord | InvitationRecord;
 // pb_account_decode's JSON: the record plus the logical key its record key must derive from.
 export interface DecodedAccountRecord { logical_key: string; record: AccountRecord | null; unsupported: boolean }
 // An authenticated record; retained capabilities acquire URLs only in their channel.

@@ -69,6 +69,7 @@ use crate::encoding::{self, ENT_FLAG_TOMBSTONE, EntVal};
 use crate::error::{Error, Result};
 use crate::storage::ValueRead;
 use crate::storage::{Storage, StorageTxn};
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -511,6 +512,8 @@ impl<'a> StreamEntry<'a> {
 }
 mod prepared;
 pub use prepared::{PreparedChanges, PreparedInspection, PreparedMerge, PreparedSync};
+mod projection;
+pub use projection::ProjectionScan;
 
 // --------------------------------------------------------------- receiver
 struct Pending {
@@ -659,8 +662,26 @@ pub struct SyncReceiver<'db, S: Storage, R: SyncResolver, B: SyncStaging> {
     span_bytes: usize,
     span_entries: usize,
     repair: PendingRepair,
+    range_only: bool,
 }
 impl<'db, S: Storage, R: SyncResolver, B: SyncStaging> SyncReceiver<'db, S, R, B> {
+    /// Receive an independently keyed peer's entire sorted leaf range into an
+    /// unpublished destination. The local transaction preserves its own tree
+    /// identity. The caller must verify the peer's final receipt on that cut.
+    pub fn new_projection(
+        db: &'db Db<S>,
+        remote_key: [u8; 32],
+        resolver: R,
+        staging: B,
+        wall_unix_secs: u64,
+        out: &mut Vec<u8>,
+    ) -> Result<Self> {
+        if !db.meta().syncable {
+            return Err(Error::Mode);
+        }
+        let write = db.begin_write(wall_unix_secs)?;
+        Self::start(db, resolver, staging, Some(write), Some(remote_key), out)
+    }
     pub fn new(
         db: &'db Db<S>,
         resolver: R,
@@ -672,24 +693,25 @@ impl<'db, S: Storage, R: SyncResolver, B: SyncStaging> SyncReceiver<'db, S, R, B
             return Err(Error::Mode);
         }
         let wtxn = db.begin_write(wall_unix_secs)?;
-        Self::start(db, resolver, staging, Some(wtxn), out)
+        Self::start(db, resolver, staging, Some(wtxn), None, out)
     }
     fn start(
         db: &'db Db<S>,
         resolver: R,
         staging: B,
         wtxn: Option<WriteTxn<'db, S>>,
+        projection: Option<[u8; 32]>,
         out: &mut Vec<u8>,
     ) -> Result<Self> {
         let snapshot = db.begin_read()?;
         let meta = db.meta();
-        let root = snapshot.root_hash()?;
+        let root = if projection.is_some() { None } else { snapshot.root_hash()? };
         reserve_sync_output(out, 52)?;
         let at = frame_begin(out, T_PULL_REQ, 0);
         out.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
         out.push(meta.branch_factor);
         out.push(root.map_or(0, |(level, _)| level));
-        out.extend_from_slice(&hashkey_fingerprint(&meta.hash_key));
+        out.extend_from_slice(&hashkey_fingerprint(projection.as_ref().unwrap_or(&meta.hash_key)));
         out.extend_from_slice(&root.map_or([0; 32], |(_, h)| h));
         frame_end(out, at);
         Ok(Self {
@@ -707,6 +729,7 @@ impl<'db, S: Storage, R: SyncResolver, B: SyncStaging> SyncReceiver<'db, S, R, B
             span_bytes: 0,
             span_entries: 0,
             repair: PendingRepair::default(),
+            range_only: projection.is_some(),
         })
     }
     pub fn new_with_delta(
@@ -935,6 +958,9 @@ impl<'db, S: Storage, R: SyncResolver, B: SyncStaging> SyncReceiver<'db, S, R, B
         Ok(())
     }
     fn pull_response(&mut self, payload: &[u8], out: &mut Vec<u8>) -> Result<()> {
+        if self.range_only && !matches!(payload.first(), Some(&S_SNAPSHOT) | Some(&S_EMPTY)) {
+            return Err(Error::Protocol);
+        }
         assert!(matches!(self.state, RState::AwaitPullRes), "pull response follows the handshake");
         let mut rd = Rd::new(payload);
         let status = rd.u8()?;
@@ -1046,7 +1072,16 @@ impl<'db, S: Storage, R: SyncResolver, B: SyncStaging> SyncReceiver<'db, S, R, B
         {
             wtxn.set_clock(wtxn.clock().recv(remote.clock, 0)?)?;
         }
-        if !local.as_ref().map(|l| l.same(&remote)).transpose()?.unwrap_or(false) {
+        let identical = match local.as_ref() {
+            Some(l) if self.range_only => {
+                l.clock == remote.clock
+                    && l.flags == remote.flags
+                    && compare_values(&l.value, &remote.value)?.is_eq()
+            }
+            Some(l) => l.same(&remote)?,
+            None => false,
+        };
+        if !identical {
             self.deltas += 1;
             let delta = SyncDelta {
                 key,
@@ -1297,18 +1332,7 @@ pub enum CommittedDelta {
     PullRequired,
 }
 
-/// Project one complete standalone transaction delta without opening a database.
-/// Every entry is validated, including rejected entries. The returned frame
-/// preserves the database fingerprint, branch factor, transaction clock and
-/// verbatim retained entries; only frame length and retained count change.
-/// Input and output are bounded by `max_bytes` (and `MAX_FRAME`); allocation is
-/// at most the input length. This validates encoding, not sender authorization
-/// or a fingerprint against a particular database. The caller supplies policy.
-pub fn project_delta(
-    bytes: &[u8],
-    max_bytes: usize,
-    mut accept: impl FnMut(&[u8]) -> bool,
-) -> Result<Vec<u8>> {
+fn delta_envelope(bytes: &[u8], max_bytes: usize) -> Result<Rd<'_>> {
     if bytes.len() < DELTA_HEADER || bytes.len() > max_bytes.min(MAX_FRAME) {
         return Err(Error::Protocol);
     }
@@ -1322,6 +1346,22 @@ pub fn project_delta(
     if !(2..=128).contains(&rd.u8()?) || rd.u8()? != 0 {
         return Err(Error::Protocol);
     }
+    Ok(rd)
+}
+
+/// Project one complete standalone transaction delta without opening a database.
+/// Every entry is validated, including rejected entries. The returned frame
+/// preserves the database fingerprint, branch factor, transaction clock and
+/// verbatim retained entries; only frame length and retained count change.
+/// Input and output are bounded by `max_bytes` (and `MAX_FRAME`); allocation is
+/// at most the input length. This validates encoding, not sender authorization
+/// or a fingerprint against a particular database. The caller supplies policy.
+pub fn project_delta(
+    bytes: &[u8],
+    max_bytes: usize,
+    mut accept: impl FnMut(&[u8]) -> bool,
+) -> Result<Vec<u8>> {
+    let mut rd = delta_envelope(bytes, max_bytes)?;
     rd.bytes(8)?; // Fingerprint is preserved; no database/key is supplied here.
     let clock = Clock::decode(rd.bytes(8)?).ok_or(Error::Protocol)?;
     if clock.is_zero() {
@@ -1365,19 +1405,7 @@ pub fn visit_delta<'a>(
     max_bytes: usize,
     mut visit: impl FnMut(&'a [u8], EntState<'a>),
 ) -> Result<()> {
-    if bytes.len() < DELTA_HEADER || bytes.len() > max_bytes.min(MAX_FRAME) {
-        return Err(Error::Protocol);
-    }
-    let mut rd = Rd::new(bytes);
-    if rd.u32()? as usize != bytes.len() || rd.u16()? != T_DELTA || rd.u16()? != 0 {
-        return Err(Error::Protocol);
-    }
-    if rd.u16()? != 1 {
-        return Err(Error::Version);
-    }
-    if !(2..=128).contains(&rd.u8()?) || rd.u8()? != 0 {
-        return Err(Error::Protocol);
-    }
+    let mut rd = delta_envelope(bytes, max_bytes)?;
     rd.bytes(8)?;
     let clock = Clock::decode(rd.bytes(8)?).ok_or(Error::Protocol)?;
     if clock.is_zero() {
@@ -1401,6 +1429,32 @@ pub fn visit_delta<'a>(
         visit(key, remote_ent_state(stored)?);
     }
     rd.done()
+}
+
+/// Translate an authorized changeset into the destination's Merkle context.
+/// Preserve value bytes and clocks; replace the fingerprint and the compact
+/// or full leaf hashes. Malformed input leaves the buffer intact.
+pub fn rekey_delta(bytes: &mut [u8], max: usize, from: &[u8; 32], to: &[u8; 32]) -> Result<()> {
+    let mut rd = delta_envelope(bytes, max)?;
+    if rd.bytes(8)? != hashkey_fingerprint(from) {
+        return Err(Error::HashKeyMismatch);
+    }
+    visit_delta(bytes, max, |_, _| {})?;
+    let mut offset = DELTA_HEADER;
+    while offset < bytes.len() {
+        let mut input = Rd::new(&bytes[offset..]);
+        let key_len = input.u16()? as usize;
+        let value_len = input.u32()? as usize;
+        let key = input.bytes(key_len)?;
+        let header_offset = offset + input.off;
+        let entry = EntVal::decode(input.bytes(value_len)?)?;
+        let hash = crate::hash::entry_hash(to, key, entry.flags, entry.userval);
+        let width = if entry.hash.is_some() { 32 } else { 1 };
+        offset += input.off;
+        bytes[header_offset..header_offset + width].copy_from_slice(&hash[..width]);
+    }
+    bytes[12..20].copy_from_slice(&hashkey_fingerprint(to));
+    Ok(())
 }
 
 /// Combine two complete deltas from the same database using the ordinary LWW
@@ -1854,13 +1908,33 @@ pub struct SyncSender<'db, S: Storage> {
     range: bool,
     range_stop: Option<Vec<u8>>,
     requests: VecDeque<(u8, Vec<u8>)>,
+    projected_root: Option<Option<(u8, [u8; 32])>>,
+    projected_leaf: Option<Box<projection::Leaf<<S::Txn<'db> as StorageTxn>::ValueReader>>>,
 }
 
 impl<'db, S: Storage> SyncSender<'db, S> {
     /// Root of the pinned transfer snapshot. Later source commits cannot
     /// change this receipt; do not read the live database for a pull's root.
     pub fn root_hash(&self) -> Result<Option<(u8, [u8; 32])>> {
-        self.snapshot.root_hash()
+        match self.projected_root {
+            Some(root) => Ok(root),
+            None => self.snapshot.root_hash(),
+        }
+    }
+    /// Calculate the exact receipt for this pinned snapshot in another hash context.
+    pub fn projection_scan(&self, key: [u8; 32]) -> Result<ProjectionScan<'_, 'db, S>> {
+        ProjectionScan::new(&self.snapshot, key, self.branch_factor)
+    }
+    /// Serve a complete sorted range when the projected root differs. Only the
+    /// new context's hashes leave the sender. The caller computed this root on
+    /// this pinned source with `projection_scan`.
+    pub fn use_projection(&mut self, key: [u8; 32], root: Option<(u8, [u8; 32])>) -> Result<()> {
+        if !matches!(self.state, SState::AwaitPullReq) {
+            return Err(Error::Protocol);
+        }
+        self.hash_key = key;
+        self.projected_root = Some(root);
+        Ok(())
     }
 
     pub fn new(db: &'db Db<S>) -> Result<SyncSender<'db, S>> {
@@ -1882,6 +1956,8 @@ impl<'db, S: Storage> SyncSender<'db, S> {
             range: false,
             range_stop: None,
             requests: VecDeque::new(),
+            projected_root: None,
+            projected_leaf: None,
         })
     }
 
@@ -1890,6 +1966,7 @@ impl<'db, S: Storage> SyncSender<'db, S> {
     /// REQUEST_BATCH_MAX ordered leaf spans (or one non-leaf span).
     pub fn process(&mut self, input: &[u8]) -> Result<SyncStatus> {
         if self.output_offset < self.output.len()
+            || self.projected_leaf.is_some()
             || self.value.is_some()
             || self.next.is_some()
             || !self.requests.is_empty()
@@ -1923,6 +2000,18 @@ impl<'db, S: Storage> SyncSender<'db, S> {
     /// Emit at most the supplied output capacity (and at most 256 KiB).
     /// Large logical frames retain their wire size and cross output calls.
     pub fn write_output(&mut self, out: &mut [u8]) -> Result<usize> {
+        loop {
+            if let Some(count) = self.try_write_output(out)? {
+                return Ok(count);
+            }
+        }
+    }
+
+    /// A projected sender may need to hash a large value before writing its
+    /// first public header. None means it consumed one bounded work slice;
+    /// yield and call again. Some(0) is the ordinary end of pending output.
+    pub fn try_write_output(&mut self, out: &mut [u8]) -> Result<Option<usize>> {
+        let mut budget = DEFAULT_MSG_CAP;
         if out.is_empty() {
             return Err(Error::InvalidArgument);
         }
@@ -1935,6 +2024,17 @@ impl<'db, S: Storage> SyncSender<'db, S> {
                     .copy_from_slice(&self.output[self.output_offset..self.output_offset + n]);
                 self.output_offset += n;
                 written += n;
+            } else if let Some(leaf) = &mut self.projected_leaf {
+                if !leaf.advance(&mut budget)? {
+                    return Ok((written > 0).then_some(written));
+                }
+                let leaf = self.projected_leaf.take().expect("completed projected leaf");
+                let hash = leaf.digest();
+                let skip = if leaf.raw.len() >= encoding::ENT_HEADER_FULL { 32 } else { 1 };
+                self.output.clear();
+                self.output.extend_from_slice(&hash[..skip]);
+                self.output_offset = 0;
+                self.value = Some((leaf.raw, skip));
             } else if let Some((value, offset)) = &mut self.value {
                 let n = (value.len() - *offset).min(limit - written);
                 value.read_exact_at(*offset, &mut out[written..written + n])?;
@@ -1951,7 +2051,7 @@ impl<'db, S: Storage> SyncSender<'db, S> {
                 break;
             }
         }
-        Ok(written)
+        Ok(Some(written))
     }
 
     fn handle_frame(&mut self, typ: u16, payload: &[u8], out: &mut Vec<u8>) -> Result<()> {
@@ -1980,7 +2080,7 @@ impl<'db, S: Storage> SyncSender<'db, S> {
                     .expect("checked fixed-width field has the destination width");
                 rd.done()?;
 
-                let my_root = self.snapshot.root_hash()?;
+                let my_root = self.root_hash()?;
                 let (status, err) = if fp != hashkey_fingerprint(&self.hash_key) {
                     (S_ERR_HASHKEY, Some(Error::HashKeyMismatch))
                 } else if bf != self.branch_factor {
@@ -1989,7 +2089,10 @@ impl<'db, S: Storage> SyncSender<'db, S> {
                     (S_EMPTY, None)
                 } else if my_root == Some((root_level, root_hash)) && root_level != 0 {
                     (S_NODIFF, None)
-                } else if root_level == 0 || self.range_fits(&[], None)? {
+                } else if self.projected_root.is_some()
+                    || root_level == 0
+                    || self.range_fits(&[], None)?
+                {
                     (S_SNAPSHOT, None)
                 } else {
                     (S_DIFF, None)
@@ -2022,6 +2125,9 @@ impl<'db, S: Storage> SyncSender<'db, S> {
                 }
             }
             (SState::Serving, T_NODES_REQ) => {
+                if self.projected_root.is_some() {
+                    return Err(Error::Protocol);
+                }
                 let mut rd = Rd::new(payload);
                 let count = rd.u16()? as usize;
                 if rd.u16()? != 0 || !(1..=REQUEST_BATCH_MAX).contains(&count) {
@@ -2180,7 +2286,12 @@ impl<'db, S: Storage> SyncSender<'db, S> {
         self.output.extend_from_slice(&(len as u32).to_le_bytes());
         self.output.extend_from_slice(&key[1..]);
         self.output[at..at + 4].copy_from_slice(&(size as u32).to_le_bytes());
-        self.value = Some((value, 0));
+        if self.projected_root.is_some() {
+            self.projected_leaf =
+                Some(Box::new(projection::Leaf::new(value, key[1..].to_vec(), &self.hash_key)?));
+        } else {
+            self.value = Some((value, 0));
+        }
         Ok(())
     }
 }

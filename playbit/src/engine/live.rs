@@ -7,7 +7,7 @@
 // reported live.
 mod entry;
 mod readiness;
-use super::completion::Wake;
+use super::{completion::Wake, remote::sync_failure};
 use crate::engine::{
     Result,
     publisher::{BootstrapToken, PublicationLease, PublishKey, PublishScope, Publisher},
@@ -68,13 +68,40 @@ impl SubscriptionLimit {
 }
 
 #[derive(Debug)]
-pub(crate) struct LiveGap;
-impl std::fmt::Display for LiveGap {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("replica subscription requires gap recovery")
+pub(crate) enum LiveGap {
+    Delivery,
+    Apply(sync_failure::Cause),
+    PendingBacking,
+}
+impl LiveGap {
+    const BACKING_WAIT: &str = "Also waiting for initial database synchronization";
+
+    pub(super) fn exhausted(self) -> sync_failure::Cause {
+        let exhausted = "replica bootstrap kept losing its live boundary after three captures";
+        match self {
+            Self::Delivery => exhausted.into(),
+            Self::Apply(cause) => cause,
+            Self::PendingBacking => format!("{exhausted}\n{}", Self::BACKING_WAIT).into(),
+        }
     }
 }
-impl std::error::Error for LiveGap {}
+impl std::fmt::Display for LiveGap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Delivery => f.write_str("replica subscription requires gap recovery"),
+            Self::Apply(cause) => std::fmt::Display::fmt(cause, f),
+            Self::PendingBacking => write!(f, "{}\n{}", Self::Delivery, Self::BACKING_WAIT),
+        }
+    }
+}
+impl std::error::Error for LiveGap {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Delivery | Self::PendingBacking => None,
+            Self::Apply(cause) => Some(cause.as_ref()),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ScopeKey {
@@ -131,6 +158,17 @@ struct Receive {
     previous_epoch: Option<[u8; 16]>,
     control: Option<replication::ReplicaControl>,
 }
+impl Receive {
+    fn apply_failure(&self, state: ReplicaState) -> Option<sync_failure::Cause> {
+        let cause = self.control.as_ref()?.failed_apply()?;
+        match state {
+            ReplicaState::Failed => Some(cause),
+            ReplicaState::Gap => Some(sync_failure::apply_gap(cause)),
+            _ => None,
+        }
+    }
+}
+
 struct Entry {
     key: ScopeKey,
     subscription_limit: Option<SubscriptionLimit>,
@@ -496,6 +534,15 @@ impl LiveReplicas {
         self.publisher.clone()
     }
 
+    pub(super) fn resolve_failure(&self, error: sync_failure::Cause) -> sync_failure::Cause {
+        sync_failure::resolve(&self.store, error, |key| {
+            self.entries
+                .iter()
+                .find(|entry| entry.key.volume == key.volume && entry.key.entry == key.entry)
+                .map(|entry| sync_failure::stream_access(&self.store, &entry.key))
+        })
+    }
+
     /// A connection status observation, never a replacement for an explicit
     /// publication/checkpoint fence or a claim about physical presentation.
     pub(crate) fn availability(
@@ -641,7 +688,7 @@ impl LiveReplicas {
         {
             return Err("automatic session synchronization is not supported yet".into());
         }
-        let publish_scope = PublishScope::new(*volume, session.as_ref())?;
+        let publish_scope = PublishScope::for_volume(&self.store, *volume, session.as_ref())?;
         let index = self.reserve(key)?;
         self.entries[index].subscription_limit = None;
         self.entries[index].preparation = None;
@@ -729,7 +776,13 @@ impl LiveReplicas {
         if prepared.subscription.is_some() {
             return Err("live replica already subscribed".into());
         }
-        match replication::subscribe(&prepared.connection, prepared.scope.clone()).await {
+        match replication::subscribe_scoped(
+            &prepared.connection,
+            prepared.scope.clone(),
+            prepared.publish_scope.route,
+        )
+        .await
+        {
             Ok(subscription) => prepared.subscription = Some(subscription),
             Err(error) => {
                 entry.subscription_limit = SubscriptionLimit::from_error(&error.to_string());
@@ -821,6 +874,12 @@ impl LiveReplicas {
         Ok(())
     }
 
+    /// Either a full or selected receiver may apply a newer backing while the
+    /// remote worker is capturing this volume. Retired receivers are drained.
+    pub(super) fn has_receiver(&self, volume: Id) -> bool {
+        self.entries.iter().any(|entry| entry.key.volume == volume && entry.receive.is_some())
+    }
+
     /// Catching up is installed work, not a reason to replace the subscription.
     /// Current scope selection must still check authorization before using this.
     pub(crate) fn is_installed(&self, volume: Id, session: Option<(&str, &str)>) -> bool {
@@ -855,6 +914,40 @@ impl LiveReplicas {
                     })
             })
             .map(|entry| entry.key)
+    }
+
+    pub(super) fn failed_receive(&self, volume: Id) -> Option<sync_failure::Cause> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.key.volume == volume && entry.key.entry.is_none())
+            .find_map(|entry| {
+                let receive = entry.receive.as_ref()?;
+                let (epoch, state) = self.notices.state(entry.key.source())?;
+                if epoch != receive.epoch {
+                    return None;
+                }
+                receive.apply_failure(state).map(|error| self.resolve_failure(error))
+            })
+    }
+
+    /// The full subscription can lose its catalog grant while an independent
+    /// known-entry subscription to the same volume stays authorized.
+    pub(crate) fn active_selected(&self, volume: Id) -> Vec<ScopeKey> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.ready
+                    && entry.key.volume == volume
+                    && entry.key.entry.is_some()
+                    && entry.receive.as_ref().is_some_and(|receive| {
+                        self.notices.state(entry.key.source()).is_some_and(|(epoch, state)| {
+                            epoch == receive.epoch
+                                && matches!(state, ReplicaState::CatchingUp | ReplicaState::Live)
+                        })
+                    })
+            })
+            .map(|entry| entry.key)
+            .collect()
     }
 
     fn recoverable(&self, entry: &Entry, kind: RecoveryKind) -> bool {
@@ -931,11 +1024,13 @@ impl LiveReplicas {
         if !entry.ready || !publication_ready || !receive_live {
             if entry.ready
                 && publication_ready
-                && entry.receive.as_ref().is_some_and(|receive| {
-                    self.notices.state(scope.source()) == Some((receive.epoch, ReplicaState::Gap))
-                })
+                && let Some(receive) = &entry.receive
+                && self.notices.state(scope.source()) == Some((receive.epoch, ReplicaState::Gap))
             {
-                return Err(LiveGap.into());
+                return Err(receive.apply_failure(ReplicaState::Gap).unwrap_or_else(|| {
+                    let key = PublishKey { volume: scope.volume, entry: scope.entry };
+                    sync_failure::target(key, LiveGap::Delivery)
+                }));
             }
             return Err("live recovery has not reached its current caught-up boundary".into());
         }
@@ -966,8 +1061,9 @@ impl LiveReplicas {
             .map(|entry| PublishKey { volume: entry.key.volume, entry: entry.key.entry })
             .collect();
         assert!(volumes.len() <= SCOPE_LIMIT);
-        let fenced = self.publisher.fence_scopes(&volumes).await?;
-        self.checkpoint(&fenced).await
+        let fenced =
+            self.publisher.fence_scopes(&volumes).await.map_err(|e| self.resolve_failure(e))?;
+        self.checkpoint(&fenced).await.map_err(|e| self.resolve_failure(e))
     }
 
     /// Ordered receive barrier for the generations returned by the publisher.
@@ -976,6 +1072,7 @@ impl LiveReplicas {
         volumes: &[crate::engine::publisher::FencedVolume],
     ) -> Result<()> {
         for volume in volumes {
+            let scope_error = |cause| sync_failure::target(volume.volume, cause);
             let entry = self
                 .entries
                 .iter()
@@ -985,17 +1082,35 @@ impl LiveReplicas {
                         && entry.ready
                         && entry.publication_generation == Some(volume.generation)
                 })
-                .ok_or("live replica changed during synchronization barrier")?;
-            let receive = entry.receive.as_ref().ok_or("live replica receiver is not installed")?;
-            let control =
-                receive.control.as_ref().ok_or("live replica checkpoint is unavailable")?;
+                .ok_or_else(|| {
+                    scope_error("live replica changed during synchronization barrier")
+                })?;
+            let receive = entry
+                .receive
+                .as_ref()
+                .ok_or_else(|| scope_error("live replica receiver is not installed"))?;
+            let control = receive
+                .control
+                .as_ref()
+                .ok_or_else(|| scope_error("live replica checkpoint is unavailable"))?;
             let result = control.checkpoint().await;
-            if self.notices.state(entry.key.source()) == Some((receive.epoch, ReplicaState::Gap)) {
-                return Err(LiveGap.into());
+            let state = self.notices.state(entry.key.source());
+            if state == Some((receive.epoch, ReplicaState::Gap)) {
+                return Err(receive
+                    .apply_failure(ReplicaState::Gap)
+                    .unwrap_or_else(|| sync_failure::target(volume.volume, LiveGap::Delivery)));
             }
-            result?;
-            if self.notices.state(entry.key.source()) != Some((receive.epoch, ReplicaState::Live)) {
-                return Err("live replica lost its caught-up boundary".into());
+            let disconnected = state == Some((receive.epoch, ReplicaState::Disconnected));
+            result.map_err(|error| {
+                if disconnected || error.is::<replication::CheckpointCapacity>() {
+                    error
+                } else {
+                    sync_failure::target(volume.volume, error)
+                }
+            })?;
+            if state != Some((receive.epoch, ReplicaState::Live)) {
+                let cause = "live replica lost its caught-up boundary";
+                return Err(if disconnected { cause.into() } else { scope_error(cause) });
             }
         }
         Ok(())
@@ -1074,6 +1189,33 @@ impl LiveReplicas {
         for entry in self.entries.iter_mut().filter(|entry| entry.key.volume == volume) {
             entry.invalidate();
         }
+    }
+
+    /// Losing access through one session retires only that exact authority. An
+    /// already admitted apply must finish before the caller fences cached data.
+    pub(crate) async fn retire_session_world(
+        &mut self,
+        volume: Id,
+        session: &crate::store::Session,
+    ) -> Result<()> {
+        let authority = Some((
+            crate::identifier::decode(&session.id)?,
+            crate::identifier::decode(&session.resolved_build_id)?,
+        ));
+        let mut index = 0;
+        while index < self.entries.len() {
+            let key = self.entries[index].key;
+            if key.volume != volume || key.session != authority {
+                index += 1;
+                continue;
+            }
+            self.entries[index].preparation = None;
+            self.retire(index).await?;
+            self.publisher.forget_scope(PublishKey { volume, entry: key.entry }).await?;
+            self.notices.forget_withdrawn(key.source())?;
+            self.entries.swap_remove(index);
+        }
+        Ok(())
     }
 
     /// The provider consumes dirty notifications through store catalog fences.
@@ -1328,6 +1470,21 @@ pub(crate) mod tests {
             live.notices.test_state(scope.source(), epoch, state);
         }
         live.exhaust_recovery(&first);
+        let failed_scope = PublishKey { volume: first.volume, entry: first.entry };
+        let failure = runtime
+            .block_on(live.checkpoint(&[super::super::publisher::FencedVolume {
+                volume: failed_scope,
+                generation: 9,
+            }]))
+            .unwrap_err();
+        assert_eq!(
+            failure.to_string(),
+            format!(
+                "Couldn’t sync database {} in volume {}\nlive replica changed during synchronization barrier",
+                first.entry.unwrap(),
+                first.volume
+            ),
+        );
         let selected = live.reserve(first).unwrap();
         assert!(!live.entries[selected].ready);
         assert!(live.entries[catalog].ready);
@@ -1372,6 +1529,59 @@ pub(crate) mod tests {
         )
         .unwrap();
         (directory, live, reader)
+    }
+
+    #[test]
+    fn world_withdrawal_retires_only_the_matching_session_and_build() {
+        runtime().block_on(async {
+            let (_directory, mut live, _reader) = controller(&Handle::current());
+            let volume = live.store.create_volume("World", true).unwrap().id;
+            let build = crate::identifier::encode(&[5; 32]);
+            let session = live
+                .store
+                .create_session(
+                    &crate::package::AppIdentity {
+                        publisher: live.store.account().id,
+                        app_id: "game".into(),
+                    },
+                    crate::store::BuildSelector::Exact { build_id: build.clone() },
+                    &build,
+                    volume,
+                )
+                .unwrap();
+            let session_key = crate::identifier::decode(&session.id).unwrap();
+            let full = ScopeKey { volume, session: Some((session_key, [5; 32])), entry: None };
+            let entry = |byte| Some(crate::store::EntryId::from_bytes([byte; 15]).unwrap());
+            let selected = ScopeKey { entry: entry(1), ..full };
+            let other_build =
+                ScopeKey { session: Some((session_key, [6; 32])), entry: entry(2), ..full };
+            let other_session =
+                ScopeKey { session: Some(([7; 32], [5; 32])), entry: entry(3), ..full };
+            let other_volume = ScopeKey { volume: test_id(8), ..full };
+            for key in [full, selected, other_build, other_session, other_volume] {
+                live.reserve(key).unwrap();
+                let token = live
+                    .publisher
+                    .begin_bootstrap(PublishKey { volume: key.volume, entry: key.entry })
+                    .await
+                    .unwrap();
+                live.publisher.abandon_bootstrap(token).await.unwrap();
+                live.notices.test_state(key.source(), [5; 16], ReplicaState::Live);
+            }
+            live.retire_session_world(volume, &session).await.unwrap();
+            live.retire_session_world(volume, &session).await.unwrap();
+            assert_eq!(live.start_readiness(&selected, std::time::Instant::now()).unwrap(), None);
+            let remaining = live.publisher.retained_scopes();
+            let notices = live.notices.drain();
+            assert_eq!(live.entries.len(), 3);
+            for key in [other_build, other_session, other_volume] {
+                assert!(live.entries.iter().any(|e| e.key == key));
+                assert!(remaining.contains(&PublishKey { volume: key.volume, entry: key.entry }));
+                assert!(notices.iter().any(|n| n.source == key.source()));
+            }
+            assert_eq!(remaining.len(), 3);
+            assert_eq!(notices.len(), 3);
+        });
     }
 
     #[cfg(feature = "file-provider")]
@@ -1540,6 +1750,33 @@ pub(crate) mod tests {
         });
     }
 
+    pub(crate) fn observed_apply_failure(
+        live: &mut LiveReplicas,
+        scope: ScopeKey,
+        generation: u64,
+        epoch: [u8; 16],
+        state: ReplicaState,
+        database: crate::store::DatabaseId,
+        cause: &str,
+    ) {
+        let index = observed_entry(
+            live,
+            scope,
+            generation,
+            epoch,
+            crate::engine::publisher::PublishState::Ready,
+            state,
+        );
+        live.entries[index].receive.as_mut().unwrap().control =
+            Some(replication::ReplicaControl::test_failed_apply(
+                PublishKey { volume: scope.volume, entry: scope.entry },
+                database,
+                cause,
+                live.notices.control_slots(),
+            ));
+        live.notices.drain();
+    }
+
     pub(crate) fn observed_entry(
         live: &mut LiveReplicas,
         scope: ScopeKey,
@@ -1671,6 +1908,49 @@ pub(crate) mod tests {
         live.notices.test_state(scope.source(), [1; 16], ReplicaState::Live);
         live.publisher.test_state(scope.volume, 1, PublishState::Failed);
         assert!(live.installed_scope(scope.volume).is_none());
+    }
+
+    #[test]
+    fn failed_receive_preflight_uses_only_the_current_catalog_epoch() {
+        use crate::engine::publisher::FencedVolume;
+        let runtime = runtime();
+        let (_directory, mut live, _reader) = controller(runtime.handle());
+        let catalog = key(1);
+        let entry = crate::store::EntryId::from_bytes([2; 15]).unwrap();
+        let database = crate::store::DatabaseId::Entry(entry);
+        let selected = ScopeKey { entry: Some(entry), ..catalog };
+        let pending =
+            crate::store::Error::NotFound(crate::store::Error::PENDING_BACKING).to_string();
+        for (scope, state, reason) in [
+            (selected, ReplicaState::Failed, "apply failed"),
+            (catalog, ReplicaState::Failed, "apply failed"),
+            (catalog, ReplicaState::Gap, pending.as_str()),
+        ] {
+            observed_apply_failure(&mut live, scope, 1, [3; 16], state, database, reason);
+            let key = PublishKey { volume: scope.volume, entry: scope.entry };
+            let err = runtime
+                .block_on(live.checkpoint(&[FencedVolume { volume: key, generation: 1 }]))
+                .unwrap_err();
+            let expected =
+                format!("Couldn’t sync database {entry} in volume {}\n{reason}", catalog.volume);
+            assert_eq!(err.to_string(), expected);
+            assert_eq!(
+                err.source().is_some_and(|cause| cause.is::<LiveGap>()),
+                state == ReplicaState::Gap
+            );
+            if scope == selected {
+                assert!(live.failed_receive(catalog.volume).is_none());
+            } else {
+                let err = live.failed_receive(catalog.volume).unwrap();
+                assert_eq!(err.to_string(), expected);
+                assert_eq!(
+                    err.source().is_some_and(|cause| cause.is::<LiveGap>()),
+                    state == ReplicaState::Gap
+                );
+            }
+        }
+        live.notices.test_state(catalog.source(), [4; 16], ReplicaState::Failed);
+        assert!(live.failed_receive(catalog.volume).is_none());
     }
 
     #[test]
@@ -1898,7 +2178,7 @@ pub(crate) mod tests {
             now += delay;
             live.append_readiness_recoveries(&mut plan, now);
             assert_eq!(plan, [scope]);
-            assert_eq!(live.start_readiness(&scope, now).unwrap(), 2);
+            assert_eq!(live.start_readiness(&scope, now).unwrap(), Some(2));
             assert!(live.readiness_running(&scope));
             // The next capture has a fresh preparation. Only its own failure
             // can retain it; the previous ticket cannot admit that generation.
@@ -2050,7 +2330,8 @@ pub(crate) mod tests {
         assert_eq!(live.take_recoveries(RecoveryKind::Gap), [scope]);
         live.publisher.test_state(scope.volume, 2, PublishState::Pending);
         live.notices.test_state(scope.source(), [2; 16], ReplicaState::Gap);
-        assert!(live.complete_recovery(&scope).unwrap_err().is::<LiveGap>());
+        let gap = live.complete_recovery(&scope).unwrap_err();
+        assert!(gap.source().is_some_and(|cause| cause.is::<LiveGap>()));
         assert!(live.recovery_is_current(&scope, RecoveryKind::Gap));
         assert!(live.entries[index].recovery_attempted);
         for publication in [PublishState::Failed, PublishState::Disconnected] {

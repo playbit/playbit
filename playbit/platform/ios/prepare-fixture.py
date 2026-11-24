@@ -42,6 +42,7 @@ with tempfile.TemporaryDirectory(prefix="playbit-ios-source-", dir="/tmp") as te
     profile = work / "profile"
     prepare_offline_profile(profile)
     environment = dict(os.environ, PLAYBIT_PROFILE=str(profile))
+    environment.pop("PLAYBIT_TESTING_CREDENTIALS", None)
     policy = '(version 1) (allow default) (deny network-outbound (remote ip "*:*"))'
     sandbox = ["/usr/bin/sandbox-exec", "-p", policy]
     ready, output = socket.socketpair()

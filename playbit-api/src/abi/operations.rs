@@ -4,6 +4,7 @@
     unsafe_code,
     reason = "C declarations and opaque pointers define the ABI; invocation lives in the SDK and runtime adapters."
 )]
+use super::environment::DISPLAY_NAME_BYTES;
 use core::ffi::c_void;
 
 #[repr(C)]
@@ -33,6 +34,16 @@ pub struct Identity {
     pub session_id: [u8; 32],
     pub flags: u32,
     pub reserved: u32,
+    /// Zero-padded UTF-8. A full-width name occupies every byte.
+    pub display_name: [u8; DISPLAY_NAME_BYTES],
+}
+
+impl Identity {
+    /// The display name, when supplied by the host. An older host can omit this field.
+    pub fn display_name(&self) -> Result<Option<&str>, super::syscall::Error> {
+        let end = core::mem::offset_of!(Self, display_name) + DISPLAY_NAME_BYTES;
+        super::environment::display_name(&self.display_name, self.written as usize >= end)
+    }
 }
 
 pub type Init = unsafe extern "C" fn(*mut Context, *mut c_void, *mut *mut c_void) -> i32;
@@ -259,10 +270,11 @@ impl Default for Identity {
             session_id: [0; 32],
             flags: 0,
             reserved: 0,
+            display_name: [0; DISPLAY_NAME_BYTES],
         }
     }
 }
 
-super::record::record!(Identity, 104, { generation: u64, account_id: [u8; 16], device_id: [u8; 16], instance_id: [u8; 16], session_id: [u8; 32], flags: u32, reserved: u32 });
+super::record::record!(Identity, 104, { generation: u64, account_id: [u8; 16], device_id: [u8; 16], instance_id: [u8; 16], session_id: [u8; 32], flags: u32, reserved: u32, display_name: [u8; DISPLAY_NAME_BYTES] }, optional_output: display_name);
 
 super::record::record!(App, if cfg!(target_pointer_width = "64") { 40 } else { 24 }, { init: Option<Init>, turn: Option<Turn>, destroy: Option<Destroy>, user_data: *mut c_void });

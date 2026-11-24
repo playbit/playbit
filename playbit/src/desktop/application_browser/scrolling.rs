@@ -21,15 +21,7 @@ impl Shell {
             .min_w_0()
             .h_full()
             .relative()
-            .child(
-                div()
-                    .id("application-columns")
-                    .size_full()
-                    .flex()
-                    .overflow_x_scroll()
-                    .track_scroll(&handle)
-                    .child(content.flex_auto().flex_shrink_0().min_w_full()),
-            )
+            .child(content.id("application-columns").overflow_x_scroll().track_scroll(&handle))
             .child(Scrollbars::overlay_with_corner_radius(&bars, 16.))
     }
 }

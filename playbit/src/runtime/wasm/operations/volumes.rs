@@ -33,7 +33,7 @@ fn write_volumes(
             volume_layout::TAGS_COUNT,
             &(volume.tags.len() as u32).to_le_bytes(),
         );
-        record.write(memory.data, volume_layout::RIGHTS, &volume.rights.0.to_le_bytes());
+        record.write(memory.data, volume_layout::RIGHTS, &volume.public_rights().0.to_le_bytes());
         record.write(
             memory.data,
             volume_layout::FLAGS,

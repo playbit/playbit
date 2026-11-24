@@ -54,6 +54,7 @@ async function project(account: string, state: unknown, record: AccountRecord): 
         throw Error('Unlock this account’s private credentials before synchronizing');
     }
     if (record.kind === 'display_name') return { ...row, display_name: record.name };
+    if (record.kind === 'app_visibility') return row;
     if (record.kind === 'volume_deleted') {
         const deleted = [...new Set([...(row.deleted_volumes ?? []), record.volume])];
         if (deleted.length > 4096) throw Error('Account deletion capacity exceeded');
@@ -97,11 +98,11 @@ export class AccountReplica {
         this.call = (name, bytes, current = () => true) => call(name, bytes, () => !this.closed && current());
     }
     close(): void { this.closed = true; }
-    async deletedVolumes(): Promise<Set<string>> {
+    async profile(): Promise<{ revision: bigint; displayName: string; deletedVolumes: Set<string> }> {
         const metadata = await openAccountMetadata<RecoveryState>('recovery');
         try {
-            const { state } = await readAccountMutation(metadata, this.account);
-            return new Set(state?.deleted_volumes ?? []);
+            const { state, control } = await readAccountMutation(metadata, this.account);
+            return { revision: control.revision, displayName: state?.display_name ?? '', deletedVolumes: new Set(state?.deleted_volumes ?? []) };
         } finally { metadata.database.close(); }
     }
     async decode(entry: AccountEntry): Promise<AccountRecord | null> {
@@ -116,7 +117,16 @@ export class AccountReplica {
             throw error;
         }
     }
-    async adopt(entry: AccountEntry, current: () => boolean): Promise<void> {
+    async displayNameRecord(current: () => boolean): Promise<(AccountEntry & { name: string }) | undefined> {
+        await requireAccountAuthority(this.account);
+        const key = await this.cipher.recordKey(new TextEncoder().encode('settings/display-name'));
+        const entry = entries(await this.call('pb_account_read', key, current)).next().value;
+        if (!entry || this.closed || !current()) return;
+        const value = await this.decode(entry);
+        if (value?.kind !== 'display_name') throw Error('Invalid account display name record');
+        return { ...entry, name: value.name };
+    }
+    async adopt(entry: AccountEntry, current: () => boolean): Promise<boolean> {
         const record = await this.decode(entry);
         const metadata = await openAccountMetadata(record?.kind === 'personal_volumes' ? 'personal' : 'recovery');
         try {
@@ -125,14 +135,16 @@ export class AccountReplica {
             for (let attempt = 0; attempt < 16 && !this.closed && current(); attempt++) {
                 const snapshot = await readAccountMutation(metadata, this.account, hex(entry.key));
                 const state = record ? await project(this.account, snapshot.state, record) : snapshot.state;
-                if (this.closed || !current()) return;
+                if (this.closed || !current()) return false;
                 try {
                     await adoptAccountMutation(metadata, this.account, snapshot.control, state,
-                        { key: hex(entry.key), clock: entry.clock, ciphertext: entry.ciphertext }, () => !this.closed && current());
-                    return;
+                        { key: hex(entry.key), clock: entry.clock, ciphertext: entry.ciphertext }, () => !this.closed && current(),
+                        record?.kind === 'app_visibility' ? record : undefined);
+                    return record?.kind === 'display_name';
                 } catch (error) { if ((error as Partial<AccountMetadataChangedError>).code !== 'account-metadata-changed' || attempt === 15) throw error; }
             }
         } finally { metadata.database.close(); }
+        return false;
     }
     async validate(bytes: Uint8Array<ArrayBuffer>, current: () => boolean, missing = false): Promise<void> {
         // Validate the combined capability projection as well as each envelope:
@@ -196,15 +208,17 @@ export class AccountReplica {
     async acknowledge(record: AccountOutboxRecord, current: () => boolean): Promise<void> {
         await acknowledgeAccountRecord('personal', this.account, record, () => !this.closed && current());
     }
-    async apply(delta: Uint8Array, current: () => boolean): Promise<void> {
+    async apply(delta: Uint8Array, current: () => boolean): Promise<boolean> {
         await requireAccountAuthority(this.account);
         const decoded = await this.call('pb_account_entries', delta, current);
         await this.validate(decoded, current);
         await withAccountAuthority(this.account, () => this.call('pb_account_apply', delta, current));
+        let foundName = false;
         for (const entry of entries(decoded)) {
-            if (this.closed || !current()) return;
+            if (this.closed || !current()) return false;
             const winner = await this.call('pb_account_read', entry.key, current);
-            for (const value of entries(winner)) await this.adopt(value, current);
+            for (const value of entries(winner)) foundName = await this.adopt(value, current) || foundName;
         }
+        return foundName;
     }
 }

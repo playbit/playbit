@@ -1,6 +1,5 @@
 // The message and result types shared by the page (ap-client.ts) and the AP
-// SharedWorker (ap-worker.ts, ap-connection.ts). Type declarations only: this
-// module is library-neutral and its imports are erased.
+// SharedWorker (ap-worker.ts, ap-connection.ts).
 
 import type { ApTiming } from "./ap-timing.ts";
 import type { ResetState } from "./web-account.ts";
@@ -8,6 +7,14 @@ import type { ResetState } from "./web-account.ts";
 // An AP service operation as the app composes it. `op` and `operation_id` are
 // the only fields every operation carries; the rest depend on `op`.
 export interface ApOperation { op: string; operation_id: string; [key: string]: unknown }
+
+// Each advisory operation has one slot beside ordinary requests at every worker boundary.
+export type AdvisoryOperation = 'describe' | 'put_account_display_name' | 'channelDisplayName';
+export function advisoryOperation(method: string, operation?: ApOperation): AdvisoryOperation | undefined {
+    if (method === 'channelDisplayName') return method;
+    const op = method === 'request' || method === 'begin' ? operation?.op : method;
+    return op === 'describe' || op === 'put_account_display_name' ? op : undefined;
+}
 
 // A service JSON response the worker has already checked for `ok: true` and a
 // matching `operation_id`.
@@ -21,7 +28,7 @@ export interface ApDescription {
 }
 
 // `ApConnection.status()` as replied to `connect`, `finishCode` and `status`.
-export interface ApStatus { caCertificate?: number[]; connected: boolean; account: string | null; instanceId: number[] | null; connectionCount: number; activeStreams: number }
+export interface ApStatus { caCertificate?: number[]; connected: boolean; account: string | null; instanceId: number[] | null; connectionCount: number; activeStreams: number; sessionDisplayNames?: boolean }
 
 // Reply to `resetWebAccount`/`resetState`: the last cleanup failure, if any.
 /** What resetWebAccount/resetState reply: web-account.ts's ResetState. */
@@ -43,6 +50,7 @@ export interface ApMethods {
     describe: { args: undefined; result: ApDescription };
     beginChannel: {args: {frame: import("./ap-codec.ts").FrameInput;device:Uint8Array;generation:number}; result:number};
     channelRead: {args:{handle:number};result:import("./ap-codec.ts").Frame & {receipt?:number}};
+    channelDisplayName: { args: { handle: number; name: Uint8Array }; result: undefined };
     channelConsumed: {args:{receipts:number[]};result:undefined};
     onboarding: { args: { stage: number }; result: undefined };
     agreement: { args: { account: string; revision: number; sha256: string; accept: boolean }; result: boolean };

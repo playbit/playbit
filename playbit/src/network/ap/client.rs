@@ -82,7 +82,16 @@ pub struct ApConnection {
     #[cfg(feature = "app-host")]
     publisher_issuer: Option<[u8; 32]>,
     response_timeout: Duration,
+    discovery: Discovery,
+}
+
+#[derive(Default)]
+struct Discovery {
     description: tokio::sync::OnceCell<super::service::ServiceDescription>,
+    #[cfg(feature = "connected-engine")]
+    ready: tokio::sync::Notify,
+    #[cfg(feature = "connected-engine")]
+    session_names: tokio::sync::OnceCell<bool>,
 }
 
 struct AuthenticationConnection {
@@ -170,7 +179,7 @@ impl ApConnection {
         Ok(Self {
             endpoint: authentication.endpoint,
             connection: authentication.connection,
-            description: tokio::sync::OnceCell::new(),
+            discovery: Discovery::default(),
             instance_id: identity.instance_id.clone(),
             #[cfg(feature = "app-host")]
             publisher_issuer: super::publisher::issuer_key_from_certificate(
@@ -201,7 +210,7 @@ impl ApConnection {
         Ok(Self {
             endpoint: authentication.endpoint,
             connection: authentication.connection,
-            description: tokio::sync::OnceCell::new(),
+            discovery: Discovery::default(),
             instance_id: identity.instance_id.clone(),
             #[cfg(feature = "app-host")]
             publisher_issuer: super::publisher::issuer_key_from_certificate(
@@ -241,7 +250,7 @@ impl ApConnection {
         Ok(Self {
             endpoint: authentication.endpoint,
             connection: authentication.connection,
-            description: tokio::sync::OnceCell::new(),
+            discovery: Discovery::default(),
             instance_id: identity.instance_id.clone(),
             #[cfg(feature = "app-host")]
             publisher_issuer: super::publisher::issuer_key_from_certificate(
@@ -255,7 +264,12 @@ impl ApConnection {
     /// Lazily discover optional support on this authenticated connection only.
     /// Baseline operations and local rendering never depend on this request.
     pub async fn describe(&self) -> super::service::Result<&super::service::ServiceDescription> {
-        self.description
+        if let Some(description) = self.discovery.description.get() {
+            return Ok(description);
+        }
+        let result = self
+            .discovery
+            .description
             .get_or_try_init(|| async {
                 tokio::time::timeout(self.response_timeout(), async {
                     let request = super::operation::ServiceRequest::Describe {
@@ -276,6 +290,70 @@ impl ApConnection {
                 })
                 .await
                 .map_err(|_| ClientError::ResponseTimeout)?
+            })
+            .await;
+        #[cfg(feature = "connected-engine")]
+        if result.is_ok() {
+            self.discovery.ready.notify_waiters();
+        }
+        result
+    }
+
+    /// A routing join can select its first-frame shape without waiting for ordinary admission.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn cached_session_names(&self) -> Option<bool> {
+        self.discovery
+            .description
+            .get()
+            .map(|d| d.features.iter().any(|f| f == super::channel::DISPLAY_NAMES_FEATURE))
+            .or_else(|| self.discovery.session_names.get().copied())
+    }
+
+    /// All active members on this connection share a single pending discovery and retry delay.
+    /// Dropping the last waiting membership cancels that work along with its control stream.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) async fn discover_session_names(&self) -> bool {
+        *self
+            .discovery
+            .session_names
+            .get_or_init(|| async {
+                let mut delay = Duration::from_millis(250);
+                loop {
+                    match self.describe().await {
+                        Ok(d) => {
+                            return d
+                                .features
+                                .iter()
+                                .any(|f| f == super::channel::DISPLAY_NAMES_FEATURE);
+                        }
+                        Err(error) => {
+                            let retry = error
+                                .downcast_ref::<super::service::ServiceFailure>()
+                                .is_some_and(super::service::ServiceFailure::is_capacity_exhausted)
+                                || matches!(
+                                    error.downcast_ref::<ClientError>(),
+                                    Some(
+                                        ClientError::ResponseTimeout
+                                            | ClientError::Read(_)
+                                            | ClientError::Write(_)
+                                            | ClientError::ClosedStream(_)
+                                    )
+                                );
+                            if !retry || self.is_closed() {
+                                return false;
+                            }
+                        }
+                    }
+                    // Another operation may finish discovery while a member is backing off.
+                    let ready = self.discovery.ready.notified();
+                    if self.discovery.description.get().is_none() {
+                        tokio::select! {
+                            _ = ready => {},
+                            _ = tokio::time::sleep(delay) => {},
+                        }
+                    }
+                    delay = (delay * 2).min(Duration::from_secs(8));
+                }
             })
             .await
     }
@@ -1015,6 +1093,103 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "connected-engine")]
+    #[test]
+    fn membership_joins_while_an_older_ap_withholds_discovery() {
+        use crate::{
+            engine::session_channels::{Event, SessionChannels},
+            network::ap::{channel, operation, service},
+            store::{BuildSelector, LocalStore},
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (endpoint, certificate) = server_endpoint(&runtime);
+        let config = silent_config(endpoint.local_addr().unwrap(), certificate);
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(LocalStore::open(dir.path()).unwrap());
+        let root = store.create_volume("Root", false).unwrap();
+        let build = crate::identifier::encode(&[7; 32]);
+        let session = store
+            .create_session(
+                &crate::package::AppIdentity {
+                    publisher: store.account().id,
+                    app_id: "stall".into(),
+                },
+                BuildSelector::Exact { build_id: build.clone() },
+                &build,
+                root.id,
+            )
+            .unwrap();
+        runtime.block_on(async {
+            timeout(Duration::from_secs(5), async {
+                let client_endpoint = create_endpoint(&config).unwrap();
+                let dial = client_endpoint
+                    .connect(config.server_address, &config.server_name)
+                    .unwrap();
+                let accept_peer = async { endpoint.accept().await.unwrap().await.unwrap() };
+                let (client, peer) = tokio::join!(dial, accept_peer);
+                let connection = Arc::new(ApConnection {
+                    endpoint: client_endpoint,
+                    connection: client.unwrap(),
+                    discovery: Discovery::default(),
+                    instance_id: b"device".to_vec(),
+                    response_timeout: config.response_timeout,
+                    #[cfg(feature = "app-host")]
+                    publisher_issuer: None,
+                });
+                let accept = || async {
+                    let (send, receive) = peer.accept_bi().await.unwrap();
+                    ApStream { send, receive, response_timeout: config.response_timeout }
+                };
+
+                // The ordinary stream has received Describe and sends no response until after join.
+                let discovery = connection.describe();
+                tokio::pin!(discovery);
+                let mut ordinary = tokio::select! {
+                    stream = accept() => stream,
+                    result = &mut discovery => panic!("unexpected discovery result {result:?}"),
+                };
+                let request = ordinary.receive().await.unwrap();
+                let request: operation::ServiceRequest =
+                    serde_json::from_slice(&request.body).unwrap();
+
+                let quota = Arc::new(tokio::sync::Semaphore::new(channel::ACCOUNT_QUEUE_BYTES));
+                let join = SessionChannels::join(
+                    connection.clone(), store, session, Some(([1; 16], [7; 32])), quota, Arc::new(|| {}),
+                );
+                let baseline = async {
+                    let mut control = accept().await;
+                    let join = control.receive().await.unwrap();
+                    assert_eq!(join.frame_type, frame_type::SUBSCRIBE);
+                    assert_eq!(join.body.len(), channel::PROOF_BYTES);
+                    let ack = Frame::new(frame_type::SUBSCRIBE, 0, [], &join.destination[..], []).unwrap();
+                    control.send(&ack).await.unwrap();
+                    (control, join.destination)
+                };
+                let (joined, (mut control, destination)) = tokio::join!(join, baseline);
+                let mut channels = joined.unwrap();
+                let mut description = service::ServiceDescription::baseline();
+                description.features.retain(|f| f != channel::DISPLAY_NAMES_FEATURE);
+                let response = serde_json::json!({
+                    "timing": [], "ok": true, "operation_id": request.operation_id(), "data": description,
+                });
+                let answer = Frame::new(
+                    frame_type::DIRECT, service::PROTOCOL, operation::SERVICE_DESTINATION,
+                    connection.instance_id(), serde_json::to_vec(&response).unwrap(),
+                ).unwrap();
+                ordinary.send(&answer).await.unwrap();
+                discovery.await.unwrap();
+                assert!(!connection.discover_session_names().await);
+
+                // The original stream continues delivering the original roster after feature absence.
+                let roster = channel::Control::Presence { participants: vec![] };
+                let body = serde_json::to_vec(&roster).unwrap();
+                control.send(&Frame::new(frame_type::PUBLISH, 0, [], destination, body).unwrap()).await.unwrap();
+                assert_eq!(channels.next().await.unwrap(), Event::Presence { participants: vec![] });
+            }).await.unwrap();
+        });
+    }
+
     /// Connects a bare `ApConnection` (bypassing the AP authentication
     /// handshake, which is irrelevant to closing a transport) to a server
     /// that never answers anything, modeling a connected, idle AP peer.
@@ -1027,7 +1202,7 @@ mod tests {
             ApConnection {
                 endpoint: authentication.endpoint,
                 connection: authentication.connection,
-                description: tokio::sync::OnceCell::new(),
+                discovery: Discovery::default(),
                 instance_id: vec![],
                 response_timeout: config.response_timeout,
                 #[cfg(feature = "app-host")]
@@ -1453,7 +1628,7 @@ mod tests {
                     let connection = ApConnection {
                         endpoint,
                         connection: transport,
-                        description: tokio::sync::OnceCell::new(),
+                        discovery: Discovery::default(),
                         instance_id: vec![],
                         response_timeout: config.response_timeout,
                         #[cfg(feature = "app-host")]

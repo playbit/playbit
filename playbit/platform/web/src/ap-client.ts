@@ -1,5 +1,7 @@
 import { AGREEMENT } from "./ap-codec.ts";
 import { validId } from './identifier.ts';
+import { advisoryOperation, type AdvisoryOperation } from './ap-protocol.ts';
+import { failure } from './errors.ts';
 import { workerURL } from './release-channel.ts';
 import type { Deployment } from './release-channel.ts';
 // The named account worker owns authentication and every AP stream across tabs.
@@ -19,6 +21,7 @@ interface PendingRequest {
     idle: boolean;
     local: boolean;
     credit: boolean;
+    advisory?: AdvisoryOperation;
 }
 
 export class ApClient {
@@ -29,6 +32,7 @@ export class ApClient {
     listeners: Map<string, ApChannelListener>;
     closed: boolean;
     observedAccount?: string;
+    private describing?: Promise<ApDescription>;
     accountListener?: ApAccountListener;
     accountFailure?: ApFailureListener;
 
@@ -84,16 +88,21 @@ export class ApClient {
         const idle = method === "streamReplica" || method === "streamInvitation" || method === "channelRead";
         const local = method === 'watchAccount' || method === 'accountChanged';
         const credit = method === 'channelConsumed';
+        const advisory = advisoryOperation(method, args && 'operation' in args ? args.operation : undefined);
         let reads = 0, ordinary = 0, controls = 0, credits = 0;
-        for (const pending of this.pending.values()) { if (pending.credit) credits++; else if (pending.local) controls++; else if (pending.idle) reads++; else ordinary++; }
-        if (credit ? credits >= 1 : local ? controls >= 3 : idle ? reads >= 33 : ordinary >= 32) return Promise.reject(new Error("Too many pending AP requests"));
+        for (const pending of this.pending.values()) {
+            if (pending.advisory) {
+                if (pending.advisory === advisory) return Promise.reject(failure('ap-capacity', 'An advisory AP request is already pending'));
+            } else if (pending.credit) credits++; else if (pending.local) controls++; else if (pending.idle) reads++; else ordinary++;
+        }
+        if (!advisory && (credit ? credits >= 1 : local ? controls >= 3 : idle ? reads >= 33 : ordinary >= 32)) return Promise.reject(new Error("Too many pending AP requests"));
         const id = this.nextId++;
         return new Promise((resolve, reject) => {
             const timer = idle ? null : setTimeout(() => {
                 this.pending.delete(id);
-                reject(new Error("AP worker response timed out"));
+                reject(advisory ? failure('ap-transport', 'AP worker response timed out') : new Error("AP worker response timed out"));
             }, 65000);
-            this.pending.set(id, { resolve, reject, timer, idle, local, credit });
+            this.pending.set(id, { resolve, reject, timer, idle, local, credit, advisory });
             try { this.worker.port.postMessage({ id, method, args, account: this.account } satisfies ApRequestOf<M>, transfer); }
             catch (error) { clearTimeout(timer as number | undefined); this.pending.delete(id); reject(error); }
         });
@@ -105,13 +114,16 @@ export class ApClient {
     }
     resetWebAccount(tab: string, token: string): Promise<ApResetResult> { return this.call('resetWebAccount', { tab, token }); }
     resetState(token: string | null = null): Promise<ApResetResult> { return this.call('resetState', { token }); }
-    describe(): Promise<ApDescription> { return this.call("describe"); }
+    describe(): Promise<ApDescription> {
+        return this.describing ??= this.call('describe').finally(() => { this.describing = undefined; });
+    }
     connect(): Promise<ApStatus> { return this.call("connect", { account: this.account }); }
     requestCode({ email, instanceName }: { email: string; instanceName?: string }): Promise<{ email: string; codeSent: true }> { return this.call("requestCode", { email, instanceName }); }
     signInWithKey(email: string, accountKey: string): Promise<ApStatus> { return this.call("signInWithKey", { email, accountKey }); }
     finishCode(code: string): Promise<ApStatus> { return this.call("finishCode", { code, account: this.account }); }
     beginChannel(frame: import("./ap-codec.ts").FrameInput,device:Uint8Array,generation:number): Promise<number> {return this.call("beginChannel",{frame,device,generation});}
     channelRead(handle:number): Promise<import("./ap-codec.ts").Frame & {receipt?:number}> {return this.call("channelRead",{handle});}
+    channelDisplayName(handle: number, name: Uint8Array): Promise<undefined> { return this.call("channelDisplayName", { handle, name }); }
     begin(operation: ApOperation): Promise<number> { return this.call("begin", { operation }); }
     subscribeReplica(operation: ApOperation): Promise<ApReplicaSubscription> { return this.call("subscribeReplica", { operation }); }
     streamReplica(handle: number): Promise<Uint8Array> { return this.call("streamReplica", { handle }); }

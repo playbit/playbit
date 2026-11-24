@@ -1,7 +1,7 @@
 //! A passive status overlay showing current work.
 use super::*;
 use crate::engine::reply::TransferProgress;
-use crate::ui::desktop::zoom;
+use crate::ui::desktop::{typography::tabular_numerals, zoom};
 use playbit_api::ui::{Theme, ThemeColor as Role};
 
 const LABEL_BYTES_MAX: usize = 512;
@@ -31,7 +31,14 @@ fn status(
         (None, "Sending Crash Report…")
     } else {
         match transfer.kind {
-            TransferKind::Failed => (Some("status-sync"), "Synchronization failed"),
+            TransferKind::Failed => (
+                Some("status-sync"),
+                transfer
+                    .message
+                    .as_deref()
+                    .and_then(crate::engine::remote::sync_failure_parts)
+                    .map_or("Synchronization failed", |(scope, _)| scope),
+            ),
             TransferKind::Canceling => (Some("status-sync"), "Canceling…"),
             TransferKind::Running => {
                 return Some(match &transfer.progress {
@@ -43,10 +50,13 @@ fn status(
                         icon: Some("status-sync"),
                         label: format!("{current}/{total} volumes"),
                     },
-                    _ => Status {
-                        icon: Some("status-sync"),
-                        label: label(transfer.message.as_deref().unwrap_or("Synchronizing…")),
-                    },
+                    _ => {
+                        let message = transfer.message.as_deref().unwrap_or("Synchronizing…");
+                        // A scheduled initialization retry is still in progress.
+                        let reason = crate::engine::remote::sync_failure_parts(message)
+                            .map_or(message, |(_, cause)| cause);
+                        Status { icon: Some("status-sync"), label: label(reason) }
+                    }
                 });
             }
             TransferKind::Idle | TransferKind::Complete | TransferKind::Paused => return None,
@@ -103,7 +113,12 @@ impl Shell {
                             .debug_selector(|| "status-icon-slot".into())
                             .child(gpui::svg().path(icon).size(sp(16.)).text_color(foreground))
                     }))
-                    .child(text.min_w_0().truncate().debug_selector(|| "status-label".into())),
+                    .child(
+                        tabular_numerals(text)
+                            .min_w_0()
+                            .truncate()
+                            .debug_selector(|| "status-label".into()),
+                    ),
             ),
         )
     }
@@ -135,6 +150,9 @@ mod tests {
             status(false, false, &transfer).expect("failed").label,
             "Synchronization failed"
         );
+        let scope = "Couldn’t sync database \"scorebook\" in volume \"Shared\"";
+        transfer.message = Some(format!("{scope}\naccess denied: volume permission"));
+        assert_eq!(status(false, false, &transfer).expect("scoped failure").label, scope);
         assert_eq!(status(true, false, &transfer).expect("restart").icon, Some("status-plug"));
         assert_eq!(
             status(false, true, &transfer),
@@ -143,6 +161,9 @@ mod tests {
         assert_eq!(status(true, true, &transfer).expect("restart").icon, Some("status-plug"));
         transfer.kind = TransferKind::Running;
         transfer.progress = None;
+        let reason = "waiting for initial database synchronization";
+        transfer.message = Some(format!("{scope}\n{reason}"));
+        assert_eq!(status(false, false, &transfer).expect("scheduled retry").label, reason);
         transfer.message = Some("Preparing app…".into());
         assert_eq!(status(false, false, &transfer).expect("preparing").label, "Preparing app…");
     }

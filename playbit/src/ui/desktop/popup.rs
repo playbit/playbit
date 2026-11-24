@@ -5,7 +5,7 @@
 )]
 
 use super::{controls, zoom};
-use crate::runtime::{MenuEntry, MenuGlyph};
+use crate::runtime::{MenuEntry, MenuGlyph, ViewNode};
 use block::ConcreteBlock;
 use cocoa::{
     appkit::NSWindowCollectionBehavior,
@@ -33,10 +33,50 @@ pub fn is_modal_active() -> bool {
     MENU_ACTIVE.load(Ordering::Acquire)
 }
 
+/// Action IDs are unique across a decoded guest scene. A menu can move with
+/// its contents, but a changed declaration cannot receive the old selection.
+pub(crate) fn guest_menu_present(view: &ViewNode, matches: &impl Fn(&[MenuEntry]) -> bool) -> bool {
+    match view {
+        ViewNode::Theme { child, .. } | ViewNode::Scroll { child, .. } => {
+            guest_menu_present(child, matches)
+        }
+        ViewNode::Row(children) | ViewNode::Column(children) | ViewNode::List(children) => {
+            children.iter().any(|child| guest_menu_present(child, matches))
+        }
+        ViewNode::ContextMenu { items, child } => {
+            matches(items) || guest_menu_present(child, matches)
+        }
+        ViewNode::PopupButton { items, disabled, .. } => !disabled && matches(items),
+        _ => false,
+    }
+}
+
+/// Only this process compares these declarations. Hash every field, including
+/// submenu boundaries, without retaining labels in pending input.
+pub(super) fn menu_digest(items: &[MenuEntry]) -> blake3::Hash {
+    use std::hash::{Hash, Hasher};
+    struct Digest(blake3::Hasher);
+    impl Hasher for Digest {
+        fn write(&mut self, bytes: &[u8]) {
+            self.0.update(bytes);
+        }
+        fn finish(&self) -> u64 {
+            u64::from_le_bytes(self.0.finalize().as_bytes()[..8].try_into().expect("hash width"))
+        }
+    }
+    let mut digest = Digest(blake3::Hasher::new());
+    items.hash(&mut digest);
+    digest.0.finalize()
+}
+
+pub(crate) type PrepareGuestMenu =
+    Rc<dyn Fn(&[MenuEntry], &App) -> Option<(gpui::EntityId, controls::Activate)>>;
+
 #[derive(Clone)]
 pub struct Request {
     owner: AnyWindowHandle,
     pub(super) opening_press: bool,
+    pub(super) prepare_guest: Option<PrepareGuestMenu>,
     pub(super) update_action: Option<u32>,
     display: Bounds<Pixels>,
     anchor: Bounds<Pixels>,
@@ -67,6 +107,7 @@ impl Request {
         Self {
             owner: window.window_handle(),
             opening_press: false,
+            prepare_guest: None,
             update_action: None,
             display: window.display(cx).map(|display| display.bounds()).unwrap_or(window.bounds()),
             anchor: screen_bounds,
@@ -118,6 +159,7 @@ impl Request {
         Self {
             owner: window.window_handle(),
             opening_press: false,
+            prepare_guest: None,
             update_action: None,
             display: window.display(cx).map(|display| display.bounds()).unwrap_or(window.bounds()),
             anchor: Bounds::new(at, size(px(0.), px(0.))),
@@ -147,6 +189,7 @@ struct ActiveMenu {
     monitor: *mut Object,
     deactivation_observer: *mut Object,
     _owner_closed: gpui::Subscription,
+    guest_owner: Option<gpui::EntityId>,
     _activation: gpui::Subscription,
     running: Rc<Cell<bool>>,
     selected: Rc<Cell<Option<u32>>>,
@@ -309,7 +352,7 @@ fn place(request: &Request, width: Pixels, height: Pixels) -> Bounds<Pixels> {
     )
 }
 
-pub fn open(request: Request, cx: &mut App) {
+pub fn open(mut request: Request, cx: &mut App) {
     if !cx.has_global::<Coordinator>() {
         cx.set_global(Coordinator::default());
     }
@@ -319,6 +362,13 @@ pub fn open(request: Request, cx: &mut App) {
     if request.control.as_ref().is_some_and(|target| target.upgrade().is_none()) {
         return;
     }
+    let guest_owner = if let Some(prepare) = &request.prepare_guest {
+        let Some((owner, activate)) = prepare(&request.items, cx) else { return };
+        request.activate = activate;
+        Some(owner)
+    } else {
+        None
+    };
     let Ok(width) = request.owner.update(cx, |_, window, _| request_width(&request, window)) else {
         return;
     };
@@ -447,6 +497,7 @@ pub fn open(request: Request, cx: &mut App) {
         monitor,
         deactivation_observer,
         _owner_closed: owner_closed,
+        guest_owner,
         _activation: activation,
         running: running.clone(),
         selected,
@@ -456,6 +507,55 @@ pub fn open(request: Request, cx: &mut App) {
         opening_press: request.opening_press,
     });
     crate::trace::mark("ui.menu.open");
+}
+
+/// The reusable menu panel may outlive its owner, including the last document.
+pub(super) fn non_menu_window_count(cx: &App) -> usize {
+    cx.windows().into_iter().filter(|window| window.downcast::<MenuView>().is_none()).count()
+}
+
+/// A guest can replace a menu while it is being tracked. Only dismiss its own
+/// snapshot, leaving other windows and unchanged menus on animated canvases alone.
+pub(super) fn reconcile_guest_menu(owner: gpui::EntityId, view: Option<&ViewNode>, cx: &mut App) {
+    if let Some(active) = cx.try_global::<Coordinator>().and_then(|menus| menus.active.as_ref())
+        && active.guest_owner == Some(owner)
+        && !view.is_some_and(|view| {
+            active.menu.read(cx).is_ok_and(|panel| {
+                guest_menu_present(view, &|items| items == panel.panels[0].items)
+            })
+        })
+    {
+        dismiss(cx);
+    }
+}
+
+/// Resolve a disabled context action only while its original menu is still tracking.
+pub fn resolve_context_action(
+    activate: &controls::Activate,
+    item: Option<MenuEntry>,
+    cx: &mut App,
+) {
+    let Some(active) = cx.try_global::<Coordinator>().and_then(|menus| menus.active.as_ref())
+    else {
+        return;
+    };
+    if !active.running.get() || !Rc::ptr_eq(&active.activate, activate) {
+        return;
+    }
+    let menu = active.menu;
+    let Some(item) = item else {
+        dismiss(cx);
+        return;
+    };
+    let _ = menu.update(cx, |view, _, cx| {
+        let [panel] = view.panels.as_mut_slice() else { return };
+        let [pending @ MenuEntry::Action { disabled: true, .. }] = panel.items.as_mut_slice()
+        else {
+            return;
+        };
+        *pending = item;
+        cx.notify();
+    });
 }
 
 /// Cancel a menu before its owner changes scale, retaining no stale hit regions.
@@ -1463,6 +1563,44 @@ mod tests {
             destructive: false,
         }
     }
+    #[gpui::test]
+    fn reusable_panel_is_not_a_last_document(cx: &mut gpui::TestAppContext) {
+        let panel = menu(cx);
+        let owner = cx.add_window(|_, _| gpui::EmptyView);
+        assert_eq!(cx.update(|cx| non_menu_window_count(cx)), 1);
+        owner.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.update(|cx| non_menu_window_count(cx)), 0);
+        assert!(cx.update(|cx| cx.windows().contains(&panel.into())));
+    }
+
+    #[test]
+    fn live_menu_follows_its_declaration_across_guest_layout_changes() {
+        let original = vec![action(7, "Reconnect", false)];
+        let same = |items: &[MenuEntry]| items == original;
+        let text =
+            || ViewNode::Text { text: "Match".into(), style: playbit_api::ui::TextStyle::Body };
+        let context = |label, disabled| ViewNode::ContextMenu {
+            items: vec![action(7, label, disabled)],
+            child: Box::new(text()),
+        };
+        assert!(guest_menu_present(&context("Reconnect", false), &same));
+        assert!(guest_menu_present(
+            &ViewNode::Column(vec![text(), context("Reconnect", false)]),
+            &same
+        ));
+        assert!(!guest_menu_present(&context("Disconnect", false), &same));
+        assert!(!guest_menu_present(&context("Reconnect", true), &same));
+        let disabled_popup = ViewNode::PopupButton {
+            id: 3,
+            label: "Teams".into(),
+            items: original.clone(),
+            disabled: true,
+        };
+        assert!(!guest_menu_present(&disabled_popup, &same));
+        assert!(!guest_menu_present(&text(), &same));
+    }
+
     #[gpui::test]
     fn account_menu_is_flush_above_its_button_and_clamps_to_display(cx: &mut gpui::TestAppContext) {
         // The sidebar menu shares its left/bottom edge with the account button,

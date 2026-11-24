@@ -513,30 +513,59 @@ test('a full event queue retains volume observation until a poll makes space', (
     assert.equal(new DataView(events.at(-1).data.buffer).getBigUint64(0, true), 2n);
 });
 
-test('identity and presence publish caller-sized records while preserving future tails', () => {
-    const a = adapter(), data = new DataView(a.memory.buffer);
-    const identity = { account: new Uint8Array(16).fill(1), device: new Uint8Array(16).fill(2), instance: new Uint8Array(16).fill(3), session: new Uint8Array(32).fill(4) };
-    a.services.identity = () => identity;
-    a.services.channels = () => ({ participants: [new Uint8Array(80).fill(5), new Uint8Array(80).fill(6)] });
-    initialize(a.memory, 128, 112); new Uint8Array(a.memory.buffer, 232, 8).fill(7);
-    assert.equal(a.operations.pb_identity(128), 0);
-    assert.equal(data.getUint32(128, true), 112); assert.equal(data.getUint32(132, true), 104);
-    assert.equal(data.getBigUint64(136, true), a.services.work.epoch); assert.equal(data.getUint8(144), 1); assert.equal(data.getUint8(160), 2);
-    assert.equal(data.getUint8(176), 3); assert.equal(data.getUint8(192), 4); assert.equal(data.getUint32(224, true), 2);
-    assert(new Uint8Array(a.memory.buffer, 232, 8).every(byte => byte === 7));
-    a.services.identity = () => undefined;
-    assert.equal(a.operations.pb_identity(128), -1);
-    assert.equal(data.getUint32(132, true), 0);
-    initialize(a.memory, 512, 96); initialize(a.memory, 608, 96);
-    new Uint8Array(a.memory.buffer, 600, 8).fill(8); new Uint8Array(a.memory.buffer, 696, 8).fill(9);
-    assert.equal(a.operations.pb_presence(512, 2, 96, 16), 0); assert.equal(data.getUint32(16, true), 2);
-    for (const [pointer, value] of [[512,5],[608,6]]) {
-        assert.equal(data.getUint32(pointer, true), 96); assert.equal(data.getUint32(pointer + 4, true), 88);
-        assert(new Uint8Array(a.memory.buffer, pointer + 8, 80).every(byte => byte === value));
+test('identity and presence publish names in complete extended records and preserve baseline strides', () => {
+    const a = adapter(), data = new DataView(a.memory.buffer), encoder = new TextEncoder();
+    const name = '梅'.repeat(85) + '!';
+    a.services.identity = () => ({ account: new Uint8Array(16).fill(1), device: new Uint8Array(16).fill(2),
+        instance: new Uint8Array(16).fill(3), session: new Uint8Array(32).fill(4), displayName: name });
+    a.services.channels = () => ({ participants: [5, 6].map((value, i) => ({
+        source: new Uint8Array(80).fill(value), displayName: i ? '' : name,
+    })) });
+    for (const [size, written] of [[104, 104], [128, 104], [359, 104], [368, 360]]) {
+        initialize(a.memory, 128, size); new Uint8Array(a.memory.buffer, 128 + written, Math.max(8, size - written)).fill(7);
+        assert.equal(a.operations.pb_identity(128), 0);
+        assert.equal(data.getUint32(128, true), size); assert.equal(data.getUint32(132, true), written);
+        assert.equal(data.getBigUint64(136, true), a.services.work.epoch); assert.equal(data.getUint8(144), 1); assert.equal(data.getUint8(160), 2);
+        assert.equal(data.getUint8(176), 3); assert.equal(data.getUint8(192), 4); assert.equal(data.getUint32(224, true), 2);
+        if (written > 104) assert.deepEqual(new Uint8Array(a.memory.buffer, 232, 256), encoder.encode(name));
+        assert(new Uint8Array(a.memory.buffer, 128 + written, Math.max(8, size - written)).every(byte => byte === 7));
     }
-    assert(new Uint8Array(a.memory.buffer, 600, 8).every(byte => byte === 8));
-    assert(new Uint8Array(a.memory.buffer, 696, 8).every(byte => byte === 9));
-    data.setUint32(608, 104, true); data.setUint32(16, 99, true);
+    a.services.identity = () => undefined;
+    assert.equal(a.operations.pb_identity(128), -1); assert.equal(data.getUint32(132, true), 0);
+    initialize(a.memory, 864, 352);
+    new Uint8Array(a.memory.buffer, 600, 256).fill(8); new Uint8Array(a.memory.buffer, 1208, 8).fill(9);
+    for (const size of [88, 96, 343]) {
+        initialize(a.memory, 512, size);
+        assert.equal(a.operations.pb_presence(512, 2, 352, 16), 0); assert.equal(data.getUint32(16, true), 2);
+        assert.equal(data.getUint32(512, true), size);
+        assert.equal(data.getUint32(516, true), 88); assert.equal(data.getUint32(868, true), 344);
+        assert(new Uint8Array(a.memory.buffer, 520, 80).every(byte => byte === 5));
+        assert(new Uint8Array(a.memory.buffer, 872, 80).every(byte => byte === 6));
+        assert(new Uint8Array(a.memory.buffer, 952, 256).every(byte => byte === 0));
+        assert(new Uint8Array(a.memory.buffer, 600, 256).every(byte => byte === 8));
+        assert(new Uint8Array(a.memory.buffer, 1208, 8).every(byte => byte === 9));
+    }
+    initialize(a.memory, 512, 344);
+    assert.equal(a.operations.pb_presence(512, 2, 352, 16), 0);
+    assert.deepEqual(new Uint8Array(a.memory.buffer, 600, 256), encoder.encode(name));
+    assert.equal(a.operations.pb_presence(512, 1, 352, 16), -11);
+    assert.equal(data.getUint32(16, true), 2); assert.equal(data.getUint32(516, true), 0);
+    data.setUint32(864, 353, true); data.setUint32(16, 99, true);
     const before = new Uint8Array(a.memory.buffer).slice();
-    assert.equal(a.operations.pb_presence(512, 2, 96, 16), -3); assert.deepEqual(new Uint8Array(a.memory.buffer), before);
+    assert.equal(a.operations.pb_presence(512, 2, 352, 16), -3); assert.deepEqual(new Uint8Array(a.memory.buffer), before);
+});
+
+test('identity and presence changes coalesce and survive a saturated event queue', () => {
+    const { operations, services, memory, events } = adapter();
+    for (;;) {
+        try { services.work.queue({ kind: 14, target: 1, data: new Uint8Array() }); }
+        catch (error) { assert.equal(error.status, -9); break; }
+    }
+    for (let i = 0; i < 3; i++) {
+        operations.environmentChanged(0x80000015);
+        operations.environmentChanged(5);
+    }
+    initialize(memory, 64, 24);
+    for (let i = 0; i < 2; i++) assert.equal(operations.pb_event_poll(64, 128, 0), 0);
+    assert.deepEqual(events.slice(-2).map(({ kind, target, data }) => [kind, target, data.length]), [[0x80000015, 0, 0], [5, 0, 0]]);
 });

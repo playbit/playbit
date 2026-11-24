@@ -236,6 +236,9 @@ fn classify(
         trace.configure(u64::from_le_bytes(data.try_into().map_err(|_| Error::InvalidArgument)?));
         return Ok(None);
     }
+    if kind == EventKind::IdentityChanged && (header.target != 0 || !data.is_empty()) {
+        return Err(Error::InvalidArgument);
+    }
     if is_ui(kind) {
         validate_ui(kind, header.target, data)?;
     }
@@ -296,6 +299,7 @@ fn event_kind(value: u32) -> Result<Option<EventKind>, Error> {
         18 => EventKind::ChannelMessage,
         19 => EventKind::ChannelStatus,
         20 => EventKind::TraceConfig,
+        value if value == EventKind::IdentityChanged as u32 => EventKind::IdentityChanged,
         unknown
             if unknown & OPTIONAL_EVENT_KIND_BIT != 0
                 && unknown & !OPTIONAL_EVENT_KIND_BIT > EventKind::TraceConfig as u32 =>

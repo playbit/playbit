@@ -41,6 +41,13 @@ impl LocalStore {
         let operations = self.access_operations(&Access::owner(self.account.id), id)?;
         let _guards = operations.lock()?;
         let _profile = self.lock_profile()?;
+        self.check_app_data_erasure(id, binding.role)?;
+        if binding.role.is_local()
+            && self.metadata.begin_read()?.has(app_removal::erased_local_volume(id).as_bytes())?
+            && self.app_removed(&binding.app)?
+        {
+            return Err(Error::AccessDenied("re-add the app before opening its erased local data"));
+        }
         let shared = binding.role == crate::package::AutomaticVolumeRole::Session
             && binding
                 .session
@@ -458,6 +465,10 @@ impl LocalStore {
             MetadataPolicy::new(volume.clone(), declaration.volume_permissions(shared.is_some()))?;
         if let Some(session) = shared {
             index.provisioned_versions.insert(session.resolved_build_id);
+        } else if let RootPurpose::Automatic(binding) = purpose
+            && binding.role == crate::package::AutomaticVolumeRole::Root
+        {
+            index.provisioned_versions.insert(binding.build.clone());
         }
         #[cfg(test)]
         checkpoint(3)?;
@@ -503,13 +514,14 @@ impl LocalStore {
         let mut entries = Vec::with_capacity(seeds.len());
         for seed in seeds {
             let revision = EntryId::generate()?;
-            let (kind, pin) = self.prepare_entry_blob_with_key(
+            let kind = self.prepare_entry_blob_with_key(
                 crate::store::volume_index::EntryAddress { volume, entry: seed.id },
                 revision,
                 &mut &seed.bytes[..],
                 &credentials.blob_key,
+                true,
+                || Ok(()),
             )?;
-            self.pin_prepared_blob_profile_locked(&pin)?;
             entries.push((
                 seed.id,
                 seed.name.clone(),
@@ -550,6 +562,9 @@ impl LocalStore {
         });
         if let Some(binding) = automatic_binding {
             automatic::write_binding(&mut tx, volume.id, binding)?;
+            if binding.role.is_local() {
+                tx.del(app_removal::erased_local_volume(volume.id).as_bytes())?;
+            }
         }
         if automatic_binding.is_none() || volume.share_key_with_service {
             tx.put(format!("pending/{}", pending.id).as_bytes(), &encode(&pending)?)?;
