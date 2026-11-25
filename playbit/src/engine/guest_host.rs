@@ -33,6 +33,25 @@ impl Failure {
         }
     }
 }
+
+/// The terminal outcome observed on the original instance event socket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EventEnd {
+    Disconnected(std::io::ErrorKind),
+    Failed(String),
+    Stopped(super::service_events::StopReason),
+}
+impl std::fmt::Display for EventEnd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disconnected(kind) => kind.fmt(f),
+            Self::Failed(details) => f.write_str(details),
+            Self::Stopped(reason) => f.write_str(reason.message()),
+        }
+    }
+}
+impl std::error::Error for EventEnd {}
+
 struct Entry {
     generation: u64,
     kind: DataKind,
@@ -57,6 +76,7 @@ struct State {
     files: files::State,
     roots: roots::State,
     failure: Option<Failure>,
+    event_end: Option<EventEnd>,
     disposed: bool,
     event_sequence: u64,
     revision: Option<(crate::store::Id, u64)>,
@@ -216,6 +236,9 @@ impl Inbox {
     pub fn failure(&self) -> Option<&'static str> {
         self.0.state.lock().expect("guest completion lock poisoned").failure.map(Failure::message)
     }
+    pub(crate) fn event_end(&self) -> Option<EventEnd> {
+        self.0.state.lock().expect("guest completion lock poisoned").event_end.clone()
+    }
     pub fn stop_reason(&self) -> Option<super::service_events::StopReason> {
         match self.0.state.lock().expect("guest completion lock poisoned").failure {
             Some(Failure::Stopped(reason)) => Some(reason),
@@ -262,13 +285,17 @@ pub struct GuestHost {
     bulk: mpsc::SyncSender<LaneWork>,
     channel_receives: mpsc::SyncSender<LaneWork>,
     channel_commands: mpsc::SyncSender<LaneWork>,
-    _event_stop: EventStop,
+    event_stop: EventStop,
     root_notify: Option<Arc<roots::Notify>>,
 }
-struct EventStop(std::os::unix::net::UnixStream);
+struct EventStop {
+    stream: std::os::unix::net::UnixStream,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
 impl Drop for EventStop {
     fn drop(&mut self) {
-        let _ = self.0.shutdown(std::net::Shutdown::Both);
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 }
 impl GuestHost {
@@ -295,7 +322,7 @@ impl GuestHost {
                 mutations,
                 reads,
                 bulk,
-                _event_stop: event_stop,
+                event_stop,
                 root_notify: None,
                 channel_receives,
                 channel_commands,
@@ -557,6 +584,16 @@ impl Host for GuestHost {
 impl Drop for GuestHost {
     fn drop(&mut self) {
         let mut state = self.shared.state.lock().expect("guest completion lock poisoned");
+        // A syscall can detect shutdown before the event reader runs. After
+        // kernel-confirmed hangup the reader can classify its buffered frames
+        // and EOF locally. Finish it before our own shutdown can mask the cause.
+        if super::readiness::peer_hung_up(&self.event_stop.stream)
+            && let Some(reader) = self.event_stop.thread.take()
+        {
+            drop(state);
+            reader.join().expect("guest event reader must not panic");
+            state = self.shared.state.lock().expect("guest completion lock poisoned");
+        }
         state.disposed = true;
         roots::dispose(&mut state, &self.bulk);
         files::dispose(&mut state, &self.bulk);
@@ -570,8 +607,8 @@ impl Drop for GuestHost {
         state.bytes =
             state.data_entries().map(|entry| entry.bytes).sum::<usize>() + files::bytes(&state);
         drop(state);
-        // Sender destruction closes each lane. Its worker drains accepted work;
-        // no join or cancellation runs on the thread disposing this host.
+        // Dropping the senders lets data and file workers drain their accepted
+        // work independently of the thread disposing this host.
     }
 }
 
@@ -741,6 +778,29 @@ fn record_failure(state: &mut State, failure: Failure) {
     roots::settle(state);
 }
 
+fn subscribe_events(
+    stream: &mut std::os::unix::net::UnixStream,
+    request: &Request,
+) -> super::Result<()> {
+    let bytes = ipc::codec::encode(request, 4096)?;
+    if let Err(write_error) = ipc::codec::write(stream, &bytes) {
+        // A full admission queue writes a refusal and closes without reading.
+        // Consume a complete buffered reply without waiting on a failed write.
+        stream.set_nonblocking(true)?;
+        match ipc::codec::read(stream, super::service_events::MAX_CHANNEL_BYTES) {
+            Ok(bytes) => {
+                ipc::Response::new(bytes)?;
+                return Err("Unexpected event reply after subscription write failed".into());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                return Err(error.into());
+            }
+            Err(_) => return Err(write_error.into()),
+        }
+    }
+    Ok(())
+}
+
 fn event_lane(
     profile: &std::path::Path,
     context: Context,
@@ -754,13 +814,12 @@ fn event_lane(
         std::os::unix::net::UnixStream::connect(profile.join(crate::paths::ENGINE_SOCKET))?;
     ipc::verify_peer(&stream).map_err(|error| std::io::Error::other(error.to_string()))?;
     stream.set_write_timeout(Some(std::time::Duration::from_secs(30)))?;
-    let stop = EventStop(stream.try_clone()?);
+    let control = stream.try_clone()?;
     let shared = shared.clone();
-    std::thread::Builder::new().name("guest-events".into()).spawn(move || {
+    let reader = std::thread::Builder::new().name("guest-events".into()).spawn(move || {
         let request = Request::InstanceEvents { context };
         let mut run = || -> super::Result<()> {
-            let bytes = codec::encode(&request, 4096)?;
-            ipc::write(&mut stream, &bytes)?;
+            subscribe_events(&mut stream, &request)?;
             loop {
                 let bytes = codec::read(&mut stream, super::service_events::MAX_CHANNEL_BYTES)?;
 
@@ -803,6 +862,7 @@ fn event_lane(
                     if !notice.volumes.is_empty() || !notice.display_name.is_empty() {
                         return Err("Stopped guest notice retained guest metadata".into());
                     }
+                    state.event_end = Some(EventEnd::Stopped(reason));
                     record_failure(&mut state, Failure::Stopped(reason));
                     drop(state);
                     (shared.wake)();
@@ -851,17 +911,26 @@ fn event_lane(
         if let Err(error) = run() {
             let mut state = shared.state.lock().expect("guest completion lock poisoned");
             if !state.disposed {
+                use std::io::ErrorKind;
+                state.event_end = Some(match error.downcast_ref::<std::io::Error>().map(|e| e.kind()) {
+                    Some(kind @ (ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe
+                        | ErrorKind::NotConnected)) => EventEnd::Disconnected(kind),
+                    _ => {
+                        crate::diagnostic!(
+                            "Guest event channel failed for {}: {error}; operations were not replayed",
+                            context.instance
+                        );
+                        EventEnd::Failed(error.to_string())
+                    }
+                });
                 record_failure(&mut state, Failure::Exchange);
-                crate::diagnostic!(
-                    "Guest event channel failed for {}: {error}; operations were not replayed",
-                    context.instance
-                );
                 drop(state);
                 (shared.wake)();
             }
         }
     })?;
-    Ok(stop)
+    Ok(EventStop { stream: control, thread: Some(reader) })
 }
 
 #[cfg(test)]

@@ -18,6 +18,49 @@ fn construct(
 }
 
 #[test]
+fn event_outcome_during_initial_root_preparation_reaches_the_guest_owner() {
+    for expected in [
+        EventEnd::Disconnected(std::io::ErrorKind::UnexpectedEof),
+        EventEnd::Failed(ipc::REQUEST_QUEUE_FULL.into()),
+    ] {
+        let (directory, _engine, admission, package) = fixture();
+        let profile = directory.path().to_owned();
+        let listener =
+            std::os::unix::net::UnixListener::bind(profile.join(crate::paths::ENGINE_SOCKET))
+                .unwrap();
+        let (send, result) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let error = Guest::prepare(&profile, admission, package, Arc::new(|| {}), None.into())
+                .err()
+                .expect("guest needs its initial roots");
+            send.send(error).unwrap();
+        });
+        assert!(
+            crate::engine::readiness::wait_readable(
+                &listener,
+                Instant::now() + Duration::from_secs(5)
+            )
+            .unwrap()
+        );
+        let (mut events, _) = listener.accept().unwrap();
+        events.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let bytes = ipc::read(&mut events).unwrap();
+        assert!(matches!(
+            ipc::codec::access::<crate::engine::ArchivedRequest>(&bytes).unwrap(),
+            crate::engine::ArchivedRequest::InstanceEvents { .. }
+        ));
+        if let EventEnd::Failed(details) = &expected {
+            let reply = Reply::Error { error: details.clone() };
+            ipc::write(&mut events, &ipc::codec::encode(&reply, 4096).unwrap()).unwrap();
+        }
+        drop(events);
+        let error = result.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(error.downcast_ref::<EventEnd>(), Some(&expected));
+        thread.join().unwrap();
+    }
+}
+
+#[test]
 fn native_host_supports_scorekeepers_full_automatic_volume_requirement() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../guests/scorekeeper");
     let manifest = crate::package::Manifest::read(&source).unwrap();
@@ -1066,7 +1109,7 @@ fn reconstruction_keeps_ownership_until_accepted_service_work_is_terminal() {
     engine.maintain_service().unwrap();
 }
 
-fn fixture() -> (tempfile::TempDir, Engine, Admission, Package) {
+pub(crate) fn fixture() -> (tempfile::TempDir, Engine, Admission, Package) {
     fixture_package(crate::engine::tests::button_package())
 }
 fn fixture_package(package: Package) -> (tempfile::TempDir, Engine, Admission, Package) {

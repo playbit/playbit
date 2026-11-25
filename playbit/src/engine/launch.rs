@@ -68,7 +68,7 @@ pub fn retain(result: Result<Option<Child>>, child: &mut Option<Child>) -> Resul
     }
 }
 
-fn connect_endpoint(profile: &Path) -> Result<Option<UnixStream>> {
+pub(crate) fn connect_endpoint(profile: &Path) -> Result<Option<UnixStream>> {
     let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
     socket.set_nonblocking(true)?;
     match socket.connect(&socket2::SockAddr::unix(profile.join(crate::paths::ENGINE_SOCKET))?) {

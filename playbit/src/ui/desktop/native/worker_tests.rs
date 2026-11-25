@@ -274,12 +274,228 @@ fn service_guest_owner_delivers_completions_and_drains_without_an_engine_scene_e
     engine.join().unwrap();
 }
 
+#[cfg(feature = "process")]
+fn opened_guest(generation: u64, replaces: Option<u64>) -> Output {
+    let (handle, _inputs) = Handle::fixture(generation);
+    Output::Opened {
+        replaces,
+        handle,
+        errors: async_channel::bounded(1).1,
+        title: "Guest".into(),
+        view: None,
+        logs: vec![],
+        quit_on_last_window: true,
+    }
+}
+
+#[cfg(feature = "process")]
+fn window_before_guest_opens(
+    cx: &mut gpui::TestAppContext,
+    previous_guest: Option<u64>,
+    acknowledged: std::rc::Rc<std::cell::Cell<bool>>,
+) -> (async_channel::Sender<Output>, gpui::AnyWindowHandle) {
+    cx.text_system()
+        .add_fonts(vec![std::borrow::Cow::Borrowed(crate::ui::desktop::UI_FONT_DATA)])
+        .unwrap();
+    let (send, output) = async_channel::bounded(1);
+    cx.update(|cx| {
+        super::super::window::receive(output, acknowledged, Default::default(), true, cx)
+    });
+    if let Some(generation) = previous_guest {
+        send.try_send(opened_guest(generation, None)).unwrap();
+    } else {
+        send.try_send(Output::Recovering {
+            generation: 0,
+            active: Arc::new(AtomicBool::new(true)),
+            started: Instant::now(),
+        })
+        .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(crate::engine::restart::NOTICE_AFTER);
+    }
+    cx.run_until_parked();
+    let windows = cx.update(|cx| cx.windows());
+    assert_eq!(windows.len(), 1);
+    (send, windows[0])
+}
+
+#[cfg(feature = "process")]
+#[gpui::test]
+fn disconnect_before_opened_closes_the_startup_status_or_previous_window(
+    startup: &mut gpui::TestAppContext,
+    replacement: &mut gpui::TestAppContext,
+) {
+    use std::{cell::Cell, rc::Rc};
+
+    let directory = tempfile::tempdir().unwrap();
+    for (cx, replaces) in [(startup, None), (replacement, Some(7))] {
+        let acknowledged = Rc::new(Cell::new(false));
+        let (send, _) = window_before_guest_opens(cx, replaces, acknowledged.clone());
+
+        let presentation = GuestPresentation { profile: directory.path(), replaces, opened: false };
+        let generation = presentation.presented_generation(8).unwrap_or(0);
+        close_disconnected_guest(directory.path(), None, "event stream closed", generation, &send);
+        drop(send);
+        cx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+        assert!(!acknowledged.get(), "a confirmed disconnect completes without a fatal alert");
+    }
+}
+
+#[cfg(feature = "process")]
+#[gpui::test]
+fn recovered_guest_opens_at_full_size_or_keeps_the_previous_guest_window(
+    startup: &mut gpui::TestAppContext,
+    replacement: &mut gpui::TestAppContext,
+) {
+    use gpui::{px, size};
+
+    let directory = tempfile::tempdir().unwrap();
+    for (cx, replaces) in [(startup, None), (replacement, Some(7))] {
+        let (send, before) = window_before_guest_opens(cx, replaces, Default::default());
+        let resized = size(px(750.), px(630.));
+        if replaces.is_some() {
+            cx.simulate_window_resize(before, resized);
+        } else {
+            assert_eq!(
+                before.update(cx, |_, window, _| window.bounds().size).unwrap(),
+                size(px(420.), px(108.)),
+            );
+        }
+
+        // Only the second scenario presented generation 7. Generation 8 failed before Opened.
+        let previous = GuestPresentation {
+            profile: directory.path(),
+            replaces: None,
+            opened: replaces.is_some(),
+        };
+        let failed = GuestPresentation {
+            replaces: previous.presented_generation(7),
+            opened: false,
+            ..previous
+        };
+        send.try_send(opened_guest(9, failed.presented_generation(8))).unwrap();
+        cx.run_until_parked();
+        let windows = cx.update(|cx| cx.windows());
+        assert_eq!(windows.len(), 1);
+        let after = windows[0];
+        assert_eq!(before == after, replaces.is_some());
+        assert_eq!(
+            after.update(cx, |_, window, _| window.bounds().size).unwrap(),
+            if replaces.is_some() { resized } else { size(px(640.), px(560.)) },
+        );
+        send.try_send(Output::Closed(9)).unwrap();
+        cx.run_until_parked();
+        assert!(cx.update(|cx| cx.windows().is_empty()));
+    }
+}
+
 #[test]
 #[cfg(feature = "process")]
-fn automatic_engine_restart_and_revocation_preserve_owner_admission() {
-    use crate::engine::{Engine, Request, admission::AdmissionQueue, ipc, reply::Reply};
+fn missing_engine_endpoint_preserves_the_classified_event_stream_end() {
+    use crate::engine::{guest_host::EventEnd, service_events::StopReason};
+    use std::io::ErrorKind;
+
     let directory = tempfile::tempdir().unwrap();
-    let profile = directory.path().to_owned();
+    for (event_end, close_after_success, close_after_failure) in [
+        (None, false, true),
+        (Some(EventEnd::Disconnected(ErrorKind::ConnectionReset)), true, true),
+        (Some(EventEnd::Stopped(StopReason::SelectedBuildChanged)), false, false),
+        (Some(EventEnd::Stopped(StopReason::ContextUnavailable)), false, false),
+        (Some(EventEnd::Failed("invalid event frame".into())), false, false),
+    ] {
+        for (exchange_failed, close) in [(false, close_after_success), (true, close_after_failure)]
+        {
+            assert_eq!(
+                disconnected_engine(directory.path(), event_end.as_ref(), exchange_failed)
+                    .is_some(),
+                close,
+                "{event_end:?}, exchange_failed={exchange_failed}",
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "process")]
+fn quit_after_guest_reconstruction_checks_the_new_event_stream() {
+    use crate::engine::{Engine, admission::AdmissionQueue, gui_guest};
+    for disconnect in [false, true] {
+        let (directory, original, prior, _) = gui_guest::tests::fixture();
+        drop(original);
+        let profile = directory.path().to_owned();
+        let (ready, started) = mpsc::sync_channel(1);
+        let (shutdown, shutdown_request) = mpsc::channel::<()>();
+        let service = std::thread::spawn(move || {
+            let mut engine = Engine::open(&profile).unwrap();
+            let listener = UnixListener::bind(profile.join(crate::paths::ENGINE_SOCKET)).unwrap();
+            let mut queue = AdmissionQueue::new(listener, &engine).unwrap();
+            ready.send(()).unwrap();
+            while matches!(shutdown_request.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                queue
+                    .run_until(&mut engine, Some(Instant::now() + Duration::from_millis(50)))
+                    .unwrap();
+            }
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (wake, receive) = mpsc::sync_channel(1);
+        let (send, output) = async_channel::bounded(1);
+        let quit = AtomicBool::new(false);
+        let mut recovery = GuestRecovery {
+            profile: directory.path(),
+            engine: std::path::Path::new("/nonexistent"),
+            child: None,
+            wake: &wake,
+            receive: &receive,
+            output: &send,
+            stop: &quit,
+            backoff: Default::default(),
+            fuel_limit: None,
+        };
+        let mut attempted = (prior.context.incarnation, prior.instance.build.clone());
+        let guest = recovery.attempt(&prior, &mut attempted, None).unwrap();
+        assert_ne!(guest.admission().context.incarnation, prior.context.incarnation);
+        quit.store(true, Ordering::Release);
+        let previous_window_generation = 41;
+        let prior_failure = Failure::from("prior guest stopped");
+        let cancel = || {
+            recovery.cancel_recovered_guest(
+                guest,
+                prior_failure.clone(),
+                previous_window_generation,
+            )
+        };
+        if disconnect {
+            // The kernel has closed the new guest's event peer before cancellation begins.
+            drop(shutdown);
+            service.join().unwrap();
+            cancel().unwrap();
+            assert!(
+                matches!(output.try_recv(), Ok(Output::Closed(g)) if g == previous_window_generation)
+            );
+        } else {
+            let failure = cancel().unwrap_err();
+            assert_eq!(failure.details, prior_failure.details);
+            assert_eq!(failure.origin.to_string(), prior_failure.origin.to_string());
+            drop(shutdown);
+            service.join().unwrap();
+        }
+        assert!(output.is_empty());
+    }
+}
+
+#[test]
+#[cfg(feature = "process")]
+fn established_engine_disconnect_closes_the_guest_and_revocation_retires_its_context() {
+    use crate::engine::{Engine, Request, admission::AdmissionQueue, ipc, reply::Reply};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum Scenario {
+        Disconnect,
+        DisconnectDuringQuit,
+        Revoke,
+    }
+
     let mut view_state = playbit_api::context::ContextState::default();
     let mut view = view_state.view();
     view.column_start();
@@ -312,174 +528,158 @@ fn automatic_engine_restart_and_revocation_preserve_owner_admission() {
     .unwrap();
     let package = crate::package::Package::new(
         "test".into(),
-        "Recovery fixture".into(),
+        "Disconnect fixture".into(),
         wasm,
         BTreeMap::new(),
     )
     .unwrap();
-    let start = |package: Option<crate::package::Package>| {
-        let owner_profile = profile.clone();
-        let stop = Arc::new(AtomicBool::new(false));
-        let engine_stop = stop.clone();
+    for scenario in [Scenario::Disconnect, Scenario::DisconnectDuringQuit, Scenario::Revoke] {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().to_owned();
+        let engine_profile = profile.clone();
+        let package = package.clone();
         let (prepared, ready) = mpsc::sync_channel(1);
-        let (deny, denials) = mpsc::sync_channel::<String>(1);
+        let (trigger, action) = mpsc::channel();
+        let (stopped, engine_stopped) = mpsc::channel();
         let engine = std::thread::spawn(move || {
-            let mut engine = Engine::open(&owner_profile).unwrap();
-            let session = package.map(|package| {
-                let root = engine.services.store.create_volume("Recovery fixture", false).unwrap();
-                engine.create_session(package, root.id).unwrap().id
-            });
+            let mut engine = Engine::open(&engine_profile).unwrap();
+            let root = engine.services.store.create_volume("Disconnect fixture", false).unwrap();
+            let session = engine.create_session(package, root.id).unwrap();
             let listener =
-                UnixListener::bind(owner_profile.join(crate::paths::ENGINE_SOCKET)).unwrap();
+                UnixListener::bind(engine_profile.join(crate::paths::ENGINE_SOCKET)).unwrap();
             let mut queue = AdmissionQueue::new(listener, &engine).unwrap();
-            prepared.send(session).unwrap();
-            while !engine_stop.load(Ordering::Acquire) {
-                if let Ok(id) = denials.try_recv() {
-                    let session = engine.services.store.session(&id).unwrap();
-                    engine
-                        .services
-                        .store
-                        .record_session_denial(&session, "fixture revocation")
-                        .unwrap();
+            prepared.send(session.id.clone()).unwrap();
+            loop {
+                match action.try_recv() {
+                    Ok(Scenario::Revoke) => {
+                        let store = &engine.services.store;
+                        let session = store.session(&session.id).unwrap();
+                        assert!(
+                            store.record_session_denial(&session, "fixture revocation").unwrap()
+                        );
+                    }
+                    Ok(_) | Err(mpsc::TryRecvError::Disconnected) => break,
+                    Err(mpsc::TryRecvError::Empty) => (),
                 }
                 queue
                     .run_until(&mut engine, Some(Instant::now() + Duration::from_millis(50)))
                     .unwrap();
             }
+            drop(queue);
+            drop(engine);
+            let _ = stopped.send(());
         });
-        (stop, engine, ready.recv_timeout(Duration::from_secs(5)).unwrap(), deny)
-    };
-    let (stop, engine, session, _) = start(Some(package));
-    let session = session.unwrap();
-    let Reply::InstanceStatus { incarnation, .. } =
-        ipc::call_archive(&profile, &Request::InstanceInspect { request: None })
-            .unwrap()
-            .into_owned()
-            .unwrap()
-    else {
-        panic!()
-    };
-    let Reply::Instance(instance) = ipc::call_archive(
-        &profile,
-        &Request::InstanceReserve {
-            restore_host_mounts: false,
-            request: Id::generate().unwrap(),
-            incarnation,
-            session: session.clone(),
-            extra_volumes: Box::default(),
-            host_mounts: Box::default(),
-        },
-    )
-    .unwrap()
-    .into_owned()
-    .unwrap() else {
-        panic!()
-    };
-    // Hold launch admission while the fixture endpoint is absent. Recovery
-    // must wait rather than executing this test harness as a helper process.
-    let lock_path = crate::paths::Paths::for_profile(&profile).unwrap().launch_lock;
-    let launch_lock = std::fs::File::create(&lock_path).unwrap();
-    launch_lock.try_lock().unwrap();
-    let mut worker =
-        Worker::start_guest(profile.clone(), std::env::current_exe().unwrap(), None, move || {
-            Ok(Some(instance))
-        })
-        .unwrap();
-    let output = worker.output();
-    let done = worker.completion();
-    let Output::Opened { handle, .. } = receive(&output) else { panic!() };
-    let click = || Input { kind: EventKind::Click, target: 1, data: vec![], revision: None };
-    assert!(handle.send(click(), None));
-    // Event headers start with the generation; kind is at byte eight. Prove
-    // this fixture recognizes a real click before checking stale-input loss.
-    loop {
-        let Output::Frame { logs, .. } = receive(&output) else {
-            panic!("missing initial click response");
+        let session = ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        let Reply::InstanceStatus { incarnation, .. } =
+            ipc::call_archive(&profile, &Request::InstanceInspect { request: None })
+                .unwrap()
+                .into_owned()
+                .unwrap()
+        else {
+            panic!()
         };
-        if logs.iter().any(|line| line == "clicked") {
-            break;
-        }
-    }
-    assert!(handle.send(click(), None));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while output.is_empty() {
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    // The one-slot output blocks subsequent turns, leaving an accepted queue.
-    let mut accepted = 0;
-    for _ in 0..MAX_INPUTS {
-        if handle.send(click(), None) {
-            accepted += 1;
-        }
-    }
-    assert!(accepted > 0);
-    stop.store(true, Ordering::Release);
-    engine.join().unwrap();
-    let active = loop {
-        match receive(&output) {
-            Output::Recovering { generation, active, .. } => {
-                assert_eq!(generation, handle.generation);
-                break active;
-            }
-            Output::Frame { .. } => (),
-            _ => panic!("the surviving owner must begin automatic recovery"),
-        }
-    };
-    assert!(done.is_empty(), "a recoverable worker retains its termination barrier");
-    assert!(!handle.send(click(), None));
-    std::fs::remove_file(profile.join(crate::paths::ENGINE_SOCKET)).unwrap();
-    let (stop, engine, _, deny) = start(None);
-    let Output::Opened { replaces, handle: fresh, logs, .. } = receive(&output) else {
-        panic!("missing reconstructed app");
-    };
-    assert_eq!(replaces, Some(handle.generation));
-    assert_ne!(fresh.generation, handle.generation);
-    assert!(!logs.iter().any(|line| line == "clicked"));
-    assert!(!active.load(Ordering::Acquire));
-    // Keep the reconstructed owner on this engine: a second GUI owner in the
-    // same process would correctly violate the one-instance admission contract.
-    deny.send(session).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut completed = None;
-    let mut failure = None;
-    let mut recovery = None;
-    let mut terminal = None;
-    while Instant::now() < deadline {
-        while let Ok(output) = output.try_recv() {
-            match output {
-                Output::Frame { logs, .. } => assert!(
-                    !logs.iter().any(|line| line == "clicked"),
-                    "old queued clicks must never reach the fresh VM"
-                ),
-                Output::Recovering { active, .. } => recovery = Some(active),
-                Output::ContextUnavailable(generation) => terminal = Some(generation),
-                Output::Failed(error) => failure = Some(error),
-                _ => (),
+        let Reply::Instance(instance) = ipc::call_archive(
+            &profile,
+            &Request::InstanceReserve {
+                restore_host_mounts: false,
+                request: Id::generate().unwrap(),
+                incarnation,
+                session,
+                extra_volumes: Box::default(),
+                host_mounts: Box::default(),
+            },
+        )
+        .unwrap()
+        .into_owned()
+        .unwrap() else {
+            panic!()
+        };
+
+        // The one-slot test output holds the worker at its next input receipt while
+        // the engine closes. The GUI can already have requested Quit at that point.
+        let (send, output) = async_channel::bounded(1);
+        let (wake, receive_wake) = mpsc::sync_channel(1);
+        let (completed, done) = mpsc::channel();
+        let quit = Arc::new(AtomicBool::new(false));
+        let owner_quit = quit.clone();
+        let instance_id = instance.id;
+        let owner = std::thread::spawn(move || {
+            let result = own_guest(
+                profile,
+                (PathBuf::from("/nonexistent"), None),
+                GuestLaunch { instance, fuel_limit: None },
+                wake,
+                receive_wake,
+                &send,
+                owner_quit,
+            );
+            let _ = completed.send(result);
+        });
+        let Output::Opened { handle, .. } = receive(&output) else { panic!("guest must open") };
+        let click = || Input { kind: EventKind::Click, target: 1, data: vec![], revision: None };
+        assert!(handle.send(click(), None));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "the open guest must process input");
+            let Output::Frame { logs, .. } = receive(&output) else { panic!("expected a frame") };
+            if logs.iter().any(|line| line == "clicked") {
+                break;
             }
         }
-        if completed.is_none()
-            && let Ok(result) = done.try_recv()
-        {
-            completed = Some(result);
+        if scenario != Scenario::Revoke {
+            for _ in 0..MAX_INPUTS {
+                assert!(handle.send(click(), None));
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !output.is_full() {
+                assert!(Instant::now() < deadline, "guest must publish a pending input receipt");
+                std::thread::yield_now();
+            }
+            assert!(!handle.inputs.is_empty(), "accepted clicks still await the worker");
+            if scenario == Scenario::DisconnectDuringQuit {
+                quit.store(true, Ordering::Release);
+                handle.close();
+            }
         }
-        if completed.is_some() && terminal.is_some() {
-            break;
+        trigger.send(scenario).unwrap();
+        if scenario != Scenario::Revoke {
+            engine_stopped.recv_timeout(Duration::from_secs(5)).unwrap();
         }
-        std::thread::sleep(Duration::from_millis(1));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "guest must retire after {scenario:?}");
+            match receive(&output) {
+                Output::Frame { generation, .. } => assert_eq!(generation, handle.generation),
+                Output::Recovering { generation, .. } if scenario == Scenario::Revoke => {
+                    assert_eq!(generation, handle.generation);
+                }
+                Output::ContextUnavailable(generation) if scenario == Scenario::Revoke => {
+                    assert_eq!(generation, handle.generation);
+                    break;
+                }
+                Output::Closed(generation) if scenario != Scenario::Revoke => {
+                    assert_eq!(generation, handle.generation);
+                    break;
+                }
+                _ => panic!("unexpected worker output after {scenario:?}"),
+            }
+        }
+        done.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        assert!(!handle.send(click(), None));
+        owner.join().unwrap();
+        if scenario != Scenario::Revoke {
+            let log = crate::paths::Paths::diagnostic_log(directory.path()).unwrap();
+            let diagnostics = std::fs::read_to_string(log).unwrap();
+            assert!(
+                diagnostics.contains(&format!(
+                    "local engine connection closed for instance {instance_id}"
+                )),
+                "{scenario:?}: {diagnostics}"
+            );
+        }
+        drop(trigger);
+        engine.join().unwrap();
     }
-    worker.request_stop();
-    worker.shutdown();
-    stop.store(true, Ordering::Release);
-    engine.join().unwrap();
-    drop(launch_lock);
-    std::fs::remove_file(lock_path).unwrap();
-    assert!(completed.is_some(), "revoked owner must retire on its live engine");
-    assert!(completed.unwrap().is_ok(), "revocation is not a fatal worker failure: {failure:?}");
-    assert!(failure.is_none(), "revocation must not emit global failure");
-    assert_eq!(terminal, Some(fresh.generation), "completion belongs to the stopped owner");
-    assert!(recovery.is_none_or(|active| !active.load(Ordering::Acquire)));
-    assert!(!fresh.send(click(), None));
 }
 
 #[test]

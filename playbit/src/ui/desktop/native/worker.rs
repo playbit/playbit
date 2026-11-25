@@ -370,52 +370,59 @@ impl Worker {
                     let _ = send.send_blocking(Output::Closed(0));
                     return Ok(());
                 };
-                resolve().map_err(Failure::from).and_then(|instance| match instance {
-                    Some(instance) => {
-                        let root = Some(instance.root);
-                        let crate::engine::reply::Reply::UiZoom { scale, .. } =
-                            crate::engine::ipc::call_archive(
-                                &profile,
-                                &crate::engine::Request::UiZoom { root, scale: None },
-                            )
-                            .and_then(|reply| reply.into_owned())
-                            .map_err(|e| e.to_string())?
-                        else {
-                            return Err("Unexpected UI zoom reply".into());
-                        };
-                        let location = profile.clone();
-                        let save = Arc::new(move |scale| {
-                            crate::engine::ipc::call_archive(
-                                &location,
-                                &crate::engine::Request::UiZoom { root, scale: Some(scale) },
-                            )
-                            .map(|_| ())
-                            .map_err(|e| e.to_string())
-                        });
-                        send.send_blocking(Output::UiZoom { scale, save })
-                            .map_err(|_| "UI stopped receiving zoom preferences")?;
-                        // The GUI guest bypasses the Sessions bootstrap. Register its
-                        // initialized source asynchronously; collector ACK never gates app work.
-                        if let Err(error) = crate::trace::attach(&profile) {
-                            crate::diagnostic!("Playbit trace attachment unavailable: {error}");
-                        }
-                        #[cfg(feature = "desktop")]
-                        crate::desktop::launch_timing::flush();
-                        own_guest(
-                            profile,
-                            (engine, child),
-                            GuestLaunch { instance, fuel_limit },
-                            worker_wake,
-                            receive,
-                            &send,
-                            worker_stop,
+                let prepared = resolve().map_err(Failure::from).and_then(|instance| {
+                    let Some(instance) = instance else { return Ok(None) };
+                    let root = Some(instance.root);
+                    let crate::engine::reply::Reply::UiZoom { scale, .. } =
+                        crate::engine::ipc::call_archive(
+                            &profile,
+                            &crate::engine::Request::UiZoom { root, scale: None },
                         )
+                        .and_then(|reply| reply.into_owned())
+                        .map_err(|e| e.to_string())?
+                    else {
+                        return Err("Unexpected UI zoom reply".into());
+                    };
+                    let location = profile.clone();
+                    let save = Arc::new(move |scale| {
+                        crate::engine::ipc::call_archive(
+                            &location,
+                            &crate::engine::Request::UiZoom { root, scale: Some(scale) },
+                        )
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                    });
+                    send.send_blocking(Output::UiZoom { scale, save })
+                        .map_err(|_| "UI stopped receiving zoom preferences")?;
+                    // The GUI guest bypasses the Sessions bootstrap. Register its
+                    // initialized source asynchronously; collector ACK never gates app work.
+                    if let Err(error) = crate::trace::attach(&profile) {
+                        crate::diagnostic!("Playbit trace attachment unavailable: {error}");
                     }
-                    None => {
+                    #[cfg(feature = "desktop")]
+                    crate::desktop::launch_timing::flush();
+                    Ok(Some(instance))
+                });
+                match prepared {
+                    Ok(Some(instance)) => own_guest(
+                        profile,
+                        (engine, child),
+                        GuestLaunch { instance, fuel_limit },
+                        worker_wake,
+                        receive,
+                        &send,
+                        worker_stop,
+                    ),
+                    Ok(None) => {
                         let _ = send.send_blocking(Output::Closed(0));
                         Ok(())
                     }
-                })
+                    Err(error) if engine_endpoint_absent(&profile) => {
+                        close_disconnected_guest(&profile, None, &error.details, 0, &send);
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
             });
             if let Err(error) = &result {
                 let _ = send.send_blocking(Output::Failed(error.clone()));
@@ -599,6 +606,48 @@ struct GuestLaunch {
 }
 
 #[cfg(feature = "process")]
+fn engine_endpoint_absent(profile: &std::path::Path) -> bool {
+    crate::engine::launch::connect_endpoint(profile).is_ok_and(|socket| socket.is_none())
+}
+
+#[cfg(feature = "process")]
+fn disconnected_engine(
+    profile: &std::path::Path,
+    event_end: Option<&crate::engine::guest_host::EventEnd>,
+    exchange_failed: bool,
+) -> Option<String> {
+    use crate::engine::guest_host::EventEnd;
+    match event_end {
+        Some(EventEnd::Disconnected(kind)) => Some(kind.to_string()),
+        Some(EventEnd::Failed(_) | EventEnd::Stopped(_)) => None,
+        None if exchange_failed && engine_endpoint_absent(profile) => {
+            Some("engine endpoint absent".to_owned())
+        }
+        None => None,
+    }
+}
+
+#[cfg(feature = "process")]
+fn close_disconnected_guest(
+    profile: &std::path::Path,
+    instance: Option<crate::store::Id>,
+    reason: &str,
+    generation: u64,
+    output: &async_channel::Sender<Output>,
+) {
+    let owner =
+        instance.map_or_else(|| "during launch".to_owned(), |id| format!("for instance {id}"));
+    crate::platform::failure::log(
+        profile,
+        "guest quitting",
+        &format!(
+            "local engine connection closed {owner} ({reason}). Accepted operations may have completed and were not replayed."
+        ),
+    );
+    let _ = output.send_blocking(Output::Closed(generation));
+}
+
+#[cfg(feature = "process")]
 fn own_guest(
     profile: PathBuf,
     engine: (PathBuf, Option<std::process::Child>),
@@ -608,6 +657,7 @@ fn own_guest(
     output: &async_channel::Sender<Output>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), Failure> {
+    use crate::engine::guest_host::EventEnd;
     use crate::engine::gui_guest::Guest;
     let GuestLaunch { instance, fuel_limit } = launch;
     let (engine, child) = engine;
@@ -617,7 +667,7 @@ fn own_guest(
         .map_err(|error| error.to_string())?;
     let publisher = controls.publisher();
     let host_wake = wake.clone();
-    let mut guest = Guest::open(
+    let mut guest = match Guest::open(
         &profile,
         instance.id,
         &instance.session,
@@ -626,8 +676,16 @@ fn own_guest(
             let _ = host_wake.try_send(());
         }),
         crate::engine::gui_guest::GuestOptions { fuel_limit, renderer: GuestRenderer::AppKit },
-    )
-    .map_err(|error| error.to_string())?;
+    ) {
+        Ok(guest) => guest,
+        Err(error) => {
+            if let Some(reason) = disconnected_engine(&profile, error.downcast_ref(), true) {
+                close_disconnected_guest(&profile, Some(instance.id), &reason, 0, output);
+                return Ok(());
+            }
+            return Err(error.to_string().into());
+        }
+    };
     let mut replaces = None;
     let mut recovery = GuestRecovery {
         profile: &profile,
@@ -646,22 +704,22 @@ fn own_guest(
         let mut presentation = GuestPresentation { profile: &profile, replaces, opened: false };
         let result =
             run_guest(&mut guest, &wake, &receive, output, &stop, &publisher, &mut presentation);
-        if result.is_err() {
-            let _ = crate::engine::gui_guest::startup(
-                &profile,
-                guest.admission().context,
-                None,
-                crate::engine::session_instance::StartupPhase::Failed,
-            );
-        }
+        let file_drain = guest.file_drain();
         publisher.stopped(result.as_ref().err().map(|error| error.details.as_str()));
-        // Nonfatal retirement belongs to an existing native window. Preserve
-        // initial-launch failure handling before any window has been presented.
-        let presented = presentation.opened || replaces.is_some();
         // Retire the VM and its input queue before showing recovery. Its data
         // host still resolves already admitted work; nothing is copied to a new VM.
-        let file_drain = guest.file_drain();
         drop(guest);
+        let event_end = file_drain.event_end();
+        let report_failed = result.is_err()
+            && !matches!(event_end, Some(EventEnd::Disconnected(_)))
+            && crate::engine::gui_guest::startup(
+                &profile,
+                prior.context,
+                None,
+                crate::engine::session_instance::StartupPhase::Failed,
+            )
+            .is_err();
+        let disconnect = disconnected_engine(&profile, event_end.as_ref(), report_failed);
         // File begin is nonblocking and can precede IPC admission. Wait on the
         // existing completion wake before retiring that context. This waits for
         // execution, not for retained results or failed cleanup that retirement
@@ -670,23 +728,36 @@ fn own_guest(
         // result must still outrank that stop. Long-lived channel receives are
         // excluded. No guest callback or input is replayed.
         drain_guest_work(&file_drain, &receive)?;
-        let Err(mut error) = result else { return Ok(()) };
+        // A slow first launch displays generation 0. A replacement keeps its
+        // old window generation until the new Opened output is delivered.
+        let presented = presentation.presented_generation(generation);
+        let window_generation = presented.unwrap_or(0);
+        if let Some(reason) = disconnect {
+            close_disconnected_guest(
+                &profile,
+                Some(prior.context.instance),
+                &reason,
+                window_generation,
+                output,
+            );
+            return Ok(());
+        }
+        let Err(mut error) = result else {
+            let _ = output.send_blocking(Output::Closed(window_generation));
+            return Ok(());
+        };
         // An accepted exchange may become uncertain while draining. Its final
         // authoritative failure must outrank the earlier expected context stop.
         if let Some(details) = file_drain.failure() {
             error.details = details.into();
         }
-        let stop_reason = presented.then(|| file_drain.stop_reason()).flatten();
-        // A failed initial turn has not rebound the window yet. Keep its prior
-        // routing identity rather than creating a second recovery window.
-        let window_generation =
-            if presentation.opened { generation } else { replaces.unwrap_or(generation) };
+        let stop_reason = presented.and_then(|_| file_drain.stop_reason());
         let Some(recovered) = recovery.recover(&prior, error, window_generation, stop_reason)?
         else {
             return Ok(());
         };
         guest = recovered;
-        replaces = Some(window_generation);
+        replaces = presented;
     }
 }
 
@@ -818,19 +889,15 @@ impl GuestRecovery<'_> {
                 started: Instant::now(),
             })
             .map_err(|_| error.clone())?;
-        let result = self.reconstruct(prior, error, stop_reason);
+        let result = self.reconstruct(prior, error, generation, stop_reason);
         active.store(false, Ordering::Release);
-        if matches!(&result, Ok(None)) {
-            self.output
-                .send_blocking(Output::ContextUnavailable(generation))
-                .map_err(|_| "The app window stopped receiving owner completion")?;
-        }
         result
     }
     fn reconstruct(
         &mut self,
         prior: &crate::engine::session_instance::Admission,
         mut error: Failure,
+        generation: u64,
         stop_reason: Option<crate::engine::service_events::StopReason>,
     ) -> Result<Option<crate::engine::gui_guest::Guest>, Failure> {
         let mut attempted = (prior.context.incarnation, prior.instance.build.clone());
@@ -843,7 +910,8 @@ impl GuestRecovery<'_> {
                 Ok(guest) => {
                     self.backoff.recovered(Instant::now());
                     if self.stop.load(Ordering::Acquire) {
-                        return Err(error);
+                        self.cancel_recovered_guest(guest, error, generation)?;
+                        return Ok(None);
                     }
                     return Ok(Some(guest));
                 }
@@ -852,6 +920,22 @@ impl GuestRecovery<'_> {
                         failure.downcast_ref::<crate::engine::gui_guest::RecoveryError>(),
                         Some(crate::engine::gui_guest::RecoveryError::ContextUnavailable)
                     ) {
+                        self.output
+                            .send_blocking(Output::ContextUnavailable(generation))
+                            .map_err(|_| "The app window stopped receiving owner completion")?;
+                        return Ok(None);
+                    }
+                    if matches!(
+                        failure.downcast_ref::<crate::engine::guest_host::EventEnd>(),
+                        Some(crate::engine::guest_host::EventEnd::Disconnected(_))
+                    ) {
+                        close_disconnected_guest(
+                            self.profile,
+                            Some(prior.context.instance),
+                            &failure.to_string(),
+                            generation,
+                            self.output,
+                        );
                         return Ok(None);
                     }
                     error = failure.to_string().into();
@@ -871,6 +955,30 @@ impl GuestRecovery<'_> {
                 }
             }
         }
+    }
+    fn cancel_recovered_guest(
+        &self,
+        guest: crate::engine::gui_guest::Guest,
+        error: Failure,
+        generation: u64,
+    ) -> Result<(), Failure> {
+        let instance = guest.admission().context.instance;
+        let drain = guest.file_drain();
+        // Quit arrived during reconstruction, before the new VM presented a window.
+        drop(guest);
+        let Some(crate::engine::guest_host::EventEnd::Disconnected(reason)) = drain.event_end()
+        else {
+            return Err(error);
+        };
+        drain_guest_work(&drain, self.receive)?;
+        close_disconnected_guest(
+            self.profile,
+            Some(instance),
+            &reason.to_string(),
+            generation,
+            self.output,
+        );
+        Ok(())
     }
     fn wait_retry(&self, delay: std::time::Duration) -> bool {
         let deadline = Instant::now() + delay;
@@ -922,6 +1030,13 @@ struct GuestPresentation<'a> {
     profile: &'a std::path::Path,
     replaces: Option<u64>,
     opened: bool,
+}
+
+#[cfg(feature = "process")]
+impl GuestPresentation<'_> {
+    fn presented_generation(&self, guest_generation: u64) -> Option<u64> {
+        if self.opened { Some(guest_generation) } else { self.replaces }
+    }
 }
 
 #[cfg(feature = "process")]
@@ -1022,7 +1137,6 @@ fn run_guest(
                 if let Some(error) = rejected_input {
                     return Err(error.into());
                 }
-                let _ = output.send_blocking(Output::Closed(handle.generation));
                 return Ok(());
             }
         }

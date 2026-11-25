@@ -2,7 +2,7 @@
 //! only an immutable, digest-checked package is read from the shared profile.
 use super::{
     Request, Result,
-    guest_host::{GuestHost, Inbox},
+    guest_host::{EventEnd, GuestHost, Inbox},
     ipc,
     reply::Reply,
     session_instance::{Admission, Context},
@@ -285,11 +285,16 @@ impl Guest {
         startup(profile, context, None, super::session_instance::StartupPhase::Loading)?;
         let result =
             Self::prepare(profile, admission, package, wake, options).and_then(|mut prepared| {
-                prepared.load_compiled()?;
-                prepared.report_startup = true;
-                prepared.instantiate()
+                let inbox = prepared.inbox.clone();
+                let result = prepared.load_compiled().and_then(|()| {
+                    prepared.report_startup = true;
+                    prepared.instantiate()
+                });
+                result.map_err(|error| inbox.event_end().map_or(error, Into::into))
             });
-        if result.is_err() {
+        if result.as_ref().is_err_and(|error| {
+            !matches!(error.downcast_ref::<EventEnd>(), Some(EventEnd::Disconnected(_)))
+        }) {
             let _ = startup(profile, context, None, super::session_instance::StartupPhase::Failed);
         }
         result
@@ -341,17 +346,26 @@ impl Guest {
             required_capabilities: package.required_host_features().iter().cloned().collect(),
             participants: vec![],
         };
+        let runtime = Runtime::with_fuel_limit(options.fuel_limit)?;
+        let wasm = package.wasm()?;
         let (mut host, inbox) = GuestHost::start(profile.to_owned(), admission.context, wake)?;
         host.renderer = options.renderer;
         host.session_key_secret = Some(admission.session_reference.key_secret());
-        context.volumes = host
-            .prepare_files(context.volumes, admission.instance.restore_host_mounts)
-            .map_err(|error| format!("File root preparation failed: {error:?}"))?;
+        context.volumes =
+            match host.prepare_files(context.volumes, admission.instance.restore_host_mounts) {
+                Ok(volumes) => volumes,
+                Err(error) => {
+                    drop(host);
+                    if let Some(end) = inbox.event_end() {
+                        return Err(end.into());
+                    }
+                    return Err(format!("File root preparation failed: {error:?}").into());
+                }
+            };
         admission.volumes = context.volumes.clone();
-        let runtime = Runtime::with_fuel_limit(options.fuel_limit)?;
         Ok(Prepared {
             admission,
-            wasm: package.wasm()?,
+            wasm,
             context,
             host,
             inbox,
@@ -537,7 +551,7 @@ fn read_package(profile: &Path, build: &str) -> Result<Package> {
 
 #[cfg(test)]
 #[path = "gui_guest_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 /// The native UI and resident worker report only for their authenticated owner.
 pub(crate) fn startup(

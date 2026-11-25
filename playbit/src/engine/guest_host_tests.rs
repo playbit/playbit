@@ -98,6 +98,25 @@ fn scoped_notice(
     .unwrap();
     ipc::write(stream, &bytes).unwrap();
 }
+fn selected_build_stop(stream: &mut std::os::unix::net::UnixStream) {
+    use crate::engine::service_events::{Notice, StopReason};
+    let bytes = codec::encode(
+        &Reply::InstanceEvents(Notice {
+            display_name: String::new(),
+            mount_revision: 0,
+            context: context(),
+            sequence: 2,
+            revision: Some((context().incarnation, 2)),
+            data_revision: 2,
+            stop: Some(StopReason::SelectedBuildChanged),
+            gap: false,
+            volumes: vec![],
+        }),
+        4096,
+    )
+    .unwrap();
+    ipc::write(stream, &bytes).unwrap();
+}
 fn receive(listener: &UnixListener) -> (std::os::unix::net::UnixStream, Request) {
     loop {
         let (mut stream, request) = receive_request(listener);
@@ -457,6 +476,133 @@ fn unrelated_ordered_fence_preserves_a_retained_read_without_a_data_change() {
 }
 
 #[test]
+fn event_subscription_keeps_a_buffered_admission_refusal_after_its_request_write_fails() {
+    let (mut stream, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let refusal = Reply::Error { error: ipc::REQUEST_QUEUE_FULL.into() };
+    ipc::write(&mut peer, &codec::encode(&refusal, 4096).unwrap()).unwrap();
+    drop(peer);
+    let error =
+        subscribe_events(&mut stream, &Request::InstanceEvents { context: context() }).unwrap_err();
+    assert_eq!(error.downcast_ref::<ipc::RejectedReply>().unwrap().0, ipc::REQUEST_QUEUE_FULL);
+}
+
+#[test]
+fn event_admission_refusal_remains_the_cause_after_the_listener_goes_away() {
+    let (directory, listener, host, inbox, wake) = fixture();
+    let (mut stream, request) = receive_request(&listener);
+    assert!(matches!(request, Request::InstanceEvents { .. }));
+    let refusal = Reply::Error { error: ipc::REQUEST_QUEUE_FULL.into() };
+    ipc::write(&mut stream, &codec::encode(&refusal, 4096).unwrap()).unwrap();
+    drop(stream);
+    wait(&wake, &inbox, |state| state.failure.is_some());
+    assert_eq!(inbox.event_end(), Some(EventEnd::Failed(ipc::REQUEST_QUEUE_FULL.into())));
+
+    drop(listener);
+    assert!(crate::engine::launch::connect_endpoint(directory.path()).unwrap().is_none());
+    drop(host);
+    assert_eq!(inbox.event_end(), Some(EventEnd::Failed(ipc::REQUEST_QUEUE_FULL.into())));
+}
+
+#[test]
+fn disposal_settles_the_hung_up_event_socket_before_retiring_the_guest() {
+    use crate::engine::{readiness::wait_readable, service_events::StopReason};
+    use std::time::Instant;
+
+    enum End {
+        Eof,
+        SelectedBuildChanged,
+        BrokenSequence,
+    }
+
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    for end in [End::Eof, End::SelectedBuildChanged, End::BrokenSequence] {
+        let directory = tempfile::tempdir().unwrap();
+        crate::paths::private_directory(directory.path(), "control").unwrap();
+        let listener =
+            UnixListener::bind(directory.path().join(crate::paths::ENGINE_SOCKET)).unwrap();
+        let (wake, woken) = mpsc::channel();
+        let (resume, gate) = mpsc::channel();
+        let first_wake = Mutex::new(Some(gate));
+        let (mut host, inbox) = GuestHost::start(
+            directory.path().into(),
+            context(),
+            Arc::new(move || {
+                let gate = first_wake.lock().unwrap().take();
+                let _ = wake.send(());
+                if let Some(gate) = gate {
+                    let _ = gate.recv_timeout(TIMEOUT);
+                }
+            }),
+        )
+        .unwrap();
+        assert!(wait_readable(&listener, Instant::now() + TIMEOUT).unwrap());
+        let (mut events, request) = receive_request(&listener);
+        assert!(matches!(request, Request::InstanceEvents { .. }));
+        notice(&mut events, 1, 1);
+        woken.recv_timeout(TIMEOUT).unwrap();
+
+        // The event reader is paused in its first wake, outside the state lock.
+        assert_eq!(inbox.event_end(), None);
+        let (event_end, failure) = match end {
+            End::Eof => {
+                // A failed one-shot exchange wakes the owner before its original
+                // event socket closes. Keep the listening endpoint open throughout.
+                let token = host.begin_data(9, read()).unwrap();
+                assert!(wait_readable(&listener, Instant::now() + TIMEOUT).unwrap());
+                let (once, request) = receive_request(&listener);
+                assert!(matches!(request, Request::Syscall { .. }));
+                drop(once);
+                woken.recv_timeout(TIMEOUT).unwrap();
+                assert_eq!(inbox.failure(), Some(EXCHANGE_FAILED));
+                host.release_data(token);
+                (EventEnd::Disconnected(std::io::ErrorKind::UnexpectedEof), Failure::Exchange)
+            }
+            End::SelectedBuildChanged => {
+                selected_build_stop(&mut events);
+                (
+                    EventEnd::Stopped(StopReason::SelectedBuildChanged),
+                    Failure::Stopped(StopReason::SelectedBuildChanged),
+                )
+            }
+            End::BrokenSequence => {
+                notice(&mut events, 3, 2);
+                (
+                    EventEnd::Failed("Guest event ownership or continuity was lost".into()),
+                    Failure::Exchange,
+                )
+            }
+        };
+        let state = inbox.0.state.lock().unwrap();
+        let (starting, started) = mpsc::sync_channel(0);
+        let (finished, disposed) = mpsc::channel();
+        let owner = std::thread::spawn(move || {
+            starting.send(()).unwrap();
+            drop(host);
+            let _ = finished.send(());
+        });
+        started.recv_timeout(TIMEOUT).unwrap();
+        // The peer is still alive as disposal starts. It closes while the owner
+        // cannot acquire State to retire its event reader.
+        assert_eq!(
+            disposed.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        drop(events);
+        drop(state);
+        // The owner can now retire the host only after the reader classifies
+        // the final frame, even if an independent syscall has already failed.
+        let premature = disposed.recv_timeout(Duration::from_millis(100));
+        resume.send(()).unwrap();
+        assert_eq!(premature, Err(mpsc::RecvTimeoutError::Timeout));
+        disposed.recv_timeout(TIMEOUT).unwrap();
+        owner.join().unwrap();
+        assert_eq!(inbox.event_end(), Some(event_end));
+        assert_eq!(inbox.failure(), Some(failure.message()));
+    }
+}
+
+#[test]
 fn broken_event_continuity_freezes_new_operations_without_reconnection() {
     let (_directory, listener, mut host, inbox, wake) = fixture();
     let server = std::thread::spawn(move || {
@@ -466,14 +612,15 @@ fn broken_event_continuity_freezes_new_operations_without_reconnection() {
         notice(&mut events, 3, 2);
     });
     wait(&wake, &inbox, |state| state.failure.is_some());
-    assert!(inbox.failure().is_some());
+    assert_eq!(inbox.failure(), Some(EXCHANGE_FAILED));
+    assert!(matches!(inbox.event_end(), Some(EventEnd::Failed(_))));
     assert_eq!(host.begin_data(9, read()), Err(HostError::Unavailable));
     server.join().unwrap();
 }
 
 #[test]
 fn ordered_selected_build_stop_reports_its_cause_and_closes_admission() {
-    use crate::engine::service_events::{Notice, StopReason};
+    use crate::engine::service_events::StopReason;
     let (_directory, listener, mut host, inbox, wake) = fixture();
     host.session_key_secret = Some([3; 16]);
     assert!(host.session_key_secret().unwrap().is_some());
@@ -481,22 +628,7 @@ fn ordered_selected_build_stop_reports_its_cause_and_closes_admission() {
         let (mut stream, request) = receive_request(&listener);
         assert!(matches!(request, Request::InstanceEvents { .. }));
         notice(&mut stream, 1, 1);
-        let bytes = codec::encode(
-            &Reply::InstanceEvents(Notice {
-                display_name: String::new(),
-                mount_revision: 0,
-                context: context(),
-                sequence: 2,
-                revision: Some((context().incarnation, 2)),
-                data_revision: 2,
-                stop: Some(StopReason::SelectedBuildChanged),
-                gap: false,
-                volumes: vec![],
-            }),
-            4096,
-        )
-        .unwrap();
-        ipc::write(&mut stream, &bytes).unwrap();
+        selected_build_stop(&mut stream);
         listener
     });
     wait(&wake, &inbox, |state| state.failure.is_some());
@@ -836,7 +968,10 @@ fn released_out_of_order_completions_cannot_exceed_the_engine_operation_window()
         channel_receives: send.clone(),
         channel_commands: send,
         root_notify: None,
-        _event_stop: EventStop(std::os::unix::net::UnixStream::pair().unwrap().0),
+        event_stop: EventStop {
+            stream: std::os::unix::net::UnixStream::pair().unwrap().0,
+            thread: None,
+        },
     };
     for _ in 0..MAX_CALLS {
         let token = host.begin_data(9, read()).unwrap();

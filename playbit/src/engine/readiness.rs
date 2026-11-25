@@ -2,6 +2,28 @@
 use crate::engine::Result;
 use std::{io, os::fd::AsRawFd, time::Instant};
 
+/// Inspect the original connected stream. Hangup includes already buffered
+/// data: a persistent reader can finish those frames without waiting on a peer.
+#[cfg(all(not(target_os = "ios"), feature = "process"))]
+#[allow(unsafe_code, reason = "poll borrows one initialized descriptor with zero timeout.")]
+pub(super) fn peer_hung_up(stream: &std::os::unix::net::UnixStream) -> bool {
+    #[cfg(target_os = "linux")]
+    let hangup = libc::POLLHUP | libc::POLLRDHUP;
+    #[cfg(not(target_os = "linux"))]
+    let hangup = libc::POLLHUP;
+    let mut event = libc::pollfd { fd: stream.as_raw_fd(), events: hangup, revents: 0 };
+    loop {
+        // SAFETY: the borrowed stream and descriptor remain live for the call.
+        let result = unsafe { libc::poll(&mut event, 1, 0) };
+        if result >= 0 {
+            return event.revents & hangup != 0;
+        }
+        if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return false;
+        }
+    }
+}
+
 /// Wait for `fd` to become readable: Ok(false) once `deadline` passes first.
 #[allow(
     unsafe_code,
