@@ -28,9 +28,11 @@ test("default transport selects its channel AP with ordinary web browser trust",
         assert.deepEqual(calls, [["https://ap.playbit.app/"]]);
         await new ApConnection('testing').transportFactory().ready;
         assert.deepEqual(calls[1], ["https://ap.testing.playbit.app/"]);
+        await new ApConnection('testing-julia').transportFactory().ready;
+        assert.deepEqual(calls[2], ["https://ap.julia.testing.playbit.app/"]);
         const fixture = {};
         assert.equal(new ApConnection('public', { transportFactory: () => fixture }).transportFactory(), fixture);
-        assert.equal(calls.length, 2);
+        assert.equal(calls.length, 3);
     } finally {
         if (previous) Object.defineProperty(globalThis, "WebTransport", previous);
         else delete globalThis.WebTransport;

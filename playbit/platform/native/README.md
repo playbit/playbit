@@ -119,6 +119,12 @@ cargo tree --locked -p playbit --no-default-features \
   --features connected-engine -e normal
 ```
 
+The private real-AP test `service/ap/tests/connected_engine.rs` enrolls this owner,
+creates a TODO session, joins it with the ordinary Wasm engine, and checks edits
+in both directions through live subscriptions. It uses isolated profiles and a
+local test AP. Build the TODO Wasm fixture, then run it from `service/ap/` with
+`cargo test --locked --test connected_engine`.
+
 Native app hosts can use `engine::native::Apps::attach_session` with the retained
 session ID, matching package, native callback descriptor and connected blob
 transport. The host vouches that its trusted callbacks implement that package.

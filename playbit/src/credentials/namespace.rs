@@ -35,6 +35,7 @@ impl Namespace {
         let suffix = match channel {
             crate::release_channel::ReleaseChannel::Public => String::new(),
             crate::release_channel::ReleaseChannel::Testing => ".testing".into(),
+            personal => format!(".testing.{}", personal.name()),
         };
         #[cfg(all(not(test), target_os = "macos"))]
         let suffix = {

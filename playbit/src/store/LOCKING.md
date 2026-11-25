@@ -41,7 +41,8 @@ close, and failure cleanup releases it. A closed traced wrapper must not unlock
 a subsequent independently opened handle.
 
 Commit failure remains an error, and publication occurs only after a successful
-commit. This does not change authorization, transaction atomicity, recovery ordering or live-feed
+commit. This change follows the durability contract in the internal performance contract; it does
+not change authorization, transaction atomicity, recovery ordering or live-feed
 ownership. It does not establish bulk-I/O fairness or acceptable input latency.
 Packaged qualification must measure these paths with the real Engine scheduler,
 background work and supported reference devices.

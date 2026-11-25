@@ -753,6 +753,220 @@
       "unwrap_expect": 4,
       "assertions_per_function": 0.3870967741935484,
       "long_functions": []
+    },
+    "service/ap/src": {
+      "lines": 10090,
+      "functions": 296,
+      "assertions": 36,
+      "unwrap": 7,
+      "expect": 78,
+      "limit_constants": 23,
+      "unsafe": 0,
+      "lines_over_100": 51,
+      "unwrap_expect": 85,
+      "assertions_per_function": 0.12162162162162163,
+      "long_functions": [
+        {
+          "id": "service/ap/src/replicas.rs::execute#1",
+          "path": "service/ap/src/replicas.rs",
+          "name": "execute",
+          "line": 652,
+          "lines": 557,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/deployments.rs::execute_inner#1",
+          "path": "service/ap/src/deployments.rs",
+          "name": "execute_inner",
+          "line": 212,
+          "lines": 271,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/server.rs::operation#1",
+          "path": "service/ap/src/server.rs",
+          "name": "operation",
+          "line": 404,
+          "lines": 219,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/blobs.rs::execute#1",
+          "path": "service/ap/src/blobs.rs",
+          "name": "execute",
+          "line": 46,
+          "lines": 182,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/auth.rs::exchange_from#1",
+          "path": "service/ap/src/auth.rs",
+          "name": "exchange_from",
+          "line": 288,
+          "lines": 177,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/server.rs::serve#1",
+          "path": "service/ap/src/server.rs",
+          "name": "serve",
+          "line": 223,
+          "lines": 176,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/replica_live.rs::subscribe#1",
+          "path": "service/ap/src/replica_live.rs",
+          "name": "subscribe",
+          "line": 610,
+          "lines": 175,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/main.rs::main#1",
+          "path": "service/ap/src/main.rs",
+          "name": "main",
+          "line": 18,
+          "lines": 164,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/session_traffic.rs::execute#1",
+          "path": "service/ap/src/session_traffic.rs",
+          "name": "execute",
+          "line": 124,
+          "lines": 153,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/replicas.rs::merge_creation#1",
+          "path": "service/ap/src/replicas.rs",
+          "name": "merge_creation",
+          "line": 509,
+          "lines": 142,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/account_replicas.rs::execute#1",
+          "path": "service/ap/src/account_replicas.rs",
+          "name": "execute",
+          "line": 56,
+          "lines": 140,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/replica_databases.rs::open#1",
+          "path": "service/ap/src/replica_databases.rs",
+          "name": "open",
+          "line": 161,
+          "lines": 128,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/server.rs::service#1",
+          "path": "service/ap/src/server.rs",
+          "name": "service",
+          "line": 624,
+          "lines": 128,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/peers.rs::execute#1",
+          "path": "service/ap/src/peers.rs",
+          "name": "execute",
+          "line": 115,
+          "lines": 115,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/bloblog.rs::execute#1",
+          "path": "service/ap/src/bloblog.rs",
+          "name": "execute",
+          "line": 23,
+          "lines": 106,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/qualification.rs::smoke#1",
+          "path": "service/ap/src/qualification.rs",
+          "name": "smoke",
+          "line": 34,
+          "lines": 103,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/auth.rs::request_code#1",
+          "path": "service/ap/src/auth.rs",
+          "name": "request_code",
+          "line": 466,
+          "lines": 96,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/records.rs::put_immutable#1",
+          "path": "service/ap/src/records.rs",
+          "name": "put_immutable",
+          "line": 375,
+          "lines": 91,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/bin/ap-probe.rs::main#1",
+          "path": "service/ap/src/bin/ap-probe.rs",
+          "name": "main",
+          "line": 13,
+          "lines": 88,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/records.rs::receipts_page#1",
+          "path": "service/ap/src/records.rs",
+          "name": "receipts_page",
+          "line": 470,
+          "lines": 84,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/replicas.rs::publish_committed#1",
+          "path": "service/ap/src/replicas.rs",
+          "name": "publish_committed",
+          "line": 421,
+          "lines": 84,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/support.rs::change#1",
+          "path": "service/ap/src/support.rs",
+          "name": "change",
+          "line": 163,
+          "lines": 80,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/testing.rs::cleanup_namespace#1",
+          "path": "service/ap/src/testing.rs",
+          "name": "cleanup_namespace",
+          "line": 168,
+          "lines": 76,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/records.rs::replace_state#1",
+          "path": "service/ap/src/records.rs",
+          "name": "replace_state",
+          "line": 265,
+          "lines": 75,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/websocket.rs::receive#1",
+          "path": "service/ap/src/websocket.rs",
+          "name": "receive",
+          "line": 165,
+          "lines": 72,
+          "fuzz_annotation": null
+        }
+      ]
     }
   },
   "tier_a": {
@@ -1060,6 +1274,209 @@
       "assertions_per_function": 0.3870967741935484,
       "long_functions": []
     },
+    "service/ap/src/wire.rs": {
+      "lines": 18,
+      "functions": 2,
+      "assertions": 0,
+      "unwrap": 0,
+      "expect": 0,
+      "limit_constants": 0,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 0,
+      "assertions_per_function": 0.0,
+      "long_functions": []
+    },
+    "service/ap/src/records.rs": {
+      "lines": 719,
+      "functions": 28,
+      "assertions": 2,
+      "unwrap": 0,
+      "expect": 2,
+      "limit_constants": 2,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 2,
+      "assertions_per_function": 0.07142857142857142,
+      "long_functions": [
+        {
+          "id": "service/ap/src/records.rs::put_immutable#1",
+          "path": "service/ap/src/records.rs",
+          "name": "put_immutable",
+          "line": 375,
+          "lines": 91,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/records.rs::receipts_page#1",
+          "path": "service/ap/src/records.rs",
+          "name": "receipts_page",
+          "line": 470,
+          "lines": 84,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/records.rs::replace_state#1",
+          "path": "service/ap/src/records.rs",
+          "name": "replace_state",
+          "line": 265,
+          "lines": 75,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "service/ap/src/records": {
+      "lines": 0,
+      "functions": 0,
+      "assertions": 0,
+      "unwrap": 0,
+      "expect": 0,
+      "limit_constants": 0,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 0,
+      "assertions_per_function": 0,
+      "long_functions": []
+    },
+    "service/ap/src/auth.rs": {
+      "lines": 647,
+      "functions": 22,
+      "assertions": 4,
+      "unwrap": 0,
+      "expect": 3,
+      "limit_constants": 2,
+      "unsafe": 0,
+      "lines_over_100": 1,
+      "unwrap_expect": 3,
+      "assertions_per_function": 0.18181818181818182,
+      "long_functions": [
+        {
+          "id": "service/ap/src/auth.rs::exchange_from#1",
+          "path": "service/ap/src/auth.rs",
+          "name": "exchange_from",
+          "line": 288,
+          "lines": 177,
+          "fuzz_annotation": null
+        },
+        {
+          "id": "service/ap/src/auth.rs::request_code#1",
+          "path": "service/ap/src/auth.rs",
+          "name": "request_code",
+          "line": 466,
+          "lines": 96,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "service/ap/src/auth_records.rs": {
+      "lines": 57,
+      "functions": 2,
+      "assertions": 0,
+      "unwrap": 0,
+      "expect": 0,
+      "limit_constants": 0,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 0,
+      "assertions_per_function": 0.0,
+      "long_functions": []
+    },
+    "service/ap/src/auth": {
+      "lines": 0,
+      "functions": 0,
+      "assertions": 0,
+      "unwrap": 0,
+      "expect": 0,
+      "limit_constants": 0,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 0,
+      "assertions_per_function": 0,
+      "long_functions": []
+    },
+    "service/ap/src/credentials.rs": {
+      "lines": 90,
+      "functions": 2,
+      "assertions": 0,
+      "unwrap": 0,
+      "expect": 0,
+      "limit_constants": 0,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 0,
+      "assertions_per_function": 0.0,
+      "long_functions": []
+    },
+    "service/ap/src/request_limits.rs": {
+      "lines": 143,
+      "functions": 8,
+      "assertions": 12,
+      "unwrap": 0,
+      "expect": 2,
+      "limit_constants": 0,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 2,
+      "assertions_per_function": 1.5,
+      "long_functions": []
+    },
+    "service/ap/src/replica_databases.rs": {
+      "lines": 421,
+      "functions": 16,
+      "assertions": 8,
+      "unwrap": 0,
+      "expect": 4,
+      "limit_constants": 2,
+      "unsafe": 0,
+      "lines_over_100": 1,
+      "unwrap_expect": 4,
+      "assertions_per_function": 0.5,
+      "long_functions": [
+        {
+          "id": "service/ap/src/replica_databases.rs::open#1",
+          "path": "service/ap/src/replica_databases.rs",
+          "name": "open",
+          "line": 161,
+          "lines": 128,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "service/ap/src/blobs.rs": {
+      "lines": 506,
+      "functions": 11,
+      "assertions": 5,
+      "unwrap": 0,
+      "expect": 2,
+      "limit_constants": 1,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 2,
+      "assertions_per_function": 0.45454545454545453,
+      "long_functions": [
+        {
+          "id": "service/ap/src/blobs.rs::execute#1",
+          "path": "service/ap/src/blobs.rs",
+          "name": "execute",
+          "line": 46,
+          "lines": 182,
+          "fuzz_annotation": null
+        }
+      ]
+    },
+    "service/ap/src/file_sync.rs": {
+      "lines": 116,
+      "functions": 9,
+      "assertions": 1,
+      "unwrap": 0,
+      "expect": 0,
+      "limit_constants": 1,
+      "unsafe": 0,
+      "lines_over_100": 0,
+      "unwrap_expect": 0,
+      "assertions_per_function": 0.1111111111111111,
+      "long_functions": []
+    },
     "playbit/src/desktop/update/archive.rs": {
       "lines": 219,
       "functions": 5,
@@ -1096,6 +1513,19 @@
       "unsafe": 2,
       "lines_over_100": 0,
       "unwrap_expect": 0,
+      "assertions_per_function": 0.0,
+      "long_functions": []
+    },
+    "service/ap/src/content.rs": {
+      "lines": 257,
+      "functions": 10,
+      "assertions": 0,
+      "unwrap": 0,
+      "expect": 1,
+      "limit_constants": 1,
+      "unsafe": 0,
+      "lines_over_100": 2,
+      "unwrap_expect": 1,
       "assertions_per_function": 0.0,
       "long_functions": []
     }
@@ -2426,6 +2856,30 @@
         "playbit/fuzz/fuzz_targets/decode_view.rs"
       ],
       "covered": true
+    },
+    {
+      "id": "service/ap/src/blobs.rs::validate_envelope#1",
+      "path": "service/ap/src/blobs.rs",
+      "name": "validate_envelope",
+      "line": 299,
+      "lines": 8,
+      "fuzz_annotation": null,
+      "fuzz_targets": [],
+      "covered": false
+    },
+    {
+      "id": "service/ap/src/auth.rs::validate#1",
+      "path": "service/ap/src/auth.rs",
+      "name": "validate",
+      "line": 75,
+      "lines": 20,
+      "fuzz_annotation": null,
+      "fuzz_targets": [
+        "playbit/fuzz/fuzz_targets/ap_codec.rs",
+        "playbit/fuzz/fuzz_targets/package_contract.rs",
+        "playbit/fuzz/fuzz_targets/store_contract.rs"
+      ],
+      "covered": true
     }
   ],
   "crates": {
@@ -2439,6 +2893,10 @@
     },
     "kvdb (redb)": {
       "count": 10,
+      "unavailable": null
+    },
+    "service/ap": {
+      "count": 289,
       "unavailable": null
     }
   }

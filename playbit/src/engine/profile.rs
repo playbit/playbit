@@ -21,7 +21,6 @@ pub(super) fn default_path(home: &Path, channel: ReleaseChannel) -> PathBuf {
     home.join(match channel {
         ReleaseChannel::Public => ".playbit",
         ReleaseChannel::Testing => ".playbit-testing",
-        #[cfg(test)]
         _ => unreachable!("personal Testing requires an explicit profile"),
     })
 }
@@ -1105,28 +1104,27 @@ mod tests {
                     home,
                     &executable,
                     Some(&home.join(reserved)),
-                    Some(ReleaseChannel::FixtureA),
+                    Some(ReleaseChannel::Julia),
                     None
                 )
                 .is_err()
             );
         }
         assert!(
-            resolve_selection(home, &executable, None, Some(ReleaseChannel::FixtureA), None)
-                .is_err()
+            resolve_selection(home, &executable, None, Some(ReleaseChannel::Julia), None).is_err()
         );
-        let selection = Selection::open(home, Some(&profile), Some(ReleaseChannel::FixtureA))
+        let julia = Selection::open(home, Some(&profile), Some(ReleaseChannel::Julia))
             .expect("personal profile");
-        assert_eq!(for_profile(&selection.path).expect("bound channel"), ReleaseChannel::FixtureA);
-        assert_eq!(selection.channel.ap_hostname(), "ap.fixture-a.example.invalid");
-        for other in [ReleaseChannel::Public, ReleaseChannel::Testing, ReleaseChannel::FixtureB] {
+        assert_eq!(for_profile(&julia.path).expect("bound channel"), ReleaseChannel::Julia);
+        assert_eq!(julia.channel.ap_hostname(), "ap.julia.testing.playbit.app");
+        for other in [ReleaseChannel::Public, ReleaseChannel::Testing, ReleaseChannel::Edward] {
             assert!(
                 resolve_selection(home, &executable, Some(&profile), Some(other), None).is_err()
             );
             assert!(Selection::open(home, Some(&profile), Some(other)).is_err());
         }
         let reopened = Selection::open(home, Some(&profile), None).expect("retained owner");
-        assert_eq!(reopened.channel, ReleaseChannel::FixtureA);
+        assert_eq!(reopened.channel, ReleaseChannel::Julia);
         fs::write(profile.join("instance.json"), "retained identity").expect("profile data");
         fs::remove_file(profile.join(PROFILE_MARKER)).expect("remove inner owner marker");
         assert!(Selection::open(home, Some(&profile), None).is_err());
@@ -1145,32 +1143,26 @@ mod tests {
             .expect("volume case sensitivity");
         let namespace = home.join(NAME_NAMESPACE);
         let inside_state = namespace.join("uncreated/nested/profile");
-        assert!(
-            Selection::open(&home, Some(&inside_state), Some(ReleaseChannel::FixtureA)).is_err()
-        );
+        assert!(Selection::open(&home, Some(&inside_state), Some(ReleaseChannel::Julia)).is_err());
         if insensitive {
             let inside_alias = home.join(".PLAYBIT-PROFILE-NAMES/uncreated/nested/profile");
             assert!(
-                Selection::open(&home, Some(&inside_alias), Some(ReleaseChannel::FixtureA))
-                    .is_err()
+                Selection::open(&home, Some(&inside_alias), Some(ReleaseChannel::Julia)).is_err()
             );
         }
         assert!(!namespace.exists(), "rejected path created the name namespace");
         for name in [".PLAYBIT", ".PLAYBIT-TESTING", ".playbit-teſting", ".playbit-teﬆing"] {
             let path = home.join(name);
-            let selection = Selection::open(&home, Some(&path), Some(ReleaseChannel::FixtureA));
+            let selection = Selection::open(&home, Some(&path), Some(ReleaseChannel::Julia));
             if insensitive {
                 assert!(selection.is_err(), "reserved alias accepted: {name}");
                 assert!(!path.exists());
             } else {
-                assert_eq!(
-                    selection.expect("distinct custom name").channel,
-                    ReleaseChannel::FixtureA
-                );
+                assert_eq!(selection.expect("distinct custom name").channel, ReleaseChannel::Julia);
             }
         }
         let similar = home.join(".playbit-tésting");
-        Selection::open(&home, Some(&similar), Some(ReleaseChannel::FixtureA))
+        Selection::open(&home, Some(&similar), Some(ReleaseChannel::Julia))
             .expect("similar non-alias remains a valid personal profile");
         let public = Selection::open(&home, None, Some(ReleaseChannel::Public))
             .expect("ordinary Public profile can still start");
@@ -1178,23 +1170,20 @@ mod tests {
         assert_eq!(for_profile(&public.path).expect("Public channel"), ReleaseChannel::Public);
 
         let path = home.join("PeRsOnAl");
-        let original = Selection::open(&home, Some(&path), Some(ReleaseChannel::FixtureA))
+        let original = Selection::open(&home, Some(&path), Some(ReleaseChannel::Julia))
             .expect("original personal profile");
         let alias = home.join("PERSONAL");
         fs::remove_dir_all(&original.path).expect("delete personal profile");
-        let replacement = Selection::open(&home, Some(&alias), Some(ReleaseChannel::FixtureB));
+        let replacement = Selection::open(&home, Some(&alias), Some(ReleaseChannel::Edward));
         if insensitive {
             assert!(replacement.is_err());
             assert!(!path.exists());
             let reopened =
                 Selection::open(&home, Some(&alias), None).expect("retained owner via alias");
-            assert_eq!(reopened.channel, ReleaseChannel::FixtureA);
+            assert_eq!(reopened.channel, ReleaseChannel::Julia);
             assert_eq!(reopened.path, original.path, "one durable profile identity");
         } else {
-            assert_eq!(
-                replacement.expect("distinct custom name").channel,
-                ReleaseChannel::FixtureB
-            );
+            assert_eq!(replacement.expect("distinct custom name").channel, ReleaseChannel::Edward);
         }
     }
 
@@ -1237,9 +1226,9 @@ mod tests {
         assert_eq!(public.path, profile);
         drop(old);
         fs::remove_dir_all(&profile).expect("delete active ordinary profile");
-        assert!(Selection::open(&home, Some(&profile), Some(ReleaseChannel::FixtureA)).is_err());
+        assert!(Selection::open(&home, Some(&profile), Some(ReleaseChannel::Julia)).is_err());
         if same_volume_name {
-            assert!(Selection::open(&home, Some(&alias), Some(ReleaseChannel::FixtureA)).is_err());
+            assert!(Selection::open(&home, Some(&alias), Some(ReleaseChannel::Julia)).is_err());
         }
         assert!(!profile.exists());
     }
@@ -1655,7 +1644,7 @@ mod tests {
     fn testing_profiles_report_their_authorities_before_any_connection() {
         // Ordinary testing accounts do not need an integration key.
         let home = tempfile::tempdir().expect("home");
-        for channel in [ReleaseChannel::Testing, ReleaseChannel::FixtureA] {
+        for channel in [ReleaseChannel::Testing, ReleaseChannel::Julia] {
             let profile = home.path().join(channel.name());
             let selected = Selection::open(home.path(), Some(&profile), Some(channel))
                 .expect("testing profile");

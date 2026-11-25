@@ -2,8 +2,8 @@
 resolver = "3"
 members = ["playbit", "playbit/platform/macos/runtime", "playbit/trace", "playbit-api", "playbit/test-fixtures", "playbit/kvdb", "playbit/docdb", "guests/*", "vendor/gpui"]
 default-members = ["playbit", "playbit-api", "playbit/kvdb", "playbit/docdb"]
-# Non-Rust guests are not Cargo members.
-exclude = ["guests/counter-ocaml", "guests/scorekeeper", "guests/touchline"]
+# Private services have their own workspaces; non-Rust guests are not Cargo members.
+exclude = ["service/ap", "guests/counter-ocaml", "guests/scorekeeper", "guests/touchline"]
 
 [workspace.package]
 version = "0.1.5-beta"

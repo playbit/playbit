@@ -34,3 +34,23 @@ test('links retain authority and reject another channel before key derivation', 
         assert.equal(nativeInvitation('/s',new URL(url).hash,selected),uri);
     }
 });
+
+test('personal Testing binds page, workers and invitation to one owner', () => {
+    const seed = new Uint8Array(16).fill(7);
+    for (const owner of ['rasmus', 'edward', 'julia']) {
+        const origin = `https://${owner}.testing.playbit.app`;
+        const selected = deploymentChannel('testing', origin);
+        assert.equal(configuration(selected).ap_hostname, `ap.${owner}.testing.playbit.app`);
+        const worker = workerURL('./ap-worker.js', `${origin}/assets/fixture/playbit.js`, selected);
+        assert.equal(workerChannel(worker.href), selected);
+        assert.throws(() => workerChannel(workerURL('./ap-worker.js', 'https://testing.playbit.app/playbit.js', selected).href), /different environment/);
+        const invitation = sessionLink(seed, selected);
+        assert.deepEqual(parseSessionLink(invitation, selected), seed);
+        assert.throws(() => parseSessionLink(invitation, 'testing'), /belongs to/);
+        assert.throws(() => parseSessionLink(sessionUri(seed, 'testing'), selected), /belongs to/);
+        assert.equal(nativeInvitation('/s', new URL(invitation).hash, selected), null);
+    }
+    for (const origin of ['https://other.testing.playbit.app', 'https://julia.testing.playbit.app:444', 'http://julia.testing.playbit.app']) {
+        assert.throws(() => deploymentChannel('testing', origin), /different environment/);
+    }
+});

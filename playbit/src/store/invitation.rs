@@ -138,7 +138,6 @@ pub fn parse_session_link(
                     ReleaseChannel::Testing => {
                         "This invitation belongs to Testing. Choose Testing in the account or sign-in Environment menu, then reopen the invitation"
                     }
-                    #[cfg(test)]
                     _ => "This invitation belongs to another personal Testing environment",
                 }));
             }

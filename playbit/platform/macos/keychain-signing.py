@@ -36,6 +36,7 @@ def prepare(app, profile_path, profile, entitlements_path, managed):
     # Only the engine calls SecItem. CLI, MCP and GUI clients use its existing IPC.
     # The outer app's profile cannot authorize a separate flat engine executable.
     # The engine must be its bundle's CFBundleExecutable; a compiled ID is not enough.
+    # See docs/internal/macos-credentials.md for the signing constraint.
     entitlements = signing_entitlements(profile) if profile is not None else None
     contents = app / "Contents"
     info = plistlib.loads((contents / "Info.plist").read_bytes())

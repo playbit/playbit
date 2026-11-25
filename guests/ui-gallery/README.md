@@ -94,8 +94,10 @@ resize/removal, without activating its window:
 cargo run --release -p playbit --example check-scrollbars
 ```
 
-The `playbit/benchmarks/check-scrollbars.swift` driver targets a specific
-process and leaves the active app in place.
+Backdrop blur is deferred by agreement for this review. The packaged
+`playbit/benchmarks/check-scrollbars.swift` driver targets a specific process;
+it does not change the active app. Screenshot automation remains future work
+through [issue #304](https://github.com/playbit/archipelago/issues/304).
 
 ### Scrollbar feedback update
 

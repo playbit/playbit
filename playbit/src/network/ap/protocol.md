@@ -859,7 +859,9 @@ sequenceDiagram
 
 ## Testing HELLO extension
 
-This optional extension authenticates a client in an isolated Testing namespace.
+The client codec and testing service implement this extension. Deployment and
+qualification are tracked separately; protocol support is not evidence that an
+endpoint has passed those gates.
 
 The testing request flag is exactly `0x01`; combinations with any other flag are
 invalid. Source and destination must be empty. The body is:
@@ -888,13 +890,15 @@ Success returns HELLO status 0 with the same credential body as successful
 REGISTER (the four-byte lengths, token, instance ID, CA and instance certificate).
 The client generates and retains its ordinary private key. Key authentication
 skips only email verification, never identity, TLS, encryption, ownership,
-invitation possession, consent or volume/session authorization.
+invitation possession, consent or volume/session authorization. Normal enrollment
+on the testing AP requires a verified address whose exact domain is `playb.it`.
 
 The authenticated namespace is immutable for that connection and all its streams.
 No operation field, source name, destination, logical ID or filesystem path can
 select another namespace. Accounts, enrollment/recovery credentials, operation
 receipts, app publications, replicas, blobs, subscriptions, routing and caches are all
 scoped. Equal logical IDs in different namespaces name independent resources.
+Production has no testing prefix or alternate storage path.
 
 ## Service operations
 
@@ -903,7 +907,7 @@ UTF-8 JSON body. `ServiceRequest` in `operation.rs` is tagged by `op` using
 snake_case; unknown fields are rejected. Every request carries `operation_id`.
 The corresponding `ServiceResponse` echoes it and carries `ok`, `code`, `error`, `denial` and
 operation-specific `data`. Never infer success from EOF or connection health.
-Identifiers use canonical Bitcoin base58 with the decoded byte widths enforced by that schema; see the [identifier codecs](../../identifier.rs).
+Identifiers use canonical Bitcoin base58 with the decoded byte widths enforced by that schema; see [identifier text](../../../../docs/identifiers.md).
 
 Native transports share `ap::service`, available with `ap-protocol`. It validates
 requests before encoding, checks DIRECT/service reply envelopes, correlates the
@@ -1458,6 +1462,7 @@ Local mutation commits synchronously. While retaining its existing volume
 operation guard, the store enqueues the actual committed delta without waiting
 for AP. A feed epoch and checked global sequence identify that publication;
 they are not recipient delivery cursors. Failed transactions publish nothing.
+The bounded feed and projection allocations are in the internal performance contract.
 Overflow and oversized transactions produce an explicit recovery boundary.
 
 AP receives the complete bounded delta before acquiring transaction/authority
@@ -1667,9 +1672,27 @@ connection replaces the selected observer; stale/canceled tasks cannot publish
 into its replacement. Web observation uses the shared AP worker and closes
 its stream on cancellation or before app bootstrap. 
 
+The AP reserves at most 128 operation-header readers and 128 account-private raw
+routing streams across testing namespaces. Excess streams are reset without
+admitting work. Raw routing retains at most 128 channels and 8 MiB of shared
+queued frames; capacity exhaustion ends that routing stream. These credits are
+separate from ordinary-operation and replica-subscription budgets, so stalled
+header readers cannot consume ordinary interactive-operation credits.
 Native QUIC endpoints use 512 KiB receive credit per stream and 2 MiB per
 connection, and retain at most 2 MiB of unacknowledged send payload per connection. Frames and streamed
 content larger than these windows are transferred incrementally.
+
+
+The native local engine can opt into privileged integration fixtures with
+`PLAYBIT_CHANNEL=testing` and `PLAYBIT_TESTING_CREDENTIALS`
+pointing to a private, at-most-1-KiB JSON file (`key` and `namespace`, each a base58-encoded 16-byte value), together with a fresh custom `PLAYBIT_PROFILE`. Default Public and Testing
+profiles reject these credentials. Ordinary support-user Testing needs no fixture
+key. The integration profile stores no testing key in
+the profile. A persistent namespace marker prevents ordinary-profile conversion,
+namespace switching and fallback to ordinary account authentication. Binding runs
+under the exclusive store lock before account metadata opens. DNS/TLS/testing HELLO run
+in background account bootstrap after local engine readiness. This local setup
+does not change the wire framing or server authorization rules above.
 
 
 ### Onboarding receipts
@@ -1745,26 +1768,31 @@ or session admission. The response header contains `content_length` and `hash`,
 followed by ordinary transfer chunks and the final service response. Fetching
 code or encrypted bytes never admits a session or grants decryption credentials.
 
-Unauthenticated HTTP reads use `https://blob.playbit.app/{hash}`. Successful
-immutable objects are cacheable for one year. Clients verify the content hash
-before retaining bytes. The HTTP ETag is separate from the BLAKE3 hash.
-An anonymous request for a missing object can return HTTP 403. Authenticated
-`get_blob` distinguishes missing content from storage unavailability.
+Unauthenticated HTTP reads use `https://blob.playbit.app/{hash}`. Cloudflare
+routes directly to S3's HTTPS REST endpoint, rewriting the path to `blobs/{hash}`;
+AP carries no HTTP response bytes. Successful immutable objects are cacheable for
+one year. Redirects and errors are not stored in the edge cache. Clients verify
+the content hash before retaining bytes. S3 supplies Content-Length and its own
+ETag, which is not the content hash. Anonymous missing-object requests can return
+S3's 403 AccessDenied because bucket listing remains private; authenticated
+`get_blob` distinguishes not-found from storage unavailability. AP reads retain
+the ordinary bulk admission limits.
 
-App bundles and encrypted volume blobs share the hash-addressed content store.
-Volume receipts still attribute durable storage to a volume, and upload
-authorization resolves its current immutable reference. Public reads of a
-volume blob return its encrypted envelope.
+App bundles and encrypted volume blobs share the same content store and
+`blobs/{hash}` backing-store keys. Volume receipts still attribute durable storage
+to a volume, and upload authorization still resolves its current immutable
+reference. Public reads return encrypted volume envelopes, never plaintext keys.
 
 ```mermaid
 flowchart LR
-    Session[Encrypted account session record] --> Fetch[Client build fetcher]
-    Fetch -->|get_blob hash| AP[Authenticated AP transport]
-    Fetch -->|GET /hash| HTTP[Public content endpoint]
-    AP --> Verify[Verify hash and package]
-    HTTP --> Verify
-    Verify --> Local[Local build cache]
-    Local -->|Completion notification| Sidebar[Name and build state]
+    Session[Encrypted account session record and last known app name] -->|Session becomes known| Cache[Bounded client build fetcher]
+    Cache -->|get_blob hash| AP[AP content store]
+    HTTP[Unauthenticated GET blob.playbit.app/hash] --> Edge[Cloudflare immutable cache]
+    Edge -->|Cache miss, HTTPS| Backing
+    AP --> Disk[Verified local content cache]
+    AP --> Backing[blobs/hash in durable object storage]
+    Cache -->|Validate package and hash, commit bytes| Local[Local build cache]
+    Local -->|Completion notification| Sidebar[Name and explicit build state]
 ```
 
 An encrypted account invitation record also carries `app_name`, either a last

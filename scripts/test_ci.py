@@ -11,48 +11,63 @@ from unittest.mock import patch
 import ci
 
 
-def selected(paths):
-    return {name for name, item in ci.select(paths).items() if item['run']}
+def selected(paths, private=True):
+    return {name for name, item in ci.select(paths, private).items() if item['run']}
 
 
 class Planner(unittest.TestCase):
     def test_check_dependencies_include_cross_language_consumers(self):
         # Whole check groups cover generated fixtures and non-Cargo consumers.
         cases = {
-            'playbit/platform/web/src/scene.ts': {'macos', 'web'},
-            'playbit/platform/ios/Host/GuestScene.swift': {'macos', 'web'},
-            'playbit/platform/macos/package.sh': {'macos'},
-            'playbit/src/desktop/sidebar_view.rs': {'macos'},
-            'playbit/src/platform/ios/account.rs': {'macos'},
-            'playbit/src/platform/web/account.rs': {'linux', 'web'},
-            'playbit/src/bin/pb/main.rs': {'linux', 'macos'},
-            'playbit/src/client/mod.rs': {'linux', 'macos'},
-            'playbit/src/ui/mod.rs': {'linux', 'macos'},
-            'playbit/src/ui/desktop/controls/render.rs': {'macos'},
-            'playbit/sdk/rust/playbit.rs': {'linux', 'macos'},
-            'playbit/sdk/toolchains/catalog.py': {'linux', 'macos'},
-            'playbit/skills/new-app.md': {'macos'},
-            'guests/todo/playbit.toml': {'linux', 'macos', 'web'},
-            'playbit-api/src/lib.rs': {'linux', 'macos', 'web'},
-            'playbit/kvdb/src/lib.rs': {'linux', 'macos', 'web'},
-            'playbit/trace/src/lib.rs': {'linux', 'macos', 'web'},
-            'playbit/src/engine/mod.rs': {'linux', 'macos'},
-            'playbit/src/channels.json': {'linux', 'macos', 'web'},
-            'vendor/gpui/src/lib.rs': {'macos'},
-            'vendor/accesskit_macos/src/lib.rs': {'macos'},
+            'service/ap/src/main.rs': {'service', 'export'},
+            'service/website/main.go': {'website', 'export'},
+            'playbit/platform/web/src/scene.ts': {'web', 'macos', 'website', 'service', 'export'},
+            'playbit/platform/ios/Host/GuestScene.swift': {'macos', 'web', 'service', 'clippy', 'style', 'export'},
+            'playbit/platform/macos/package.sh': {'macos', 'clippy', 'packaging', 'export'},
+            'service/infra/ci/ap-build-image/Dockerfile': {'service', 'image', 'export'},
+            'service/playbot/playbot.py': {'playbot', 'export'},
+            'service/playbot/capture.swift': {'playbot', 'export'},
+            'service/playbot/agent-instructions.md': {'playbot', 'export'},
+            'service/infra/release_controller.py': {'export'},
+            'service/infra/test_release_controller.py': {'export'},
+            'service/infra/release_state.py': {'export'},
+            'service/infra/test_release_state.py': {'export'},
+            'docs/manual/getting-started.md': {'website', 'export'},
+            'playbit/src/desktop/sidebar_view.rs': {'macos', 'clippy', 'style', 'service', 'export'},
+            'playbit/src/platform/ios/account.rs': {'macos', 'clippy', 'style', 'service', 'export'},
+            'playbit/src/platform/web/account.rs': {'linux', 'web', 'style', 'service', 'export'},
+            'playbit/src/bin/pb/main.rs': {'linux', 'macos', 'clippy', 'style', 'service', 'export'},
+            'playbit/src/client/mod.rs': {'linux', 'macos', 'clippy', 'style', 'service', 'export'},
+            'playbit/src/ui/mod.rs': {'linux', 'macos', 'clippy', 'style', 'service', 'export'},
+            'playbit/src/ui/desktop/controls/render.rs': {'macos', 'clippy', 'style', 'service', 'export'},
+            'playbit/sdk/rust/playbit.rs': {'linux', 'macos', 'clippy', 'service', 'export'},
+            'playbit/sdk/toolchains/catalog.py': {'linux', 'macos', 'clippy', 'service', 'website', 'export'},
+            'playbit/skills/new-app.md': {'macos', 'export'},
+            'guests/todo/playbit.toml': {'linux', 'macos', 'web', 'clippy', 'style', 'service', 'export'},
+            'playbit-api/src/lib.rs': {'linux', 'macos', 'web', 'clippy', 'style', 'service', 'website', 'export'},
+            'playbit/kvdb/src/lib.rs': {'linux', 'macos', 'web', 'clippy', 'style', 'service', 'kvdb-coverage', 'export'},
+            'playbit/trace/src/lib.rs': {'linux', 'macos', 'web', 'clippy', 'style', 'service', 'export'},
+            'playbit/src/engine/mod.rs': {'linux', 'macos', 'clippy', 'style', 'service', 'export'},
+            'playbit/src/channels.json': {'linux', 'macos', 'web', 'clippy', 'style', 'service', 'website', 'export'},
+            'vendor/gpui/src/lib.rs': {'macos', 'clippy', 'service', 'export'},
+            'vendor/accesskit_macos/src/lib.rs': {'macos', 'clippy', 'export'},
         }
         for path, expected in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(selected([path]), expected)
+        self.assertEqual(selected(['service/playbot/playbot.py', 'service/ap/src/main.rs']),
+                         {'playbot', 'service', 'export'})
 
     def test_unknown_and_shared_inputs_run_every_group(self):
         # Unclassified inputs cannot silently omit a consumer or target.
         for path in ('new-tool/file', 'new-tool/instructions.md', 'Cargo.toml', 'Cargo.lock',
                      'scripts/build-version.rs', '.github/workflows/public.yml', 'playbit/Cargo.toml',
-                     'playbit/build.rs', 'playbit/new-core/file.rs'):
+                     'playbit/build.rs', 'playbit/new-core/file.rs',
+                     'service/infra/release.py', 'service/infra/release_ap.py',
+                     'service/infra/release_controller.py.new', 'service/playbot-extra/tool.py'):
             with self.subTest(path=path):
-                self.assertEqual(selected([path]), set(ci.GROUPS))
-        self.assertEqual(selected(None), set(ci.GROUPS))
+                self.assertEqual(selected([path]), set(ci.PUBLIC + ci.PRIVATE))
+        self.assertEqual(selected(None), set(ci.PUBLIC + ci.PRIVATE))
 
     def test_long_histories_follow_storage_dependencies_and_default_to_full(self):
         # UI/adapters retain their ordinary tests without rebuilding the long
@@ -62,7 +77,8 @@ class Planner(unittest.TestCase):
                      'playbit/platform/web/src/scene.ts', 'playbit/src/bin/pb/main.rs',
                      'playbit/src/engine/service_call.rs', 'playbit/src/runtime/host/files.rs',
                      'playbit/src/network/ap/wire.rs',
-                     'playbit/sdk/rust/playbit.rs', 'README.md'):
+                     'playbit/sdk/rust/playbit.rs', 'service/website/main.go',
+                     'service/ap/src/main.rs', 'service/playbot/playbot.py', 'README.md'):
             with self.subTest(path=path):
                 self.assertFalse(ci.storage_history([path])['run'])
         for path in ('playbit/src/store/volume_index.rs', 'playbit/src/package/mod.rs',
@@ -78,11 +94,16 @@ class Planner(unittest.TestCase):
         # Prefix boundaries cannot turn a new shared module into a UI exclusion.
         self.assertTrue(ci.storage_history(['playbit/src/desktop_shared.rs'])['run'])
 
-    def test_prose_skips_builds(self):
-        self.assertEqual(selected(['docs/building.md', 'README.md']), set())
-        self.assertEqual(selected([]), set())
-        self.assertEqual(selected(['playbit/platform/web/src/scene.ts']), {'web', 'macos'})
-        self.assertEqual(selected(None), set(ci.GROUPS))
+    def test_prose_skips_builds_and_public_selection_needs_no_private_tree(self):
+        # Private source classification remains checked even for prose-only PRs.
+        runbook = 'service/infra/ci/self-hosted/README.md'
+        self.assertEqual(selected(['docs/building.md', 'README.md', runbook]), {'export'})
+        self.assertEqual(selected([runbook, 'service/website/main.go']), {'website', 'export'})
+        self.assertEqual(selected([runbook], private=False), set())
+        self.assertFalse(ci.storage_history([runbook])['run'])
+        self.assertEqual(selected([], private=False), set())
+        self.assertEqual(selected(['playbit/platform/web/src/scene.ts'], private=False), {'web', 'macos'})
+        self.assertEqual(selected(None, private=False), set(ci.PUBLIC))
 
     def test_rename_and_deletion_use_both_paths_from_real_git(self):
         # A rename across groups affects the old consumer as well as the new one.
@@ -93,7 +114,7 @@ class Planner(unittest.TestCase):
             git('init', '-b', 'main')
             git('config', 'user.name', 'CI Test')
             git('config', 'user.email', 'ci-test@example.invalid')
-            source = root / 'playbit/src/client/a.txt'
+            source = root / 'service/ap/a.txt'
             source.parent.mkdir(parents=True)
             source.write_text('same content\n')
             git('add', '.')
@@ -105,16 +126,16 @@ class Planner(unittest.TestCase):
             git('add', '-A')
             git('commit', '-m', 'move')
             with patch.object(ci, 'ROOT', root):
-                value = ci.plan(base)
+                value = ci.plan(base, private=True)
             self.assertEqual({name for name, item in value['groups'].items() if item['run']},
-                             set(ci.GROUPS))
+                             {'service', 'macos', 'web', 'clippy', 'style', 'export'})
             self.assertEqual(value['base'], base)
             self.assertEqual(value['head'], git('rev-parse', 'HEAD'))
             self.assertFalse(value['storage_history']['run'])
             with patch.object(ci, 'ROOT', root):
-                full = ci.plan(base, full=True)
+                full = ci.plan(base, private=True, full=True)
             self.assertEqual({name for name, item in full['groups'].items() if item['run']},
-                             set(ci.GROUPS))
+                             set(ci.PUBLIC + ci.PRIVATE))
             self.assertTrue(full['storage_history']['run'])
             # Deleting a storage input must still run its long workloads even
             # when its replacement lives entirely in a frontend directory.
@@ -128,14 +149,14 @@ class Planner(unittest.TestCase):
             git('add', '-A')
             git('commit', '-m', 'move storage')
             with patch.object(ci, 'ROOT', root):
-                self.assertTrue(ci.plan(base)['storage_history']['run'])
+                self.assertTrue(ci.plan(base, private=True)['storage_history']['run'])
 
     def test_github_outputs_carry_selected_checks_and_storage_workload(self):
         # Local plans and reusable/public GitHub workflows share the decision.
         for changed in (None, ['playbit/src/desktop/sidebar_view.rs'], ['playbit/src/store/mod.rs']):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temporary:
                 output = Path(temporary) / 'output'
-                value = dict(base='base', head='head', groups=ci.select(changed),
+                value = dict(base='base', head='head', groups=ci.select(changed, private=True),
                              storage_history=ci.storage_history(changed))
                 with patch.dict(os.environ, {'GITHUB_OUTPUT': str(output)}):
                     ci.github_outputs(value)
@@ -161,9 +182,13 @@ class Results(unittest.TestCase):
 
     def test_gate_explains_propagated_dependency_failure(self):
         # Both gate levels identify the dependency whose failure they propagate.
-        results = {'web': {'result': 'failure'}, 'test': {'result': 'failure'}}
-        for job in results:
-            env = {'CI_RESULTS': json.dumps(results), 'CI_EXPECTED': json.dumps({job: True})}
+        results = {name: {'result': 'skipped'} for name in ci.PRIVATE}
+        results.update(plan={'result': 'success'}, web={'result': 'failure'}, test={'result': 'failure'})
+        results['playbot'] = {'result': 'failure'}
+        for job, selection in (('web', {'CI_EXPECTED': '{"web":true}'}),
+                               ('test', {'CI_SELECTED': '["web"]'}),
+                               ('playbot', {'CI_SELECTED': '["playbot"]'})):
+            env = {'CI_RESULTS': json.dumps(results), **selection}
             with self.subTest(job=job), patch.dict(os.environ, env, clear=True):
                 with self.assertRaises(ValueError) as failure:
                     ci.gate()
@@ -174,10 +199,10 @@ class Results(unittest.TestCase):
     def test_failed_or_missing_plan_cannot_turn_skips_green(self):
         # The aggregate must fail even when all dependent jobs were skipped.
         for result in ('failure', 'cancelled', 'skipped', None):
-            results = {'test': {'result': 'skipped'}}
+            results = {name: {'result': 'skipped'} for name in ci.PRIVATE + ('test',)}
             if result:
                 results['plan'] = {'result': result}
-            env = {'CI_RESULTS': json.dumps(results), 'CI_EXPECTED': '{"plan":true,"test":true}'}
+            env = {'CI_RESULTS': json.dumps(results), 'CI_SELECTED': '[]'}
             with patch.dict(os.environ, env, clear=True), self.assertRaises(ValueError):
                 ci.gate()
 

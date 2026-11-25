@@ -483,4 +483,4 @@ Find the volume with backing `VOLUME_BUNDLE` (`0x300`) through `volume.list`,
 then open, list and read it with ordinary asynchronous File operations. This
 volume is read-only and has no persistent database or KV addressing. `app/`
 contains signed identity metadata, the portable executable, role declarations and optional
-icon and trace declarations. See [package contents and admission](../playbit/src/package/README.md).
+icon and trace declarations. See [the format specification](pbapp.md).

@@ -93,7 +93,7 @@ fn account_menu_tracks_readiness_and_rechecks_before_deferred_upgrade(
 fn personal_startup_receives_dismiss_without_starting_update_work(cx: &mut gpui::TestAppContext) {
     let (host, _, _) = crate::desktop::test_support::host(cx);
     cx.update(|cx| {
-        setup_for(host.downgrade(), ReleaseChannel::FixtureA, cx);
+        setup_for(host.downgrade(), ReleaseChannel::Rasmus, cx);
         check(false, cx);
         start(Operation::Initialize(Some("1".into())), cx);
         start(Operation::Check, cx);

@@ -20,17 +20,30 @@ if (typeof document !== "undefined") {
         throw failure;
     }
     const deployment = configuration(selected);
+    const personal = selected !== deployment.channel;
     const environment = document.querySelector<HTMLSelectElement>('#environment');
     if (environment) {
         environment.value = deployment.channel;
-        environment.onchange = () => location.assign(configuration(channel(environment.value)).website + '/s');
+        if (personal) {
+            const label = environment.closest('label');
+            if (label) label.hidden = true;
+        } else {
+            environment.onchange = () => location.assign(configuration(channel(environment.value)).website + '/s');
+        }
     }
     const badge = document.querySelector<HTMLElement>('#testing');
-    if (badge) badge.hidden = deployment.channel !== 'testing';
+    if (badge) {
+        badge.hidden = deployment.channel !== 'testing';
+        if (personal) badge.textContent = `${selected.slice('testing-'.length)} · Testing`;
+    }
     const preference = document.querySelector<HTMLElement>('#native-preference');
-    if (preference) preference.hidden = false;
+    if (preference) preference.hidden = personal;
     const instructions = document.querySelector<HTMLElement>('#install-instructions');
     if (instructions && selected === 'testing') instructions.textContent += ' In Playbit, choose Testing from Environment before reopening this invitation.';
+    if (personal) {
+        const intro = document.querySelector<HTMLElement>('.invitation-intro');
+        if (intro) intro.textContent = 'Join this session with the experimental web runtime';
+    }
     const diagnostics = document.querySelector<HTMLButtonElement>('#copy-environment');
     if (diagnostics) diagnostics.onclick = async () => {
         const failure = document.documentElement.dataset.replicationFailure;
@@ -49,7 +62,7 @@ if (typeof document !== "undefined") {
     }
     const install = document.querySelector<HTMLElement>("#install-playbit");
     const download = document.querySelector<HTMLAnchorElement>("#download-playbit");
-    if (install && download) {
+    if (!personal && install && download) {
         void configureInstallation(install, download, deployment.channel).then(available => {
             const footerDownload = document.querySelector<HTMLAnchorElement>('.footer-download');
             if (available && footerDownload) {

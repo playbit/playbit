@@ -2,19 +2,31 @@
 import endpoints from '../../../src/channels.json' with { type: 'json' };
 
 export type ReleaseChannel = 'public' | 'testing';
-export type Deployment = ReleaseChannel;
-export const deployments: readonly Deployment[] = ['public', 'testing'];
+const personalTesting = ['testing-rasmus', 'testing-edward', 'testing-julia'] as const;
+export type Deployment = ReleaseChannel | typeof personalTesting[number];
+export const deployments: readonly Deployment[] = ['public', 'testing', ...personalTesting];
 
 export function channel(value: unknown): ReleaseChannel {
     if (value !== 'public' && value !== 'testing') throw new Error('Environment must be public or testing');
     return value;
 }
 export function configuration(value: Deployment) {
+    for (const personal of personalTesting) {
+        if (value === personal) {
+            const hostname = personal.slice('testing-'.length) + '.testing.playbit.app';
+            return { channel: 'testing' as const, website: `https://${hostname}`, ap_hostname: `ap.${hostname}`, macos_manifest: null };
+        }
+    }
     const selected = channel(value);
     return { channel: selected, ...endpoints[selected] };
 }
 export function deploymentChannel(value: unknown, origin: string): Deployment {
     const selected = channel(value), expected = configuration(selected).website;
+    if (selected === 'testing') {
+        for (const personal of personalTesting) {
+            if (origin === configuration(personal).website) return personal;
+        }
+    }
     // Plain local development retains its public-only origin. Testing uses its
     // separate HTTPS origin, before any credential or web profile opens.
     const local = selected === 'public' && /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:[1-9][0-9]{0,4})?$/.test(origin);

@@ -22,12 +22,17 @@ ROOT = Path(__file__).resolve().parents[1]
 DIRECTORIES = [
     'playbit/src/' + name for name in
     ('runtime', 'store', 'engine', 'network', 'desktop', 'platform', 'package', 'bin')
-] + ['playbit/kvdb/src', 'playbit/trace/src', 'playbit-api/src']
+] + ['playbit/kvdb/src', 'playbit/trace/src', 'playbit-api/src', 'service/ap/src']
 TIER_A = [
     'playbit/src/desktop/update/' + name for name in ('archive.rs', 'package.rs', 'install.rs')
 ] + [
     'playbit/src/' + name for name in ('runtime', 'store', 'network', 'package', 'platform/web')
-] + ['playbit/kvdb/src', 'playbit-api/src']
+] + ['playbit/kvdb/src', 'playbit-api/src'] + [
+    'service/ap/src/' + name for name in (
+        'wire.rs', 'records.rs', 'records', 'auth.rs', 'auth_records.rs', 'auth',
+        'credentials.rs', 'request_limits.rs', 'replica_databases.rs', 'blobs.rs', 'content.rs', 'file_sync.rs',
+    )
+]
 EXCLUDED_DIRS = {'vendor', 'target', 'node_modules', 'tests', 'benches', 'benchmarks'}
 LITERALS = re.compile(
     r'//[^\n]*|/\*.*?\*/|(?:br|cr|r)(?P<hashes>\#*)".*?"(?P=hashes)'
@@ -154,15 +159,16 @@ def in_scope(path, scope):
 
 def crate_counts(root):
     commands = {
-        'playbit (desktop)': ['-p', 'playbit'],
-        'playbit (no default features)': ['-p', 'playbit', '--no-default-features'],
-        'kvdb (redb)': ['-p', 'kvdb', '--features', 'redb'],
+        'playbit (desktop)': (root, ['-p', 'playbit']),
+        'playbit (no default features)': (root, ['-p', 'playbit', '--no-default-features']),
+        'kvdb (redb)': (root, ['-p', 'kvdb', '--features', 'redb']),
+        'service/ap': (root / 'service/ap', []),
     }
     results = {}
-    for name, args in commands.items():
+    for name, (cwd, args) in commands.items():
         command = ['cargo', 'tree', '-e', 'normal', '--prefix', 'none', '--locked', *args]
         try:
-            run = subprocess.run(command, cwd=root, capture_output=True, text=True, timeout=60)
+            run = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=60)
             if run.returncode:
                 raise ValueError(run.stderr.strip())
             names = set(re.findall(r'^([\w-]+) v\S+', run.stdout, re.MULTILINE))

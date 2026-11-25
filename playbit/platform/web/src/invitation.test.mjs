@@ -44,12 +44,12 @@ test("web crypto derives the native session identity, proof and envelope", async
     await assert.rejects(openEnvelope(parsed, ""), /damaged/);
 });
 
-test("a Testing session link with a trailing slash stays in its own environment", async () => {
-    const link = `https://testing.playbit.app/s/#${vector.code}`;
-    const parsed = await parseInvitation(link, 'testing');
-    assert.equal(parsed.url, `https://testing.playbit.app/s#${vector.code}`);
-    assert.equal(parsed.uri, `playbit:session:testing:${vector.code}`);
-    assert.throws(() => parseSessionLink(link, 'public'), /belongs/);
+test("a personal session link with a trailing slash stays in its own environment", async () => {
+    const link = `https://julia.testing.playbit.app/s/#${vector.code}`;
+    const parsed = await parseInvitation(link, 'testing-julia');
+    assert.equal(parsed.url, `https://julia.testing.playbit.app/s#${vector.code}`);
+    assert.equal(parsed.uri, null);
+    assert.throws(() => parseSessionLink(link, 'testing'), /belongs/);
 });
 
 test("invitation validation rejects cross-bound identities and substituted seeds", async () => {

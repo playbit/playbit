@@ -91,7 +91,7 @@ trait Read {\n    fn parse(&self);\n}
                      'benchmarks/x.rs', 'benches/x.rs', 'tests.rs', 'x_tests.rs',
                      'test_support.rs', 'prepared_bench.rs'):
             self.assertFalse(style.production_file(Path(name)), name)
-        self.assertTrue(style.production_file(Path('playbit/src/runtime/testing.rs')))
+        self.assertTrue(style.production_file(Path('service/ap/src/testing.rs')))
 
     def test_all_regressions_and_report_only_tiers(self):
         # Assertion density is report-only, even when a tier A count decreases.
@@ -152,7 +152,7 @@ trait Read {\n    fn parse(&self);\n}
             self.assertIn('2 more in the job log', published)
 
     def test_tier_scopes_and_decoder_coverage(self):
-        # Mixed platform trees must not transfer tier B metrics to A.
+        # Mixed service/platform trees must not transfer tier B metrics to A.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             sources = {
@@ -160,6 +160,8 @@ trait Read {\n    fn parse(&self);\n}
                 'playbit/fuzz/fuzz_targets/kvdb_wire.rs': 'decode_bytes(input);',
                 'playbit/src/platform/web/mod.rs': 'fn decode_web() {}',
                 'playbit/src/platform/ios/mod.rs': 'fn decode_ios() { None.unwrap(); }',
+                'service/ap/src/records/nested.rs': 'fn parse_record() {}',
+                'service/ap/src/server.rs': 'fn parse_server() { None.unwrap(); }',
                 'playbit/src/engine/mod.rs': 'fn parse_engine() {}',
             }
             for path, source in sources.items():
@@ -171,19 +173,20 @@ trait Read {\n    fn parse(&self);\n}
             self.assertEqual(style.report(root, check_only=True)['tier_a'], report['tier_a'])
             names = {f['name']: f['covered'] for f in report['decoders']}
             self.assertEqual(names, {'decode_bytes': True, 'validate_item': True, 'parse_missing': False,
-                                     'decode_web': False})
+                                     'decode_web': False, 'parse_record': False})
             decoder = next(f for f in report['decoders'] if f['name'] == 'decode_bytes')
             self.assertEqual(decoder['fuzz_targets'], ['playbit/fuzz/fuzz_targets/kvdb_wire.rs'])
             self.assertEqual(report['tier_a']['playbit/kvdb/src']['functions'], 3)
             self.assertEqual(report['tier_a']['playbit/src/platform/web']['unwrap'], 0)
             self.assertEqual(report['directories']['playbit/src/platform']['unwrap'], 1)
+            self.assertEqual(report['tier_a']['service/ap/src/records']['functions'], 1)
 
     def test_crate_names_deduplicate_versions_and_unavailable(self):
         output = subprocess.CompletedProcess([], 0, 'kvdb v1.0\nredb v1.0\nredb v2.0 (*)\n', '')
         with patch.object(style.subprocess, 'run', return_value=output) as run:
             counts = style.crate_counts(Path('/example'))
             self.assertTrue(all(v['count'] == 2 for v in counts.values()))
-            self.assertEqual(run.call_args.kwargs['cwd'], Path('/example'))
+            self.assertEqual(run.call_args.kwargs['cwd'], Path('/example/service/ap'))
             self.assertIn('--locked', run.call_args.args[0])
         for error in (FileNotFoundError('no cargo'), subprocess.TimeoutExpired('cargo', 60)):
             with patch.object(style.subprocess, 'run', side_effect=error):

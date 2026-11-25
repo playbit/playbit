@@ -48,8 +48,8 @@ guest failures still applies.
 
 | Tier | A violated invariant means | Where |
 |---|---|---|
-| A | Data is lost or corrupted, replicas diverge, a guest escapes its sandbox, or authorization is bypassed. | `playbit-api`, `playbit/kvdb`, `playbit/src/store`, `playbit/src/runtime`, `playbit/src/network`, `playbit/src/package`, the archive/signature/installation boundary in `playbit/src/desktop/update`, and the Rust web host in `playbit/src/platform/web`. |
-| B | A session, connection, or recovery fails, recovers wrongly, or reports the wrong state to the user. | `playbit/src/engine`, `playbit/trace`, the shared panic policy in `playbit/src/platform/failure.rs`, the binaries in `playbit/src/bin`, and the Rust side of `playbit/src/platform/ios`. |
+| A | Data is lost or corrupted, replicas diverge, a guest escapes its sandbox, or authorization is bypassed. | `playbit-api`, `playbit/kvdb`, `playbit/src/store`, `playbit/src/runtime`, `playbit/src/network`, `playbit/src/package`, the archive/signature/installation boundary in `playbit/src/desktop/update`, the Rust web host in `playbit/src/platform/web`, and the wire, record, authorization, and storage code of the remote AP service (private). |
+| B | A session, connection, or recovery fails, recovers wrongly, or reports the wrong state to the user. | `playbit/src/engine`, `playbit/trace`, the shared panic policy in `playbit/src/platform/failure.rs`, the binaries in `playbit/src/bin`, the Rust side of `playbit/src/platform/ios`, and the routing, hosting, and process control of the remote AP service (private). |
 | C | Something looks wrong. Nothing is lost, because the data and the decisions live in tiers A and B. | `playbit/src/desktop`, `playbit/src/ui`, the Swift host in `playbit/platform/ios`, the TypeScript in `playbit/platform/web/src`, `scripts`, and the public website. |
 
 Three rules apply across tiers:
@@ -175,6 +175,13 @@ decision made once, here, not by whoever writes the assertion.
   guest stops with a clear message that names the app, not the runtime. The
   host never panics because a guest did. The failure is always logged locally;
   anonymous crash capture for app developers is a later step.
+- **The remote AP service.** Isolate the failure to the smallest unit whose
+  state can be safely discarded or restored, normally one connection or one
+  request. Continue serving other work only when that boundary prevents
+  inconsistent shared state from being observed. A task boundary or a caught
+  panic alone does not establish this. If safe containment cannot be
+  established, stop the affected subsystem or process. Log enough context to
+  reproduce and notify operators; a violated invariant is never routine.
 - **Everything else** (the engine, the CLI, the desktop and mobile hosts, the
   web host): crash, log, and, when there is a user, tell them what happened
   in plain words and what to do next. Acknowledge durable writes only after
@@ -226,8 +233,19 @@ Concretely: no polling loops for freshness of anything; a queue or channel
 wakes the consumer, and the consumer drains up to a bound and yields. Protocol
 deadlines and bounded backoff after failure are allowed; periodic fetches
 are not. Interactive work runs isolated from bulk and network work so that a
-stalled transfer cannot delay a keystroke. The macOS updater checks its release manifest hourly while the
-main app runs. Its installer uses event-driven process and lock waits.
+stalled transfer cannot delay a keystroke. The numbers, meaning the startup
+and interaction budgets, are in the internal performance contract and are not
+restated here; the shape of the code that meets them is.
+
+The macOS distribution updater is the sole release-discovery exception: one
+hourly manifest check while the main app runs, as scoped in the performance
+contract. Its installer still uses event-driven process/lock waits.
+
+Operator service monitoring has one explicit exception: Production/Testing APs and websites
+send one status heartbeat per second. Each has at most one request in flight,
+a 750 ms request deadline, skipped missed ticks and no backlog. This measures
+process readiness and host resources; it does not discover or refresh user data.
+Dashboard observations arrive through SSE, with deadlines marking missing reports.
 
 ## Performance
 
@@ -359,8 +377,8 @@ complies. Enforcement status as of 2026-09-21:
 
 | Rule | Implemented checks | Remaining work |
 |---|---|---|
-| Warnings, clippy, `unsafe` in tier A, bare `unwrap` in tier A | Workspace/member lint configuration; warnings-denied first-party Clippy with and without desktop; iOS library check; tier A unwrap regression gate | Finish removing existing unwraps in the later scoped work items; unsafe FFI exceptions remain locally documented |
-| Layout | First-party Rust is formatted; client, kvdb and fuzz-workspace formatting checks run in CI | Maintain formatting as code changes; vendor retains its upstream policy |
+| Warnings, clippy, `unsafe` in tier A, bare `unwrap` in tier A | Workspace/member lint configuration; warnings-denied first-party Clippy with and without desktop and in AP; iOS library check; tier A unwrap regression gate | Finish removing existing unwraps in the later scoped work items; unsafe FFI exceptions remain locally documented |
+| Layout | First-party Rust is formatted; client, AP, kvdb and fuzz-workspace formatting checks run in CI | Maintain formatting as code changes; vendor retains its upstream policy |
 | Function length, assertion density, limit constants | The style report inventories all three; its tier A gate rejects newly overlong functions; density and limits are report-only | Review meaningful invariants and limit coverage rather than counts |
 | Every decoder of untrusted bytes has a fuzz target | kvdb and the runtime boundary have fuzz smoke tests; the style report heuristically matches decoder names or annotations to targets | Review actual decoder coverage and add missing targets; a textual match does not prove execution |
 | Panic policy | Existing host and service tests cover parts of failure handling | Injected-failure tests covering each policy, including shared-state containment before service continuation |

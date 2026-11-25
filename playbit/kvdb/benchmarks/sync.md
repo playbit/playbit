@@ -124,8 +124,8 @@ hardware, power/thermal state, medium on both ends, build, command, RTT, loss,
 concurrency and sample count. Avoid compilation during measurements. Loopback
 uses kernel shortcuts and does not establish WAN performance; use another host
 or an external network emulator for latency/loss experiments. This benchmark
-measures the kvdb protocol independently of AP authorization, engine scheduling,
-live pub/sub and the UI.
+omits AP framing/authorization, engine scheduling, live pub/sub and UI work; it
+cannot qualify their end-to-end budgets in `docs/internal/performance.md`.
 
 ## Current catch-up mechanism
 

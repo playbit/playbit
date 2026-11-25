@@ -78,11 +78,11 @@ export function parseSessionLink(text: unknown, selected: Deployment): Uint8Arra
     for (const candidate of deployments) {
         const { channel, website } = configuration(candidate);
         const prefixes = [website + '/s#', website + '/s/#'];
-        prefixes.push(`playbit:session:${channel}:`);
+        if (candidate === channel) prefixes.push(`playbit:session:${channel}:`);
         for (const prefix of prefixes) {
             if (!text.startsWith(prefix)) continue;
             if (candidate !== selected) {
-                const name = candidate === 'public' ? 'Public' : 'Testing';
+                const name = candidate === 'public' ? 'Public' : candidate === 'testing' ? 'Testing' : website;
                 throw new Error(`This invitation belongs to ${name}. Open ${website}/s to join it`);
             }
             return parseSessionCode(text.slice(prefix.length));
@@ -92,9 +92,9 @@ export function parseSessionLink(text: unknown, selected: Deployment): Uint8Arra
     return parseSessionCode(text);
 }
 export const sessionLink = (seed: Uint8Array, selected: Deployment): string => configuration(selected).website + '/s#' + sessionCode(seed);
-export function sessionUri(seed: Uint8Array, selected: Deployment): string {
+export function sessionUri(seed: Uint8Array, selected: Deployment): string | null {
     const { channel } = configuration(selected);
-    return `playbit:session:${channel}:${sessionCode(seed)}`;
+    return selected === channel ? `playbit:session:${channel}:${sessionCode(seed)}` : null;
 }
 
 export async function deriveSessionKeys(seed: Uint8Array<ArrayBuffer>): Promise<SessionKeys> {

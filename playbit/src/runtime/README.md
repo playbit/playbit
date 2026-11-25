@@ -37,9 +37,10 @@ contracts need their callers and tests updated together. This map describes the
 current implementation; it does not assign ownership or prescribe a replacement
 engine or graphics backend.
 
-The [shared capability table](../capability.rs) implements handle lookup,
-rights, reuse, revocation and counted ownership. [Runtime capabilities](capabilities.rs)
-defines the guest resource namespace.
+See [runtime capabilities](../../../docs/runtime-capabilities.md) for handle lookup,
+rights, reuse, revocation and counted ownership. The shared table implementation is
+[`capability`](../capability.rs); [`capabilities`](capabilities.rs) defines the guest
+resource namespace.
 
 ## Operation modules
 

@@ -486,7 +486,6 @@ fn service_plist(channel: ReleaseChannel) -> Result<&'static std::ffi::CStr> {
     match channel {
         ReleaseChannel::Public => Ok(c"playbit-engine.plist"),
         ReleaseChannel::Testing => Ok(c"playbit-engine-testing.plist"),
-        #[cfg(test)]
         _ => Err("Managed background services require a distribution channel".into()),
     }
 }

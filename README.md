@@ -39,5 +39,7 @@ Read [AGENTS.md](AGENTS.md) before contributing.
 ## Source and license
 
 Client source is licensed under [Business Source License 1.1](LICENSE), with
-exceptions listed there. This repository contains the client, app SDKs and
-examples from the tagged release. The root workspace builds independently.
+exceptions listed there. Releases export a client-only mirror; it remains
+private during beta. Server code, deployment infrastructure and internal
+planning documents are excluded. The root workspace builds independently of
+the private service workspace.

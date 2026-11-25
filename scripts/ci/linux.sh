@@ -2,6 +2,9 @@
 # Shared verification commands for local and GitHub execution.
 set -euo pipefail
 
+# Test client CI publication tooling.
+python3 -m unittest discover -s playbit/ci -p 'test_*.py'
+
 # Clippy (Linux & wasm).
 cargo clippy --locked -p playbit --bins --no-default-features --features process,artwork --no-deps
 cargo clippy --locked -p playbit -p playbit-trace --lib --no-default-features --target wasm32-unknown-unknown --no-deps

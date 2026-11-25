@@ -37,10 +37,10 @@ impl Fixture {
             fs::write(old.join(directory).join("site.rs"), format!("const NAME: &str = {name:?};"))
                 .expect("write static native source fixture");
         }
-        fs::create_dir_all(old.join("other-crate/src"))
+        fs::create_dir_all(old.join("service/ap/src"))
             .expect("create private service source fixture directory");
         fs::write(
-            old.join("other-crate/src/private.rs"),
+            old.join("service/ap/src/private.rs"),
             "const NAME: &str = \"ap.private.forbidden\";",
         )
         .expect("write excluded private service source");

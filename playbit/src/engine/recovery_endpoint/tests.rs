@@ -154,7 +154,7 @@ fn missing_profile_retires_authenticated_orphan_and_preserves_other_engine() {
 fn deleted_personal_profile_retires_only_its_remembered_owners_engine() {
     let fixture = Fixture::new();
     let home = fixture.directory.path().canonicalize().unwrap();
-    let mut owner = fixture.start("Personal", ReleaseChannel::FixtureA);
+    let mut owner = fixture.start("Personal", ReleaseChannel::Julia);
     let alias =
         home.with_file_name(home.file_name().unwrap().to_ascii_uppercase()).join("PERSONAL");
     let requested = if cfg!(target_os = "macos") && alias.is_dir() {
@@ -165,18 +165,18 @@ fn deleted_personal_profile_retires_only_its_remembered_owners_engine() {
     };
     fs::remove_dir_all(&owner.profile).unwrap();
 
-    for other in [ReleaseChannel::Public, ReleaseChannel::Testing, ReleaseChannel::FixtureB] {
+    for other in [ReleaseChannel::Public, ReleaseChannel::Testing, ReleaseChannel::Edward] {
         assert!(profile::recover_gui_profile(&home, &requested, other).is_err());
         assert!(profile::Selection::open(&home, Some(&requested), Some(other)).is_err());
         assert!(owner.child.try_wait().unwrap().is_none());
         assert!(!owner.profile.exists());
     }
 
-    profile::recover_gui_profile(&home, &requested, ReleaseChannel::FixtureA).unwrap();
+    profile::recover_gui_profile(&home, &requested, ReleaseChannel::Julia).unwrap();
     assert_eq!(owner.child.wait().unwrap().signal(), Some(libc::SIGTERM));
     let reopened = profile::Selection::open(&home, Some(&requested), None).unwrap();
-    assert_eq!(reopened.channel, ReleaseChannel::FixtureA);
-    assert_eq!(fs::read(owner.profile.join("channel")).unwrap(), b"test-a");
+    assert_eq!(reopened.channel, ReleaseChannel::Julia);
+    assert_eq!(fs::read(owner.profile.join("channel")).unwrap(), b"julia");
 }
 
 #[test]

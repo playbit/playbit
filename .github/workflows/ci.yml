@@ -1,3 +1,4 @@
+# Published as .github/workflows/ci.yml; inactive in the private repository.
 name: ci
 on:
     push:

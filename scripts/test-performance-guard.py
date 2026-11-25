@@ -30,7 +30,7 @@ class GuardTests(unittest.TestCase):
     def test_detects_observed_jobs_and_parallel_load(self):
         self.assertTrue(guard["heavy"]([dict(cpu=101)]))
         self.assertTrue(guard["heavy"]([dict(cpu=51, executable="/usr/bin/tar")]))
-        self.assertTrue(guard["heavy"]([dict(cpu=51, executable="/work/tool/target/debug/deps/diagnostic")]))
+        self.assertTrue(guard["heavy"]([dict(cpu=51, executable="/work/service/ap/target/debug/deps/diagnostic")]))
         self.assertTrue(guard["heavy"]([dict(cpu=90) for _ in range(5)]))
         self.assertFalse(guard["heavy"]([dict(cpu=60, executable="desktop focus work")]))
         self.assertFalse(guard["heavy"]([dict(cpu=20), dict(cpu=40)]))

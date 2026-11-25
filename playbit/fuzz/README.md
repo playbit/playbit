@@ -3,7 +3,9 @@
 This standalone cargo-fuzz workspace covers the runtime, app ABI, AP and local IPC codecs, store, packages and kvdb. It
 does not build as part of the stable root workspace. All thirteen targets share one
 instrumented dependency build. Its native-runtime feature links the real C ABI
-implementations retained by sanitizer coverage in the SDK. The host fixture is available only through
+implementations retained by sanitizer coverage in the SDK. Corpus/crash archives
+are each capped at 7 MiB of input bytes so thirteen pairs and ZIP overhead remain
+within the existing 256-MiB transfer budget. The host fixture is available only through
 Playbit's existing `test-support` feature and cannot access files, the network,
 or native presentation.
 
@@ -66,12 +68,88 @@ cargo +nightly fuzz run --fuzz-dir playbit/fuzz --target aarch64-apple-darwin --
 cargo +nightly fuzz run --fuzz-dir playbit/fuzz --target aarch64-apple-darwin --debug-assertions kvdb_sync_pair -- -max_total_time=1800
 ```
 
-Set `--target` to your host target. On ARM Linux with glibc, use
-`aarch64-unknown-linux-gnu`. Keep ASan and debug assertions enabled.
-Corpus files, crash artifacts, build outputs and the standalone lockfile are ignored. Generate seeds with `seed-corpus.py`;
+Select the actual host target on other machines. CI explicitly uses
+`aarch64-unknown-linux-gnu`, since the prebuilt cargo-fuzz executable can otherwise
+select its own musl target. ASan and debug assertions stay enabled in both local
+and CI runs; each CI target runs for 60 seconds. Corpus, crash artifacts, build
+outputs and the standalone lockfile are ignored. Generate seeds with `seed-corpus.py`;
 never add generated `corpus/` files to Git.
 
 `seed-corpus.py` provides valid nested scenes, exact record/depth limits, all
 Reader selectors, every scalar syscall, invalid scalar arguments, and result buffers. Fuzzing mutates those
 seeds and also generates malformed input. A clean run is evidence for the tested
 inputs, not a proof that every decoder path or VM/JIT behavior was covered.
+
+## Persistent CI corpora and failure inputs
+
+The main-only `.github/workflows/main-checks.yml` workflow fuzzes pushes that
+change a fuzzed input. It restores the shared corpus from `ci.playbit.app`, adds the generated seeds, and runs all twelve
+targets for 60 seconds each, even if an earlier target fails.
+Each target has a 180-second process deadline; exceeding it kills its process
+group and records a timeout. A nonzero target result still fails the job.
+The worker logs starting distinct-input counts and bytes. Before collecting a
+successful target, it logs the on-disk counts and bytes and minimizes coverage
+into a separate temporary directory with libFuzzer's `-merge=1` operation (the
+same operation as `cargo fuzz cmin`). The original directory survives compaction.
+Each merge has a 60-second process-group deadline and a 2-GiB libFuzzer RSS limit.
+The minimized corpus must fit the archive limits below; a merge failure or an
+oversized result fails collection. Reproducers are collected after merging,
+including failures discovered by a merge child even if its parent exits zero.
+
+The trusted results reporter archives each same-repository run's corpora,
+reproducer inputs, dependency lockfile, versions and exact checkout identity in
+S3, then adds downloads to that run's results page. It also reports interrupted
+or missing evidence; absence of an upload does not establish absence of crashes.
+The reporter never runs downloaded code or inputs. Fork outputs remain excluded.
+
+Only successful targets from main pushes contribute to the shared baseline.
+The reporter replaces the baseline entries that the main run restored with its
+compacted corpus, while
+retaining entries added to the shared baseline since that restore. This preserves
+discoveries from overlapping runs without adding discarded baseline entries back.
+If that combination exceeds the archive limits, the reporter keeps that target's
+baseline unchanged and emits a warning in the log and job summary requesting
+compaction. Other targets and run publication still complete; the skipped corpus
+remains in the immutable run archive. The promotion receipt also records that
+run as processed, so reporting retries do not reapply it after later compaction.
+Corpora are keyed by target, not commit or lockfile.
+Inputs are synthetic test data; do not introduce real profiles, credentials, or
+customer data into these publicly downloadable bundles.
+
+```mermaid
+flowchart LR
+    baseline["S3 shared corpus manifest and snapshots"] -->|HTTPS, no credentials| job["Fuzz job: restore, seed, run all targets"]
+    job --> compact["Unprivileged worker: minimize successful corpora, collect reproducers"]
+    compact -->|one-day transfer| artifact["GitHub fuzz evidence"]
+    artifact --> reporter["Trusted main results reporter"]
+    reporter -->|all eligible runs| page["Permanent run page, corpus and reproducers"]
+    reporter -->|successful main targets: replace restored entries, retain concurrent additions| baseline
+    reporter -->|after verified publication and promotion| cleanup["Delete transfer copy"]
+```
+
+The corpus and reproducer archives use SHA-256 filenames (with the libFuzzer
+artifact kind preserved for reproducers). The manifest records archive hashes,
+lengths and input counts; `result.json` hashes all published files. Starting
+counts include generated seeds and are deduplicated by content. Saved counts for
+successful targets describe the minimized corpus. Targets that fail before
+collection retain their on-disk corpus when it fits the archive limits.
+To reproduce, use the exact checkout, resolved `Cargo.lock`, toolchain versions,
+target triple and command displayed on the failure page. No source or raw build
+logs are added to the report.
+
+Limits: 1 MiB per input, 16,384 corpus inputs and 7 MiB expanded corpus per
+target, 16 reproducer inputs and 7 MiB expanded reproducers per target, 24 MiB
+per compressed archive, 64 KiB metadata and 1 MiB lockfile. Thus thirteen targets
+retain at most 182 MiB expanded input data per run; the existing outer transfer
+limit is 256 MiB. The worker admits at most 65,536 files / 64 MiB per working
+corpus before a run or merge, allowing growth and generated seeds above the
+archive budget. The 1-MiB per-input check also applies to this working corpus.
+Process merges and bundles sequentially. Each HTTPS request has a 30-second
+deadline; the complete restore step has a four-minute deadline. Archive collection
+errors fail CI and mark the affected bundle unavailable while preserving other
+bundles, especially crash inputs. Storage failures never silently reset a corpus.
+These are bounded CI operations, not application startup/rendering changes or
+runtime performance qualification. Historical S3 snapshots have no expiry.
+
+See [the CI runbook](../../service/infra/ci/README.md) in the private repository
+for bootstrap, reporting retries and active-corpus compaction.

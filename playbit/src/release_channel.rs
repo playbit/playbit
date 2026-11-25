@@ -13,32 +13,26 @@ pub enum ReleaseChannel {
     #[default]
     Public,
     Testing,
-    #[cfg(test)]
-    #[serde(rename = "test-a")]
-    FixtureA,
-    #[cfg(test)]
-    #[serde(rename = "test-b")]
-    FixtureB,
+    Rasmus,
+    Edward,
+    Julia,
 }
 
 impl ReleaseChannel {
-    #[cfg(not(test))]
-    pub const ALL: [Self; 2] = [Self::Public, Self::Testing];
-    #[cfg(test)]
-    pub const ALL: [Self; 4] = [Self::Public, Self::Testing, Self::FixtureA, Self::FixtureB];
+    pub const ALL: [Self; 5] =
+        [Self::Public, Self::Testing, Self::Rasmus, Self::Edward, Self::Julia];
 
     pub const fn is_personal(self) -> bool {
-        !matches!(self, Self::Public | Self::Testing)
+        matches!(self, Self::Rasmus | Self::Edward | Self::Julia)
     }
 
     pub const fn label(self) -> &'static str {
         match self {
             Self::Public => "Public",
             Self::Testing => "Testing",
-            #[cfg(test)]
-            Self::FixtureB => "Fixture B",
-            #[cfg(test)]
-            Self::FixtureA => "Fixture A",
+            Self::Rasmus => "Rasmus Testing",
+            Self::Edward => "Edward Testing",
+            Self::Julia => "Julia Testing",
         }
     }
 
@@ -46,11 +40,10 @@ impl ReleaseChannel {
         match value {
             "public" => Ok(Self::Public),
             "testing" => Ok(Self::Testing),
-            #[cfg(test)]
-            "test-b" => Ok(Self::FixtureB),
-            #[cfg(test)]
-            "test-a" => Ok(Self::FixtureA),
-            _ => Err("PLAYBIT_CHANNEL must be public or testing"),
+            "rasmus" => Ok(Self::Rasmus),
+            "edward" => Ok(Self::Edward),
+            "julia" => Ok(Self::Julia),
+            _ => Err("PLAYBIT_CHANNEL must be public, testing, rasmus, edward or julia"),
         }
     }
 
@@ -58,10 +51,9 @@ impl ReleaseChannel {
         match self {
             Self::Public => "public",
             Self::Testing => "testing",
-            #[cfg(test)]
-            Self::FixtureB => "test-b",
-            #[cfg(test)]
-            Self::FixtureA => "test-a",
+            Self::Rasmus => "rasmus",
+            Self::Edward => "edward",
+            Self::Julia => "julia",
         }
     }
 
@@ -69,10 +61,9 @@ impl ReleaseChannel {
         match self {
             Self::Public => endpoints::PUBLIC_AP_HOSTNAME,
             Self::Testing => endpoints::TESTING_AP_HOSTNAME,
-            #[cfg(test)]
-            Self::FixtureB => "ap.fixture-b.example.invalid",
-            #[cfg(test)]
-            Self::FixtureA => "ap.fixture-a.example.invalid",
+            Self::Rasmus => "ap.rasmus.testing.playbit.app",
+            Self::Edward => "ap.edward.testing.playbit.app",
+            Self::Julia => "ap.julia.testing.playbit.app",
         }
     }
 
@@ -80,10 +71,9 @@ impl ReleaseChannel {
         match self {
             Self::Public => endpoints::PUBLIC_WEBSITE,
             Self::Testing => endpoints::TESTING_WEBSITE,
-            #[cfg(test)]
-            Self::FixtureB => "https://fixture-b.example.invalid",
-            #[cfg(test)]
-            Self::FixtureA => "https://fixture-a.example.invalid",
+            Self::Rasmus => "https://rasmus.testing.playbit.app",
+            Self::Edward => "https://edward.testing.playbit.app",
+            Self::Julia => "https://julia.testing.playbit.app",
         }
     }
 
@@ -91,8 +81,7 @@ impl ReleaseChannel {
         match self {
             Self::Public => Some(endpoints::PUBLIC_MACOS_MANIFEST),
             Self::Testing => Some(endpoints::TESTING_MACOS_MANIFEST),
-            #[cfg(test)]
-            Self::FixtureA | Self::FixtureB => None,
+            Self::Rasmus | Self::Edward | Self::Julia => None,
         }
     }
 }

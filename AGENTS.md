@@ -62,7 +62,7 @@ See [app trace declarations](docs/app-trace-declarations.md).
 
 ## Identifier text
 
-Use the [shared identifier codecs](playbit/src/identifier.rs). All user-visible opaque
+Follow [the identifier text contract](docs/identifiers.md). All user-visible opaque
 Playbit IDs use canonical base58, including CLI/GUI, JSON APIs, logs, support/admin
 tools, documentation and examples. Use the shared codecs and exact decoded byte
 widths; do not hand-format IDs as hex, UUIDs or byte arrays.

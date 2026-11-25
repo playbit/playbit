@@ -26,7 +26,7 @@ sync with an entry spool and journal. Capacity errors occur before publication. 
 bounded by its existing unsigned 32-bit length field; it is not a RAM allocation.
 These conservative charges bound admission, not actual JavaScript engine RSS.
 The complete worker/tab must still pass the 256 MiB and responsiveness limits
-in a browser run.
+in the internal performance contract under actual web browser qualification.
 
 The diagnostic operator `qualify.mjs` waits for committed TODO initialization and
 visible updates; input acknowledgments can contain Pending scenes. It reports
