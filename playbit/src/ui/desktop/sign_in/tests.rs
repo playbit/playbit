@@ -899,12 +899,30 @@ fn failed_key_sign_in_restores_editing_and_long_key_feedback(cx: &mut gpui::Test
 
 #[gpui::test]
 fn tab_cycles_fields_and_enabled_button_in_both_directions(cx: &mut gpui::TestAppContext) {
+    // The privacy link is reachable even before the email enables sign-up.
     let (window, view) = cx.update(|cx| {
         open(ReleaseChannel::Public, false, Rc::new(|_, _| Ok(())), Rc::new(|_| {}), cx).unwrap()
     });
     cx.run_until_parked();
     window
         .update(cx, |_, window, _| {
+            assert!(
+                window.accessibility_nodes_for_test().any(|(_, n)| {
+                    n.placeholder() == Some("Account key (leave empty to sign up)")
+                })
+            );
+            let (_, submit) = window
+                .accessibility_nodes_for_test()
+                .find(|(_, n)| n.label() == Some("Sign up..."))
+                .unwrap();
+            assert!(submit.is_disabled());
+            let (_, link) = window
+                .accessibility_nodes_for_test()
+                .find(|(_, n)| n.role() == gpui::accesskit::Role::Link)
+                .unwrap();
+            assert_eq!(link.label(), Some("Privacy Policy"));
+            assert_eq!(link.url(), Some(agreement::PRIVACY_URL));
+            assert_eq!(link.bounds().unwrap().y0, submit.bounds().unwrap().y1 + 12.);
             assert!(
                 !window
                     .accessibility_nodes_for_test()
@@ -920,6 +938,9 @@ fn tab_cycles_fields_and_enabled_button_in_both_directions(cx: &mut gpui::TestAp
         .unwrap();
     cx.simulate_keystrokes(window.into(), "tab");
     window.update(cx, |view, window, cx| assert!(view.privacy.read(cx).focused(window))).unwrap();
+    cx.simulate_keystrokes(window.into(), "enter");
+    cx.dispatch_key_up(window.into(), gpui::Keystroke::parse("enter").unwrap());
+    assert_eq!(cx.opened_url().as_deref(), Some(agreement::PRIVACY_URL));
     cx.simulate_keystrokes(window.into(), "tab");
     window
         .update(cx, |view, window, cx| {
@@ -934,6 +955,11 @@ fn tab_cycles_fields_and_enabled_button_in_both_directions(cx: &mut gpui::TestAp
     window
         .update(cx, |view, window, cx| {
             assert!(view.primary.read(cx).focused(window));
+            assert!(
+                window
+                    .accessibility_nodes_for_test()
+                    .any(|(_, n)| { n.label() == Some("Sign up...") && !n.is_disabled() })
+            );
             assert!(
                 view.primary.read(cx).keyboard_focus_visible(window),
                 "Tab must show the shared prominent-button focus treatment"
@@ -1558,7 +1584,7 @@ fn reduced_zoom_centers_the_heading_and_form_together(cx: &mut gpui::TestAppCont
 fn saved_account_fills_untouched_fields_without_submitting(cx: &mut gpui::TestAppContext) {
     let sent = Rc::new(RefCell::new(Vec::new()));
     let dispatch = sent.clone();
-    let (_, view) = cx.update(|cx| {
+    let (window, view) = cx.update(|cx| {
         open(
             ReleaseChannel::Public,
             false,
@@ -1591,6 +1617,15 @@ fn saved_account_fills_untouched_fields_without_submitting(cx: &mut gpui::TestAp
     });
     cx.run_until_parked();
     assert!(sent.borrow().is_empty());
+    window
+        .update(cx, |_, window, _| {
+            assert!(
+                window
+                    .accessibility_nodes_for_test()
+                    .any(|(_, n)| { n.label() == Some("Sign in") && !n.is_disabled() })
+            );
+        })
+        .unwrap();
 }
 
 #[gpui::test]

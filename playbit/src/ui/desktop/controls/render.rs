@@ -49,8 +49,12 @@ impl Render for Control {
                 && self.focus.is_focused(window),
             pressed: !self.disabled && (self.press.active() || self.popup_open),
         };
-        let surface = self.render_surface(&appearance, window);
-        let mut root = self.render_root(surface, &appearance, window);
+        let mut root = if matches!(self.kind, Kind::Link(_)) {
+            self.render_link(&appearance, window)
+        } else {
+            let surface = self.render_surface(&appearance, window);
+            self.render_root(surface, &appearance, window)
+        };
         if !self.disabled {
             root = self.pointer_handlers(root, cx);
             root = self.keyboard_handlers(root, cx);
@@ -117,6 +121,7 @@ impl Control {
 
     fn background(&self, pressed: bool) -> gpui::Hsla {
         match self.kind {
+            Kind::Link(_) => gpui::transparent_black(),
             Kind::Checkbox(_) => {
                 if self.disabled {
                     self.color(Role::ControlBackground).alpha(0.1)
@@ -704,6 +709,22 @@ impl Control {
         }
     }
 
+    fn render_link(&self, appearance: &Appearance, window: &Window) -> gpui::Stateful<gpui::Div> {
+        let text = self.color(Role::Text);
+        let mut link = div().id("link").relative().flex().track_focus(&self.focus);
+        link.style().align_self = Some(gpui::AlignSelf::FlexStart);
+        *link.text_style() = Some(label_style(window));
+        link.line_height(appearance.pixels(12.))
+            .whitespace_nowrap()
+            .text_color(text.alpha(0.4))
+            .when(!self.disabled, |link| {
+                link.cursor_pointer().when(self.press.hovered || appearance.focused, |link| {
+                    link.text_color(text).underline()
+                })
+            })
+            .child(format!("{} →", self.label))
+    }
+
     fn render_root(
         &self,
         surface: gpui::Div,
@@ -818,7 +839,11 @@ impl Control {
                 }
                 cx.notify();
             }
-            if this.press.pointer || this.copy_value.is_some() || this.sidebar_icon.is_some() {
+            if this.press.pointer
+                || this.copy_value.is_some()
+                || this.sidebar_icon.is_some()
+                || matches!(this.kind, Kind::Link(_))
+            {
                 cx.notify();
             }
         }))
@@ -936,9 +961,13 @@ impl Control {
         let mut node = Node::new(match self.kind {
             Kind::Checkbox(_) => Role::CheckBox,
             Kind::Button(_) => Role::Button,
+            Kind::Link(_) => Role::Link,
             Kind::Popup => Role::ComboBox,
         });
         node.set_label(self.accessibility_label.as_ref().unwrap_or(&self.label).to_string());
+        if let Kind::Link(url) = self.kind {
+            node.set_url(url);
+        }
         match &self.session_name {
             Some(SessionName::Loading(_)) => {
                 node.set_description("Loading app information".to_owned())

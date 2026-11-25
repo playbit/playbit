@@ -231,7 +231,6 @@ impl SignIn {
                             3 => cx.open_url(&this.flow.help_url(this.channel)),
                             6 => this.save_agreement(cx),
                             7 => cx.quit(),
-                            9 => cx.open_url(agreement::PRIVACY_URL),
                             5 => {
                                 let work = if this.flow.step == Step::Replace {
                                     this.flow.decline_replacement()
@@ -248,12 +247,23 @@ impl SignIn {
                 if id == 2 { control.circle_icon("sign-in-back") } else { control }
             })
         };
-        let primary = control(1, "Sign in", ButtonStyle::Primary, cx);
+        let primary = control(1, "Sign up...", ButtonStyle::Primary, cx);
         let sign_out = control(5, "Sign Out", ButtonStyle::Default, cx);
         let back = control(2, "Back", ButtonStyle::Default, cx);
         let help = control(3, "Help", ButtonStyle::Default, cx);
-        let privacy = control(9, "Privacy policy", ButtonStyle::Default, cx);
-        privacy.update(cx, |button, cx| button.set_button_size(96., 24., cx));
+        let privacy = cx.new(|cx| {
+            controls::Control::new(
+                9,
+                controls::Properties {
+                    kind: controls::Kind::Link(agreement::PRIVACY_URL),
+                    label: "Privacy Policy",
+                    disabled: false,
+                    theme: &theme(),
+                },
+                Rc::new(|_, cx| cx.open_url(agreement::PRIVACY_URL)),
+                cx,
+            )
+        });
         let agreement_save = control(6, "Save as…", ButtonStyle::Default, cx);
         let agreement_decline = control(7, "Decline & Quit", ButtonStyle::Default, cx);
         let account_id = cx.new(|cx| {
@@ -529,10 +539,10 @@ impl SignIn {
         }
         match self.flow.step {
             Step::Entry => {
+                let key = self.key.read(cx).text().trim();
                 (self.flow.enrolled || validation::email(self.email.read(cx).text()))
-                    && ((!self.flow.enrolled && self.key.read(cx).text().is_empty())
-                        || crate::store::account_key::parse(self.key.read(cx).text().trim())
-                            .is_ok())
+                    && ((!self.flow.enrolled && key.is_empty())
+                        || crate::store::account_key::parse(key).is_ok())
             }
             Step::Code => validation::code(self.code.read(cx).text()),
             Step::RestoreKey => {
@@ -566,6 +576,14 @@ impl Render for SignIn {
         let initializing =
             matches!(self.flow.step, Step::Reset | Step::Recovery | Step::Profile | Step::SignOut);
         let step = self.flow.presentation();
+        let can_sign_up = step == Step::Entry && !self.flow.enrolled;
+        self.key.update(cx, |key, _| {
+            key.set_placeholder(if can_sign_up {
+                "Account key (leave empty to sign up)"
+            } else {
+                "Account key"
+            });
+        });
         let busy =
             self.channel_busy || self.flow.busy() || (initializing && self.flow.error.is_empty());
         self.render_channel(busy, cx);
@@ -612,21 +630,15 @@ impl Render for SignIn {
         } else if failure || initializing {
             "Retry"
         } else {
+            let key = self.key.read(cx).text().trim();
             match step {
+                Step::Entry if can_sign_up && key.is_empty() => "Sign up...",
                 Step::Entry
-                    if !self.flow.enrolled
-                        && self.key.read(cx).text().is_empty()
+                    if !key.is_empty()
+                        && crate::store::account_key::parse(key).is_err()
                         && validation::email(self.email.read(cx).text()) =>
                 {
-                    "Request One-time Code"
-                }
-                Step::Entry
-                    if !self.key.read(cx).text().is_empty()
-                        && crate::store::account_key::parse(self.key.read(cx).text().trim())
-                            .is_err()
-                        && validation::email(self.email.read(cx).text()) =>
-                {
-                    validation::account_key_error(self.key.read(cx).text())
+                    validation::account_key_error(key)
                 }
                 Step::Replace => "Replace",
                 Step::Entry | Step::Code => "Sign in",
@@ -787,14 +799,7 @@ impl Render for SignIn {
         {
             form = form.child(self.primary.clone());
         }
-        if step == Step::Entry && !self.flow.enrolled && !busy && !failure {
-            if self.flow.error.is_empty() && self.flow.field_error.is_none() {
-                form = form.child(self.text(
-                    3,
-                    "Leave the key blank to get a code by email. \
-                     We use your email for sign-in and account notices.",
-                ));
-            }
+        if can_sign_up && !busy && !failure {
             form = form.child(self.privacy.clone());
         }
         if step == Step::Code && !busy && !failure {

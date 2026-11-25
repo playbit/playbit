@@ -296,6 +296,7 @@ impl AssetSource for Assets {
 pub enum Kind {
     Checkbox(CheckState),
     Button(ButtonStyle),
+    Link(&'static str),
     Popup,
 }
 
