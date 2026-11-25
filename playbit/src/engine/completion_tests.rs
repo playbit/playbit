@@ -45,7 +45,13 @@ fn callback_hosts_advance_independent_guest_turns_and_retire_pending_wakes() {
             owner
                 .submit(
                     id,
-                    Request::Input { instance: *instance, kind: 2, target: 1, data: vec![] },
+                    Request::Input {
+                        object_id: 1,
+                        instance: *instance,
+                        kind: 2,
+                        target: 1,
+                        data: vec![],
+                    },
                 )
                 .unwrap();
             let mut step = owner.advance(engine, true, true, true);

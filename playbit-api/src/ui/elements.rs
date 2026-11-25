@@ -245,4 +245,13 @@ impl Canvas<'_, '_> {
             _ => None,
         })
     }
+
+    /// Elapsed display time for each frame delivered this turn.
+    pub fn frames(&self) -> impl DoubleEndedIterator<Item = FrameInput> + '_ {
+        self.encoder
+            .events
+            .for_target(self.id)
+            .filter(|event| event.kind == EventKind::Frame)
+            .map(|event| FrameInput::decode(event.data).expect("validated frame input"))
+    }
 }

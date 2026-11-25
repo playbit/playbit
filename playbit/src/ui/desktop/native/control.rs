@@ -48,6 +48,7 @@ struct Snapshot {
     generation: u64,
     build: String,
     scene: Arc<Vec<u8>>,
+    legacy_canvas_input: bool,
     logs: Vec<app_control::LogEntry>,
     next: u64,
     handle: Option<Handle>,
@@ -76,6 +77,7 @@ impl Publisher {
             generation,
             build,
             scene: Arc::new(vec![]),
+            legacy_canvas_input: false,
             logs: vec![],
             next: 0,
             handle: Some(handle),
@@ -85,7 +87,12 @@ impl Publisher {
         drop(state);
         self.notify();
     }
-    pub fn frame(&self, scene: Option<Vec<u8>>, logs: &[String]) {
+    pub fn frame(
+        &self,
+        scene: Option<Vec<u8>>,
+        view: Option<&crate::runtime::ViewNode>,
+        logs: &[String],
+    ) {
         if scene.is_none() && logs.is_empty() {
             return;
         }
@@ -95,6 +102,7 @@ impl Publisher {
                 scene.len() <= playbit_api::abi::syscall::MAX_CALL_BYTES,
                 "runtime validated scene size"
             );
+            state.legacy_canvas_input = view.is_some_and(|view| view.legacy_canvas() != 0);
             state.scene = Arc::new(scene);
         }
         state.next =
@@ -238,9 +246,36 @@ impl Publisher {
                     {
                         playbit_api::abi::syscall::EventKind::Key
                     }
+                    22 if target != 0 => playbit_api::abi::syscall::EventKind::WindowPointer,
+                    23 if target == 0 => playbit_api::abi::syscall::EventKind::WindowKeyboard,
                     _ => return Err("Invalid app control input kind, target, or payload".into()),
                 };
-                if !handle.send_tool_input(Input { kind, target, data, revision: None }) {
+                use playbit_api::abi::{input::Input as RawInput, syscall::EventKind};
+                let legacy_canvas = state.legacy_canvas_input
+                    && matches!(kind, EventKind::Pointer | EventKind::Key);
+                let object_id = handle.object_id.load(Ordering::Acquire);
+                if object_id == 0
+                    && !legacy_canvas
+                    && matches!(
+                        kind,
+                        EventKind::Pointer
+                            | EventKind::Key
+                            | EventKind::WindowPointer
+                            | EventKind::WindowKeyboard
+                    )
+                {
+                    return Err(
+                        "The guest window is closed. Open it before sending raw input.".into()
+                    );
+                }
+                if RawInput::family(kind) != 0 && RawInput::decode(kind, &data).is_err() {
+                    return Err("Invalid app control input payload".into());
+                }
+                if !handle.send_tool_input(
+                    Input { kind, target, data, revision: None },
+                    object_id,
+                    legacy_canvas,
+                ) {
                     return Err(
                         "App input queue is full or closed; this input did not start".into()
                     );
@@ -297,6 +332,7 @@ impl Server {
                 generation: 0,
                 build: String::new(),
                 scene: Arc::new(vec![]),
+                legacy_canvas_input: false,
                 logs: vec![],
                 next: 0,
                 handle: None,
@@ -760,6 +796,7 @@ mod tests {
                 generation: 1,
                 build: String::new(),
                 scene: Arc::new(vec![]),
+                legacy_canvas_input: false,
                 logs: vec![],
                 next: 0,
                 handle: None,
@@ -770,7 +807,7 @@ mod tests {
         };
         let (outputs, _) = async_channel::bounded(1);
         for report in ["é".repeat(MAX_LOG_BYTES / 2), "🌱".repeat(MAX_LOG_BYTES)] {
-            publisher.frame(None, &["before crash".into()]);
+            publisher.frame(None, None, &["before crash".into()]);
             let failure: super::super::super::alert::Failure = report.clone().into();
             publisher.stopped(Some(&failure.details));
             let reply = publisher.observe(1, &Wait::Logs(None)).unwrap().unwrap();
@@ -807,6 +844,7 @@ mod tests {
                 generation: 1,
                 build: String::new(),
                 scene: Arc::new(vec![]),
+                legacy_canvas_input: false,
                 logs: vec![],
                 next: 0,
                 handle: None,
@@ -818,6 +856,7 @@ mod tests {
         let (outputs, _) = async_channel::bounded(1);
         publisher.frame(
             Some(vec![0; app_control::MAX_SCENE_BYTES + 1]),
+            None,
             &["large frame presented".to_owned()],
         );
         let error = publisher.respond(1, Operation::Frame, &outputs).unwrap_err();
@@ -826,7 +865,7 @@ mod tests {
             panic!("large presentations retain readable logs")
         };
         assert_eq!(batch.lines[0].message, "large frame presented");
-        publisher.frame(Some(vec![0; app_control::MAX_SCENE_BYTES]), &[]);
+        publisher.frame(Some(vec![0; app_control::MAX_SCENE_BYTES]), None, &[]);
         let Reply::Frame { scene, .. } = publisher.respond(1, Operation::Frame, &outputs).unwrap()
         else {
             panic!("the exact tool snapshot limit fits")

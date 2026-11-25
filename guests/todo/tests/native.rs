@@ -125,7 +125,7 @@ fn input(kind: EventKind, target: u32, data: &[u8]) -> Event {
     } else {
         data
     };
-    Event { kind, target, data: data.to_vec() }
+    Event { object_id: 0, kind, target, data: data.to_vec() }
 }
 fn settle(apps: &mut Apps, generation: u64) {
     let deadline = Instant::now() + std::time::Duration::from_secs(10);

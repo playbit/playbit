@@ -261,8 +261,11 @@ fn typed_creation_preserves_its_receipt_after_write_authority_is_withdrawn() {
     )
     .unwrap();
     let ready = super::handles::raw_operation(operation).raw().to_le_bytes().to_vec();
-    push_event(&mut state, Event { kind: EventKind::ObjectCreationReady, target: 0, data: ready })
-        .unwrap();
+    push_event(
+        &mut state,
+        Event { object_id: 0, kind: EventKind::ObjectCreationReady, target: 0, data: ready },
+    )
+    .unwrap();
     super::test_support::set_volume_rights(&mut state, 0, VolumeRights::READ);
     assert_eq!(
         handles::poll_operation(&mut state, operation, Opcode::ObjectCreatePoll),
@@ -294,7 +297,7 @@ fn typed_creation_preserves_its_receipt_after_write_authority_is_withdrawn() {
     .unwrap();
     assert_ne!(operation, current);
     assert_eq!(handles::poll_operation(&mut state, current, Opcode::ObjectCreatePoll), Ok(OBJECT));
-    assert_eq!(state.queued_bytes, 20);
+    assert_eq!(state.queued_bytes, abi::EVENT_QUEUE_OVERHEAD);
     assert_eq!(calls.lock().unwrap().polls, 2);
     assert_eq!(
         handles::poll_operation(&mut state, current, Opcode::ObjectCreatePoll),

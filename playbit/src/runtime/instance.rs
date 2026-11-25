@@ -18,6 +18,7 @@ use playbit_api::abi::syscall::{self as abi, EventKind, Id, Opcode, VolumeHandle
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Event {
     pub kind: EventKind,
+    pub object_id: u32,
     /// UI element identity for Click, Submit, Pointer, Key and Frame; zero for
     /// host state notifications.
     pub target: u32,
@@ -134,6 +135,7 @@ pub(super) struct State {
     pub(super) channel_listener: Option<u64>,
     pub(super) pending_data_bytes: usize,
     pub(super) logs: Vec<String>,
+    pub(super) uses_window_input: bool,
     pub(super) view: Option<crate::runtime::ViewNode>,
     pub(super) view_bytes: Option<Vec<u8>>,
     pub(super) quit_on_last_window: Option<bool>,
@@ -188,7 +190,10 @@ impl State {
     pub(super) fn assert_invariants(&self) {
         assert!(self.events.len() <= MAX_QUEUED_EVENTS, "event queue exceeded its count limit");
         assert!(self.queued_bytes <= MAX_QUEUED_EVENT_BYTES, "event queue exceeded its byte limit");
-        assert!(self.queued_bytes >= 20 * self.events.len(), "each event owns a 20-byte header");
+        assert!(
+            self.queued_bytes >= abi::EVENT_QUEUE_OVERHEAD * self.events.len(),
+            "event queue charges every envelope"
+        );
         assert!(
             self.capabilities.count(OPERATION) <= abi::MAX_PENDING_OPERATIONS,
             "pending operation limit"
@@ -232,14 +237,19 @@ impl State {
             &context.volumes,
             supported.contains(&Opcode::FileOpenBegin),
         )?;
-        #[cfg(all(feature = "native-audio", target_vendor = "apple"))]
-        let audio_presentation = host
-            .supports_audio()
-            .then(|| super::audio::Presentation::new(context.identity.instance_id));
         let mut state = State {
+            #[cfg(all(feature = "native-audio", target_vendor = "apple"))]
+            audio_presentation: host
+                .supports_audio()
+                .then(|| super::audio::Presentation::new(context.identity.instance_id)),
             halted: false,
             tracing,
-            trace_config: Event { kind: EventKind::TraceConfig, target: 0, data: vec![0; 8] },
+            trace_config: Event {
+                object_id: 0,
+                kind: EventKind::TraceConfig,
+                target: 0,
+                data: vec![0; 8],
+            },
             trace_config_pending: false,
             context,
             volume_handles,
@@ -255,15 +265,13 @@ impl State {
             capability_names,
             #[cfg(all(feature = "native-audio", target_vendor = "apple"))]
             audio: super::audio_handles::Table::new(),
-            #[cfg(all(feature = "native-audio", target_vendor = "apple"))]
-            audio_presentation,
             files,
             events: VecDeque::from([QueuedEvent::new(
-                Event { kind: EventKind::Started, target: 0, data: Vec::new() },
+                Event { object_id: 0, kind: EventKind::Started, target: 0, data: Vec::new() },
                 1,
             )]),
             work: work::Work::new(),
-            queued_bytes: 20,
+            queued_bytes: abi::EVENT_QUEUE_OVERHEAD,
             pending_update: None,
             deferred_update: None,
             wake_deadline: None,
@@ -272,6 +280,7 @@ impl State {
             channel_listener: None,
             pending_data_bytes: 0,
             logs: Vec::new(),
+            uses_window_input: false,
             view: None,
             view_bytes: None,
             quit_on_last_window: None,

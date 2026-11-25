@@ -41,7 +41,7 @@ fn deactivation_preserves_an_edits_readback_root_and_rejects_new_input_and_timer
     assert_eq!(
         state.queue_event(
             generation,
-            Event { kind: EventKind::Click, target: 1, data: vec![] },
+            Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
             None
         ),
         Err(HostError::Conflict)
@@ -98,8 +98,11 @@ fn taking_a_completion_directly_restores_its_root_before_a_dependent_begin() {
     .unwrap();
     let root =
         state.work.pending[&crate::capability::Handle::new(pending.generation, pending.slot).raw()];
-    events::push_event(&mut state, Event { kind: EventKind::Click, target: 1, data: vec![] })
-        .unwrap();
+    events::push_event(
+        &mut state,
+        Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
+    )
+    .unwrap();
     state.finish_frame();
     state.deactivate();
     events::take_event(&mut state).unwrap();
@@ -181,7 +184,7 @@ fn a_sealed_mailbox_admits_only_its_accepted_inputs_during_deactivation() {
     events::take_event(&mut state).unwrap();
     state.finish_frame();
     let generation = state.generation();
-    let click = || Event { kind: EventKind::Click, target: 2, data: vec![] };
+    let click = || Event { object_id: 0, kind: EventKind::Click, target: 2, data: vec![] };
     let mut mailbox = state.deactivate_with_inputs(2).unwrap();
     assert!(state.deactivate_with_inputs(0).is_ok(), "a repeated empty close is harmless");
     assert!(matches!(state.deactivate_with_inputs(1), Err(HostError::Conflict)));
@@ -211,7 +214,8 @@ fn deactivation_cancels_unstarted_recurring_events_but_keeps_accepted_input() {
     let (mut state, _records, _volume) = state();
     events::take_event(&mut state).unwrap();
     for kind in [EventKind::Wake, EventKind::Frame, EventKind::Click] {
-        events::push_event(&mut state, Event { kind, target: 1, data: vec![] }).unwrap();
+        events::push_event(&mut state, Event { object_id: 0, kind, target: 1, data: vec![] })
+            .unwrap();
     }
     state.finish_frame();
     state.deactivate();

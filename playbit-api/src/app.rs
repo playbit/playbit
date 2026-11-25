@@ -242,6 +242,7 @@ mod tests {
         fn push_raw(&mut self, kind: u32, target: u32, data: &[u8]) {
             self.events.push_back(HostEvent {
                 header: abi::Event {
+                    object_id: 0,
                     size: core::mem::size_of::<abi::Event>() as u32,
                     written: core::mem::size_of::<abi::Event>() as u32,
                     generation: 7,
@@ -686,8 +687,9 @@ mod tests {
         let pointer = PointerInput { x: 10, y: 20, phase: 1, buttons: 1 };
         let key = KeyInput { key: 1, pressed: true };
         let frame = FrameInput { elapsed_us: 16_667 };
+        let canvas = view.canvas(5, 100, 100, Motion.into(), &[]);
         assert_eq!(
-            view.canvas(5, 100, 100, Motion.into(), &[]).events().collect::<Vec<_>>(),
+            canvas.events().collect::<Vec<_>>(),
             [
                 CanvasEvent::Pointer(pointer),
                 CanvasEvent::Key(key),
@@ -697,6 +699,7 @@ mod tests {
                 CanvasEvent::Frame(frame),
             ]
         );
+        assert_eq!(canvas.frames().collect::<Vec<_>>(), [frame, frame]);
         assert_eq!(
             view.canvas(6, 100, 100, CanvasFrames::Continuous, &[]).events().collect::<Vec<_>>(),
             [CanvasEvent::Key(key), CanvasEvent::Frame(frame)]
@@ -895,6 +898,7 @@ mod tests {
         let mut state = ContextState::default();
         let raw_kind = |kind, target, data: Vec<u8>| HostEvent {
             header: abi::Event {
+                object_id: 1,
                 size: core::mem::size_of::<abi::Event>() as u32,
                 written: core::mem::size_of::<abi::Event>() as u32,
                 generation: 7,
@@ -907,8 +911,8 @@ mod tests {
             raw_kind(EventKind::Click as u32, 0, Vec::new()),
             raw_kind(EventKind::Click as u32, 1, vec![1]),
             raw_kind(EventKind::TextChanged as u32, 1, vec![0xff]),
-            raw_kind(EventKind::Pointer as u32, 1, vec![0; 15]),
-            raw_kind(EventKind::Key as u32, 1, vec![0; 3]),
+            raw_kind(EventKind::WindowPointer as u32, 1, vec![0; 15]),
+            raw_kind(EventKind::WindowKeyboard as u32, 0, vec![0; 3]),
             raw_kind(EventKind::Frame as u32, 1, vec![0; 3]),
             raw_kind(EventKind::TextChanged as u32, 1, vec![b'x'; MAX_EVENT_BYTES + 1]),
         ] {
@@ -976,7 +980,9 @@ mod tests {
         assert_eq!(context.raw_events().len(), 0);
         assert_eq!(host.events.len(), 1, "skips count toward the turn limit");
         host.events.clear();
-        for _ in 0..=MAX_QUEUED_EVENT_BYTES / (MAX_EVENT_BYTES + 20) {
+        for _ in 0..=MAX_QUEUED_EVENT_BYTES
+            / (MAX_EVENT_BYTES + crate::abi::syscall::EVENT_QUEUE_OVERHEAD)
+        {
             host.push_raw(optional, 0, &vec![0; MAX_EVENT_BYTES]);
         }
         host.push(EventKind::Click, 1, &[]);
@@ -1051,6 +1057,7 @@ mod tests {
             if deferred {
                 host.deferred_event = Some(HostEvent {
                     header: abi::Event {
+                        object_id: 0,
                         size: core::mem::size_of::<abi::Event>() as u32,
                         written: core::mem::size_of::<abi::Event>() as u32,
                         generation: 7,
@@ -1096,20 +1103,22 @@ mod tests {
         for (kind, target, data) in
             [(EventKind::Click, 2, &[][..]), (EventKind::VolumesChanged, 0, revision.as_slice())]
         {
-            for spare in [0, 19, 20, 27, 28] {
+            for spare in [0, 23, 24, 31, 32] {
                 let mut host = ViewHost::default();
                 let full = vec![b'x'; MAX_EVENT_BYTES];
-                let full_count = MAX_QUEUED_EVENT_BYTES / (MAX_EVENT_BYTES + 20);
+                let full_count = MAX_QUEUED_EVENT_BYTES
+                    / (MAX_EVENT_BYTES + crate::abi::syscall::EVENT_QUEUE_OVERHEAD);
                 for _ in 0..full_count {
                     host.push(EventKind::DataChanged, 1, &full);
                 }
                 let last = MAX_QUEUED_EVENT_BYTES
-                    - (full_count + 1) * 20
+                    - (full_count + 1) * crate::abi::syscall::EVENT_QUEUE_OVERHEAD
                     - full_count * MAX_EVENT_BYTES
                     - spare;
                 host.push(EventKind::DataChanged, 1, &full[..last]);
                 host.deferred_event = Some(HostEvent {
                     header: abi::Event {
+                        object_id: 0,
                         size: core::mem::size_of::<abi::Event>() as u32,
                         written: core::mem::size_of::<abi::Event>() as u32,
                         generation: 7,
@@ -1118,7 +1127,8 @@ mod tests {
                     },
                     data: data.to_vec(),
                 });
-                let deferred = usize::from(spare < 20 + data.len());
+                let deferred =
+                    usize::from(spare < crate::abi::syscall::EVENT_QUEUE_OVERHEAD + data.len());
                 // SAFETY: every payload fits the host limit; both callbacks borrow this fixture.
                 let (context, _) =
                     unsafe { Context::from_raw((&mut host as *mut ViewHost).cast(), state) }

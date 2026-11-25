@@ -1,3 +1,4 @@
+import { combineSurfaceMotion, legacyCanvasEvent, observeSurface } from "./surface-input.ts";
 import { AGREEMENT } from "./ap-codec.ts";
 import { NativeTextEdits, MAX_TEXT_EVENT_BYTES } from "./text-input.ts";
 import { parseAccountKey } from "./account-key.ts";
@@ -77,7 +78,7 @@ function createWorker() {
             engineFailure = data.engineFailure;
             updateFrames();
             current.terminate();
-            retireCanvasPresses();
+            retireSurfaceInput();
             for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error(engineFailure)); }
             pending.clear();
             error.textContent = engineFailure;
@@ -149,16 +150,14 @@ function call<M extends RuntimeMethod>(method: M, args?: RuntimeMethods[M]["args
     return new Promise<RuntimeMethods[M]["result"]>((resolve, reject) => {
         const timer = method === "close" || (method === "input" && appClosing) ? undefined : setTimeout(() => {
             engineFailure = "The app stopped responding. Reload to reopen retained data.";
-            updateFrames(); pending.delete(id); worker.terminate(); retireCanvasPresses(); reject(new Error(engineFailure));
+            updateFrames(); pending.delete(id); worker.terminate(); retireSurfaceInput(); reject(new Error(engineFailure));
         }, method === "open" || invitation ? 300000 : 5000);
         pending.set(id, { method, resolve, reject, timer }); worker.postMessage({ id, method, args });
     });
 }
 const submissions = new Map<number, Promise<RuntimePresentation>>();
 const editors = new Map<number, Editor>();
-type CanvasPress = { canvas: HTMLCanvasElement; target: number } & ({ kind: 11; pointerId: number } | { kind: 12; key: number });
-const heldCanvasPresses = new Set<CanvasPress>();
-let reservedCanvasBytes = 0;
+let reservedInputCount = 0, reservedInputBytes = 0;
 let inputTail: Promise<unknown> = Promise.resolve(), inputCount = 0, inputBytes = 0, draftFailures = 0;
 let appClosing = false, appClosed = false, closeTask: Promise<{ closed: true }> | undefined;
 let inputFailure: { target: number; message: string } | undefined;
@@ -181,28 +180,26 @@ async function input(kind: number, target: number, data: Uint8Array, menu?: Menu
         }
     }
     if (current !== worker) throw new Error("The app changed before this input reached it.");
-    return queueInput(kind, target, data, retrying, failures, undefined, menu);
+    return queueInput(kind, target, data, retrying, failures, 0, menu);
 }
 function queueInput(kind: number, target: number, data: Uint8Array, retrying = inputFailure,
-    failures = draftFailures, transition?: { press: CanvasPress; down: boolean }, menu?: MenuSelection): Promise<RuntimePresentation> {
+    failures = draftFailures, reservation = 0, menu?: MenuSelection): Promise<RuntimePresentation> {
     // Admission happens before chaining: retained closures and payloads are bounded.
     if (appClosing || appClosed) throw new Error("The app is finishing accepted work. This input was not accepted.");
-    // A press reserves one slot and its ABI payload size. Its release
-    // exchanges that reservation for an entry in the same FIFO.
-    const change = transition ? transition.down ? 1 : -1 : 0;
-    const reserved = heldCanvasPresses.size + change;
-    const reservedBytes = reservedCanvasBytes + change * data.length;
+    // A started sequence reserves admission for its terminal event.
+    const reserved = reservedInputCount + reservation;
+    const reservedBytes = reservedInputBytes + reservation * data.length;
     if (data.length > MAX_TEXT_EVENT_BYTES || inputCount + reserved >= 32
         || inputBytes + data.length + reservedBytes > 2 * 1024 * 1024) {
         const failure = new Error("The app is busy. Your text is retained; try again.");
-        inputFailure = { target, message: failure.message };
-        error.textContent = failure.message; throw failure;
+        if (kind < 22) {
+            inputFailure = { target, message: failure.message };
+            error.textContent = failure.message;
+        }
+        throw failure;
     }
-    if (transition) {
-        if (transition.down) heldCanvasPresses.add(transition.press);
-        else heldCanvasPresses.delete(transition.press);
-        reservedCanvasBytes = reservedBytes;
-    }
+    reservedInputCount = reserved;
+    reservedInputBytes = reservedBytes;
     const current = worker;
     const editor = (kind === 3 || kind === 14) ? editors.get(target) : null;
     const revision = editor?.revision;
@@ -230,7 +227,7 @@ function queueInput(kind: number, target: number, data: Uint8Array, retrying = i
         }
         return result;
     }).catch(failure => {
-        if (current === worker && (!transition || main.contains(transition.press.canvas))) {
+        if (current === worker && kind < 22) {
             if (editor) { draftFailures++; if (editor.sent === revision) editor.sent = editor.acknowledged; }
             inputFailure = { target, message: failure.message }; error.textContent = failure.message;
         }
@@ -239,29 +236,12 @@ function queueInput(kind: number, target: number, data: Uint8Array, retrying = i
         .finally(() => {
             inputCount--; inputBytes -= data.length;
             if (kind === 3 && submissions.get(target) === promise) submissions.delete(target);
+            flushSurfaceMotion();
             updateFrames();
         });
     inputTail = promise;
     if (kind === 3) submissions.set(target, promise);
     return promise;
-}
-function sendCanvasPress(press: CanvasPress, data: Uint8Array, down: boolean): boolean {
-    try { void queueInput(press.kind, press.target, data, inputFailure, draftFailures, { press, down }).catch(() => {}); }
-    catch { return false; }
-    return true;
-}
-function releasePointerCapture(press: CanvasPress): void {
-    if (press.kind === 11 && press.canvas.hasPointerCapture(press.pointerId)) press.canvas.releasePointerCapture(press.pointerId);
-}
-function cancelCanvasPress(press: CanvasPress): void {
-    if (sendCanvasPress(press, press.kind === 11 ? words(0, 0, 3, 0) : words(press.key, 0), false)) releasePointerCapture(press);
-}
-function retireCanvasPresses(): void {
-    for (const press of heldCanvasPresses) {
-        heldCanvasPresses.delete(press);
-        releasePointerCapture(press);
-    }
-    reservedCanvasBytes = 0;
 }
 function lockGuestControls(): void {
     for (const editor of editors.values()) editor.element.readOnly = true;
@@ -272,7 +252,8 @@ function lockGuestControls(): void {
 }
 function closeApp(): Promise<{ closed: true }> {
     if (closeTask) return closeTask;
-    for (const press of heldCanvasPresses) cancelCanvasPress(press);
+    configureSurfaceInput(0);
+    surfaceMotion.clear();
     appClosing = true;
     updateFrames();
     for (const item of pending.values()) if (item.method === "input") { clearTimeout(item.timer); item.timer = undefined; }
@@ -377,54 +358,6 @@ function element(node: SceneNode): HTMLElement {
         }
         canvas.tabIndex = 0;
         canvas.setAttribute("aria-label", "Game canvas"); canvas.dataset.control = String(node.id);
-        const pointer = (event: PointerEvent, phase: number) => {
-            if (!main.contains(canvas)) return;
-            let active: Extract<CanvasPress, { kind: 11 }> | undefined;
-            for (const press of heldCanvasPresses) {
-                if (press.kind === 11 && press.canvas === canvas) { active = press; break; }
-            }
-            if (phase === 1) {
-                if (active || event.button !== 0 || !event.isPrimary) return;
-            } else if (!active || active.pointerId !== event.pointerId) return;
-            if (active && phase === 3) { cancelCanvasPress(active); return; }
-            const rect = canvas.getBoundingClientRect();
-            const current = canvasScenes.get(canvas)!;
-            if (!rect.width || !rect.height) {
-                if (active && phase === 2) cancelCanvasPress(active);
-                return;
-            }
-            const width = current.extent ? rect.width : current.width, height = current.extent ? rect.height : current.height;
-            const x = Math.round(Math.max(0, Math.min(width, (event.clientX - rect.left) * width / rect.width)));
-            const y = Math.round(Math.max(0, Math.min(height, (event.clientY - rect.top) * height / rect.height)));
-            const bytes = words(x, y, phase, phase < 2 ? event.buttons & 1 : 0);
-            if (phase === 1) {
-                const press: CanvasPress = { canvas, target: node.id, kind: 11, pointerId: event.pointerId };
-                if (!sendCanvasPress(press, bytes, true)) return;
-                try { canvas.setPointerCapture(event.pointerId); }
-                catch { cancelCanvasPress(press); return; }
-                canvas.focus({ preventScroll: true });
-            } else if (phase === 2) {
-                if (sendCanvasPress(active!, bytes, false)) releasePointerCapture(active!);
-            } else input(11, node.id, bytes).catch(() => {});
-        };
-        canvas.onpointerdown = event => pointer(event, 1); canvas.onpointermove = event => pointer(event, event.buttons & 1 ? 0 : 2);
-        canvas.onpointerup = event => pointer(event, 2); canvas.onpointercancel = event => pointer(event, 3);
-        canvas.onlostpointercapture = event => pointer(event, 3);
-        const keys: Record<string, number> = { ArrowLeft: 1, ArrowRight: 2, ArrowUp: 3, ArrowDown: 4, Space: 5, " ": 5 };
-        const keyboard = (event: KeyboardEvent, down: boolean) => {
-            const key = keys[event.code] ?? keys[event.key];
-            const shortcut = event.altKey || event.metaKey || event.ctrlKey;
-            if (!key || (down && shortcut) || !main.contains(canvas)) return;
-            if (!shortcut) event.preventDefault();
-            for (const press of heldCanvasPresses) {
-                if (press.kind !== 12 || press.canvas !== canvas || press.key !== key) continue;
-                if (!down) cancelCanvasPress(press);
-                return;
-            }
-            if (down) sendCanvasPress({ canvas, target: node.id, kind: 12, key }, words(key, 1), true);
-        };
-        canvas.onkeydown = event => keyboard(event, true); canvas.onkeyup = event => keyboard(event, false);
-        canvas.onblur = () => { for (const press of heldCanvasPresses) if (press.canvas === canvas) cancelCanvasPress(press); };
         paintCanvas(canvas, node); return canvas;
     }
     throw new Error(`Unsupported control ${node.kind}`);
@@ -599,6 +532,65 @@ function moveSibling(parent: Element, child: Element, before: Element | null): v
 function createReplacement(current: Element | undefined, node: SceneNode): HTMLElement {
     const next = element(node); if (current) current.replaceWith(next); return next;
 }
+let surfaceInput: ReturnType<typeof observeSurface> | undefined;
+const surfaceMotion = new Map<string, { kind: number; target: number; data: Uint8Array }>();
+function flushSurfaceMotion(): void {
+    for (const [key, packet] of surfaceMotion) {
+        if (inputCount >= 8) return;
+        surfaceMotion.delete(key);
+        try { void queueInput(packet.kind, packet.target, packet.data).catch(() => {}); }
+        catch { return; }
+    }
+}
+function retireSurfaceInput(): void {
+    surfaceMotion.clear();
+    surfaceInput?.reset();
+    reservedInputCount = reservedInputBytes = 0;
+}
+function configureSurfaceInput(mask: number, legacy = false) {
+    if (mask && !surfaceInput) {
+        surfaceInput = observeSurface(main, (kind, target, data, motion, reservation = 0, legacy) => {
+            const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+            const stream = kind === 22 ? view.getUint32(20, true) : kind === 26 ? view.getUint16(22, true) : view.getUint8(20);
+            const device = view.getUint32(12, true);
+            const key = [kind, target, device, stream, kind === 24 ? view.getUint16(22, true) : 0].join("/");
+            if (legacy) {
+                const canvas = kind === 22 && target
+                    ? main.querySelector<HTMLCanvasElement>(`canvas[data-control="${target}"]`) : null;
+                const event = legacyCanvasEvent({ kind, target, data }, canvas ? canvasScenes.get(canvas) : undefined);
+                if (!event) {
+                    if (reservation < 0) {
+                        reservedInputCount += reservation;
+                        reservedInputBytes += reservation * (kind === 22 ? 16 : 8);
+                    }
+                    return reservation <= 0;
+                }
+                ({ kind, target, data } = event);
+            }
+            if (motion && inputCount >= 8) {
+                const previous = surfaceMotion.get(key);
+                if (!previous && surfaceMotion.size >= 16) return false;
+                if (previous) combineSurfaceMotion(kind, previous.data, data);
+                surfaceMotion.set(key, { kind, target, data });
+                return true;
+            }
+            if (kind !== 26 || motion) {
+                const previous = surfaceMotion.get(key);
+                if (previous && (motion || kind === 25 || kind === 24)) combineSurfaceMotion(kind, previous.data, data);
+                surfaceMotion.delete(key);
+            } else if (view.getUint8(20) === 1) {
+                for (const pending of surfaceMotion.keys()) if (pending.startsWith(`26/0/${device}/`)) surfaceMotion.delete(pending);
+            }
+            try { void queueInput(kind, target, data, undefined, draftFailures, reservation).catch(() => {}); }
+            catch { return false; }
+            return true;
+        }, () => 1, canvas => {
+            const scene = canvasScenes.get(canvas);
+            return scene?.extent ? undefined : scene;
+        });
+    }
+    surfaceInput?.configure(mask, legacy);
+}
 let renderedScene: SceneNode | undefined, renderedWindow: SceneWindow | undefined;
 function render(result: RuntimePresentation): void {
     (document.querySelector("#close-app") as HTMLButtonElement).hidden = false;
@@ -611,11 +603,11 @@ function render(result: RuntimePresentation): void {
     if (!renderedScene || !main.firstElementChild) main.replaceChildren(element(result.scene));
     else patch(main.firstElementChild, renderedScene, result.scene);
     renderedScene = result.scene;
+    const legacyInput = Boolean(result.window?.legacyCanvas);
+    configureSurfaceInput(result.window?.input ?? (legacyInput ? 3 : 0), legacyInput);
     if (contextPopup && (!main.contains(contextPopup.owner) || menus.get(contextPopup.owner)?.revision !== contextPopup.revision)) {
         contextPopup.element.remove(); contextPopup = undefined;
     }
-    // Removing a focused canvas need not dispatch blur.
-    for (const press of heldCanvasPresses) if (!main.contains(press.canvas)) cancelCanvasPress(press);
     if (measure) scheduleSurface();
     updateFrames();
     for (const [id, editor] of editors) if (!main.contains(editor.element)) editors.delete(id);
@@ -819,12 +811,13 @@ function persistInvitation(joined = opened): void {
 }
 function replaceWorker(reason: string): void {
     worker.terminate();
-    retireCanvasPresses();
+    retireSurfaceInput();
     for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error(reason)); } pending.clear();
     for (const handle of streams) apClient.streamClose(handle).catch(() => {}); streams.clear();
     surfaceDelivery = undefined;
     if (renderedScene) {
         submissions.clear(); editors.clear(); inputFailure = undefined;
+        configureSurfaceInput(0);
         renderedScene = undefined; renderedWindow = undefined; guestFailure = undefined; pixelScale = 1;
         contextPopup?.element.remove(); contextPopup = undefined;
         main.replaceChildren(); delete main.dataset.scene;

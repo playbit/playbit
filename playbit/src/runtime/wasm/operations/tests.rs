@@ -467,7 +467,12 @@ fn named_control_imports_preserve_outputs_events_and_scoped_identity() {
         store.data_mut().app.queued_bytes = 0;
         crate::runtime::syscall::push_event(
             &mut store.data_mut().app,
-            Event { kind: EventKind::DataChanged, target: 7, data: b"hello".to_vec() },
+            Event {
+                object_id: 0,
+                kind: EventKind::DataChanged,
+                target: 7,
+                data: b"hello".to_vec(),
+            },
         )
         .unwrap();
         let event = instance.get_typed_func::<(u32, u32, u32), i32>(&mut store, "event").unwrap();
@@ -866,7 +871,8 @@ fn surface_notifications_are_validated_before_queueing_and_poll_exact_bytes() {
             inputs: Surface::POINTER | Surface::KEYBOARD,
         };
         let data = surface.encode().unwrap();
-        let event = Event { kind: EventKind::SurfaceChanged, target: 0, data: data.to_vec() };
+        let event =
+            Event { object_id: 0, kind: EventKind::SurfaceChanged, target: 0, data: data.to_vec() };
         let view = crate::runtime::ViewNode::Column(vec![]);
         assert!(crate::runtime::syscall::validate_input(&view, &event).is_ok());
         for bad in [

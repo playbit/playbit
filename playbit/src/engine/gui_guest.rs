@@ -12,7 +12,7 @@ use crate::{
     runtime::{
         Runtime, ViewNode,
         syscall::{
-            Event, EventKind, GuestContext, GuestInstance, HostError, Identity, validate_input,
+            Event, EventKind, GuestContext, GuestInstance, HostError, Identity, route_input,
         },
     },
     store::Id,
@@ -412,9 +412,15 @@ impl Guest {
         if self.inbox.failure().is_some() {
             return Err(HostError::Unavailable);
         }
-        if event.kind != EventKind::SurfaceChanged {
-            validate_input(self.scene.as_ref().ok_or(HostError::Conflict)?, &event)?;
-        }
+        let event = if event.kind == EventKind::SurfaceChanged {
+            event
+        } else {
+            let Some(event) = route_input(self.scene.as_ref().ok_or(HostError::Conflict)?, event)?
+            else {
+                return Ok(());
+            };
+            event
+        };
         // Surface geometry is checked by the runtime independently of a scene.
         self.guest.queue_input(self.generation(), event, closing)
     }
@@ -440,7 +446,7 @@ impl Guest {
             && !self.draining
             && let Err(error) = self.guest.queue_event(
                 self.generation(),
-                Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+                Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] },
             )
         {
             self.inbox.defer_changed();

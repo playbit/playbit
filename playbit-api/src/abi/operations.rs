@@ -20,6 +20,7 @@ pub struct Event {
     pub generation: u64,
     pub kind: u32,
     pub target: u32,
+    pub object_id: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -252,11 +253,12 @@ impl Default for Event {
             generation: 0,
             kind: 0,
             target: 0,
+            object_id: 0,
         }
     }
 }
 
-super::record::record!(Event, 24, { generation: u64, kind: u32, target: u32 });
+super::record::record!(Event, 24, { generation: u64, kind: u32, target: u32, object_id: u32 }, optional_output: object_id);
 
 impl Default for Identity {
     fn default() -> Self {

@@ -382,8 +382,8 @@ const COMMANDS: &[Command] = &[
         core: false,
     },
     Command {
-        usage: "pb input SESSION click TARGET [--instance ID]\npb input SESSION submit TARGET TEXT [--instance ID]\npb input SESSION key TARGET KEY down|up [--instance ID]\npb input SESSION pointer TARGET move|down|up|cancel X Y [none|primary] [--instance ID]",
-        description: "Admit one input to the selected GUI owner. Canvas keys: left, right, up, down, space. Pointer X and Y are logical canvas-local coordinates; a down defaults to primary, other phases to none. A move with primary drags. A lost reply never repeats input.",
+        usage: "pb input SESSION click TARGET [--instance ID]\npb input SESSION submit TARGET TEXT [--instance ID]\npb input SESSION key [TARGET] KEY down|up [--instance ID]\npb input SESSION pointer TARGET move|down|up|cancel X Y [none|primary] [--instance ID]",
+        description: "Admit one input to the selected GUI owner. Use a Playbit key name for window input. An explicit canvas target accepts left, right, up, down, or space. Pointer X and Y are logical canvas-local coordinates; a down defaults to primary, other phases to none. A move with primary drags. A lost reply never repeats input.",
         command: &["input"],
         core: false,
     },

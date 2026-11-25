@@ -214,6 +214,7 @@ export function guestOperations(services: Services): RuntimeOperations {
             bytes(memory, output).set(event.data);
             const data = new Uint8Array(L.event.size), result = new DataView(data.buffer);
             result.setBigUint64(8, services.work.epoch, true); result.setUint32(16, event.kind, true); result.setUint32(20, event.target, true);
+            result.setUint32(L.event.offsets.object_id, event.objectId ?? 0, true);
             publishRecord(memory, header, L.event, data);
             services.work.poll(); if(event.kind===18)session().consumed(event.data.length,event.data.slice(8,88),event.data.slice(88,104));
             if (!services.work.draining) flushEnvironmentChanges();

@@ -127,17 +127,21 @@ wait without polling. Inspect current state after waking, including
 Call `playbit_gui` with the session join code or invitation link. It also accepts
 the retained session ID returned by the engine. `instance-list` returns IDs of
 live GUI owners. Supply an explicit instance when several windows run the same
-session. Use the target canvas ID from the app's UI or its validated scene.
+session. Keys go to the selected window and use Playbit key names such as
+`Left`, `A`, `Space` and `F12`. Pointer injection uses the target canvas ID
+and canvas-local coordinates. For the released canvas key format, include the numeric
+`target` with `left`, `right`, `up`, `down`, or `space`. The CLI accepts the same
+form, for example `pb input JOIN_CODE key 1 up down`.
 
 Each line below shows arguments for one `playbit_gui` call. Here, canvas 1 is
 the game board and the movement keys overlap until each is released.
 
 ```jsonl
 {"op":"instance-list","session":"SESSION"}
-{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"key":"up","pressed":true}
-{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"key":"right","pressed":true}
-{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"key":"right","pressed":false}
-{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"key":"up","pressed":false}
+{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","key":"up","pressed":true}
+{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","key":"right","pressed":true}
+{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","key":"right","pressed":false}
+{"op":"key-input","session":"SESSION","instance":"PLAYER_TWO","key":"up","pressed":false}
 {"op":"pointer-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"phase":"down","x":120,"y":80}
 {"op":"pointer-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"phase":"move","x":140,"y":90,"button":"primary"}
 {"op":"pointer-input","session":"SESSION","instance":"PLAYER_TWO","target":1,"phase":"up","x":140,"y":90}
@@ -161,8 +165,8 @@ the join code from `pb session list`. The instance and canvas IDs work in both t
 
 ```sh
 pb session instances JOIN_CODE
-pb input JOIN_CODE key 1 up down --instance PLAYER_TWO
-pb input JOIN_CODE key 1 up up --instance PLAYER_TWO
+pb input JOIN_CODE key up down --instance PLAYER_TWO
+pb input JOIN_CODE key up up --instance PLAYER_TWO
 pb input JOIN_CODE pointer 1 down 120 80 --instance PLAYER_TWO
 pb input JOIN_CODE pointer 1 up 120 80 --instance PLAYER_TWO
 pb screenshot JOIN_CODE player-one.png --instance PLAYER_ONE

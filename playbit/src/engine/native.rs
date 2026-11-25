@@ -7,7 +7,7 @@ use crate::{
         Frame, RuntimeError, ViewNode,
         host::*,
         native::NativeInstance,
-        syscall::{Event, EventKind, HostError, HostResult, validate_input},
+        syscall::{Event, EventKind, HostError, HostResult, route_input},
     },
     store::{
         Access, Id as StoreId,
@@ -318,9 +318,15 @@ impl Apps {
         if let Some(error) = app.blocked {
             return Err(error);
         }
-        if event.kind != EventKind::SurfaceChanged {
-            validate_input(app.scene.as_ref().ok_or(HostError::Conflict)?, &event)?;
-        }
+        let event = if event.kind == EventKind::SurfaceChanged {
+            event
+        } else {
+            let Some(event) = route_input(app.scene.as_ref().ok_or(HostError::Conflict)?, event)?
+            else {
+                return Ok(());
+            };
+            event
+        };
         // Surface geometry is checked by the runtime independently of a scene.
         app.instance.queue_input(generation, event, closing)
     }
@@ -416,7 +422,7 @@ impl Apps {
         if app.dirty && !app.draining {
             match app.instance.queue_event(
                 generation,
-                Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+                Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] },
             ) {
                 Ok(()) => {
                     app.dirty = false;

@@ -8,6 +8,7 @@ pub struct SceneNode {
     pub id: u32,
     pub style: u32,
     pub state: u32,
+    pub window_input: u32,
     pub disabled: u8,
     pub multiline: u8,
     pub read_only: u8,
@@ -85,7 +86,7 @@ pub(super) fn storage(node: &ViewNode) -> Result<usize, String> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pb_ios_scene_node(node: *const ViewNode) -> SceneNode {
     let Some(node) = (unsafe { node.as_ref() }) else { return SceneNode::default() };
-    let mut out = SceneNode::default();
+    let mut out = SceneNode { window_input: node.input_families(), ..SceneNode::default() };
     let text = match semantic(node) {
         ViewNode::Column(children) | ViewNode::List(children) => {
             out.kind = 1;

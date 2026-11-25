@@ -206,7 +206,12 @@ mod tests {
                     guest
                         .queue_event(
                             guest.generation(),
-                            Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+                            Event {
+                                object_id: 0,
+                                kind: EventKind::DataChanged,
+                                target: 0,
+                                data: vec![],
+                            },
                         )
                         .expect("admit event");
                     guest.pump().expect("resume waiting callback");

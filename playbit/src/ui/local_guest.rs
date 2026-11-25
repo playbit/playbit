@@ -12,7 +12,7 @@ use crate::{
     package::Package,
     runtime::{
         ExecutionBackend, Runtime, ViewNode,
-        syscall::{Event, EventKind, GuestInstance, HostError, validate_input},
+        syscall::{Event, EventKind, GuestInstance, HostError, route_input},
     },
     store::Id,
 };
@@ -242,8 +242,11 @@ impl Apps {
         )
     }
     pub(crate) fn input(&mut self, id: Id, event: Event) -> Result<()> {
-        validate_input(self.scene(id)?, &event)
-            .map_err(|error| format!("Guest input rejected: {error:?}"))?;
+        let Some(event) = route_input(self.scene(id)?, event)
+            .map_err(|error| format!("Guest input rejected: {error:?}"))?
+        else {
+            return Ok(());
+        };
         let app = self
             .running
             .iter_mut()
@@ -374,7 +377,12 @@ impl Apps {
                 if app.dirty && active && !app.draining {
                     match app.guest.queue_event(
                         app.guest.generation(),
-                        Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+                        Event {
+                            object_id: 0,
+                            kind: EventKind::DataChanged,
+                            target: 0,
+                            data: vec![],
+                        },
                     ) {
                         Ok(()) => {
                             app.dirty = false;

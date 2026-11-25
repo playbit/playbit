@@ -12,6 +12,7 @@ struct GuestScene: Equatable {
     }
     var kind: Kind
     var id: UInt32
+    var windowInput: UInt32 = 0
     var style: UInt32
     var state: UInt32
     var disabled: Bool
@@ -58,7 +59,7 @@ struct GuestScene: Equatable {
             default: throw NSError(domain: "Playbit", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid native canvas item"])
             }
         }
-        return GuestScene(kind: kind, id: node.id, style: node.style, state: node.state,
+        return GuestScene(kind: kind, id: node.id, windowInput: node.window_input, style: node.style, state: node.state,
             disabled: node.disabled != 0, multiline: node.multiline != 0, readOnly: node.read_only != 0,
             text: String(decoding: UnsafeBufferPointer(start: node.text, count: node.text_len), as: UTF8.self),
             placeholder: String(decoding: UnsafeBufferPointer(start: node.placeholder, count: node.placeholder_len), as: UTF8.self),

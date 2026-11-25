@@ -138,6 +138,20 @@ const canvas = (id, width, height, flags, items = []) => record(22, id, [
 ]);
 const pixels = (srcW, srcH, rgba, color = 0) => [...words(2, 3, 4, 8, 8, color, srcW, srcH, rgba.length), ...rgba];
 
+test("named canvases use released input until the guest selects window input", () => {
+    const board = canvas(7, 640, 448, 4);
+    const plain = document(board);
+    const original = decodeScene(plain);
+    assert.deepEqual(original.window, { legacyCanvas: 7 });
+    for (const mask of [0, 3]) {
+        const subscribed = decodeScene(document(record(29, 0, u32(mask)), board), original);
+        assert.deepEqual(subscribed.window, { input: mask });
+        const removed = decodeScene(plain, subscribed);
+        assert.deepEqual(removed.window, { input: 0 });
+        assert.deepEqual(decodeScene(plain, removed).window, { input: 0 });
+    }
+});
+
 test("standalone window canvas and context actions retain metadata and owned pixel bytes", () => {
     const action = id => [1, ...u32(id), 0, 0, ...u32(4), ...text("Pass")];
     const rgba = [0, 21, 255, 255, 90, 42, 161, 127];
@@ -156,8 +170,8 @@ test("standalone window canvas and context actions retain metadata and owned pix
     source.fill(0);
     assert.deepEqual(Array.from(board.items[0].rgba), rgba);
     assert.doesNotThrow(() => validateSceneInput(decoded.controls, 2, 2, new Uint8Array(), decodeTextInput, decoded.root.revision));
-    assert.doesNotThrow(() => validateInput(decoded.controls, 11, 1, Uint8Array.from(words(5000, 640, 1, 1))));
-    assert.throws(() => validateInput(decoded.controls, 11, 1, Uint8Array.from(words(5001, 640, 1, 1))));
+    assert.doesNotThrow(() => validateInput(decoded.controls, 13, 1, Uint8Array.from(u32(16_667))));
+    assert.throws(() => validateInput(decoded.controls, 13, 1, Uint8Array.from(u32(100_001))));
     assert.throws(() => decodeScene(document(start, canvas(2, 640, 448, 4), end)), /Duplicate guest control/);
 });
 

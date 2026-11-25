@@ -1,4 +1,4 @@
-use playbit_api::abi::syscall::{KeyInput, PointerInput};
+use playbit_api::abi::input::{self, Key, Pointer};
 use playbit_api::ui::{CanvasRect, Color};
 
 pub const HEIGHT: u32 = 250;
@@ -43,9 +43,12 @@ impl Keyboard {
         })
     }
 
-    pub fn pointer(&mut self, input: PointerInput) -> Option<Action> {
-        let pressed = input.phase == 1 || (input.phase == 0 && input.buttons == 1);
-        let pad = pressed.then(|| self.pad_at(input.x, input.y)).flatten();
+    pub fn pointer(&mut self, input: Pointer) -> Option<Action> {
+        let pressed = input.flags & input::PRIMARY != 0
+            && input.buttons & 1 != 0
+            && matches!(input.phase, input::POINTER_DOWN | input::POINTER_MOVE);
+        let pad =
+            pressed.then(|| self.pad_at(input.canvas_x as u32, input.canvas_y as u32)).flatten();
         if pad == self.pointer_pad {
             return None;
         }
@@ -56,19 +59,27 @@ impl Keyboard {
         })
     }
 
-    pub fn key(&mut self, input: KeyInput) -> Option<Action> {
-        let held = &mut self.keys[(input.key - 1) as usize];
-        let trigger = input.pressed && !*held;
-        *held = input.pressed;
+    pub fn key(&mut self, key: Key, pressed: bool) -> Option<Action> {
+        let index = match key {
+            Key::Left => 0,
+            Key::Right => 1,
+            Key::Up => 2,
+            Key::Down => 3,
+            Key::Space => 4,
+            _ => return None,
+        };
+        let held = &mut self.keys[index];
+        let trigger = pressed && !*held;
+        *held = pressed;
         if !trigger {
             return None;
         }
-        match input.key {
-            1 => self.selected = self.selected.saturating_sub(1),
-            2 => self.selected = (self.selected + 1).min(7),
-            3 => return Some(Action::Volume(10)),
-            4 => return Some(Action::Volume(-10)),
-            5 => return Some(Action::Play(self.selected)),
+        match key {
+            Key::Left => self.selected = self.selected.saturating_sub(1),
+            Key::Right => self.selected = (self.selected + 1).min(7),
+            Key::Up => return Some(Action::Volume(10)),
+            Key::Down => return Some(Action::Volume(-10)),
+            Key::Space => return Some(Action::Play(self.selected)),
             _ => {}
         }
         None
@@ -90,8 +101,23 @@ impl Keyboard {
 mod tests {
     use super::*;
 
-    fn pointer(x: u32, phase: u32, buttons: u32) -> PointerInput {
-        PointerInput { x, y: 80, phase, buttons }
+    fn pointer(x: u32, phase: u8, buttons: u16) -> Pointer {
+        Pointer {
+            id: 1,
+            kind: input::MOUSE,
+            phase,
+            flags: input::PRIMARY,
+            buttons,
+            canvas_x: x as f32,
+            canvas_y: 80.,
+            x: x as f32,
+            y: 80.,
+            dx: 0.,
+            dy: 0.,
+            button: input::NO_BUTTON,
+            click_count: 0,
+            pen: None,
+        }
     }
 
     #[test]
@@ -113,14 +139,14 @@ mod tests {
     fn keyboard_selection_volume_and_highlights_follow_input() {
         let mut keyboard = Keyboard::default();
         for _ in 0..10 {
-            keyboard.key(KeyInput { key: 2, pressed: true });
-            keyboard.key(KeyInput { key: 2, pressed: false });
+            keyboard.key(Key::Right, true);
+            keyboard.key(Key::Right, false);
         }
         assert_eq!(keyboard.selected, 7);
-        assert_eq!(keyboard.key(KeyInput { key: 5, pressed: true }), Some(Action::Play(7)));
-        assert_eq!(keyboard.key(KeyInput { key: 5, pressed: true }), None);
+        assert_eq!(keyboard.key(Key::Space, true), Some(Action::Play(7)));
+        assert_eq!(keyboard.key(Key::Space, true), None);
         keyboard.cancel();
-        assert_eq!(keyboard.key(KeyInput { key: 3, pressed: true }), Some(Action::Volume(10)));
+        assert_eq!(keyboard.key(Key::Up, true), Some(Action::Volume(10)));
         keyboard.lit[7] = NOTE_MS;
         keyboard.advance(200);
         assert_eq!(keyboard.lit[7], 300);

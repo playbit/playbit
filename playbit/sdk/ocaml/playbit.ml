@@ -38,7 +38,7 @@ let host_limit kind =
 let quit_on_last_window intent = check (quit_raw intent)
 let optional_event_kind_bit = Int32.min_int
 
-type event = { generation : int64; kind : int32; target : int32; data : bytes }
+type event = { generation : int64; kind : int32; target : int32; object_id : int32; data : bytes }
 
 let header = Bytes.create event_bytes
 let payload = ref (Bytes.create 128)
@@ -65,13 +65,14 @@ let rec poll_with poll_one =
     if
       Bytes.get_int32_le header event_size_offset <> Int32.of_int event_bytes
       || Bytes.get_int32_le header event_written_offset
-         <> Int32.of_int event_bytes
+         < 24l
     then failwith "Playbit event record is incomplete";
     let kind = Bytes.get_int32_le header event_kind_offset in
-    let baseline = Int32.compare kind 1l >= 0 && Int32.compare kind 20l <= 0 in
+    let baseline = (kind >= 1l && kind <= 20l)
+      || (kind >= 22l && kind <= 26l) in
     let optional =
       Int32.logand kind optional_event_kind_bit <> 0l
-      && Int32.compare (Int32.logand kind Int32.max_int) 20l > 0
+      && (kind = EventKind.identity_changed || Int32.compare (Int32.logand kind Int32.max_int) 26l > 0)
     in
     if (not baseline) && not optional then (
       unsupported_event := true;
@@ -87,6 +88,8 @@ let rec poll_with poll_one =
       Some
         {
           generation = Bytes.get_int64_le header event_generation_offset;
+          object_id = (if Bytes.get_int32_le header event_written_offset >= 28l
+            then Bytes.get_int32_le header event_object_id_offset else 0l);
           kind;
           target;
           data = Bytes.sub !payload 0 (Int64.to_int result);
@@ -96,8 +99,37 @@ let poll () = poll_with poll_raw
 let poll_deadline deadline_ns = poll_with (poll_deadline_raw deadline_ns)
 
 module Input = struct
+  let pointers = 1
+  let keyboard = 2
+  let scrolling = 4
+  let gestures = 8
+  let gamepads = 16
+
   type pointer = { x : int; y : int; phase : int; buttons : int }
   type key = { key : int; pressed : bool }
+
+  type source = { timestamp_ns : int64; client_id : int32; device_id : int32; modifiers : int }
+  type pen = {
+    pressure : float; tangential_pressure : float; tilt_x : float; tilt_y : float;
+    twist : float; width : float; height : float; altitude : float; azimuth : float;
+  }
+  type window_pointer = {
+    source : source; id : int32; phase : int; kind : int; button : int; click_count : int;
+    flags : int; buttons : int; x : float; y : float; dx : float; dy : float;
+    canvas_x : float; canvas_y : float; pen : pen option;
+  }
+  type window_keyboard = {
+    source : source; key : int; device_key : int; pressed : bool; repeat : bool; text : Uchar.t array;
+  }
+  type scroll = {
+    source : source; kind : int; phase : int; flags : int;
+    x : float; y : float; dx : float; dy : float; wheel_z : float;
+  }
+  type gesture = {
+    source : source; kind : int; phase : int; x : float; y : float; dx : float; dy : float;
+    scale : float; rotation : float;
+  }
+  type gamepad = { source : source; phase : int; control : int; value : float; x : float; y : float }
 
   type surface = {
     width : int;
@@ -114,9 +146,9 @@ module Input = struct
     then invalid_arg "Playbit input word";
     Int32.to_int raw
 
-  let pointer bytes =
+  let pointer bytes : pointer =
     if Bytes.length bytes <> 16 then invalid_arg "Playbit pointer length";
-    let value =
+    let value : pointer =
       {
         x = word bytes 0;
         y = word bytes 4;
@@ -130,12 +162,61 @@ module Input = struct
     then invalid_arg "Playbit pointer value";
     value
 
-  let key bytes =
+  let key bytes : key =
     if Bytes.length bytes <> 8 then invalid_arg "Playbit key length";
     let key = word bytes 0 and pressed = word bytes 4 in
     if key < 1 || key > 5 || pressed < 0 || pressed > 1 then
       invalid_arg "Playbit key value";
     { key; pressed = pressed = 1 }
+
+  let u8 = Bytes.get_uint8
+  let u16 = Bytes.get_uint16_le
+  let f bytes offset = Int32.float_of_bits (Bytes.get_int32_le bytes offset)
+  let source bytes : source = {
+    timestamp_ns = Bytes.get_int64_le bytes 0;
+    client_id = Bytes.get_int32_le bytes 8;
+    device_id = Bytes.get_int32_le bytes 12;
+    modifiers = u16 bytes 16;
+  }
+  let check bytes length =
+    if Bytes.length bytes <> length then invalid_arg "Playbit input payload length"
+
+  let window_pointer bytes : window_pointer =
+    let kind = u8 bytes 25 in
+    check bytes (if kind = 4 then 92 else 56);
+    let pen = if kind <> 4 then None else Some {
+      pressure = f bytes 56; tangential_pressure = f bytes 60; tilt_x = f bytes 64;
+      tilt_y = f bytes 68; twist = f bytes 72; width = f bytes 76; height = f bytes 80;
+      altitude = f bytes 84; azimuth = f bytes 88;
+    } in
+    { source = source bytes; id = Bytes.get_int32_le bytes 20; phase = u8 bytes 24; kind;
+      button = u8 bytes 26; click_count = u8 bytes 27; flags = u16 bytes 28;
+      buttons = u16 bytes 30; x = f bytes 32; y = f bytes 36; dx = f bytes 40; dy = f bytes 44;
+      canvas_x = f bytes 48; canvas_y = f bytes 52; pen }
+
+  let window_keyboard bytes : window_keyboard =
+    check bytes 60;
+    let length = u8 bytes 26 in
+    if length > 8 then invalid_arg "Playbit key text length";
+    { source = source bytes; key = u16 bytes 20; device_key = u16 bytes 22;
+      pressed = u8 bytes 24 = 1; repeat = u8 bytes 25 = 1;
+      text = Array.init length (fun i -> Uchar.of_int (word bytes (28 + i * 4))) }
+
+  let scroll bytes : scroll =
+    check bytes 44;
+    { source = source bytes; kind = u8 bytes 20; phase = u8 bytes 21; flags = u16 bytes 22;
+      x = f bytes 24; y = f bytes 28; dx = f bytes 32; dy = f bytes 36; wheel_z = f bytes 40 }
+
+  let gesture bytes : gesture =
+    check bytes 48;
+    { source = source bytes; kind = u8 bytes 20; phase = u8 bytes 21;
+      x = f bytes 24; y = f bytes 28; dx = f bytes 32; dy = f bytes 36;
+      scale = f bytes 40; rotation = f bytes 44 }
+
+  let gamepad bytes : gamepad =
+    check bytes 36;
+    { source = source bytes; phase = u8 bytes 20; control = u16 bytes 22;
+      value = f bytes 24; x = f bytes 28; y = f bytes 32 }
 
   let frame bytes =
     if Bytes.length bytes <> 4 then invalid_arg "Playbit frame length";
@@ -201,6 +282,11 @@ module View = struct
       Buffer.add_char out (Char.chr role);
       word out color
     ) overrides
+
+  let window_input out mask =
+    if mask < 0 || mask > 31 then invalid_arg "Playbit window input families";
+    command_header out view_window_input 0l 4;
+    uint out mask
 
   let window_style out style =
     let appearance = WindowStyle.(theme_bright lor theme_dark) in

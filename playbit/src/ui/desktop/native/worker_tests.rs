@@ -711,8 +711,11 @@ fn submit_during_a_refresh_starts_its_mutation_before_deactivation() {
         .unwrap();
     apps.advance(generation, |_| {}).unwrap();
     let input = submit("Saved while loading");
-    apps.input(generation, Event { kind: input.kind, target: input.target, data: input.data })
-        .unwrap();
+    apps.input(
+        generation,
+        Event { object_id: 0, kind: input.kind, target: input.target, data: input.data },
+    )
+    .unwrap();
     apps.deactivate(generation).unwrap();
     let mut logs = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -766,8 +769,11 @@ fn checkbox_during_a_refresh_keeps_its_known_edit_through_quit() {
         apps.advance(generation, |_| {}).unwrap();
         assert!(apps.drain_pending(generation).unwrap());
         assert_eq!(format!("{:?}", apps.scene(generation).unwrap()), before);
-        apps.input(generation, Event { kind: EventKind::Click, target: 100, data: vec![] })
-            .unwrap();
+        apps.input(
+            generation,
+            Event { object_id: 0, kind: EventKind::Click, target: 100, data: vec![] },
+        )
+        .unwrap();
         if quit {
             apps.deactivate(generation).unwrap();
         }
@@ -926,6 +932,9 @@ fn admission_is_bounded_and_close_keeps_the_accepted_queue() {
     let (wake, _) = mpsc::sync_channel(1);
     let (errors, error_receive) = async_channel::bounded(1);
     let handle = Handle {
+        object_id: Arc::new(AtomicU32::new(1)),
+        #[cfg(feature = "process")]
+        tool_pointer: Default::default(),
         #[cfg(all(feature = "native-audio", target_os = "macos"))]
         audio_instance: None,
         session: None,
@@ -1131,6 +1140,7 @@ fn failed_input_invalidates_already_queued_effects_without_replay() {
             &mut apps,
             slot,
             Some(Message {
+                object_id: 1,
                 pending: PendingInput::new(&slot.handle.pending),
                 input,
                 epoch: 0,
@@ -1155,6 +1165,7 @@ fn failed_input_invalidates_already_queued_effects_without_replay() {
         &mut apps,
         slot,
         Some(Message {
+            object_id: 1,
             pending: PendingInput::new(&slot.handle.pending),
             input: submit("Explicit retry"),
             epoch: slot.handle.epoch(),
@@ -1397,9 +1408,9 @@ fn setup_acknowledges_drafts_and_rejects_stale_actions() {
 mod frame_input_tests;
 #[cfg(feature = "process")]
 #[test]
-fn tool_pointer_release_uses_the_target_canvas_size_at_execution() {
-    use crate::runtime::syscall::{HostError, validate_input};
-    use playbit_api::abi::syscall::PointerInput;
+fn tool_pointer_uses_window_layout_and_releases_removed_canvas() {
+    use playbit_api::abi::input::Input as RawInput;
+    use playbit_api::abi::input::{self, Pointer, Source};
     let (handle, queue) = Handle::fixture(7);
     let canvas = |id, width, height| ViewNode::Canvas {
         id,
@@ -1410,40 +1421,125 @@ fn tool_pointer_release_uses_the_target_canvas_size_at_execution() {
         clear_color: None,
         items: vec![],
     };
-    let scene = |width, height| {
-        ViewNode::Row(vec![canvas(1, 300, 200), ViewNode::Column(vec![canvas(7, width, height)])])
+    let root = |child| ViewNode::Theme {
+        theme: playbit_api::ui::Theme::light(),
+        window_background_specified: false,
+        window_style: None,
+        window_input: Some(input::POINTER),
+        legacy_canvas: 0,
+        window_size_constraints: None,
+        child: Box::new(child),
     };
-    let press = PointerInput { x: 90, y: 50, phase: 1, buttons: 1 };
-    let release = PointerInput { phase: 2, buttons: 0, ..press };
-    let input = |target, pointer: PointerInput| Input {
-        kind: EventKind::Pointer,
-        target,
-        data: pointer.encode().into(),
+    let scene = |width, height| {
+        root(ViewNode::Row(vec![
+            canvas(1, 300, 200),
+            ViewNode::Column(vec![canvas(7, width, height)]),
+        ]))
+    };
+    handle.object_id.store(7, Ordering::Release);
+    handle.update_tool_canvas_offsets([(1, [0., 0.])]);
+    handle.update_tool_canvas_offsets([(7, [18., 24.])]);
+    let press = Pointer {
+        canvas_x: 90.,
+        canvas_y: 50.,
+        phase: input::POINTER_DOWN,
+        buttons: 1,
+        id: 1,
+        kind: input::MOUSE,
+        button: 0,
+        click_count: 1,
+        flags: input::PRIMARY,
+        x: 0.,
+        y: 0.,
+        dx: 0.,
+        dy: 0.,
+        pen: None,
+    };
+    let release = Pointer { phase: input::POINTER_UP, buttons: 0, ..press };
+    let input = |pointer| Input {
+        kind: EventKind::WindowPointer,
+        target: 7,
+        data: RawInput::Pointer(pointer).encode(Source::default()),
         revision: None,
     };
     let execute = |scene: &ViewNode| {
         let message = queue.try_recv().unwrap();
-        message.source.event(message.input, || Some(scene))
+        let event = message.source.event(message.input, message.object_id, || Some(scene));
+        crate::runtime::syscall::validate_input(scene, &event).unwrap();
+        let (_, RawInput::Pointer(pointer)) = RawInput::decode(event.kind, &event.data).unwrap()
+        else {
+            panic!("expected pointer")
+        };
+        (event.object_id, pointer)
     };
-    let old = scene(100, 60);
-    assert!(handle.send_tool_input(input(7, press)));
-    let event = execute(&old);
-    assert_eq!(PointerInput::decode(&event.data).unwrap(), press);
-    validate_input(&old, &event).unwrap();
-    assert!(handle.send_tool_input(input(7, release)));
+    let send =
+        |packet| handle.send_tool_input(packet, handle.object_id.load(Ordering::Acquire), false);
+    assert!(send(input(press)));
+    assert_eq!(execute(&scene(100, 60)), (7, Pointer { x: 108., y: 74., ..press }));
+    assert!(send(input(release)));
+    handle.object_id.store(8, Ordering::Release);
+    handle.update_tool_canvas_offsets([(7, [30., 40.])]);
     let current = scene(64, 32);
-    let event = execute(&current);
     assert_eq!(
-        PointerInput::decode(&event.data).unwrap(),
-        PointerInput { x: 64, y: 32, ..release }
+        execute(&current),
+        (7, Pointer { x: 82., y: 56., canvas_x: 64., canvas_y: 32., ..release })
     );
-    validate_input(&current, &event).unwrap();
-    assert!(handle.send(input(7, release), None));
-    let physical = execute(&current);
-    assert_eq!(PointerInput::decode(&physical.data).unwrap(), release);
-    assert_eq!(validate_input(&current, &physical), Err(HostError::InvalidArgument));
-    assert!(handle.send_tool_input(input(8, release)));
-    assert_eq!(validate_input(&current, &execute(&current)), Err(HostError::InvalidArgument));
+    assert!(handle.send(input(release), None));
+    assert_eq!(execute(&current), (8, release));
+
+    assert!(send(input(press)));
+    assert_eq!(
+        execute(&current),
+        (8, Pointer { x: 94., y: 72., canvas_x: 64., canvas_y: 32., ..press })
+    );
+    let second = Pointer { button: 1, buttons: 3, ..press };
+    let partial = Pointer { button: 1, buttons: 1, ..release };
+    assert!(send(input(second)));
+    assert_eq!(execute(&current).1.buttons, 3);
+    assert!(send(input(partial)));
+    assert_eq!(execute(&current).1.buttons, 1);
+    handle.update_tool_canvas_offsets([(1, [0., 0.])]);
+    assert!(!send(input(press)));
+    assert!(send(input(release)));
+    assert_eq!(execute(&root(canvas(1, 300, 200))), (8, Pointer { x: 120., y: 90., ..release }));
+    assert!(!send(input(release)));
+    // The same released tool packets address the named canvas in a legacy guest
+    // and its corresponding window subscription after the guest migrates.
+    use playbit_api::abi::syscall::{KeyInput, PointerInput};
+    let mut legacy = scene(64, 32);
+    let ViewNode::Theme { window_input, legacy_canvas, .. } = &mut legacy else { unreachable!() };
+    *window_input = None;
+    *legacy_canvas = 1;
+    let old_key = KeyInput { key: 3, pressed: true };
+    let old_pointer = PointerInput { x: 70, y: 16, phase: 1, buttons: 1 };
+    handle.update_tool_canvas_offsets([(7, [30., 40.])]);
+    let send_old = |kind, data, view: &ViewNode| {
+        assert!(handle.send_tool_input(
+            Input { kind, target: 7, data, revision: None },
+            8,
+            view.legacy_canvas() != 0
+        ));
+        let queued = queue.try_recv().unwrap();
+        queued.source.event(queued.input, queued.object_id, || Some(view))
+    };
+    let event = send_old(EventKind::Key, old_key.encode().to_vec(), &legacy);
+    assert_eq!((event.kind, event.target), (EventKind::Key, 7));
+    assert_eq!(KeyInput::decode(&event.data).unwrap(), old_key);
+    let event = send_old(EventKind::Pointer, old_pointer.encode().to_vec(), &legacy);
+    assert_eq!((event.kind, event.target), (EventKind::Pointer, 7));
+    assert_eq!(PointerInput::decode(&event.data).unwrap(), PointerInput { x: 64, ..old_pointer });
+    let event = send_old(EventKind::Key, old_key.encode().to_vec(), &current);
+    assert_eq!((event.kind, event.target), (EventKind::WindowKeyboard, 0));
+    let (_, RawInput::Keyboard(key)) = RawInput::decode(event.kind, &event.data).unwrap() else {
+        unreachable!()
+    };
+    assert_eq!((key.device_key, key.pressed), (input::Key::Up, true));
+    let event = send_old(EventKind::Pointer, old_pointer.encode().to_vec(), &current);
+    assert_eq!((event.kind, event.target), (EventKind::WindowPointer, 7));
+    let (_, RawInput::Pointer(p)) = RawInput::decode(event.kind, &event.data).unwrap() else {
+        unreachable!()
+    };
+    assert_eq!((p.x, p.y, p.canvas_x, p.canvas_y), (94., 56., 64., 16.));
 }
 
 #[cfg(feature = "process")]
@@ -1463,6 +1559,9 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
     let (wake, awakened) = mpsc::sync_channel(1);
     let (errors, _) = async_channel::bounded(1);
     let handle = Handle {
+        object_id: Arc::new(AtomicU32::new(1)),
+        #[cfg(feature = "process")]
+        tool_pointer: Default::default(),
         #[cfg(all(feature = "native-audio", target_os = "macos"))]
         audio_instance: None,
         session: None,
@@ -1475,6 +1574,7 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
         failures: Arc::new(AtomicU64::new(0)),
         errors,
     };
+    handle.update_tool_canvas_offsets([(7, [18., 24.])]);
     let (outputs, lifecycle) = async_channel::bounded(1);
     let server = Server::start(directory.path(), id, outputs).unwrap();
     let publisher = server.publisher();
@@ -1516,7 +1616,7 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
         assert!(admitted.is_empty() && lifecycle.is_empty());
     }
     publisher.opened(1, crate::identifier::encode(&[0xcd; 32]), handle.clone());
-    publisher.frame(Some(vec![0x80; 1024]), &["Initial owner log".into()]);
+    publisher.frame(Some(vec![0x80; 1024]), None, &["Initial owner log".into()]);
     let Reply::Frame { scene, generation, instance, .. } = call(&owner, Operation::Frame).unwrap()
     else {
         panic!()
@@ -1573,7 +1673,7 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
     let wait = Exchange::connect(directory.path(), &owner, Operation::Logs { after: Some(cursor) })
         .unwrap();
     let waiting = std::thread::spawn(move || wait.receive().unwrap());
-    publisher.frame(None, &["Readiness wakes logs".into()]);
+    publisher.frame(None, None, &["Readiness wakes logs".into()]);
     let Reply::Logs(batch) = waiting.join().unwrap() else { panic!() };
     assert_eq!(batch.lines[0].message, "Readiness wakes logs");
     assert_eq!(batch.cursor.next, 2);
@@ -1584,7 +1684,7 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
     silent.cancellation_handle().unwrap().shutdown(Shutdown::Both).unwrap();
     assert!(silent.receive().is_err());
     let many: Vec<String> = (0..300).map(|n| format!("Log {n}")).collect();
-    publisher.frame(None, &many);
+    publisher.frame(None, None, &many);
     let Reply::Logs(batch) = call(&owner, Operation::Logs { after: None }).unwrap() else {
         panic!()
     };
@@ -1616,21 +1716,78 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
             instance, generation: 1, png: result
         } if instance == id && result == png));
     }
+    // A first guest frame can precede AppKit window creation. Both released
+    // tool packet shapes need a window only when the admitted scene uses window input.
+    let scene = |legacy| ViewNode::Theme {
+        theme: playbit_api::ui::Theme::light(),
+        window_background_specified: false,
+        window_style: None,
+        window_input: if legacy {
+            None
+        } else {
+            Some(playbit_api::abi::input::POINTER | playbit_api::abi::input::KEYBOARD)
+        },
+        legacy_canvas: if legacy { 7 } else { 0 },
+        window_size_constraints: None,
+        child: Box::new(ViewNode::Canvas {
+            id: 7,
+            width: 100,
+            height: 80,
+            frames: playbit_api::ui::CanvasFrames::Static,
+            extent: playbit_api::ui::CanvasExtent::Inline,
+            clear_color: None,
+            items: vec![],
+        }),
+    };
+    let targeted = || {
+        [
+            Operation::key(Some(7), "up", true).unwrap(),
+            Operation::pointer(7, "down", 24, 16, None).unwrap(),
+        ]
+    };
+    handle.object_id.store(0, Ordering::Release);
+    let modern = scene(false);
+    publisher.frame(Some(vec![1]), Some(&modern), &[]);
+    for operation in targeted() {
+        assert!(
+            call(&owner, operation).unwrap_err().to_string().contains("guest window is closed")
+        );
+    }
+    assert!(admitted.is_empty());
+    let legacy = scene(true);
+    publisher.frame(Some(vec![2]), Some(&legacy), &[]);
+    for operation in targeted() {
+        assert!(matches!(call(&owner, operation).unwrap(), Reply::Accepted { .. }));
+        awakened.recv_timeout(Duration::from_secs(5)).unwrap();
+        let message = admitted.try_recv().unwrap();
+        let event = message.source.event(message.input, message.object_id, || Some(&legacy));
+        assert!(matches!(event.kind, EventKind::Key | EventKind::Pointer));
+        assert_eq!((event.target, event.object_id), (7, 0));
+        crate::runtime::syscall::validate_input(&legacy, &event).unwrap();
+    }
+
+    handle.object_id.store(1, Ordering::Release);
+    handle.update_tool_canvas_offsets([]);
+    publisher.frame(Some(vec![3]), Some(&modern), &[]);
+    assert!(call(&owner, Operation::pointer(7, "down", 24, 16, None).unwrap()).is_err());
+    assert!(admitted.is_empty(), "window input needs a layout for the selected canvas");
+    handle.update_tool_canvas_offsets([(7, [18., 24.])]);
     for operation in [
-        Operation::key(7, "up", true).unwrap(),
+        Operation::key(Some(7), "up", true).unwrap(),
+        Operation::key(None, "up", true).unwrap(),
         Operation::pointer(7, "down", 24, 16, None).unwrap(),
-        Operation::key(7, "up", false).unwrap(),
+        Operation::key(None, "up", false).unwrap(),
     ] {
         let Operation::Input { kind, target, ref data } = operation else { unreachable!() };
         let expected = data.clone();
         assert!(matches!(call(&owner, operation).unwrap(), Reply::Accepted { .. }));
         awakened.recv_timeout(Duration::from_secs(5)).unwrap();
         let message = admitted.try_recv().unwrap();
-        assert!(matches!(message.source, InputSource::Tool));
+        assert!(matches!(message.source, InputSource::Tool { .. }));
         let input = message.input;
         assert_eq!((input.kind as u32, input.target, input.data), (kind, target, expected));
     }
-    for kind in [EventKind::Key, EventKind::Pointer] {
+    for kind in [EventKind::WindowKeyboard, EventKind::WindowPointer] {
         assert!(
             call(&owner, Operation::Input { kind: kind as u32, target: 7, data: vec![] }).is_err()
         );
@@ -1747,7 +1904,7 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
         Output::ShowRequested { owner_generation: 2, presentation: 1 }
     ));
     assert!(lifecycle.is_empty());
-    publisher.frame(Some(vec![1, 2, 3]), &["Fresh owner".into()]);
+    publisher.frame(Some(vec![1, 2, 3]), None, &["Fresh owner".into()]);
     let Reply::Logs(resumed) = paused_reader.join().unwrap().unwrap() else { panic!() };
     assert!(resumed.reset && resumed.cursor.generation == 2);
     let Reply::Logs(batch) = call(&owner, Operation::Logs { after: Some(cursor) }).unwrap() else {

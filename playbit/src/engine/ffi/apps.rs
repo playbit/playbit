@@ -93,6 +93,11 @@ pub unsafe extern "C" fn pb_engine_app_input(
                 13 => EventKind::Frame,
                 14 => EventKind::TextChanged,
                 15 => EventKind::SurfaceChanged,
+                22 => EventKind::WindowPointer,
+                23 => EventKind::WindowKeyboard,
+                24 => EventKind::WindowScroll,
+                25 => EventKind::WindowGesture,
+                26 => EventKind::WindowGamepad,
                 _ => return Err(Error::InvalidArgument),
             };
             let bytes = if length == 0 {
@@ -101,7 +106,10 @@ pub unsafe extern "C" fn pb_engine_app_input(
                 input(data, length, playbit_api::abi::syscall::MAX_EVENT_BYTES as u32)?;
                 std::slice::from_raw_parts(data, length as usize).to_vec()
             };
-            inner.apps.input(event.generation, Event { kind, target: event.target, data: bytes })
+            inner.apps.input(
+                event.generation,
+                Event { object_id: event.object_id, kind, target: event.target, data: bytes },
+            )
         })
     }
 }

@@ -853,6 +853,7 @@ impl GuestRenderer {
                 ui::WINDOW_SIZE_CONSTRAINTS_FEATURE,
                 ui::CANVAS_CLEAR_FEATURE,
                 ui::CANVAS_PIXELS_FEATURE,
+                playbit_api::abi::input::FEATURE,
                 ui::CANVAS_VIEWPORT_FEATURE,
                 ui::CANVAS_WINDOW_FEATURE,
                 ui::WINDOW_STYLE_FEATURE,
@@ -871,6 +872,7 @@ impl GuestRenderer {
             &[
                 ui::CANVAS_CLEAR_FEATURE,
                 ui::CANVAS_PIXELS_FEATURE,
+                playbit_api::abi::input::FEATURE,
                 AUTOMATIC_VOLUMES_FEATURE,
                 SESSION_VOLUME_FEATURE,
                 DISPLAY_NAMES_FEATURE,
@@ -888,14 +890,17 @@ pub(crate) fn input_event(kind: u32, target: u32, data: Vec<u8>) -> Result<rt::E
     let kind = match kind {
         2 => rt::EventKind::Click,
         3 => rt::EventKind::Submit,
-        11 => rt::EventKind::Pointer,
-        12 => rt::EventKind::Key,
         13 => rt::EventKind::Frame,
         14 => rt::EventKind::TextChanged,
         15 => rt::EventKind::SurfaceChanged,
+        22 => rt::EventKind::WindowPointer,
+        23 => rt::EventKind::WindowKeyboard,
+        24 => rt::EventKind::WindowScroll,
+        25 => rt::EventKind::WindowGesture,
+        26 => rt::EventKind::WindowGamepad,
         _ => return Err("unsupported input event".into()),
     };
-    Ok(rt::Event { kind, target, data })
+    Ok(rt::Event { object_id: 0, kind, target, data })
 }
 
 #[cfg(all(test, feature = "app-host"))]

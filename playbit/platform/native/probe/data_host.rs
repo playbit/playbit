@@ -114,7 +114,7 @@ impl Driver {
     fn changed(&mut self) {
         self.queue_event(
             self.generation(),
-            Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+            Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] },
         )
         .unwrap();
     }
@@ -265,8 +265,11 @@ fn c_app_commits_through_scoped_data_host_and_reopens_durable_state() {
     assert!(!checked(&app.pump().unwrap()));
     assert!(!changed.load(Ordering::Acquire), "rejected edits must not reach the mutating host");
     assert!(!fixture.done());
-    app.queue_event(app.generation(), Event { kind: EventKind::Click, target: 1, data: vec![] })
-        .unwrap();
+    app.queue_event(
+        app.generation(),
+        Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
+    )
+    .unwrap();
     assert!(checked(&app.pump().unwrap()));
     assert!(changed.load(Ordering::Acquire));
     assert!(fixture.done());
@@ -294,8 +297,11 @@ fn c_accepted_edit_and_readback_drain_after_deactivation() {
     // SAFETY: the probe and scene buffers outlive this callback owner.
     let mut app = unsafe { fixture.app(&mut probe, Arc::new(AtomicBool::new(false))) };
     assert!(!checked(&app.pump().unwrap()));
-    app.queue_event(app.generation(), Event { kind: EventKind::Click, target: 1, data: vec![] })
-        .unwrap();
+    app.queue_event(
+        app.generation(),
+        Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
+    )
+    .unwrap();
     let frame = app.instance.pump().unwrap();
     assert!(!app.inbox.idle(), "the accepted edit has not yet been Taken");
     app.instance.deactivate();
@@ -490,7 +496,10 @@ fn rust_sdk_and_c_app_share_checked_store_operations_with_independent_contexts()
     assert!(!checked(&rust_app.pump().unwrap()));
     assert_ne!(c_app.generation(), rust_app.generation());
     c_app
-        .queue_event(c_app.generation(), Event { kind: EventKind::Click, target: 1, data: vec![] })
+        .queue_event(
+            c_app.generation(),
+            Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
+        )
         .unwrap();
     assert!(checked(&c_app.pump().unwrap()));
     assert!(
@@ -502,7 +511,7 @@ fn rust_sdk_and_c_app_share_checked_store_operations_with_independent_contexts()
     rust_app
         .queue_event(
             rust_app.generation(),
-            Event { kind: EventKind::Click, target: 1, data: vec![] },
+            Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
         )
         .unwrap();
     assert!(!checked(&rust_app.pump().unwrap()));
@@ -670,7 +679,7 @@ fn persistent_native_input_to_validated_scene_timing() {
         let start = Instant::now();
         app.queue_event(
             app.generation(),
-            Event { kind: EventKind::Click, target: 1, data: vec![] },
+            Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
         )
         .unwrap();
         let frame = app.pump().unwrap();
@@ -714,8 +723,11 @@ fn c_app_establishes_its_schema_creates_data_and_discovers_it_after_reopen() {
     fixture.object = Id::from_bytes(probe.object);
     assert_ne!(probe.object, [0; 16]);
     assert!(!fixture.done());
-    app.queue_event(app.generation(), Event { kind: EventKind::Click, target: 1, data: vec![] })
-        .unwrap();
+    app.queue_event(
+        app.generation(),
+        Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
+    )
+    .unwrap();
     assert!(checked(&app.pump().unwrap()));
     let object = probe.object;
     drop(app);

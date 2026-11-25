@@ -35,10 +35,11 @@ let click target =
     if target = pass then controls.pass <- true
     else if target = shoot then controls.shoot <- true
 
-let pointer (event : Input.pointer) =
+let pointer (event : Input.window_pointer) =
+  let x = int_of_float event.canvas_x and y = int_of_float event.canvas_y in
   Option.iter (fun (_, (view : Match_view.t)) ->
     let action = Option.bind view.action (fun (bounds, action) ->
-      if Pixel_layout.contains bounds event.x event.y then Some action else None) in
+      if Pixel_layout.contains bounds x y then Some action else None) in
     match event.phase, action with
     | 1, Some Match_view.Rematch -> click rematch
     | 1, Some Play -> pressing_hint := true; Controls.key controls 5 true
@@ -49,8 +50,8 @@ let pointer (event : Input.pointer) =
     | (0 | 1), _ when event.buttons land 1 <> 0 && not !pressing_hint
                        && (Room.game room).phase <> Match.Full_time ->
         Option.iter (fun fit ->
-          if Pixel_layout.contains fit.Pixel_layout.box event.x event.y then (
-            let x, y = Pixel_layout.to_source fit event.x event.y in
+          if Pixel_layout.contains fit.Pixel_layout.box x y then (
+            let x, y = Pixel_layout.to_source fit x y in
             let x, y = Art.unproject ~x ~y in
             if x >= 0. && x <= Match.width && y >= 0. && y <= Match.height then
               controls.destination <- Some (x, y))) view.stadium
@@ -70,13 +71,23 @@ let update (e : event) =
   else if is EventKind.click then click e.target
   else if is EventKind.data_ready then
     Scorebook.complete book (fun () -> Room.start room)
+  else if is EventKind.window_keyboard then (
+    let k = Input.window_keyboard e.data in
+    if k.device_key = Key.space && old_game.phase = Match.Full_time then (
+      if k.pressed && not k.repeat && Room.can_restart room then click rematch)
+    else
+      let direction =
+        if k.device_key = Key.left then 1
+        else if k.device_key = Key.right then 2
+        else if k.device_key = Key.up then 3
+        else if k.device_key = Key.down then 4
+        else if k.device_key = Key.space then 5
+        else 0 in
+      Controls.key controls direction k.pressed)
   else if e.target = canvas then (
-    if is EventKind.key then (
-      let k = Input.key e.data in
-      if k.key = 5 && old_game.phase = Match.Full_time then (
-        if k.pressed && Room.can_restart room then click rematch)
-      else Controls.key controls k.key k.pressed)
-    else if is EventKind.pointer then pointer (Input.pointer e.data)
+    if is EventKind.window_pointer then (
+      let input = Input.window_pointer e.data in
+      if input.flags land 1 <> 0 then pointer input)
     else if is EventKind.frame then (
       let dt = Input.frame e.data in
       let input = Controls.frame controls dt (current_player ()) in
@@ -170,6 +181,7 @@ let render () =
     let seconds = (game.ticks_left + Match.ticks_per_second - 1) / Match.ticks_per_second in
     Art.draw_scorebug ~home_score:game.home_score ~away_score:game.away_score ~seconds in
   let scene = View.create () in
+  View.window_input scene (Input.pointers lor Input.keyboard);
   View.theme scene [ThemeColor.window_background, background];
   View.window_style scene window_style;
   let canvas () = View.canvas_with_options ~extent:View.Window ~clear_color:background

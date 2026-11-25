@@ -18,7 +18,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     thread::JoinHandle,
@@ -34,36 +34,54 @@ const MAX_TITLE_BYTES: usize = 256;
 const ADMISSION_ERROR: &str = "Input could not be queued. Try the action again.";
 mod ready_output;
 
-pub(super) struct PendingInput(Arc<AtomicUsize>);
+// Queue items and reserved terminal edges share one atomic admission bound.
+const RESERVATION: usize = MAX_INPUTS + 1;
+
+pub(super) struct PendingInput(Arc<AtomicUsize>, usize);
 impl PendingInput {
-    fn try_new(count: &Arc<AtomicUsize>) -> Option<Self> {
+    fn charge(count: &Arc<AtomicUsize>, amount: usize) -> Option<Self> {
         count
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                if n < MAX_INPUTS { Some(n + 1) } else { None }
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |units| {
+                let used = units % RESERVATION + units / RESERVATION;
+                (used < MAX_INPUTS).then_some(units + amount)
             })
             .ok()
-            .map(|_| Self(count.clone()))
+            .map(|_| Self(count.clone(), amount))
     }
+
+    fn activate(mut self) -> Self {
+        assert_eq!(self.1, RESERVATION);
+        assert!(self.0.fetch_sub(RESERVATION - 1, Ordering::AcqRel) >= RESERVATION);
+        self.1 = 1;
+        self
+    }
+
     #[cfg(test)]
     fn new(count: &Arc<AtomicUsize>) -> Self {
-        Self::try_new(count).expect("test input fits the admission bound")
+        Self::charge(count, 1).expect("test input fits the admission bound")
     }
 }
 impl Drop for PendingInput {
     fn drop(&mut self) {
-        assert!(self.0.fetch_sub(1, Ordering::AcqRel) > 0);
+        assert!(self.0.fetch_sub(self.1, Ordering::AcqRel) >= self.1);
     }
 }
 pub(super) struct Message {
     pending: PendingInput,
     pub(super) input: Input,
     epoch: u64,
+    object_id: u32,
     source: InputSource,
 }
 enum InputSource {
     Window,
     Menu(blake3::Hash),
-    Tool,
+    #[cfg(feature = "process")]
+    Tool {
+        object_id: u32,
+        offset: Option<[f32; 2]>,
+        legacy_canvas: bool,
+    },
 }
 impl Message {
     /// Discard an obsolete selection before checking its epoch. Dropping its
@@ -95,30 +113,161 @@ impl Message {
         if message.epoch != handle.epoch() {
             return Err("An earlier input failed. Try the action again.".into());
         }
-        Ok(Some(message.source.event(message.input, scene)))
+        Ok(Some(message.source.event(message.input, message.object_id, scene)))
     }
 }
 impl InputSource {
-    fn event<'a>(self, input: Input, scene: impl FnOnce() -> Option<&'a ViewNode>) -> Event {
-        let mut event = Event { kind: input.kind, target: input.target, data: input.data };
-        // The scene can resize between tool admission and the owner's turn.
-        // Physical input was already mapped by the surface that received it.
-        if matches!(self, Self::Tool)
-            && event.kind == EventKind::Pointer
-            && let Some((width, height)) =
-                scene().and_then(|view| super::super::canvas::canvas_size(view, event.target))
-            && let Ok(mut pointer) = playbit_api::abi::syscall::PointerInput::decode(&event.data)
+    fn event<'a>(
+        self,
+        input: Input,
+        object_id: u32,
+        scene: impl FnOnce() -> Option<&'a ViewNode>,
+    ) -> Event {
+        let event = Event { object_id, kind: input.kind, target: input.target, data: input.data };
+        #[cfg(feature = "process")]
+        if let Self::Tool { offset, legacy_canvas, .. } = self
+            && matches!(event.kind, EventKind::Pointer | EventKind::Key | EventKind::WindowPointer)
         {
-            pointer.x = pointer.x.min(width);
-            pointer.y = pointer.y.min(height);
-            event.data.copy_from_slice(&pointer.encode());
+            return map_tool_input(event, offset, legacy_canvas, scene());
         }
+        #[cfg(not(feature = "process"))]
+        let _ = scene;
         event
     }
 }
+
+#[cfg(feature = "process")]
+fn map_tool_input(
+    mut event: Event,
+    offset: Option<[f32; 2]>,
+    legacy_canvas: bool,
+    scene: Option<&ViewNode>,
+) -> Event {
+    use crate::ui::app_control::canvas_input::{CANVAS_KEYS, keyboard};
+    use playbit_api::abi::{
+        input::{Input, Source},
+        syscall::{KeyInput, PointerInput},
+    };
+    let size = scene.and_then(|view| super::super::canvas::canvas_size(view, event.target));
+    let tool = || Source { timestamp_ns: playbit_trace::clock_ns(), ..Source::default() };
+    let (source, mut pointer) = match event.kind {
+        EventKind::Key => {
+            if !legacy_canvas
+                && size.is_some()
+                && let Ok(key) = KeyInput::decode(&event.data)
+            {
+                let input = keyboard(CANVAS_KEYS[key.key as usize - 1], key.pressed);
+                event.kind = input.kind();
+                event.target = 0;
+                event.data = input.encode(tool());
+            }
+            return event;
+        }
+        EventKind::Pointer => {
+            let Ok(mut packet) = PointerInput::decode(&event.data) else { return event };
+            if legacy_canvas {
+                if let Some((width, height)) = size {
+                    packet.x = packet.x.min(width);
+                    packet.y = packet.y.min(height);
+                    event.data.copy_from_slice(&packet.encode());
+                }
+                return event;
+            }
+            (tool(), window_pointer(packet))
+        }
+        EventKind::WindowPointer => {
+            let Ok((source, Input::Pointer(pointer))) = Input::decode(event.kind, &event.data)
+            else {
+                return event;
+            };
+            (source, pointer)
+        }
+        _ => unreachable!("only canvas keys and pointers require tool mapping"),
+    };
+    // The scene can resize after admission. Only the original window offset was captured there.
+    if let Some([x, y]) = offset {
+        if let Some((width, height)) = size {
+            pointer.canvas_x = pointer.canvas_x.clamp(0., width as f32);
+            pointer.canvas_y = pointer.canvas_y.clamp(0., height as f32);
+        }
+        pointer.x = x + pointer.canvas_x;
+        pointer.y = y + pointer.canvas_y;
+        let input = Input::Pointer(pointer);
+        event.kind = input.kind();
+        event.data = input.encode(source);
+    }
+    event
+}
+
+#[cfg(feature = "process")]
+fn window_pointer(
+    pointer: playbit_api::abi::syscall::PointerInput,
+) -> playbit_api::abi::input::Pointer {
+    use playbit_api::abi::input::{self, Pointer};
+    let phase = pointer.phase as u8;
+    Pointer {
+        id: u32::MAX,
+        kind: input::MOUSE,
+        phase,
+        button: if matches!(phase, input::POINTER_DOWN | input::POINTER_UP) {
+            0
+        } else {
+            input::NO_BUTTON
+        },
+        click_count: 0,
+        flags: input::PRIMARY,
+        buttons: pointer.buttons as u16,
+        x: 0.,
+        y: 0.,
+        dx: 0.,
+        dy: 0.,
+        canvas_x: pointer.x as f32,
+        canvas_y: pointer.y as f32,
+        pen: None,
+    }
+}
+
+#[cfg(feature = "process")]
+struct ToolPointer {
+    layouts: crossbeam_queue::ArrayQueue<ToolCanvasLayout>,
+    state: std::sync::Mutex<ToolPointerState>,
+}
+
+#[cfg(feature = "process")]
+impl Default for ToolPointer {
+    fn default() -> Self {
+        Self { layouts: crossbeam_queue::ArrayQueue::new(1), state: Default::default() }
+    }
+}
+
+#[cfg(feature = "process")]
+#[derive(Default)]
+struct ToolPointerState {
+    layout: ToolCanvasLayout,
+    held: Option<ToolPointerOrigin>,
+}
+
+#[cfg(feature = "process")]
+#[derive(Default)]
+struct ToolCanvasLayout {
+    object_id: u32,
+    offsets: Vec<(u32, [f32; 2])>,
+}
+
+#[cfg(feature = "process")]
+#[derive(Clone, Copy)]
+struct ToolPointerOrigin {
+    object_id: u32,
+    target: u32,
+    offset: [f32; 2],
+}
+
 #[derive(Clone)]
 pub(super) struct Handle {
     pub generation: u64,
+    pub(super) object_id: Arc<AtomicU32>,
+    #[cfg(feature = "process")]
+    tool_pointer: Arc<ToolPointer>,
     #[cfg(all(feature = "native-audio", target_os = "macos"))]
     audio_instance: Option<[u8; 16]>,
     pub session: Option<[u8; 32]>,
@@ -136,7 +285,7 @@ impl Handle {
         self.audio_instance
     }
     pub fn input_pending(&self) -> bool {
-        self.pending.load(Ordering::Acquire) != 0
+        !self.pending.load(Ordering::Acquire).is_multiple_of(RESERVATION)
     }
     #[cfg(test)]
     pub(super) fn fixture(generation: u64) -> (Self, async_channel::Receiver<Message>) {
@@ -151,6 +300,9 @@ impl Handle {
                 session: None,
                 inputs,
                 wake,
+                object_id: Arc::new(AtomicU32::new(0)),
+                #[cfg(feature = "process")]
+                tool_pointer: Default::default(),
                 failures: Arc::new(AtomicU64::new(0)),
                 errors,
                 #[cfg(all(target_os = "macos", feature = "process"))]
@@ -182,16 +334,91 @@ impl Handle {
         self.send(input, None)
     }
     pub fn send(&self, input: Input, epoch: Option<u64>) -> bool {
-        self.enqueue(input, epoch, InputSource::Window)
+        self.enqueue(input, epoch, InputSource::Window, None)
     }
     pub(super) fn send_menu(&self, input: Input, epoch: u64, menu: blake3::Hash) -> bool {
-        self.enqueue(input, Some(epoch), InputSource::Menu(menu))
+        self.enqueue(input, Some(epoch), InputSource::Menu(menu), None)
     }
     #[cfg(feature = "process")]
-    pub(super) fn send_tool_input(&self, input: Input) -> bool {
-        self.enqueue(input, None, InputSource::Tool)
+    pub(super) fn send_tool_input(
+        &self,
+        input: Input,
+        object_id: u32,
+        legacy_canvas: bool,
+    ) -> bool {
+        use playbit_api::abi::input::{self as abi, Input as RawInput};
+        let source = |offset| InputSource::Tool { object_id, offset, legacy_canvas };
+        if legacy_canvas || !matches!(input.kind, EventKind::WindowPointer | EventKind::Pointer) {
+            return self.enqueue(input, None, source(None), None);
+        }
+        let pointer = if input.kind == EventKind::Pointer {
+            let Ok(packet) = playbit_api::abi::syscall::PointerInput::decode(&input.data) else {
+                return false;
+            };
+            window_pointer(packet)
+        } else {
+            let Ok((_, RawInput::Pointer(pointer))) = RawInput::decode(input.kind, &input.data)
+            else {
+                return false;
+            };
+            pointer
+        };
+        let terminal = RawInput::Pointer(pointer).ends_sequence();
+        let target = input.target;
+        let mut state = self.tool_pointer.state.lock().expect("tool pointer state lock");
+        if let Some(layout) = self.tool_pointer.layouts.pop() {
+            state.layout = layout;
+        }
+        let held =
+            state.held.filter(|origin| origin.object_id == object_id && origin.target == target);
+        let offset = if state.layout.object_id == object_id {
+            state.layout.offsets.iter().find(|(id, _)| *id == target).map(|(_, offset)| *offset)
+        } else {
+            None
+        };
+        let offset =
+            offset.or_else(|| if terminal { held.map(|origin| origin.offset) } else { None });
+        let Some(offset) = offset else { return false };
+        if !self.enqueue(input, None, source(Some(offset)), None) {
+            return false;
+        }
+        // CLI and MCP share one synthetic pointer. Keep its last origin until
+        // the last button is released, even if the canvas disappears mid-chord.
+        if pointer.phase == abi::POINTER_DOWN || held.is_some() {
+            let released = terminal && (pointer.phase != abi::POINTER_UP || pointer.buttons == 0);
+            state.held = (!released).then_some(ToolPointerOrigin { object_id, target, offset });
+        }
+        true
     }
-    fn enqueue(&self, input: Input, epoch: Option<u64>, source: InputSource) -> bool {
+
+    #[cfg(feature = "process")]
+    pub(super) fn update_tool_canvas_offsets(
+        &self,
+        offsets: impl IntoIterator<Item = (u32, [f32; 2])>,
+    ) {
+        // The renderer publishes the latest layout without waiting on tool I/O.
+        self.tool_pointer.layouts.force_push(ToolCanvasLayout {
+            object_id: self.object_id.load(Ordering::Acquire),
+            offsets: offsets.into_iter().collect(),
+        });
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) fn reserve_release(&self) -> Option<PendingInput> {
+        PendingInput::charge(&self.pending, RESERVATION)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn send_release(&self, input: Input, release: PendingInput) -> bool {
+        self.enqueue(input, None, InputSource::Window, Some(release))
+    }
+
+    fn enqueue(
+        &self,
+        input: Input,
+        epoch: Option<u64>,
+        source: InputSource,
+        release: Option<PendingInput>,
+    ) -> bool {
         // UI admission is serial. Frames may not follow an unacknowledged input.
         if input.kind == EventKind::Frame && self.input_pending() {
             return false;
@@ -212,10 +439,22 @@ impl Handle {
             playbit_api::abi::syscall::MAX_EVENT_BYTES
         };
         let input_kind = input.kind;
-        let pending =
-            (input.data.len() <= max_bytes).then(|| PendingInput::try_new(&self.pending)).flatten();
+        let pending = (input.data.len() <= max_bytes)
+            .then(|| {
+                if let Some(release) = release {
+                    Some(release.activate())
+                } else {
+                    PendingInput::charge(&self.pending, 1)
+                }
+            })
+            .flatten();
+        let object_id = match &source {
+            #[cfg(feature = "process")]
+            InputSource::Tool { object_id, .. } => *object_id,
+            _ => self.object_id.load(Ordering::Acquire),
+        };
         if let Some(pending) = pending
-            && self.inputs.try_send(Message { input, epoch, pending, source }).is_ok()
+            && self.inputs.try_send(Message { input, epoch, pending, source, object_id }).is_ok()
         {
             let _ = self.wake.try_send(());
             true
@@ -223,7 +462,9 @@ impl Handle {
             crate::trace::mark("ui.input.rejected");
             // A display callback can race the old queue closing during hot reload.
             // Its frame is disposable, and no user action needs to be retried.
-            if input_kind != EventKind::Frame {
+            if input_kind != EventKind::Frame
+                && playbit_api::abi::input::Input::family(input_kind) == 0
+            {
                 let _ = self.errors.try_send(ADMISSION_ERROR);
             }
             false
@@ -1062,6 +1303,9 @@ fn run_guest(
         pending: Arc::new(AtomicUsize::new(0)),
         inputs,
         wake: wake.clone(),
+        object_id: Arc::new(AtomicU32::new(0)),
+        #[cfg(feature = "process")]
+        tool_pointer: Default::default(),
         failures: Arc::new(AtomicU64::new(0)),
         errors,
     };
@@ -1079,7 +1323,7 @@ fn run_guest(
         crate::engine::session_instance::StartupPhase::OpeningWindow,
     )
     .map_err(|error| error.to_string())?;
-    publisher.frame(first.encoded, &first.logs);
+    publisher.frame(first.encoded, first.view.as_ref(), &first.logs);
     let title = guest.title().to_owned();
     if title.is_empty() || title.len() > MAX_TITLE_BYTES {
         return Err("App title must contain 1–256 UTF-8 bytes".into());
@@ -1173,12 +1417,19 @@ fn advance_guest(
 
             frame_input = message.input.kind == EventKind::Frame;
             pending = Some(message.pending);
-            admit_guest_input(guest, handle, message.input, message.epoch, message.source)
+            admit_guest_input(
+                guest,
+                handle,
+                message.input,
+                message.epoch,
+                message.object_id,
+                message.source,
+            )
         } else {
             Ok(())
         };
     let frame = guest.pump().map_err(|error| error.to_string())?;
-    publisher.frame(frame.encoded, &frame.logs);
+    publisher.frame(frame.encoded, frame.view.as_ref(), &frame.logs);
     let result = admitted.map(|()| frame.view);
     if result.is_err() {
         handle.failed();
@@ -1206,12 +1457,13 @@ fn admit_guest_input(
     handle: &Handle,
     input: Input,
     epoch: u64,
+    object_id: u32,
     source: InputSource,
 ) -> Result<(), String> {
     if epoch != handle.epoch() {
         return Err("An earlier input failed. Try the action again.".into());
     }
-    let event = source.event(input, || guest.scene());
+    let event = source.event(input, object_id, || guest.scene());
     guest.input(event).map_err(|error| format!("Input failed: {error:?}. Try the action again."))
 }
 
@@ -1378,6 +1630,9 @@ fn open_slot(
         startup: None,
         inputs,
         wake: wake.clone(),
+        object_id: Arc::new(AtomicU32::new(0)),
+        #[cfg(feature = "process")]
+        tool_pointer: Default::default(),
         failures: Arc::new(AtomicU64::new(0)),
         pending: Arc::new(AtomicUsize::new(0)),
         errors,
@@ -1523,7 +1778,7 @@ fn advance(
         ack = InputAck::new(message.input.target, message.input.revision.unwrap_or_default());
         frame_input = message.input.kind == EventKind::Frame;
         admitted = if message.epoch == slot.handle.epoch() {
-            let event = message.source.event(message.input, scene);
+            let event = message.source.event(message.input, message.object_id, scene);
             apps.input(generation, event)
                 .map_err(|error| format!("Input failed: {error:?}. Try the action again."))
         } else {

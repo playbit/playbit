@@ -260,7 +260,7 @@ final class EngineHost {
     }
     private enum Payload {
         case control(Control)
-        case input(instance: String, kind: UInt32, target: UInt32, data: Data)
+        case input(instance: String, kind: UInt32, target: UInt32, objectID: UInt32, data: Data)
     }
     private struct Pending {
         let id: UInt64
@@ -962,7 +962,7 @@ final class EngineHost {
             switch request.payload {
             case .control(let control):
                 try accept(decode(control.submit(handle, id: request.id)))
-            case .input(let instance, let kind, let target, let data):
+            case .input(let instance, let kind, let target, let objectID, let data):
                 #if PHASE1_QUALIFICATION
                 if ProcessInfo.processInfo.arguments.contains("--w7-panic-on-input") { pb_ios_qualification_panic() }
                 #endif
@@ -970,7 +970,7 @@ final class EngineHost {
                 try accept(instanceBytes.withUnsafeBufferPointer { instance in
                     try data.withUnsafeBytes { bytes in
                         try decode(pb_ios_app_input(handle, request.id, instance.baseAddress, instance.count,
-                            kind, target, bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count))
+                            kind, target, objectID, bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count))
                     }
                 })
             }
@@ -981,13 +981,13 @@ final class EngineHost {
         do { try control.validate(); try enqueue(.control(control), bytes: control.bytes, completion: completion) }
         catch { completion(.failure(error)) }
     }
-    func input(instance: String, kind: Int, target: UInt32, data: Data,
+    func input(instance: String, kind: Int, target: UInt32, objectID: UInt32 = 0, data: Data,
                completion: @escaping (Result<[String: Any], Error>) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         do {
             guard let kind = UInt32(exactly: kind), Self.validInstance(instance),
                   data.count <= (kind == 14 ? GuestTextEdits.payloadBytesMax : GuestTextEdits.textBytesMax) else { throw failure("Invalid guest input") }
-            try enqueue(.input(instance: instance, kind: kind, target: target, data: data),
+            try enqueue(.input(instance: instance, kind: kind, target: target, objectID: objectID, data: data),
                         bytes: 32 + 8 + data.count, completion: completion)
         } catch { completion(.failure(error)) }
     }

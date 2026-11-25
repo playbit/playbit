@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("app", choices=("todo", "shared-note", "ui-gallery", "micro-kart"))
@@ -81,6 +82,15 @@ with tempfile.TemporaryDirectory(prefix="playbit-ios-source-", dir="/tmp") as te
                         trace_table = table == "trace" or table.startswith("trace.")
                     if not trace_table:
                         lines.append(line)
+                if guest == "micro-kart":
+                    features = tomllib.loads((guest_source / "playbit.toml").read_text())["required_host_features"]
+                    for index, line in enumerate(lines):
+                        if line.startswith("required_host_features"):
+                            existing = tomllib.loads(line)["required_host_features"]
+                            lines[index] = "required_host_features = " + json.dumps(sorted(set(existing + features))) + "\n"
+                            break
+                    else:
+                        lines.insert(0, "required_host_features = " + json.dumps(features) + "\n")
                 manifest.write_text("".join(lines))
             subprocess.run([str(binary / "pb"), "build", *flags], cwd=source, env=environment, check=True)
             result = subprocess.run([str(binary / "pb"), "bundle", *flags],

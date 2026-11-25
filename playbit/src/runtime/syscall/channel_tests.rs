@@ -117,6 +117,7 @@ fn channel_readiness_message_delivery_and_retirement_need_no_volume_rights() {
     state.notify_data(generation, 1).unwrap();
     let event = events::take_event(&mut state).unwrap();
     let parsed = playbit_api::context::Event {
+        object_id: 0,
         generation,
         kind: event.kind,
         target: event.target,
@@ -165,8 +166,12 @@ fn a_full_guest_event_queue_retains_channel_delivery_and_its_credits() {
     let (mut state, records) = fixture();
     events::take_event(&mut state).unwrap();
     channels::open(&mut state, "messages").unwrap();
-    while push_event(&mut state, Event { kind: EventKind::Wake, target: 0, data: vec![] }).is_ok() {
-    }
+    while push_event(
+        &mut state,
+        Event { object_id: 0, kind: EventKind::Wake, target: 0, data: vec![] },
+    )
+    .is_ok()
+    {}
     records.borrow_mut().results.insert(
         1,
         Ok(Arc::new(DataResult::ChannelEvents(vec![crate::session_channel::Event::Message {
@@ -234,7 +239,7 @@ fn display_name_changes_coalesce_and_reach_both_snapshots_after_queue_pressure()
     for _ in 0..MAX_QUEUED_EVENTS {
         events::push_event(
             &mut state,
-            Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+            Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] },
         )
         .unwrap();
     }
@@ -251,7 +256,7 @@ fn display_name_changes_coalesce_and_reach_both_snapshots_after_queue_pressure()
     for kind in [EventKind::IdentityChanged, EventKind::PresenceChanged] {
         assert_eq!(
             events::take_event(&mut state).unwrap(),
-            Event { kind, target: 0, data: vec![] }
+            Event { object_id: 0, kind, target: 0, data: vec![] }
         );
     }
     state.set_display_name(&name).unwrap();

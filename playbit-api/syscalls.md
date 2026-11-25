@@ -269,8 +269,16 @@ entry permissions in addition to volume rights.
 Event kind numbers are Started=1, Click=2, Submit=3, DataChanged=4,
 PresenceChanged=5, UpdateAvailable=6, ObjectCreationReady=7, FileCopyReady=8,
 FileSelectionReady=9, Wake=10, Pointer=11, Key=12, Frame=13, TextChanged=14,
-SurfaceChanged=15, DataReady=16 and VolumesChanged=17. Packed event payloads use little-endian
-integers and contain no pointers.
+SurfaceChanged=15, DataReady=16, VolumesChanged=17, ChannelMessage=18,
+ChannelStatus=19, TraceConfig=20, WindowPointer=22, WindowKeyboard=23,
+WindowScroll=24, WindowGesture=25 and WindowGamepad=26. Packed event
+payloads use little-endian integers and binary32 floats.
+
+`PBEvent.object_id` at offset 24 is the originating guest window. It is
+initialized when `written >= 28`. Zero indicates an event without a known
+window. A window's ID survives scene submissions and focus changes. Creating
+a replacement window allocates a new ID. `target` identifies a semantic control
+or named canvas when applicable.
 
 `IdentityChanged` (`PB_EVENT_IDENTITY_CHANGED`, kind `0x80000015`) is an
 advisory notification with target zero and an empty payload. A guest can read
@@ -292,7 +300,49 @@ platform-local until committed; Submit is the separate plain-UTF-8 submission
 Dimensions describe the padded content viewport by default. A root canvas
 using `ui.canvas.window.v1` receives the full drawable window dimensions.
 `VolumesChanged` has target zero and an eight-byte `revision:u64` payload.
-See the [event codecs](src/abi/syscall.rs) for Pointer, Key and Frame payloads.
+`Frame` carries elapsed display time as a little-endian `u32` in microseconds.
+
+#### Window input
+
+Declare `ui.input.v1` in the package's `required_host_features`. Submit view
+command 29 with target zero and one `u32` mask before the root. The bits are
+pointer 1, keyboard 2, scroll 4, gesture 8 and gamepad 16. Each submission sets
+the whole mask. Omission sets it to zero. Native controls continue to act and
+raise semantic events. The host delivers raw events from the guest's content
+area. Key and gamepad events belong to the active guest window. A terminal
+event can finish an admitted sequence after the mask changes.
+
+Raw input starts with a 20-byte source record containing occurrence time in
+monotonic nanoseconds, `u32 client_id`, `u32 device_id`, `u16 modifiers`
+and two zero bytes. Client ID zero denotes local input. Device IDs identify
+input devices or device classes within the host. They can be zero if unknown.
+The coordinate origin is the top-left of the guest window's content, with x
+increasing right and y increasing down. A pointer event targeting a canvas
+also carries canvas-local coordinates. Drag coordinates can extend beyond
+the canvas or window content.
+
+| Kind | Bytes | Payload after the source |
+| --- | ---: | --- |
+| WindowPointer | 56 or 92 | `u32` contact ID, four bytes for phase, kind, changed button and click count, `u16` flags and button mask, six floats for x, y, dx, dy, canvas x and canvas y. Pen adds nine floats for pressure, tangential pressure, normalized x/y tilt, twist in degrees, contact width/height, altitude and azimuth in radians. |
+| WindowKeyboard | 60 | Two `u16` codes for the logical and physical key, then four bytes for pressed, repeat, text length and reserved zero. Eight `u32` Unicode scalar slots follow. Unused slots are zero. |
+| WindowScroll | 44 | Kind, phase, `u16` flags, then x, y, horizontal delta, vertical delta and third-axis delta. Unit flags distinguish logical units, lines and pages. |
+| WindowGesture | 48 | Kind, phase, two reserved zero bytes, then center x/y, pan dx/dy, relative scale and relative clockwise rotation in radians. |
+| WindowGamepad | 36 | Phase, reserved zero, `u16` control, scalar value and paired x/y. Axes are normalized to [-1, 1] with up positive. Buttons and triggers use [0, 1]. |
+
+Keyboard codes are consecutive from `None = 0` through `Mute = 127`.
+Use `Key::COUNT` or `PB_KEY_COUNT` when indexing a table. Use committed
+`TextChanged` for editor drafts. Platform and device capabilities determine
+which raw details can be observed. The SDK types define the flags and phases.
+[Rust payloads](src/abi/input.rs) · [C payloads](include/playbit/sys/abi.h)
+
+Existing apps using named canvas command 22 still receive Pointer (11) and
+Key (12) for their canvases. Pointer is four `u32` values for canvas x/y,
+phase (move=0, down=1, up=2, cancel=3) and primary button state. Key is two
+`u32` values for the physical key (left=1, right=2, up=3, down=4, space=5)
+and the pressed flag. Named canvases and display frames keep the released
+command 22 encoding. The first explicit window input mask switches that guest
+instance to window input. Later submissions that omit the mask disable raw
+input while allowing pending releases to finish.
 
 ## Asynchronous completion contract
 

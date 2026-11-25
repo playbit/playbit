@@ -83,6 +83,23 @@ struct GuestInput {
     var bytes: Int { data.count + 128 }
 }
 
+// Each admitted pan, pinch, rotation or scroll keeps capacity for its ending.
+struct GuestInputSequences {
+    enum Phase: UInt8 { case changed, began, ended }
+    private(set) var points: [UInt8: CGPoint] = [:]
+
+    mutating func deliver(_ phase: Phase, kind: UInt8, point: CGPoint, send: (Int) -> Bool) {
+        switch phase {
+        case .began:
+            if points[kind] == nil && send(1) { points[kind] = point }
+        case .changed:
+            if points[kind] != nil && send(0) { points[kind] = point }
+        case .ended:
+            if points[kind] != nil && send(-1) { points.removeValue(forKey: kind) }
+        }
+    }
+}
+
 // Owned on the main thread. The first item remains charged until its response
 // is applied, and only that item is handed to EngineHost's serial worker.
 struct GuestInputQueue {
@@ -96,6 +113,35 @@ struct GuestInputQueue {
             bytes + size <= 2 * 1024 * 1024 else { return false }
         items.append(contentsOf: inputs); bytes += size
         return true
+    }
+    mutating func coalesce(_ input: GuestInput) -> Bool {
+        guard items.count > 1, let previous = items.last,
+              previous.kind == input.kind, previous.target == input.target,
+              previous.data.count == input.data.count, input.data.count >= 28,
+              previous.data[12..<20] == input.data[12..<20] else { return false }
+        let start: Int?
+        switch input.kind {
+        case 22 where (input.data.count == 56 || input.data.count == 92) && input.data[24] == 0 && previous.data[24] == 0
+            && previous.data[20..<24] == input.data[20..<24]: start = 40
+        case 24 where input.data.count == 44 && (input.data[21] == 0 || input.data[21] == 3)
+            && previous.data[20..<24] == input.data[20..<24]: start = 32
+        case 26 where input.data.count == 36 && input.data[20] == 4 && previous.data[20..<24] == input.data[20..<24]: start = nil
+        default: return false
+        }
+        var data = input.data
+        if let start {
+            for offset in stride(from: start, to: start + (input.kind == 22 ? 8 : 12), by: 4) {
+                let sum = float(data, offset) + float(previous.data, offset)
+                var bits = sum.bitPattern.littleEndian
+                withUnsafeBytes(of: &bits) { data.replaceSubrange(offset..<offset+4, with: $0) }
+            }
+        }
+        if input.kind == 22 { data[28] |= 16 }
+        items[items.count - 1] = GuestInput(kind: input.kind, target: input.target, data: data, revision: 0)
+        return true
+    }
+    private func float(_ data: Data, _ offset: Int) -> Float {
+        data.withUnsafeBytes { Float(bitPattern: UInt32(littleEndian: $0.loadUnaligned(fromByteOffset: offset, as: UInt32.self))) }
     }
     mutating func finish(success: Bool) {
         guard !items.isEmpty else { return }

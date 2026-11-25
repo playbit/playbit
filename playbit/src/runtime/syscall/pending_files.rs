@@ -129,7 +129,8 @@ pub(in crate::runtime) fn list_next(
 }
 fn local_capacity(state: &State) -> HostResult<()> {
     if state.events.len() == super::MAX_QUEUED_EVENTS
-        || state.queued_bytes + 28 > super::MAX_QUEUED_EVENT_BYTES
+        || state.queued_bytes + 8 + playbit_api::abi::syscall::EVENT_QUEUE_OVERHEAD
+            > super::MAX_QUEUED_EVENT_BYTES
     {
         return Err(HostError::LimitExceeded);
     }
@@ -141,7 +142,7 @@ fn notify_local(state: &mut State, handle: OperationHandle) {
     let root = state.work.pending[&raw];
     super::events::push_work_event(
         state,
-        super::Event { kind: super::EventKind::DataReady, target: 0, data },
+        super::Event { object_id: 0, kind: super::EventKind::DataReady, target: 0, data },
         Some(root),
     )
     .expect("local completion capacity admitted before changing ownership");

@@ -46,7 +46,7 @@ fn event_regions(
     data: u32,
     capacity: u32,
 ) -> HostResult<(Region, Region)> {
-    let header = memory.record(event, layout_event::LAYOUT, false, None)?;
+    let header = memory.record(event, layout_event::OUTPUT, false, None)?;
     let output = memory.admit(data, capacity, 1, 1, contract::MAX_EVENT_BYTES as u32)?;
     if header.overlaps(output) {
         return Err(HostError::InvalidArgument);
@@ -69,6 +69,9 @@ fn write_event(
     header.write(memory.data, layout_event::GENERATION, &u64::from(state.generation).to_le_bytes());
     header.write(memory.data, layout_event::KIND, &(event.kind as u32).to_le_bytes());
     header.write(memory.data, layout_event::TARGET, &event.target.to_le_bytes());
+    if header.len() >= layout_event::OBJECT_ID + 4 {
+        header.write(memory.data, layout_event::OBJECT_ID, &event.object_id.to_le_bytes());
+    }
     header.publish(memory.data, layout_event::LAYOUT);
     Ok(count as i64)
 }

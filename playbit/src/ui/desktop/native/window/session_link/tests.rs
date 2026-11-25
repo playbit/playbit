@@ -161,6 +161,8 @@ fn titlebar_pointer_and_keyboard_copy_current_session_without_guest_input(
         .update(cx, |this, _, cx| {
             let view = ViewNode::Theme {
                 window_background_specified: false,
+                window_input: None,
+                legacy_canvas: 0,
                 window_size_constraints: None,
                 window_style: Some(WindowStyle::HIDE_SESSION_BUTTON),
                 theme: Theme::light(),
@@ -199,6 +201,8 @@ fn floating_session_button_preserves_guest_pointer_and_titlebar_drag_outside_its
     let (handle, inputs) = retained_handle(profile.path(), 7, session);
     let scene = |window_style, child| ViewNode::Theme {
         window_style,
+        window_input: None,
+        legacy_canvas: 0,
         window_size_constraints: None,
         theme: Theme::light(),
         window_background_specified: false,
@@ -248,21 +252,6 @@ fn floating_session_button_preserves_guest_pointer_and_titlebar_drag_outside_its
     visual.simulate_click(beside, Default::default());
     assert!(inputs.is_empty(), "a titlebar press belongs to the window");
 
-    // A drag that starts on the pitch can cross the titlebar and finish there.
-    let pitch = gpui::point(beside.x, px(100.));
-    let left = gpui::MouseButton::Left;
-    visual.simulate_mouse_down(pitch, left, Default::default());
-    visual.simulate_mouse_move(beside, Some(left), Default::default());
-    visual.simulate_mouse_up(beside, left, Default::default());
-    for phase in [1, 0, 2] {
-        let input = inputs.try_recv().unwrap().input;
-        assert_eq!((input.kind, input.target), (EventKind::Pointer, 1));
-        assert_eq!(
-            playbit_api::abi::syscall::PointerInput::decode(&input.data).unwrap().phase,
-            phase
-        );
-    }
-    assert!(inputs.is_empty());
     for style in [None, Some(WindowStyle::NONE)] {
         set_canvas(style, 1, cx);
         let overlay =
@@ -270,8 +259,6 @@ fn floating_session_button_preserves_guest_pointer_and_titlebar_drag_outside_its
         assert_eq!(overlay, bounds);
         while inputs.try_recv().is_ok() {}
         visual.simulate_click(beside, Default::default());
-        assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::Pointer);
-        assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::Pointer);
     }
     // Hide between down and up. A later drag from the canvas onto the
     // restored button must not complete the old press.

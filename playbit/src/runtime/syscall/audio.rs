@@ -274,6 +274,7 @@ pub(in crate::runtime) fn pump(state: &mut State) {
         if super::events::push_work_event(
             state,
             super::Event {
+                object_id: 0,
                 kind: super::EventKind::DataReady,
                 target: 0,
                 data: raw.to_le_bytes().to_vec(),

@@ -413,7 +413,12 @@ impl Fixture {
         state.assert_invariants();
         assert_eq!(
             state.queued_bytes,
-            state.events.iter().map(|queued| 20 + queued.event.data.len()).sum::<usize>()
+            state
+                .events
+                .iter()
+                .map(|queued| playbit_api::abi::syscall::EVENT_QUEUE_OVERHEAD
+                    + queued.event.data.len())
+                .sum::<usize>()
         );
         assert!(
             state.capabilities.count(crate::runtime::capabilities::OPERATION)

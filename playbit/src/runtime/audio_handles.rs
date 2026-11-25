@@ -405,7 +405,7 @@ mod tests {
         while state.events.len() < crate::runtime::work::MAX_QUEUED_EVENTS {
             syscall::events::push_event(
                 &mut state,
-                Event { kind: EventKind::Wake, target: 0, data: vec![] },
+                Event { object_id: 0, kind: EventKind::Wake, target: 0, data: vec![] },
             )
             .unwrap();
         }

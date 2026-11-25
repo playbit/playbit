@@ -122,7 +122,7 @@ pub(in crate::runtime) fn consume_operation(
     state.events.retain(|queued| {
         let consumed = queued.event.kind == pending.ready_kind() && queued.event.data == request;
         if consumed {
-            state.queued_bytes -= queued.event.data.len() + 20;
+            state.queued_bytes -= queued.event.data.len() + abi::EVENT_QUEUE_OVERHEAD;
         }
         !consumed
     });

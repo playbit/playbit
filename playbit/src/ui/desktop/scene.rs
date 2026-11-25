@@ -8,7 +8,7 @@ use super::{
 use crate::runtime::ViewNode;
 use gpui::{App, Entity, Focusable, MouseButton, SharedString, Window, div, prelude::*, rgba};
 use playbit_api::abi::syscall::EventKind;
-use std::{cell::Cell, collections::BTreeMap, rc::Rc, sync::Arc};
+use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 
 /// One host-bound input; text revisions acknowledge local drafts, not app data.
 pub struct Input {
@@ -18,6 +18,8 @@ pub struct Input {
     pub revision: Option<u64>,
 }
 pub type SendInput = Arc<dyn Fn(Input) -> bool + Send + Sync>;
+pub(super) type CanvasBounds =
+    Rc<std::cell::RefCell<BTreeMap<u32, (gpui::Bounds<gpui::Pixels>, gpui::Bounds<gpui::Pixels>)>>>;
 #[derive(Clone, Copy, Default)]
 pub struct InputAck {
     pub target: u32,
@@ -31,7 +33,6 @@ impl InputAck {
 pub struct Scene {
     send: SendInput,
     active: bool,
-    pointer: Rc<Cell<Option<u32>>>,
     activate: controls::Activate,
     #[cfg(target_os = "macos")]
     pub(super) prepare_menu: Option<super::popup::PrepareGuestMenu>,
@@ -42,6 +43,7 @@ pub struct Scene {
     images: BTreeMap<u32, Entity<super::image::ImageView>>,
     canvas_images: Vec<Entity<super::canvas_images::CanvasImages>>,
     canvas_index: usize,
+    pub(super) canvas_bounds: CanvasBounds,
     // Stable identities for text by traversal position, with no duplicate text.
     pub(crate) text_ids: Vec<Entity<()>>,
     text_index: usize,
@@ -54,7 +56,6 @@ impl Scene {
         Self {
             send,
             active: true,
-            pointer: Rc::new(Cell::new(None)),
             activate,
             #[cfg(target_os = "macos")]
             prepare_menu: None,
@@ -65,6 +66,7 @@ impl Scene {
             images: BTreeMap::new(),
             canvas_images: Vec::new(),
             canvas_index: 0,
+            canvas_bounds: Default::default(),
             text_ids: Vec::new(),
             text_index: 0,
             context_ids: Vec::new(),
@@ -118,7 +120,6 @@ impl Scene {
     /// Bind a reconstructed owner without replaying input. Existing field text
     /// remains private until a later edit or explicit user action sends it.
     pub fn rebind(&mut self, send: SendInput, cx: &mut App) {
-        self.pointer.set(None);
         self.send = send;
         self.active = true;
         for (id, editor) in &self.editors {
@@ -131,9 +132,6 @@ impl Scene {
     /// Retained fields remain selectable and copyable while stopped.
     pub fn set_active(&mut self, active: bool, view: Option<&ViewNode>, cx: &mut App) {
         self.active = active;
-        if !active {
-            self.pointer.set(None);
-        }
         if let Some(view) = view {
             self.update_controls(view, &playbit_api::ui::Theme::light(), cx);
         }
@@ -152,23 +150,6 @@ impl Scene {
                 return false;
             }
         }
-        true
-    }
-    /// Only an accepted canvas press may take keyboard focus from its shell.
-    pub fn has_canvas_pointer(&self) -> bool {
-        self.pointer.get().is_some()
-    }
-    /// Release only a gesture whose press was accepted by this exact owner.
-    /// Queue refusal keeps it retained; no new owner receives a prior gesture.
-    pub fn release_canvas_pointer(&self) -> bool {
-        let Some(target) = self.pointer.get() else { return true };
-        let data = playbit_api::abi::syscall::PointerInput { x: 0, y: 0, phase: 3, buttons: 0 }
-            .encode()
-            .to_vec();
-        if !(self.send)(Input { kind: EventKind::Pointer, target, data, revision: None }) {
-            return false;
-        }
-        self.pointer.set(None);
         true
     }
     /// The host supplies a scene accepted by the shared runtime decoder.
@@ -225,6 +206,7 @@ impl Scene {
         self.text_index = 0;
         self.context_index = 0;
         self.canvas_index = 0;
+        self.canvas_bounds.borrow_mut().clear();
         let content = match view {
             Some(view) => {
                 let content =
@@ -588,9 +570,7 @@ impl Scene {
                 // Retire replaced pixels even when the canvas is currently clipped.
                 images.update(cx, |images, _| images.prepare(items, window));
                 let (id, width, height) = (*id, *width, *height);
-                let send = self.send.clone();
-                let pointer = self.pointer.clone();
-                let active = self.active;
+                let bounds = self.canvas_bounds.clone();
                 canvas_element(
                     id,
                     (width, height),
@@ -598,20 +578,9 @@ impl Scene {
                     items.clone(),
                     images,
                     f32::from(window.rem_size()) / 16.,
-                    move |data| {
-                        // A release over host chrome reaches every canvas's
-                        // mouse-up-out listener. Only its press owner may send it.
-                        if !active || (data.phase != 1 && pointer.get() != Some(id)) {
-                            return;
-                        }
-                        let pressed = data.buttons == 1 && data.phase < 2;
-                        if send(Input {
-                            kind: EventKind::Pointer,
-                            target: id,
-                            data: data.encode().to_vec(),
-                            revision: None,
-                        }) {
-                            pointer.set(pressed.then_some(id));
+                    move |area, clip| {
+                        if id != 0 {
+                            bounds.borrow_mut().insert(id, (area, clip));
                         }
                     },
                 )
@@ -1207,7 +1176,7 @@ mod rendering_tests {
                     .collect(),
             )),
         };
-        let activated = Rc::new(Cell::new(None));
+        let activated = Rc::new(std::cell::Cell::new(None));
         let log = activated.clone();
         let window = cx.add_window(|window, _| {
             window.activate_window();

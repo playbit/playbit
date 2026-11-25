@@ -269,7 +269,7 @@ instance = new WebAssembly.Instance(module, {playbit: {pb_syscall(op, ...slots) 
     if (opcode('EventPoll',op)) {
         if (events.length === 0) return BigInt(abi['Error::WouldBlock']);
         const event = events[0], p = Number(slots[0]);
-        assert(u32(p) === 24 && u32(p+4) === 0 && slots.slice(3).every(s => s === 0n), 'event capacity and unused slots');
+        assert(u32(p) === 32 && u32(p+4) === 0 && slots.slice(3).every(s => s === 0n), 'event capacity and unused slots');
         if (Number(slots[2]) < event.body.length) {
             eventRetries++;
             return BigInt(event.body.length);

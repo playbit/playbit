@@ -127,8 +127,11 @@ fn close_applies_queued_input_before_rechecking_the_next_menu_selection() {
     let ViewNode::Column(children) = child.as_ref() else { panic!("controls") };
     let ViewNode::ContextMenu { items, .. } = &children[1] else { panic!("context menu") };
     let menu = crate::ui::desktop::popup::menu_digest(items);
-    apps.input(handle.generation, Event { kind: EventKind::Click, target: 2, data: vec![] })
-        .unwrap();
+    apps.input(
+        handle.generation,
+        Event { object_id: 0, kind: EventKind::Click, target: 2, data: vec![] },
+    )
+    .unwrap();
     assert!(handle.send(
         Input {
             kind: EventKind::Frame,

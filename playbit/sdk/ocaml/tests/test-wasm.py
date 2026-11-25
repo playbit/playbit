@@ -56,7 +56,7 @@ let () =
         failwith "deadline should have expired";
     (match poll_deadline Int64.minus_one with
      | Some event when event.kind = Int32.of_int EventKind.data_changed
-                       && Bytes.equal event.data (Bytes.make 256 'd') -> ()
+                       && event.object_id = 0l && Bytes.equal event.data (Bytes.make 256 'd') -> ()
      | _ -> failwith "deadline size probe lost event");
     if poll_deadline 0L <> None then failwith "nonblocking deadline poll";
     if Obj.tag (Obj.repr stdout) <> Obj.custom_tag
@@ -78,6 +78,7 @@ let () =
                 if Int64.compare event.generation Int64.min_int <> 0
                    || Int32.compare event.kind (-1l) <> 0
                    || Int32.compare event.target Int32.min_int <> 0
+                   || event.object_id <> 123l
                    || Bytes.length event.data <> 512
                    || Bytes.get event.data 511 <> 'x' then failwith "event bits changed";
                 (try failwith "caught" with Failure _ -> log "caught")
@@ -107,7 +108,7 @@ instance = new WebAssembly.Instance(module, {playbit:{pb_syscall(op,...args) {
     if (op===abi['Opcode::ClockRead']) return 1n<<50n;
     if (op===abi['Opcode::EventPollDeadline']) {
         deadlines.push(BigInt.asUintN(64,args[3]));
-        assert(args[0]===8n && args[1]===32n && args[4]===0n && args[5]===0n, 'deadline poll slots');
+        assert(args[0]===8n && args[1]===40n && args[4]===0n && args[5]===0n, 'deadline poll slots');
         if (deadlines.length===1 || deadlines.length===4) return -6n;
         if (args[2]<256n) return 256n;
         const data=new DataView(instance.exports.memory.buffer), header=Number(args[0]);
@@ -144,8 +145,8 @@ instance = new WebAssembly.Instance(module, {playbit:{pb_syscall(op,...args) {
         }
         if (args[2]<512n) return 512n;
         const data=new DataView(instance.exports.memory.buffer), header=Number(args[0]);
-        assert(data.getUint32(header,true)===24 && data.getUint32(header+4,true)===0, 'caller record capacity');
-        data.setUint32(header+4,24,true);data.setBigUint64(header+8, 0x8000000000000000n, true);data.setUint32(header+16,0xffffffff,true);data.setUint32(header+20,0x80000000,true);
+        assert(data.getUint32(header,true)===32 && data.getUint32(header+4,true)===0, 'caller record capacity');
+        data.setUint32(header+4,28,true);data.setUint32(header+24,123,true);data.setBigUint64(header+8, 0x8000000000000000n, true);data.setUint32(header+16,0xffffffff,true);data.setUint32(header+20,0x80000000,true);
         new Uint8Array(instance.exports.memory.buffer,Number(args[1]),512).fill(120);delivered=true;return 512n;
     }
     throw Error('Unexpected syscall '+op);
@@ -185,6 +186,6 @@ run(["node", "--input-type=module", "-e", """
 import fs from 'node:fs';
 const module=new WebAssembly.Module(fs.readFileSync('_build/layout-target/wasm32-unknown-unknown/debug/playbit_wasm_layout.wasm'));
 const sections=WebAssembly.Module.customSections(module,'playbit.abi.layout');
-if(sections.length!==1||JSON.stringify([...new Uint32Array(sections[0])])!==JSON.stringify([24,8,8,16,20]))throw Error('wasm32 Event layout changed');
+if(sections.length!==1||JSON.stringify([...new Uint32Array(sections[0])])!==JSON.stringify([32,8,8,16,20,24]))throw Error('wasm32 Event layout changed');
 console.log('wasm32 Rust Event layout passed');
 """])

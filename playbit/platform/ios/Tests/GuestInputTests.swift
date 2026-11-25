@@ -1,8 +1,10 @@
 // Run with Host/GuestInput.swift via swiftc; no simulator or runtime mocks.
 import Foundation
+import CoreGraphics
 
 @main enum GuestInputTests {
     static func main() {
+        gestureTerminalsAtCapacity()
         precondition(MemoryLayout<GuestEditRevision>.stride <= 32)
         var revision = GuestEditRevision()
         precondition(revision.accepts(nil))
@@ -96,5 +98,29 @@ import Foundation
         }
         precondition(admitted.count == 3)
         print("GuestInputTests: surface encoding/admission/reset, revision, failed-draft barrier, atomic admission and byte/count bounds passed")
+    }
+
+    static func gestureTerminalsAtCapacity() {
+        // Leave room for two of three gesture beginnings and their eventual endings.
+        var queue = GuestInputQueue(), sequences = GuestInputSequences(), reserved = 0
+        let input = GuestInput(kind: 25, target: 0, data: Data(repeating: 0, count: 48), revision: 0)
+        precondition(queue.admit(Array(repeating: input, count: 27)))
+        var admissions: [Int] = []
+        func send(_ reservation: Int) -> Bool {
+            guard queue.count + 1 + reserved + reservation <= 32, queue.admit([input]) else { return false }
+            reserved += reservation
+            admissions.append(reservation)
+            return true
+        }
+        for kind in UInt8(0)...2 { sequences.deliver(.began, kind: kind, point: .zero, send: send) }
+        for _ in 0..<10 {
+            for kind in UInt8(0)...2 { sequences.deliver(.changed, kind: kind, point: .zero, send: send) }
+        }
+        precondition(admissions == [1, 1, 0] && reserved == 2)
+        for kind in UInt8(0)...2 { sequences.deliver(.ended, kind: kind, point: .zero, send: send) }
+        precondition(admissions == [1, 1, 0, -1, -1] && reserved == 0 && sequences.points.isEmpty)
+        queue.finish(success: true)
+        sequences.deliver(.ended, kind: 0, point: .zero) { _ in preconditionFailure("duplicate terminal") }
+        sequences.deliver(.changed, kind: 2, point: .zero) { _ in preconditionFailure("unadmitted gesture") }
     }
 }

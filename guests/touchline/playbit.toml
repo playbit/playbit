@@ -3,7 +3,7 @@ name = "Touchline"
 lang = "ocaml"
 icon = "icon.svg"
 required_host_features = [
-    "automatic-volumes.v1", "clock.read", "identity.read", "presence.read",
+    "ui.input.v1",     "automatic-volumes.v1", "clock.read", "identity.read", "presence.read",
     "session.channel", "session.channel.begin", "session.channel.take",
     "session.read", "ui.canvas.clear.v1", "ui.canvas.pixels.v1", "ui.canvas.window.v1",
     "ui.window.style.v1", "wake.after",

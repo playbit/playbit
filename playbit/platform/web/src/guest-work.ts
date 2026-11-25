@@ -1,6 +1,6 @@
 import { AbiError } from "./guest-memory.ts";
 
-export interface GuestEvent { kind: number; target: number; data: Uint8Array }
+export interface GuestEvent { kind: number; target: number; objectId?: number; data: Uint8Array }
 export interface QueuedEvent extends GuestEvent { key: bigint; operation?: bigint }
 export interface WorkExports {
     pb_web_guest_input(bytes: number): bigint;

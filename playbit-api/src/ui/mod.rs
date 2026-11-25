@@ -48,6 +48,7 @@ pub const VIEW_SCROLL_END: u8 = 25;
 pub const VIEW_JPEG_IMAGE: u8 = 26;
 pub const VIEW_WINDOW_STYLE: u8 = 27;
 pub const VIEW_WINDOW_SIZE_CONSTRAINTS: u8 = 28;
+pub const VIEW_WINDOW_INPUT: u8 = 29;
 pub const MAX_IMAGE_BYTES: usize = 128 * 1024;
 pub const MAX_IMAGE_PIXELS: u32 = 1024 * 1024;
 
@@ -579,6 +580,7 @@ pub struct ViewEncoder<'a> {
     depth: usize,
     roots: u32,
     theme_written: bool,
+    window_input_written: bool,
     window_style_written: bool,
     window_size_constraints_written: bool,
     canvas_items: usize,
@@ -599,6 +601,7 @@ impl<'a> ViewEncoder<'a> {
             depth: 0,
             roots: 0,
             theme_written: false,
+            window_input_written: false,
             window_style_written: false,
             window_size_constraints_written: false,
             canvas_items: 0,
@@ -622,6 +625,18 @@ impl<'a> ViewEncoder<'a> {
             self.write(&item.color.0.to_le_bytes());
         }
         self.theme_written = true;
+    }
+
+    /// Select raw input families for this window. Submit before the root.
+    pub fn window_input(&mut self, families: u32) {
+        assert!(families & !crate::abi::input::ALL == 0, "unknown window input family");
+        assert_eq!(self.depth, 0, "window input must precede the root");
+        assert!(
+            self.roots == 0 && !self.window_input_written,
+            "window input is a single root setting"
+        );
+        self.command(VIEW_WINDOW_INPUT, 0, &families.to_le_bytes());
+        self.window_input_written = true;
     }
 
     /// Set the native window style for this scene before starting its root.
@@ -1146,6 +1161,7 @@ impl<'a> ViewEncoder<'a> {
         self.bytes.truncate(VIEW_MAGIC.len());
         self.roots = 0;
         self.theme_written = false;
+        self.window_input_written = false;
         self.window_style_written = false;
         self.window_size_constraints_written = false;
         self.canvas_items = 0;

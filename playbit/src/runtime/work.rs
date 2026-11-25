@@ -156,5 +156,5 @@ pub(crate) fn browser_event_fits(count: usize, held: usize, bytes: usize) -> boo
     bytes <= abi::MAX_EVENT_BYTES
         && count < MAX_QUEUED_EVENTS
         && held <= MAX_QUEUED_EVENT_BYTES
-        && bytes + 20 <= MAX_QUEUED_EVENT_BYTES - held
+        && bytes + abi::EVENT_QUEUE_OVERHEAD <= MAX_QUEUED_EVENT_BYTES - held
 }

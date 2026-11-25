@@ -55,7 +55,12 @@ fn entry_permission_rejection_preserves_draft_without_creating_an_object() {
         .unwrap();
     let draft = "Retained after entry permission rejection";
     owner
-        .input(Event { kind: EventKind::Submit, target: 1, data: draft.as_bytes().to_vec() })
+        .input(Event {
+            object_id: 0,
+            kind: EventKind::Submit,
+            target: 1,
+            data: draft.as_bytes().to_vec(),
+        })
         .unwrap();
     fn text_field(node: &ViewNode) -> Option<&str> {
         match node {
@@ -85,7 +90,12 @@ fn entry_permission_rejection_preserves_draft_without_creating_an_object() {
         .set_entry_permissions(&access, root.id, database.entry, EntryAcl::Inherit)
         .unwrap();
     owner
-        .input(Event { kind: EventKind::Submit, target: 1, data: draft.as_bytes().to_vec() })
+        .input(Event {
+            object_id: 0,
+            kind: EventKind::Submit,
+            target: 1,
+            data: draft.as_bytes().to_vec(),
+        })
         .unwrap();
     assert_eq!(
         engine
@@ -158,7 +168,7 @@ fn oversized_submission_is_consumed_without_orphans_and_next_task_succeeds() {
         "🦀".repeat(2049).into_bytes(),
     ] {
         owner
-            .input(Event { kind: EventKind::Submit, target: 1, data })
+            .input(Event { object_id: 0, kind: EventKind::Submit, target: 1, data })
             .expect("oversized input must not trap");
         let view = owner.scene().to_vec();
         assert!(
@@ -204,6 +214,7 @@ fn oversized_submission_is_consumed_without_orphans_and_next_task_succeeds() {
     );
     owner
         .input(Event {
+            object_id: 0,
             kind: EventKind::Submit,
             target: 1,
             data: b"Short task after rejection".to_vec(),
@@ -216,7 +227,12 @@ fn oversized_submission_is_consumed_without_orphans_and_next_task_succeeds() {
     let accepted = ["b".repeat(8120), "a".repeat(8192), "c".repeat(8192), "d".repeat(8192)];
     for title in &accepted {
         owner
-            .input(Event { kind: EventKind::Submit, target: 1, data: title.as_bytes().to_vec() })
+            .input(Event {
+                object_id: 0,
+                kind: EventKind::Submit,
+                target: 1,
+                data: title.as_bytes().to_vec(),
+            })
             .unwrap();
     }
     let objects = engine
@@ -348,7 +364,7 @@ fn projected_refresh_keeps_large_pages_external_edits_and_row_limit() {
     owner.data_changed();
     let updated = owner.scene().to_vec();
     assert!(updated.windows(23).any(|bytes| bytes == b"Externally changed task"));
-    owner.input(Event { kind: EventKind::Click, target: 100, data: vec![] }).unwrap();
+    owner.input(Event { object_id: 0, kind: EventKind::Click, target: 100, data: vec![] }).unwrap();
     let object = engine
         .services
         .store
@@ -357,6 +373,7 @@ fn projected_refresh_keeps_large_pages_external_edits_and_row_limit() {
     assert_eq!(object.fields[&done_field].values, Some(vec![Value::Boolean(true)]));
     owner
         .input(Event {
+            object_id: 0,
             kind: EventKind::Submit,
             target: 1,
             data: b"Rejected sixty-fifth task".to_vec(),
@@ -438,6 +455,7 @@ fn draft_add_return_and_background_refresh_preserve_the_intended_text() {
     for text in ["a", "ab", "a", "  Draft 🦀  "] {
         owner
             .input(Event {
+                object_id: 0,
                 kind: EventKind::TextChanged,
                 target: 1,
                 data: playbit_api::abi::text::TextInput::encode(text, &[]).expect("fixture edit"),
@@ -463,10 +481,15 @@ fn draft_add_return_and_background_refresh_preserve_the_intended_text() {
     }
     owner.data_changed();
     assert_eq!(field(&decode_view(owner.scene()).unwrap()), "  Draft 🦀  ");
-    owner.input(Event { kind: EventKind::Click, target: 2, data: vec![] }).unwrap();
+    owner.input(Event { object_id: 0, kind: EventKind::Click, target: 2, data: vec![] }).unwrap();
     assert_eq!(field(&decode_view(owner.scene()).unwrap()), "");
     owner
-        .input(Event { kind: EventKind::Submit, target: 1, data: b"Return task".to_vec() })
+        .input(Event {
+            object_id: 0,
+            kind: EventKind::Submit,
+            target: 1,
+            data: b"Return task".to_vec(),
+        })
         .unwrap();
     let objects = engine
         .services
@@ -496,7 +519,7 @@ fn draft_add_return_and_background_refresh_preserve_the_intended_text() {
         .collect::<Vec<_>>();
     titles.sort();
     assert_eq!(titles, ["Draft 🦀", "Return task"]);
-    owner.input(Event { kind: EventKind::Submit, target: 1, data: vec![] }).unwrap();
+    owner.input(Event { object_id: 0, kind: EventKind::Submit, target: 1, data: vec![] }).unwrap();
     assert_eq!(
         engine
             .services
@@ -725,13 +748,17 @@ fn queued_checkbox_keeps_object_identity_through_insert_reorder_and_deletion() {
             .unwrap();
         let (initial, _) = settle(&mut guest, &records);
         let initial_ids = checkboxes(&initial);
-        let click =
-            Event { kind: EventKind::Click, target: initial_ids["Intended task"], data: vec![] };
+        let click = Event {
+            object_id: 0,
+            kind: EventKind::Click,
+            target: initial_ids["Intended task"],
+            data: vec![],
+        };
         validate_input(&initial, &click).unwrap();
         // The click was valid for the presented scene. An incoming insertion
         // moves its row from position1 to position2 before the guest handles it.
         records.lock().unwrap().objects.insert([10; 16], object(10, "Earlier insertion"));
-        let changed = Event { kind: EventKind::DataChanged, target: 0, data: vec![] };
+        let changed = Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] };
         guest.queue_event(guest.generation(), changed.clone()).unwrap();
         guest.queue_event(guest.generation(), click.clone()).unwrap();
         let (inserted, _) = settle(&mut guest, &records);

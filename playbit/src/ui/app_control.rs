@@ -1,6 +1,6 @@
 //! Same-user tools address one exact GUI-owned session instance. One exchange
 //! has one result; losing a reply never replays input or an application Quit.
-mod canvas_input;
+pub(crate) mod canvas_input;
 
 #[cfg(feature = "process")]
 use crate::engine::ipc;

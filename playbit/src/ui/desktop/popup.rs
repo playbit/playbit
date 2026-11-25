@@ -490,6 +490,10 @@ pub fn open(mut request: Request, cx: &mut App) {
             })
         })
         .expect("newly opened menu remains available");
+    #[cfg(all(feature = "local-store", feature = "native-runtime"))]
+    if let Some(guest) = owner.downcast::<super::native::window::AppWindow>() {
+        let _ = guest.update(cx, |app, _, _| app.begin_modal_input());
+    }
     MENU_ACTIVE.store(true, Ordering::Release);
     cx.global_mut::<Coordinator>().active = Some(ActiveMenu {
         owner: request.owner,

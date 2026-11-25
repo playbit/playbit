@@ -127,7 +127,7 @@ mod tests {
         }
         assert!(finished.is_ok(), "worker readiness must progress without a UI consumer");
         producer.join().unwrap();
-        assert!(PendingInput::try_new(&count).is_none(), "admission counts unadopted receipts");
+        assert!(PendingInput::charge(&count, 1).is_none(), "admission counts unadopted receipts");
         assert_eq!(receiver.len(), 2 * MAX_INPUTS);
         for n in 0..MAX_INPUTS {
             assert!(matches!(

@@ -109,7 +109,10 @@ fn enums(
                     None => next,
                 };
                 values.insert(format!("{name}::{}", v.ident), n);
-                let field = snake(&v.ident.to_string());
+                let mut field = snake(&v.ident.to_string());
+                if name == "Key" && field == "end" {
+                    field.push('_');
+                }
                 if name == "EventKind" && n & (1 << 31) != 0 {
                     // Advisory event kinds exceed a wasm OCaml int's 31-bit range.
                     writeln!(ml, "    let {field} = 0x{n:08x}l")?;
@@ -118,7 +121,7 @@ fn enums(
                 }
                 next = n + 1;
             }
-            if name == "ThemeColor" {
+            if name == "ThemeColor" || name == "Key" {
                 writeln!(ml, "    let count = {next}")?;
             }
             writeln!(ml, "end\n")?;
@@ -301,12 +304,14 @@ fn run() -> Result<()> {
         Ok(syn::parse_file(&fs::read_to_string(api.join(name))?)?)
     };
     let syscall = parse("src/abi/syscall.rs")?;
+    let input = parse("src/abi/input.rs")?;
     let env = parse("src/abi/environment.rs")?;
     let ops = parse("src/abi/operations.rs")?;
     let ui = parse("src/ui/mod.rs")?;
     let mut ml = String::from("(* Generated from playbit-api. Do not edit. *)\n");
     let mut values = BTreeMap::new();
     enums(&syscall, &["Opcode", "Error", "EventKind"], &mut ml, &mut values)?;
+    enums(&input, &["Key", "GamepadButton", "GamepadAxis"], &mut ml, &mut values)?;
     enums(&env, &["HostLimit", "HostPlatform"], &mut ml, &mut values)?;
     enums(&ui, &["TextStyle", "ButtonStyle", "ThemeColor"], &mut ml, &mut values)?;
     window_style_flags(&ui, &mut ml, &mut values)?;
@@ -328,6 +333,7 @@ fn run() -> Result<()> {
                 "VIEW_CANVAS",
                 "VIEW_THEME",
                 "VIEW_WINDOW_STYLE",
+                "VIEW_WINDOW_INPUT",
                 "VIEW_WINDOW_SIZE_CONSTRAINTS",
                 "VIEW_POPUP_BUTTON",
                 "VIEW_CONTEXT_MENU_START",
@@ -386,14 +392,17 @@ fn run() -> Result<()> {
             ("generation".into(), "u64".into()),
             ("kind".into(), "u32".into()),
             ("target".into(), "u32".into()),
+            ("object_id".into(), "u32".into()),
         ]
     {
         return Err("Event layout changed; review marshalling".into());
     }
+    const EVENT_BYTES: i64 = 32;
+    writeln!(ml, "let event_bytes = {EVENT_BYTES}")?;
     ml.push_str(
-        "let event_bytes = 24\nlet event_size_offset = 0\n\
+        "let event_size_offset = 0\n\
          let event_written_offset = 4\nlet event_generation_offset = 8\n\
-         let event_kind_offset = 16\nlet event_target_offset = 20\n",
+         let event_kind_offset = 16\nlet event_target_offset = 20\nlet event_object_id_offset = 24\n",
     );
     let mut wat = String::from(
         ";; Generated scalar lowering from Rust. Buffer ownership lives in playbit_ffi.wat.\n(module\n    (import \"playbit\" \"pb_syscall\" (func $syscall (param i32 i64 i64 i64 i64 i64 i64) (result i64)))\n",
@@ -459,8 +468,10 @@ fn run() -> Result<()> {
     );
     fs::write(out.join("playbit_abi.json"), metadata)?;
     let mut ffi = include_str!("../../playbit_ffi.wat").to_owned();
-    values.insert("EVENT_BYTES".into(), 24);
-    for name in ["MAX_CALL_BYTES", "MAX_EVENT_BYTES", "EVENT_BYTES"] {
+    values.insert("EVENT_BYTES".into(), EVENT_BYTES);
+    // Offset zero is the null pointer. The aligned header starts at byte eight.
+    values.insert("EVENT_DATA_OFFSET".into(), 8 + EVENT_BYTES);
+    for name in ["MAX_CALL_BYTES", "MAX_EVENT_BYTES", "EVENT_BYTES", "EVENT_DATA_OFFSET"] {
         ffi = ffi.replace(&format!("@{name}@"), &values[name].to_string());
     }
     fs::write(out.join("playbit_ffi.wat"), ffi)?;

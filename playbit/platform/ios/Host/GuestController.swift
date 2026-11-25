@@ -12,7 +12,23 @@ final class GuestController: UIViewController, UITextFieldDelegate {
         selected[session] = controller
         return controller
     }
+    private static var nextWindowID: UInt32 = 1
+    private let objectID: UInt32
     private let session: String
+    private lazy var surfaceInput = GuestSurfaceInput(root: view, viewport: scroll) { [weak self] kind, target, data, reservation in
+        guard let self else { return false }
+        let input = GuestInput(kind: kind, target: target, data: data, revision: 0)
+        guard self.instance != nil else {
+            // A retired instance releases its reserved terminal slots without dispatching work.
+            if reservation < 0 {
+                Self.inputReservations += reservation
+                Self.inputReservedBytes += input.bytes * reservation
+            }
+            return reservation < 0
+        }
+        if reservation == 0 && self.inputs.coalesce(input) { return true }
+        return self.enqueue([input], reservation: reservation, reservedBytes: input.bytes * reservation)
+    }
     private var instance: String?
     private var generation: UInt64?
     private var openRequested = false
@@ -41,6 +57,8 @@ final class GuestController: UIViewController, UITextFieldDelegate {
     // sessions whose input responses are still in flight during navigation.
     private static var inputCount = 0
     private static var inputBytes = 0
+    private static var inputReservations = 0
+    private static var inputReservedBytes = 0
     private static let performance = OSLog(subsystem: "app.playbit", category: "GuestInput")
     private final class GuestNode {
         var kind: GuestScene.Kind
@@ -62,7 +80,18 @@ final class GuestController: UIViewController, UITextFieldDelegate {
     private var audioActivationPending = false
     private var audioWanted = false
     private var audioEpoch: UInt64 = 0
-    init(session: String) { self.session = session; super.init(nibName: nil, bundle: nil) }
+    init(session: String) {
+        self.session = session
+        objectID = Self.nextWindowID
+        Self.nextWindowID += 1
+        super.init(nibName: nil, bundle: nil)
+    }
+    func observeInput(_ event: UIEvent) {
+        if scene?.windowInput ?? 0 != 0, let guest {
+            surfaceInput.content = guest.view
+            surfaceInput.receive(event)
+        }
+    }
     required init?(coder: NSCoder) { fatalError() }
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -143,11 +172,13 @@ final class GuestController: UIViewController, UITextFieldDelegate {
             prepareAudioSession()
         }
         if opening { if !openingPaused { checkOpening() }; return }
+        surfaceInput.configure(scene?.windowInput ?? 0)
         view.setNeedsLayout()
         startFrames()
         refreshScene()
     }
     @objc private func suspend() {
+        surfaceInput.configure(0)
         cancelAudioActivation()
         audioActive(false)
         timer?.invalidate(); timer = nil; lastFrame = 0
@@ -439,6 +470,9 @@ final class GuestController: UIViewController, UITextFieldDelegate {
             if opening { opening = false; openingAction.isHidden = true }
             if next != scene {
                 scene = next
+                if !quitting, UIApplication.shared.applicationState == .active, navigationController?.topViewController === self {
+                    surfaceInput.configure(next.windowInput)
+                }
                 let previous = guest
                 guest = reconcile(next, previous: previous, acknowledgment: acknowledgment)
                 if previous?.view !== guest?.view {
@@ -491,10 +525,9 @@ final class GuestController: UIViewController, UITextFieldDelegate {
                 control.addTarget(self, action: #selector(activated(_:)), for: .touchUpInside); view = control
             case .canvas:
                 let canvas = CanvasView()
+                canvas.tag = Int(id)
+                canvas.isMultipleTouchEnabled = true
                 canvas.isOpaque = false
-                if id != 0 {
-                    canvas.event = { [weak self] words in self?.send(kind: 11, target: id, data: words.flatMap(Self.bytes)) }
-                }
                 canvas.isUserInteractionEnabled = id != 0
                 if id != 0 {
                     canvas.accessibilityIdentifier = "guest-canvas"; canvas.isAccessibilityElement = true; canvas.accessibilityLabel = "Interactive game canvas"
@@ -593,21 +626,24 @@ final class GuestController: UIViewController, UITextFieldDelegate {
             }
         }
     }
-    private func send(kind: Int, target: UInt32, data: [UInt8] = [], revision: UInt64 = 0) {
-        enqueue([GuestInput(kind: kind, target: target, data: Data(data), revision: revision)])
-    }
-    @discardableResult private func enqueue(_ requests: [GuestInput]) -> Bool {
+    @discardableResult private func enqueue(_ requests: [GuestInput], reservation: Int = 0, reservedBytes: Int = 0) -> Bool {
         let bytes = requests.reduce(0) { $0 + $1.bytes }
-        guard !quitting, Self.inputCount + requests.count <= 32, Self.inputBytes + bytes <= 2 * 1024 * 1024,
-            inputs.admit(requests) else { availability.text = "The app is busy. Your draft is retained; try again."; return false }
+        let slots = Self.inputReservations + reservation
+        let retained = Self.inputReservedBytes + reservedBytes
+        guard !quitting, Self.inputCount + requests.count + slots <= 32, Self.inputBytes + bytes + retained <= 2 * 1024 * 1024,
+            inputs.admit(requests) else {
+            if requests.contains(where: { $0.kind < 22 }) { availability.text = "The app is busy. Your draft is retained; try again." }
+            return false
+        }
         Self.inputCount += requests.count; Self.inputBytes += bytes
+        Self.inputReservations = slots; Self.inputReservedBytes = retained
         dispatchInput(); return true
     }
     private func dispatchInput() {
         guard !inputPending, let instance, let input = inputs.first else { return }
         inputPending = true
         os_signpost(.begin, log: Self.performance, name: "Local guest input")
-        EngineHost.shared.input(instance: instance, kind: input.kind, target: input.target, data: input.data) { result in
+        EngineHost.shared.input(instance: instance, kind: input.kind, target: input.target, objectID: objectID, data: input.data) { result in
             os_signpost(.end, log: Self.performance, name: "Local guest input")
             if case .success = result, input.revision != 0 {
                 self.field(input.target, in: self.guest)?.revision.acknowledge(input.revision)
@@ -646,7 +682,7 @@ final class GuestController: UIViewController, UITextFieldDelegate {
     }
     private func quit() {
         guard instance != nil, !quitting else { return }
-        quitting = true; suspend()
+        suspend(); quitting = true
         scroll.isUserInteractionEnabled = false
         navigationItem.rightBarButtonItem?.isEnabled = false
         availability.text = "Finishing accepted work…"
@@ -663,6 +699,7 @@ final class GuestController: UIViewController, UITextFieldDelegate {
                 self.scroll.isUserInteractionEnabled = true
                 self.navigationItem.rightBarButtonItem?.isEnabled = true
                 self.availability.text = error.localizedDescription
+                self.resume()
             case .success(let value):
                 guard value["quit"] as? String == instance else {
                     self.availability.text = "The app's Quit result is unavailable."
@@ -721,7 +758,6 @@ final class CanvasView: UIView {
             }
         }
     }
-    var event: (([UInt32]) -> Void)?
     override func draw(_ rect: CGRect) {
         guard let context = UIGraphicsGetCurrentContext(), let scene,
               scene.width > 0, scene.height > 0 else { return }
@@ -764,15 +800,4 @@ final class CanvasView: UIView {
         UIColor(displayP3Red: CGFloat((rgba >> 24) & 255) / 255, green: CGFloat((rgba >> 16) & 255) / 255,
             blue: CGFloat((rgba >> 8) & 255) / 255, alpha: CGFloat(rgba & 255) / 255)
     }
-    private func touch(_ touches: Set<UITouch>, phase: UInt32) {
-        guard let point = touches.first?.location(in: self), point.x.isFinite, point.y.isFinite,
-              bounds.width.isFinite, bounds.height.isFinite, bounds.width > 0, bounds.height > 0,
-              let scene, scene.width > 0, scene.height > 0 else { return }
-        let width = CGFloat(scene.width), height = CGFloat(scene.height)
-        event?([UInt32(max(0, min(width, point.x / bounds.width * width))), UInt32(max(0, min(height, point.y / bounds.height * height))), phase, phase == 2 || phase == 3 ? 0 : 1])
-    }
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) { touch(touches, phase: 1) }
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) { touch(touches, phase: 0) }
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) { touch(touches, phase: 2) }
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) { touch(touches, phase: 3) }
 }

@@ -86,7 +86,7 @@ fn table(probe: &mut Probe) -> App {
     }
 }
 fn input(target: u32) -> Event {
-    Event { kind: EventKind::Click, target, data: vec![] }
+    Event { object_id: 0, kind: EventKind::Click, target, data: vec![] }
 }
 #[cfg(all(target_os = "macos", feature = "desktop-ui", feature = "connected-engine"))]
 #[test]

@@ -294,7 +294,7 @@ FIELD_TYPE(PBEvent, written, uint32_t);
 FIELD_TYPE(PBEvent, generation, uint64_t);
 FIELD_TYPE(PBEvent, kind, uint32_t);
 FIELD_TYPE(PBEvent, target, uint32_t);
-
+FIELD_TYPE(PBEvent, object_id, uint32_t);
 FIELD_TYPE(PBIdentity, size, uint32_t);
 FIELD_TYPE(PBIdentity, written, uint32_t);
 FIELD_TYPE(PBIdentity, generation, uint64_t);
@@ -366,6 +366,21 @@ FIELD_TYPE(PBKvRead, reserved, uint32_t);
 #define PREFIX_ALIGN(type) _Alignof(type)
 #endif
 PREFIX_ASSERT(sizeof(PBTraceEvent) == 40);
+PREFIX_ASSERT(sizeof(PBInputSource) == 20);
+PREFIX_ASSERT(sizeof(PBPointerInput) == 56);
+PREFIX_ASSERT(sizeof(PBPenInput) == 92);
+PREFIX_ASSERT(sizeof(PBKeyboardInput) == 60);
+PREFIX_ASSERT(sizeof(PBScrollInput) == 44);
+PREFIX_ASSERT(sizeof(PBGestureInput) == 48);
+PREFIX_ASSERT(sizeof(PBGamepadInput) == 36);
+PREFIX_ASSERT(PB_EVENT_POINTER == 11);
+PREFIX_ASSERT(PB_EVENT_KEY == 12);
+PREFIX_ASSERT(PB_EVENT_WINDOW_POINTER == 22);
+PREFIX_ASSERT(PB_EVENT_WINDOW_KEYBOARD == 23);
+PREFIX_ASSERT(PB_EVENT_WINDOW_SCROLL == 24);
+PREFIX_ASSERT(PB_EVENT_WINDOW_GESTURE == 25);
+PREFIX_ASSERT(PB_EVENT_WINDOW_GAMEPAD == 26);
+
 PREFIX_ASSERT(offsetof(PBTraceEvent, reference_eid) == 8);
 PREFIX_ASSERT(offsetof(PBTraceEvent, value) == 16);
 PREFIX_ASSERT(offsetof(PBTraceEvent, reference_tid) == 24);

@@ -12,7 +12,7 @@ use std::process::Child;
 pub(super) fn schema() -> Value {
     json!({
         "name":"playbit_gui",
-        "description":"Inspect live Playbit instances, send canvas input, or capture a selected window as a PNG image. Input acknowledges queue admission; do not repeat an input after a lost response. Use separate key-down and key-up calls, including for simultaneous keys. Pointer coordinates are local logical canvas units, and a move with button primary drags. The canvas target is the numeric ID assigned by the app.",
+        "description":"Inspect live Playbit instances, send window input, or capture a selected window as a PNG image. Input acknowledges queue admission; do not repeat an input after a lost response. Use separate key-down and key-up calls, including for simultaneous keys. Pointer coordinates are local logical canvas units, and a move with button primary drags. For released canvas key input, supply the numeric canvas target with left, right, up, down, or space.",
         "inputSchema":{
             "type":"object",
             "properties":{
@@ -20,7 +20,7 @@ pub(super) fn schema() -> Value {
                 "session":{"type":"string","description":"Session join code, invitation link or retained session ID."},
                 "instance":{"type":"string","description":"Instance ID from instance-list. Required for control when several instances are running."},
                 "target":{"type":"integer","minimum":1,"maximum":u32::MAX},
-                "key":{"enum":["left","right","up","down","space"]},
+                "key":{"type":"string","description":"A Playbit key name, such as Left, A, Space, or F12."},
                 "pressed":{"type":"boolean","description":"True for key-down, false for key-up."},
                 "phase":{"enum":["move","down","up","cancel"]},
                 "x":{"type":"integer","minimum":0,"maximum":u32::MAX},
@@ -35,7 +35,7 @@ pub(super) fn schema() -> Value {
                     "additionalProperties":false},
                 {"properties":{"op":{"const":"key-input"},"session":{},"instance":{},
                     "target":{},"key":{},"pressed":{}},
-                    "required":["target","key","pressed"],"additionalProperties":false},
+                    "required":["key","pressed"],"additionalProperties":false},
                 {"properties":{"op":{"const":"pointer-input"},"session":{},"instance":{},
                     "target":{},"phase":{},"x":{},"y":{},"button":{}},
                     "required":["target","phase","x","y"],"additionalProperties":false}
@@ -58,7 +58,7 @@ enum Arguments {
     KeyInput {
         session: String,
         instance: Option<Id>,
-        target: u32,
+        target: Option<u32>,
         key: String,
         pressed: bool,
     },
@@ -139,11 +139,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn key_input_accepts_an_optional_canvas_target() {
+        // Parse v0.1.3 canvas input and the new window form through the actual MCP argument type.
+        for target in [Some(7u32), None] {
+            let mut value = json!({"op":"key-input","session":"SESSION","key":"up","pressed":true});
+            if let Some(id) = target {
+                value["target"] = json!(id);
+            }
+            let Arguments::KeyInput { target: parsed, .. } =
+                serde_json::from_value(value).expect("published key-input arguments")
+            else {
+                panic!("expected key-input")
+            };
+            assert_eq!(parsed, target);
+        }
+    }
+
+    #[test]
     fn malformed_gestures_do_not_start_the_engine() {
         let mut child = None;
         for arguments in [
-            r#"{"op":"key-input","session":"s","target":1,"key":"up"}"#,
-            r#"{"op":"key-input","session":"s","target":1,"key":"unknown","pressed":true}"#,
+            r#"{"op":"key-input","session":"s","key":"up"}"#,
+            r#"{"op":"key-input","session":"s","key":"unknown","pressed":true}"#,
             r#"{"op":"pointer-input","session":"s","target":1,"phase":"move","x":-1,"y":0}"#,
             r#"{"op":"screenshot","session":"s","instance":"bad-id"}"#,
         ] {

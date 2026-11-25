@@ -49,6 +49,8 @@ pub enum ViewNode {
     Theme {
         theme: Theme,
         window_background_specified: bool,
+        window_input: Option<u32>,
+        legacy_canvas: u32,
         window_style: Option<WindowStyle>,
         window_size_constraints: Option<WindowSizeConstraints>,
         child: Box<ViewNode>,
@@ -209,6 +211,8 @@ pub fn decode_view(bytes: &[u8]) -> Result<ViewNode, ()> {
         node_count: 0,
         theme: Theme::light(),
         theme_seen: false,
+        window_input: None,
+        legacy_canvas: 0,
         window_style: None,
         window_size_constraints: None,
         theme_roles: [false; ThemeColor::COUNT],
@@ -236,6 +240,8 @@ pub fn decode_view(bytes: &[u8]) -> Result<ViewNode, ()> {
     assert_eq!(position, bytes.len());
     let view = ViewNode::Theme {
         theme: decoder.theme,
+        window_input: decoder.window_input,
+        legacy_canvas: decoder.legacy_canvas,
         window_background_specified: decoder.theme_roles[ThemeColor::WindowBackground as usize],
         window_style: decoder.window_style,
         window_size_constraints: decoder.window_size_constraints,
@@ -246,12 +252,43 @@ pub fn decode_view(bytes: &[u8]) -> Result<ViewNode, ()> {
     Ok(view)
 }
 
+impl ViewNode {
+    #[cfg(any(feature = "native-runtime", feature = "wasm-runtime"))]
+    pub(crate) fn legacy_canvas(&self) -> u32 {
+        match self {
+            Self::Theme { window_input: None, legacy_canvas, .. } => *legacy_canvas,
+            _ => 0,
+        }
+    }
+
+    #[cfg(any(
+        all(
+            target_os = "macos",
+            feature = "local-store",
+            feature = "native-runtime",
+            feature = "desktop-ui"
+        ),
+        feature = "ios"
+    ))]
+    pub(crate) fn input_families(&self) -> u32 {
+        match self {
+            Self::Theme { window_input: Some(mask), .. } => *mask,
+            _ if self.legacy_canvas() != 0 => {
+                playbit_api::abi::input::POINTER | playbit_api::abi::input::KEYBOARD
+            }
+            _ => 0,
+        }
+    }
+}
+
 struct ViewDecoder {
     containers: Vec<ViewContainer>,
     root: Option<ViewNode>,
     node_count: usize,
     theme: Theme,
     theme_seen: bool,
+    window_input: Option<u32>,
+    legacy_canvas: u32,
     window_style: Option<WindowStyle>,
     window_size_constraints: Option<WindowSizeConstraints>,
     theme_roles: [bool; ThemeColor::COUNT],
@@ -272,7 +309,9 @@ impl ViewDecoder {
         assert!(self.containers.len() <= MAX_VIEW_DEPTH);
         assert!(self.node_count <= MAX_VIEW_NODES);
         match kind {
-            VIEW_WINDOW_STYLE | VIEW_WINDOW_SIZE_CONSTRAINTS
+            VIEW_WINDOW_STYLE
+            | VIEW_WINDOW_SIZE_CONSTRAINTS
+            | playbit_api::ui::VIEW_WINDOW_INPUT
                 if id == 0 && self.root.is_none() && self.containers.is_empty() =>
             {
                 self.decode_window_metadata(kind, payload)
@@ -303,7 +342,12 @@ impl ViewDecoder {
                 self.decode_container_end(kind)
             }
             VIEW_TEXT if id == 0 => self.decode_text(payload),
-            VIEW_CANVAS => self.decode_canvas(id, payload),
+            VIEW_CANVAS => {
+                if self.legacy_canvas == 0 {
+                    self.legacy_canvas = id;
+                }
+                self.decode_canvas(id, payload)
+            }
             VIEW_FILE_IMAGE if id == 0 && payload.len() == 31 => self.decode_file_image(payload),
             VIEW_IMAGE_DESCRIPTION if id == 0 && preceding == Some(VIEW_FILE_IMAGE) => {
                 self.decode_image_description(payload)
@@ -322,6 +366,13 @@ impl ViewDecoder {
     // fuzz: decode_view
     fn decode_window_metadata(&mut self, kind: u8, payload: &[u8]) -> Result<(), ()> {
         match kind {
+            playbit_api::ui::VIEW_WINDOW_INPUT if self.window_input.is_none() => {
+                let bits = u32::from_le_bytes(payload.try_into().map_err(|_| ())?);
+                if bits & !playbit_api::abi::input::ALL != 0 {
+                    return Err(());
+                }
+                self.window_input = Some(bits);
+            }
             VIEW_WINDOW_STYLE if self.window_style.is_none() => {
                 let bits = u32::from_le_bytes(payload.try_into().map_err(|_| ())?);
                 self.window_style = Some(WindowStyle::from_bits(bits).ok_or(())?);
@@ -885,9 +936,10 @@ fn decode_canvas_options(
 fn view_records(view: &ViewNode, depth: usize) -> usize {
     assert!(depth <= MAX_VIEW_DEPTH + 1); // Includes the implicit Theme wrapper.
     let count = match view {
-        ViewNode::Theme { child, window_style, window_size_constraints, .. } => {
+        ViewNode::Theme { child, window_style, window_size_constraints, window_input, .. } => {
             usize::from(window_style.is_some())
                 + usize::from(window_size_constraints.is_some())
+                + usize::from(window_input.is_some())
                 + view_records(child, depth + 1)
         }
         ViewNode::Scroll { child, .. } => 2 + view_records(child, depth + 1),
@@ -1163,6 +1215,7 @@ mod tests {
             crate::runtime::syscall::validate_input(
                 &view,
                 &Event {
+                    object_id: 0,
                     kind: playbit_api::abi::syscall::EventKind::Click,
                     target: 2,
                     data: vec![]
@@ -1174,6 +1227,7 @@ mod tests {
             crate::runtime::syscall::validate_input(
                 &view,
                 &Event {
+                    object_id: 0,
                     kind: playbit_api::abi::syscall::EventKind::Click,
                     target: 1,
                     data: vec![]
@@ -1207,6 +1261,7 @@ mod tests {
             crate::runtime::syscall::validate_input(
                 &view,
                 &Event {
+                    object_id: 0,
                     kind: playbit_api::abi::syscall::EventKind::Click,
                     target: 1,
                     data: vec![]
@@ -1227,7 +1282,7 @@ mod tests {
         use playbit_api::abi::syscall::EventKind;
         let view = decode_view(&encoded_segments()).unwrap();
         for target in [1, 2, 3, 4, 5] {
-            let event = Event { kind: EventKind::Click, target, data: Vec::new() };
+            let event = Event { object_id: 0, kind: EventKind::Click, target, data: Vec::new() };
             assert_eq!(validate_input(&view, &event).is_ok(), target == 2 || target == 4);
         }
         let ViewNode::Theme { child, .. } = view else { panic!() };
@@ -1237,7 +1292,7 @@ mod tests {
         assert!(
             validate_input(
                 &children[0],
-                &Event { kind: EventKind::Click, target: 2, data: Vec::new() }
+                &Event { object_id: 0, kind: EventKind::Click, target: 2, data: Vec::new() }
             )
             .is_err()
         );
@@ -1294,6 +1349,7 @@ mod tests {
         assert!(matches!(nodes[1], ViewNode::Canvas { id: 0, .. }));
         assert!(matches!(nodes[2], ViewNode::Canvas { id: 7, .. }));
         let event = Event {
+            object_id: 0,
             kind: playbit_api::abi::syscall::EventKind::Frame,
             target: 0,
             data: 1u32.to_le_bytes().to_vec(),
@@ -1302,6 +1358,38 @@ mod tests {
         assert!(
             crate::runtime::syscall::validate_input(&view, &Event { target: 7, ..event },).is_ok()
         );
+    }
+
+    #[cfg(any(feature = "native-runtime", feature = "wasm-runtime"))]
+    #[test]
+    fn original_named_canvas_receives_its_released_key_packet() {
+        use playbit_api::abi::{input, syscall};
+        let mut state = playbit_api::context::ContextState::default();
+        let mut view = state.view();
+        view.column_start();
+        view.canvas(7, 16, 16, CanvasFrames::Continuous, &[]);
+        view.column_end();
+        let bytes = view.finish();
+        assert_eq!(bytes[13], VIEW_CANVAS);
+        let released = decode_view(&bytes).unwrap();
+
+        let key = input::Input::Keyboard(input::Keyboard {
+            key: input::Key::Up,
+            device_key: input::Key::Up,
+            pressed: true,
+            repeat: false,
+            text: ['\0'; 8],
+            text_len: 0,
+        });
+        let raw = Event {
+            object_id: 3,
+            kind: key.kind(),
+            target: 0,
+            data: key.encode(input::Source::default()),
+        };
+        let event = crate::runtime::syscall::route_input(&released, raw).unwrap().unwrap();
+        assert_eq!((event.kind, event.target, event.object_id), (syscall::EventKind::Key, 7, 3));
+        assert_eq!(event.data, [3, 0, 0, 0, 1, 0, 0, 0]);
     }
 
     #[test]
@@ -1343,6 +1431,7 @@ mod tests {
                 }
             );
             let event = Event {
+                object_id: 0,
                 kind: playbit_api::abi::syscall::EventKind::Frame,
                 target: 7,
                 data: 1u32.to_le_bytes().to_vec(),
@@ -1369,8 +1458,7 @@ mod tests {
     }
 
     #[test]
-    fn window_canvas_accepts_large_logical_geometry_and_checks_pointer_bounds() {
-        use playbit_api::abi::syscall::{EventKind, PointerInput};
+    fn window_canvas_accepts_large_logical_geometry() {
         let (width, height) = (5500, 3000);
         let edge = CanvasRect {
             x: width - 1,
@@ -1393,13 +1481,6 @@ mod tests {
         let ViewNode::Theme { child, .. } = &scene else { panic!("theme") };
         let ViewNode::Canvas { items, .. } = child.as_ref() else { panic!("canvas") };
         assert_eq!(items, &[super::CanvasItem::Rect(edge)]);
-        for (x, y, accepted) in
-            [(width, height, true), (width + 1, height, false), (width, height + 1, false)]
-        {
-            let data = PointerInput { x, y, phase: 1, buttons: 1 }.encode().to_vec();
-            let event = Event { kind: EventKind::Pointer, target: 7, data };
-            assert_eq!(crate::runtime::syscall::validate_input(&scene, &event).is_ok(), accepted);
-        }
         // Width follows the command header. Verify the exact logical bound.
         let mut widest = bytes.clone();
         for (edge, accepted) in [
@@ -1741,6 +1822,8 @@ mod tests {
                 theme: Theme::light(),
                 window_background_specified: false,
                 window_style: None,
+                window_input: None,
+                legacy_canvas: 0,
                 window_size_constraints: None,
                 child: Box::new(ViewNode::Column(vec![
                     ViewNode::Text { style: TextStyle::Title, text: "Recipes".to_owned() },

@@ -5,12 +5,10 @@ import { drawCanvas } from "./canvas.ts";
 const words = (...values) => { const bytes = new Uint8Array(values.length * 4), view = new DataView(bytes.buffer); values.forEach((n, i) => view.setUint32(i * 4, n, true)); return bytes; };
 const command = (kind, id, payload = []) => [kind, ...words(id, payload.length), ...payload];
 const canvas = frames => new Uint8Array([...new TextEncoder().encode("PBV1"), ...command(1, 0), ...command(22, 17, words(320, 240, frames, 0)), ...command(4, 0)]);
-test("Canvas mode is required and canonical; static input keeps pointer and key only", () => {
+test("Canvas animation requires continuous frame mode", () => {
     for (const mode of [0, 1]) {
         const { controls } = decodeScene(canvas(mode));
         assert.equal(controls.get(17).frames, mode);
-        validateInput(controls, 11, 17, words(20, 30, 1, 1));
-        validateInput(controls, 12, 17, words(1, 1));
         const frame = () => validateInput(controls, 13, 17, words(16667));
         if (mode) frame(); else assert.throws(frame, /Invalid input/);
         assert.throws(() => validateInput(controls, 13, 18, words(16667)), /unavailable/);

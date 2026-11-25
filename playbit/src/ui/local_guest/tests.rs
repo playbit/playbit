@@ -156,7 +156,9 @@ impl Fixture {
         } else {
             data
         };
-        self.apps.input(self.ids[index], Event { kind, target, data: data.to_vec() }).unwrap();
+        self.apps
+            .input(self.ids[index], Event { object_id: 0, kind, target, data: data.to_vec() })
+            .unwrap();
         self.apps.advance(true);
     }
     fn rows(&self, index: usize) -> Vec<(u32, String, CheckState)> {
@@ -281,6 +283,7 @@ fn notice_during_accepted_input_preserves_independent_instance_state() {
         .input(
             f.ids[1],
             Event {
+                object_id: 0,
                 kind: EventKind::TextChanged,
                 target: 1,
                 data: playbit_api::abi::text::TextInput::encode("Independent draft", &[])
@@ -386,13 +389,16 @@ fn instance_capacity_is_independent_of_shared_session_identity() {
 fn deactivation_drains_an_accepted_save_and_its_readback() {
     let mut f = Fixture::new();
     f.input(0, EventKind::TextChanged, 1, b"Saved before close");
-    f.apps.input(f.ids[0], Event { kind: EventKind::Click, target: 2, data: vec![] }).unwrap();
+    f.apps
+        .input(f.ids[0], Event { object_id: 0, kind: EventKind::Click, target: 2, data: vec![] })
+        .unwrap();
     f.apps.deactivate(f.ids[0]).unwrap();
     assert!(
         f.apps
             .input(
                 f.ids[0],
                 Event {
+                    object_id: 0,
                     kind: EventKind::TextChanged,
                     target: 1,
                     data: playbit_api::abi::text::TextInput::encode("Rejected", &[])

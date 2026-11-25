@@ -130,7 +130,7 @@ test('capability discovery does not authenticate a structurally admitted package
     const installed = new Set(Object.keys(target.operations).filter(name => name.startsWith('pb_')));
     installed.add('pb_clock_read');
     const features = ['ui.canvas.clear.v1', 'ui.canvas.pixels.v1', 'ui.canvas.viewport.v1', 'ui.canvas.window.v1',
-        'ui.window.size-constraints.v1', 'ui.window.style.v1', 'display-names.v1'];
+        'ui.input.v1', 'ui.window.size-constraints.v1', 'ui.window.style.v1', 'display-names.v1'];
     for (const feature of features) assert(names.includes(feature), feature);
     assert.equal(names.length, installed.size + features.length);
     for (const name of ['object.schema.read.begin', 'object.schema.read.take', 'object.schema.establish.begin',

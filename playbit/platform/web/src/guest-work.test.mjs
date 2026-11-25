@@ -5,6 +5,20 @@ import { GuestData } from "./guest-data.ts";
 
 const ok = () => 0;
 const parts = handle => [handle >> 32n, Number(handle & 0xffffffffn)];
+test("released canvas input and window input enter the same guest queue", () => {
+    const work = createWork();
+    for (const [kind, target, length] of [[11, 7, 16], [12, 7, 8], [22, 7, 56], [23, 0, 60]]) {
+        work.queue({ kind, target, objectId: 4, data: new Uint8Array(length) });
+    }
+    work.beginTurn();
+    assert.deepEqual(Array.from({ length: 4 }, () => {
+        const { kind, target, objectId } = work.poll();
+        return [kind, target, objectId];
+    }), [[11, 7, 4], [12, 7, 4], [22, 7, 4], [23, 0, 4]]);
+    work.endTurn();
+    assert.equal(work.pending, false);
+});
+
 test("accepted input reservations bound payloads and survive deactivation until queued", () => {
     const events = [], work = createWork(events), roots = [];
     for (let i = 0; i < 256; i++) roots.push(work.input(0));

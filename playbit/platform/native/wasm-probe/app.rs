@@ -10,7 +10,7 @@ pub extern "C" fn probe_base() -> u32 {
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn probe_layout(index: u32) -> u32 {
-    const LAYOUT: [u32; 703] = [
+    const LAYOUT: [u32; 705] = [
     size_of::<playbit_api::abi::data::EntryHandle>() as u32,
     align_of::<playbit_api::abi::data::EntryHandle>() as u32,
     5,
@@ -547,7 +547,7 @@ pub extern "C" fn probe_layout(index: u32) -> u32 {
     <playbit_api::abi::pending::Selection as Record>::FIELDS[6].width,
     size_of::<playbit_api::abi::operations::Event>() as u32,
     align_of::<playbit_api::abi::operations::Event>() as u32,
-    5,
+    6,
     core::mem::offset_of!(playbit_api::abi::operations::Event, size) as u32,
     <playbit_api::abi::operations::Event as Record>::FIELDS[0].width,
     core::mem::offset_of!(playbit_api::abi::operations::Event, written) as u32,
@@ -558,6 +558,8 @@ pub extern "C" fn probe_layout(index: u32) -> u32 {
     <playbit_api::abi::operations::Event as Record>::FIELDS[3].width,
     core::mem::offset_of!(playbit_api::abi::operations::Event, target) as u32,
     <playbit_api::abi::operations::Event as Record>::FIELDS[4].width,
+    core::mem::offset_of!(playbit_api::abi::operations::Event, object_id) as u32,
+    <playbit_api::abi::operations::Event as Record>::FIELDS[5].width,
     size_of::<playbit_api::abi::operations::Identity>() as u32,
     align_of::<playbit_api::abi::operations::Identity>() as u32,
     10,

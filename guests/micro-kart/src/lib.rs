@@ -1,6 +1,9 @@
 //! Phase 1 multimedia experiment: one playable kart, no multiplayer yet.
 #![cfg(any(target_arch = "wasm32", test))]
-use playbit_api::abi::syscall::{Error, EventKind, FrameInput, KeyInput, PointerInput};
+use playbit_api::abi::{
+    input::{Input, Key, POINTER_DOWN, POINTER_MOVE, PRIMARY},
+    syscall::{Error, EventKind, FrameInput},
+};
 #[cfg(target_arch = "wasm32")]
 use playbit_api::context::Context;
 use playbit_api::ui::{CanvasItem, CanvasRect, CanvasText, Color};
@@ -31,21 +34,28 @@ impl Game {
 
     fn input(&mut self, kind: EventKind, data: &[u8]) -> Result<(), Error> {
         match kind {
-            EventKind::Pointer => {
-                let input = PointerInput::decode(data)?;
-                self.pointer = input.buttons == 1 && input.phase < 2;
-                if self.pointer {
-                    self.x = (f64::from(input.x) - 12.0).clamp(42.0, 254.0);
+            EventKind::WindowPointer => {
+                let (_, Input::Pointer(input)) = Input::decode(kind, data)? else {
+                    return Err(Error::InvalidArgument);
+                };
+                if input.flags & PRIMARY != 0 {
+                    self.pointer = input.buttons & 1 != 0
+                        && matches!(input.phase, POINTER_DOWN | POINTER_MOVE);
+                    if self.pointer {
+                        self.x = (f64::from(input.canvas_x) - 12.0).clamp(42.0, 254.0);
+                    }
                 }
             }
-            EventKind::Key => {
-                let input = KeyInput::decode(data)?;
-                match input.key {
-                    1 => self.left = input.pressed,
-                    2 => self.right = input.pressed,
-                    3 | 5 => self.throttle = input.pressed,
-                    4 => self.brake = input.pressed,
-                    _ => return Err(Error::InvalidArgument),
+            EventKind::WindowKeyboard => {
+                let (_, Input::Keyboard(input)) = Input::decode(kind, data)? else {
+                    return Err(Error::InvalidArgument);
+                };
+                match input.device_key {
+                    Key::Left => self.left = input.pressed,
+                    Key::Right => self.right = input.pressed,
+                    Key::Up | Key::Space => self.throttle = input.pressed,
+                    Key::Down => self.brake = input.pressed,
+                    _ => {}
                 }
             }
             EventKind::Frame => {
@@ -111,6 +121,7 @@ impl Game {
         view: &mut ViewEncoder<'_>,
     ) -> Result<(), Error> {
         let drawing = self.drawing();
+        view.window_input(playbit_api::abi::input::POINTER | playbit_api::abi::input::KEYBOARD);
         view.column_start();
         view.text(TextStyle::Title, "Micro Kart");
         view.text(
@@ -141,7 +152,7 @@ pub fn playbit_app() -> playbit_api::App {
 #[cfg(target_arch = "wasm32")]
 fn turn(game: &mut Game, context: &mut Context<'_>, view: &mut ViewEncoder<'_>) {
     for event in context.raw_events() {
-        if event.target == CANVAS {
+        if event.target == CANVAS || event.kind == EventKind::WindowKeyboard {
             game.input(event.kind, event.data).unwrap();
         }
     }
@@ -156,25 +167,47 @@ mod tests {
     fn keyboard_and_pointer_change_actual_simulation_and_pixels() {
         let mut game = Game::new();
         let initial = game.drawing();
-        game.input(EventKind::Key, &KeyInput { key: 3, pressed: true }.encode()).unwrap();
-        game.input(EventKind::Key, &KeyInput { key: 1, pressed: true }.encode()).unwrap();
+        use playbit_api::abi::input::{Keyboard, Pointer, Source};
+        for key in [Key::Up, Key::Left] {
+            let input = Input::Keyboard(Keyboard {
+                key,
+                device_key: key,
+                pressed: true,
+                repeat: false,
+                text: ['\0'; 8],
+                text_len: 0,
+            });
+            game.input(input.kind(), &input.encode(Source::default())).unwrap();
+        }
         for _ in 0..60 {
             game.input(EventKind::Frame, &FrameInput { elapsed_us: 16_667 }.encode()).unwrap();
         }
         assert!(game.speed > 150.0 && game.distance > 75.0 && game.x < 100.0);
         assert_ne!(game.drawing(), initial);
-        game.input(
-            EventKind::Pointer,
-            &PointerInput { x: 220, y: 350, phase: 1, buttons: 1 }.encode(),
-        )
-        .unwrap();
+        let mut pointer = Pointer {
+            id: 1,
+            kind: 1,
+            phase: POINTER_DOWN,
+            buttons: 1,
+            button: 0,
+            flags: PRIMARY,
+            click_count: 1,
+            x: 220.,
+            y: 350.,
+            canvas_x: 220.,
+            canvas_y: 350.,
+            dx: 0.,
+            dy: 0.,
+            pen: None,
+        };
+        let input = Input::Pointer(pointer);
+        game.input(input.kind(), &input.encode(Source::default())).unwrap();
         assert_eq!(game.x, 208.0);
         assert!(game.pointer);
-        game.input(
-            EventKind::Pointer,
-            &PointerInput { x: 220, y: 350, phase: 3, buttons: 0 }.encode(),
-        )
-        .unwrap();
+        pointer.phase = playbit_api::abi::input::POINTER_CANCEL;
+        pointer.buttons = 0;
+        let input = Input::Pointer(pointer);
+        game.input(input.kind(), &input.encode(Source::default())).unwrap();
         assert!(!game.pointer);
         assert!(game.drawing().iter().all(|item| match item {
             CanvasItem::Rect(rect) => rect.fits(WIDTH, HEIGHT),

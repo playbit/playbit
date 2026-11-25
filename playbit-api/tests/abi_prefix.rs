@@ -430,6 +430,7 @@ const _: () = {
             ("generation", "u64", 8, 8),
             ("kind", "u32", 16, 4),
             ("target", "u32", 20, 4),
+            ("object_id", "u32", 24, 4),
         ],
     );
     prefix::<abi::operations::Identity>(
@@ -918,6 +919,7 @@ const _: () = {
             ("generation", "u64", 8, 8),
             ("kind", "u32", 16, 4),
             ("target", "u32", 20, 4),
+            ("object_id", "u32", 24, 4),
         ],
     );
     prefix::<abi::operations::Identity>(

@@ -6,7 +6,7 @@ use crate::runtime::{
     host::DataKind,
     work::{Work, browser_event_fits, browser_operation_fits},
 };
-use playbit_api::abi::syscall::Error;
+use playbit_api::abi::syscall::{EVENT_QUEUE_OVERHEAD, Error};
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
@@ -77,11 +77,11 @@ impl Owner {
         self.event_fits(bytes)?;
         let root = self.work.new_root()?;
         assert!(self.inputs.insert(root, bytes).is_none());
-        self.event_bytes += bytes + 20;
+        self.event_bytes += bytes + EVENT_QUEUE_OVERHEAD;
         Ok(root)
     }
     fn queue(&mut self, root: u64, kind: u32, bytes: usize) -> Result<u64> {
-        let supported = matches!(kind, 1..=6 | 10..=15 | 17..=19)
+        let supported = matches!(kind, 1..=6 | 10..=15 | 17..=19 | 22..=26)
             || (kind == playbit_api::abi::syscall::EventKind::IdentityChanged as u32 && bytes == 0);
         if !supported || self.inputs.get(&root) != Some(&bytes) {
             return Err(Error::InvalidArgument);
@@ -93,7 +93,7 @@ impl Owner {
     }
     fn reject(&mut self, root: u64) -> Result<()> {
         let bytes = self.inputs.remove(&root).ok_or(Error::StaleHandle)?;
-        self.event_bytes -= bytes + 20;
+        self.event_bytes -= bytes + EVENT_QUEUE_OVERHEAD;
         self.work.failed = true;
         self.reap();
         Ok(())
@@ -161,7 +161,7 @@ impl Owner {
             Rights::NONE,
             Event { root, kind, bytes: 8, operation: Some(slot) },
         )?;
-        self.event_bytes += 28;
+        self.event_bytes += 8 + EVENT_QUEUE_OVERHEAD;
         Ok(key.raw())
     }
     fn poll(&mut self, key: u64) -> Result<()> {
@@ -169,7 +169,7 @@ impl Owner {
             return Err(Error::Conflict);
         }
         let event = self.events.take(&key).ok_or(Error::StaleHandle)?;
-        self.event_bytes -= event.bytes + 20;
+        self.event_bytes -= event.bytes + EVENT_QUEUE_OVERHEAD;
         self.work.active = Some(event.root);
         self.work.progress = true;
         self.reap();
@@ -214,7 +214,7 @@ impl Owner {
         self.data_bytes -= operation.bytes;
         self.events.retain(|_, event| {
             if event.operation == Some(slot) {
-                self.event_bytes -= event.bytes + 20;
+                self.event_bytes -= event.bytes + EVENT_QUEUE_OVERHEAD;
                 false
             } else {
                 true
@@ -251,7 +251,7 @@ impl Owner {
         });
         self.events.retain(|_, event| {
             if event.operation == Some(handle) {
-                self.event_bytes -= event.bytes + 20;
+                self.event_bytes -= event.bytes + EVENT_QUEUE_OVERHEAD;
                 false
             } else {
                 true
@@ -262,7 +262,7 @@ impl Owner {
     fn cancel_notification(&mut self, kind: u32) -> Result<()> {
         self.events.retain(|_, event| {
             if event.kind == kind {
-                self.event_bytes -= event.bytes + 20;
+                self.event_bytes -= event.bytes + EVENT_QUEUE_OVERHEAD;
                 false
             } else {
                 true
@@ -278,7 +278,7 @@ impl Owner {
         self.work.deactivate();
         self.events.retain(|_, event| {
             if matches!(event.kind, 10 | 13 | 17) {
-                self.event_bytes -= event.bytes + 20;
+                self.event_bytes -= event.bytes + EVENT_QUEUE_OVERHEAD;
                 false
             } else {
                 true

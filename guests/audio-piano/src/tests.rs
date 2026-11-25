@@ -7,6 +7,10 @@ use playbit::runtime::{Frame, ViewNode};
 
 struct NoAudio;
 impl Host for NoAudio {
+    fn supported_features(&self) -> &[&str] {
+        &[playbit_api::abi::input::FEATURE]
+    }
+
     fn supported_operations(&self) -> &[Opcode] {
         &[]
     }
@@ -81,14 +85,14 @@ fn unsupported_audio_renders_retry_and_keeps_controls_usable() {
     guest
         .queue_event(
             guest.generation(),
-            Event { kind: EventKind::Click, target: RETRY, data: vec![] },
+            Event { object_id: 0, kind: EventKind::Click, target: RETRY, data: vec![] },
         )
         .unwrap();
     check_error_scene(&guest.pump().unwrap(), "Volume 70%");
     guest
         .queue_event(
             guest.generation(),
-            Event { kind: EventKind::Click, target: LOUDER, data: vec![] },
+            Event { object_id: 0, kind: EventKind::Click, target: LOUDER, data: vec![] },
         )
         .unwrap();
     check_error_scene(&guest.pump().unwrap(), "Volume 80%");

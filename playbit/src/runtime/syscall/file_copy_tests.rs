@@ -324,7 +324,7 @@ fn terminal_copy_results_consume_handles_hints_and_reject_wrong_destination_ids(
             let expected = result.err().unwrap_or(HostError::Internal);
             assert_eq!(poll(&mut guest, "poll", handle), (expected as i32, vec![0xa5; 15]));
             assert!(guest.store.data().app.capabilities.operations().next().is_none());
-            assert_eq!(guest.store.data().app.queued_bytes, 20);
+            assert_eq!(guest.store.data().app.queued_bytes, abi::EVENT_QUEUE_OVERHEAD);
             assert_eq!(poll(&mut guest, "poll", handle).0, HostError::StaleHandle as i32);
             assert_eq!(guest.notify_file_copy(generation, token), Err(HostError::StaleHandle));
         }
@@ -405,6 +405,7 @@ fn copy_ready_queue_pressure_stale_generations_and_forged_handles_are_safe() {
             guest.queue_event(
                 generation,
                 Event {
+                    object_id: 0,
                     kind: EventKind::FileCopyReady,
                     target: 0,
                     data: [
@@ -420,7 +421,7 @@ fn copy_ready_queue_pressure_stale_generations_and_forged_handles_are_safe() {
             guest
                 .queue_event(
                     generation,
-                    Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+                    Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] },
                 )
                 .unwrap();
         }

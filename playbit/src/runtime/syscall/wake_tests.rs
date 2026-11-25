@@ -93,7 +93,7 @@ fn poll(guest: &mut GuestInstance) -> HostResult<Event> {
     let target = u32::from_le_bytes(header[20..].try_into().unwrap());
     let mut data = vec![0; status as usize];
     memory.read(&guest.store, 96, &mut data).unwrap();
-    Ok(Event { kind, target, data })
+    Ok(Event { object_id: 0, kind, target, data })
 }
 
 fn guest(backend: ExecutionBackend) -> GuestInstance {
@@ -113,7 +113,7 @@ fn readiness_tracks_started_notifications_and_due_wakes_without_consuming_them()
         guest
             .queue_event(
                 guest.generation(),
-                Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+                Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] },
             )
             .unwrap();
         assert!(guest.has_ready_work(Instant::now()));
@@ -189,7 +189,7 @@ fn wake_is_one_shot_bound_to_generation_and_cannot_be_injected() {
         assert_eq!(
             guest.queue_event(
                 guest.generation(),
-                Event { kind: EventKind::Wake, target: 0, data: vec![] }
+                Event { object_id: 0, kind: EventKind::Wake, target: 0, data: vec![] }
             ),
             Err(HostError::InvalidArgument)
         );
@@ -203,9 +203,9 @@ fn replacing_an_unconsumed_wake_removes_it_without_losing_other_events() {
         assert_eq!(wake(&mut guest, 1000), 0);
         let deadline = guest.store.data().app.wake_deadline.unwrap();
         queue_due_wake(&mut guest.store.data_mut().app, deadline);
-        assert_eq!(guest.store.data().app.queued_bytes, 40);
+        assert_eq!(guest.store.data().app.queued_bytes, 2 * abi::EVENT_QUEUE_OVERHEAD);
         assert_eq!(wake(&mut guest, 2000), 0);
-        assert_eq!(guest.store.data().app.queued_bytes, 20);
+        assert_eq!(guest.store.data().app.queued_bytes, abi::EVENT_QUEUE_OVERHEAD);
         assert_eq!(guest.store.data().app.events.front().unwrap().event.kind, EventKind::Started);
         assert!(guest.store.data().app.wake_deadline.unwrap() > deadline);
     }
@@ -219,7 +219,7 @@ fn full_queue_preserves_due_wake_until_a_turn_can_drain_it() {
             guest
                 .queue_event(
                     guest.generation(),
-                    Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+                    Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] },
                 )
                 .unwrap();
         }
@@ -232,7 +232,10 @@ fn full_queue_preserves_due_wake_until_a_turn_can_drain_it() {
         queue_due_wake(&mut guest.store.data_mut().app, deadline);
         assert!(!guest.wake_due(deadline));
         assert_eq!(guest.store.data().app.events.back().unwrap().event.kind, EventKind::Wake);
-        assert_eq!(guest.store.data().app.queued_bytes, 20 * MAX_QUEUED_EVENTS);
+        assert_eq!(
+            guest.store.data().app.queued_bytes,
+            abi::EVENT_QUEUE_OVERHEAD * MAX_QUEUED_EVENTS
+        );
     }
 }
 

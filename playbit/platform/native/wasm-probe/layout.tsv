@@ -528,9 +528,9 @@ PBSelection.entry_id.offset	24
 PBSelection.entry_id.width	15
 PBSelection.entry_reserved.offset	39
 PBSelection.entry_reserved.width	1
-PBEvent.sizeof	24
+PBEvent.sizeof	32
 PBEvent.alignof	8
-PBEvent.field_count	5
+PBEvent.field_count	6
 PBEvent.size.offset	0
 PBEvent.size.width	4
 PBEvent.written.offset	4
@@ -541,6 +541,8 @@ PBEvent.kind.offset	16
 PBEvent.kind.width	4
 PBEvent.target.offset	20
 PBEvent.target.width	4
+PBEvent.object_id.offset	24
+PBEvent.object_id.width	4
 PBIdentity.sizeof	104
 PBIdentity.alignof	8
 PBIdentity.field_count	9

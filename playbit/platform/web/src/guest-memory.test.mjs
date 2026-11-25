@@ -35,12 +35,24 @@ test('record admission bounds capacity, rejects unknown input semantics and pres
     const memory = new WebAssembly.Memory({ initial: 1 }), data = new DataView(memory.buffer);
     initialize(memory, 16, 24); assert.equal(record(memory, 16, ABI.event).length, 24);
     data.setUint32(16, 23, true); assert.throws(() => record(memory, 16, ABI.event), error => error.status === -11);
-    initialize(memory, 16, 32); new Uint8Array(memory.buffer, 40, 8).fill(7);
+    initialize(memory, 16, 40); new Uint8Array(memory.buffer, 44, 12).fill(7);
     assert.throws(() => record(memory, 16, ABI.event, true), error => error.status === -7);
-    const output = record(memory, 16, ABI.event), source = new Uint8Array(24); new DataView(source.buffer).setUint32(16, 2, true);
+    const output = record(memory, 16, ABI.event), source = new Uint8Array(32);
+    const event = new DataView(source.buffer);
+    event.setUint32(16, 2, true);
+    event.setUint32(24, 9, true);
     publishRecord(memory, output, ABI.event, source);
-    assert.equal(data.getUint32(16, true), 32); assert.equal(data.getUint32(20, true), 24);
-    assert(new Uint8Array(memory.buffer, 40, 8).every(byte => byte === 7));
+    assert.equal(data.getUint32(16, true), 40);
+    assert.equal(data.getUint32(20, true), 28);
+    assert.equal(data.getUint32(40, true), 9);
+    assert(new Uint8Array(memory.buffer, 44, 12).every(byte => byte === 7));
+    for (const capacity of [24, 25, 26, 27]) {
+        initialize(memory, 16, capacity);
+        new Uint8Array(memory.buffer, 40, 4).fill(7);
+        publishRecord(memory, record(memory, 16, ABI.event), ABI.event, source);
+        assert.equal(data.getUint32(20, true), 24);
+        assert.equal(data.getUint32(40, true), 0x07070707);
+    }
     data.setUint32(16, 4097, true); assert.throws(() => record(memory, 16, ABI.event), error => error.status === -9);
     initialize(memory, 64, 32); initialize(memory, 96, 40);
     assert.throws(() => recordArray(memory, 64, 2, 32, ABI.event, false, 2), error => error.status === -3);

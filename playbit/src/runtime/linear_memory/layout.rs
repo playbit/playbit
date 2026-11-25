@@ -799,19 +799,28 @@ pub(crate) mod operations {
     pub(crate) mod event {
         use super::super::Layout;
         pub(crate) const MIN_SIZE: u32 = 24;
-        pub(crate) const SIZEOF: u32 = 24;
+        pub(crate) const SIZEOF: u32 = 32;
         pub(crate) const ALIGNMENT: u32 = 8;
         pub(crate) const SIZE: usize = 0;
         pub(crate) const WRITTEN: usize = 4;
         pub(crate) const GENERATION: usize = 8;
         pub(crate) const KIND: usize = 16;
         pub(crate) const TARGET: usize = 20;
+        pub(crate) const OBJECT_ID: usize = 24;
         pub(crate) const LAYOUT: Layout = Layout {
             minimum: MIN_SIZE,
             size: SIZEOF,
             alignment: ALIGNMENT,
-            fields: &[(SIZE, 4), (WRITTEN, 4), (GENERATION, 8), (KIND, 4), (TARGET, 4)],
+            fields: &[
+                (SIZE, 4),
+                (WRITTEN, 4),
+                (GENERATION, 8),
+                (KIND, 4),
+                (TARGET, 4),
+                (OBJECT_ID, 4),
+            ],
         };
+        pub(crate) const OUTPUT: Layout = LAYOUT.before_output_tail(OBJECT_ID);
     }
     pub(crate) mod identity {
         use super::super::Layout;

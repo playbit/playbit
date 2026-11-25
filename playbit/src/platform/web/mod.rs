@@ -558,6 +558,25 @@ pub extern "C" fn pb_web_validate_text_input(length: usize) -> i32 {
     };
     validate().map_or_else(|error| error as i32, |()| 0)
 }
+#[unsafe(no_mangle)]
+pub extern "C" fn pb_web_validate_surface_input(kind: u32, length: usize) -> i32 {
+    crate::platform::failure::guard();
+    use playbit_api::abi::{input::Input, syscall::EventKind};
+    let validate = || {
+        let kind = match kind {
+            22 => EventKind::WindowPointer,
+            23 => EventKind::WindowKeyboard,
+            24 => EventKind::WindowScroll,
+            25 => EventKind::WindowGesture,
+            26 => EventKind::WindowGamepad,
+            _ => return Err(Error::InvalidArgument),
+        };
+        let data = admit_input(length, 92)?;
+        Input::decode(kind, &data[..length]).map(|(_, input)| input.ends_sequence())
+    };
+    validate().map_or_else(|error| error as i32, i32::from)
+}
+
 fn publish_output(bytes: Vec<u8>) -> i32 {
     if bytes.len() > LIMIT {
         return Error::LimitExceeded as i32;

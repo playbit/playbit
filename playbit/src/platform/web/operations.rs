@@ -513,6 +513,7 @@ fn supported(opcode: Opcode) -> bool {
 const VIEW_FEATURES: &[&str] = &[
     playbit_api::ui::CANVAS_CLEAR_FEATURE,
     playbit_api::ui::CANVAS_PIXELS_FEATURE,
+    playbit_api::abi::input::FEATURE,
     playbit_api::ui::CANVAS_VIEWPORT_FEATURE,
     playbit_api::ui::CANVAS_WINDOW_FEATURE,
     playbit_api::ui::WINDOW_SIZE_CONSTRAINTS_FEATURE,

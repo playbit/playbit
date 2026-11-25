@@ -547,7 +547,7 @@ fn ready_event_decoding_rejects_wrong_kind_and_payload() {
     let event = Event { generation: 1, kind: EventKind::FileCopyReady, target: 0, data: &bytes };
     assert_eq!(event.operation(), Ok(OperationHandle::new(1, 2)));
     for invalid in [
-        Event { kind: EventKind::Click, ..event },
+        Event { object_id: 0, kind: EventKind::Click, ..event },
         Event { target: 1, ..event },
         Event { data: &bytes[..7], ..event },
         Event { data: &[0; 8], ..event },

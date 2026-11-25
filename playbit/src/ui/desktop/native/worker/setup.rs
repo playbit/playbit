@@ -56,6 +56,9 @@ impl Setup {
             #[cfg(all(feature = "native-audio", target_os = "macos"))]
             audio_instance: None,
             generation: 0,
+            object_id: Arc::new(AtomicU32::new(0)),
+            #[cfg(feature = "process")]
+            tool_pointer: Default::default(),
             session: None,
             #[cfg(all(target_os = "macos", feature = "process"))]
             startup: None,

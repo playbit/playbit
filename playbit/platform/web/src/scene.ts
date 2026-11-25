@@ -25,7 +25,7 @@ export interface SceneCanvas { kind: "canvas"; id: number; width: number; height
 export type SceneControl = SceneInput | SceneToggle | SceneCanvas | SceneScroll | MenuAction;
 export type SceneNode = SceneContainer | SceneText | Exclude<SceneControl, MenuAction>;
 export interface WindowConstraints { minWidth: number; minHeight: number; maxWidth: number; maxHeight: number; aspectRatio: number }
-export interface SceneWindow { style?: number; constraints?: WindowConstraints; theme?: Map<number, number> }
+export interface SceneWindow { style?: number; constraints?: WindowConstraints; theme?: Map<number, number>; input?: number; legacyCanvas?: number }
 export interface Scene { root: SceneNode; controls: Map<number, SceneControl>; window?: SceneWindow }
 
 export function surfaceBytes(width: number, height: number, scale: number, inputs: number): Uint8Array {
@@ -76,7 +76,7 @@ export function decodeScene(bytes: Uint8Array, previous?: Scene | null): Scene {
         const data = bytes.subarray(offset, offset + length), d = new DataView(data.buffer, data.byteOffset, data.length);
         offset += length;
         switch (type) {
-            case 10: case 27: case 28:
+            case 10: case 27: case 28: case 29:
                 if (id || stack.length || root) throw new Error("Window metadata must precede the root");
                 window ??= {};
                 decodeWindowMetadata(window, type, d);
@@ -120,6 +120,10 @@ export function decodeScene(bytes: Uint8Array, previous?: Scene | null): Scene {
                 add({ kind: type === 3 ? "button" : "checkbox", id, state: data[0], disabled: Boolean(data[1]), label: decoder.decode(data.subarray(2)) });
                 break;
             case 22: {
+                if (id && window?.input === undefined && previous?.window?.input === undefined) {
+                    window ??= {};
+                    window.legacyCanvas ??= id;
+                }
                 const canvas = decodeCanvas(id, data, d, canvasTotals);
                 if (canvas.extent && stack.some(node => node.kind !== "context-menu")) throw new Error("Extended canvas must be the root");
                 add(canvas);
@@ -130,6 +134,10 @@ export function decodeScene(bytes: Uint8Array, previous?: Scene | null): Scene {
         }
     }
     if (stack.length || !root) throw new Error("Incomplete guest scene");
+    if (previous?.window?.input !== undefined && window?.input === undefined) {
+        window ??= {};
+        window.input = 0;
+    }
     return window ? { root, controls, window } : { root, controls };
 }
 
@@ -143,6 +151,11 @@ function decodeWindowMetadata(window: SceneWindow, type: number, data: DataView)
             theme.set(role, data.getUint32(at + 1, true));
         }
         window.theme = theme;
+    } else if (type === 29) {
+        if (window.input !== undefined || data.byteLength !== 4) throw new Error("Invalid window input");
+        const mask = data.getUint32(0, true);
+        if (mask > 31) throw new Error("Invalid window input families");
+        window.input = mask;
     } else if (type === 27) {
         if (window.style !== undefined || data.byteLength !== 4) throw new Error("Invalid window style");
         const bits = data.getUint32(0, true);

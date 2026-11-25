@@ -133,9 +133,9 @@ export const ABI = {
         offsets: { size: 0, written: 4, present: 8, reserved: 12, volume: 16, entry_id: 24, entry_reserved: 39 },
     },
     event: {
-        minimum: 24, size: 24, alignment: 8,
-        fields: [[0, 4], [4, 4], [8, 8], [16, 4], [20, 4]],
-        offsets: { size: 0, written: 4, generation: 8, kind: 16, target: 20 },
+        minimum: 24, size: 32, alignment: 8, optionalOutputField: 24,
+        fields: [[0, 4], [4, 4], [8, 8], [16, 4], [20, 4], [24, 4]],
+        offsets: { size: 0, written: 4, generation: 8, kind: 16, target: 20, object_id: 24 },
     },
     identity: {
         minimum: 104, size: 360, alignment: 8, optionalOutputField: 104,

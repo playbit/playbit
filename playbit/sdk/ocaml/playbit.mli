@@ -19,7 +19,7 @@ val wake_after : int -> unit
 (** Raw monotonic nanoseconds. All 64 bits are timestamp data. *)
 val monotonic_ns : unit -> int64
 
-type event = { generation : int64; kind : int32; target : int32; data : bytes }
+type event = { generation : int64; kind : int32; target : int32; object_id : int32; data : bytes }
 
 val optional_event_kind_bit : int32
 val poll : unit -> event option
@@ -95,8 +95,37 @@ module Session : sig
 end
 
 module Input : sig
+  val pointers : int
+  val keyboard : int
+  val scrolling : int
+  val gestures : int
+  val gamepads : int
+
   type pointer = { x : int; y : int; phase : int; buttons : int }
   type key = { key : int; pressed : bool }
+
+  type source = { timestamp_ns : int64; client_id : int32; device_id : int32; modifiers : int }
+  type pen = {
+    pressure : float; tangential_pressure : float; tilt_x : float; tilt_y : float;
+    twist : float; width : float; height : float; altitude : float; azimuth : float;
+  }
+  type window_pointer = {
+    source : source; id : int32; phase : int; kind : int; button : int; click_count : int;
+    flags : int; buttons : int; x : float; y : float; dx : float; dy : float;
+    canvas_x : float; canvas_y : float; pen : pen option;
+  }
+  type window_keyboard = {
+    source : source; key : int; device_key : int; pressed : bool; repeat : bool; text : Uchar.t array;
+  }
+  type scroll = {
+    source : source; kind : int; phase : int; flags : int;
+    x : float; y : float; dx : float; dy : float; wheel_z : float;
+  }
+  type gesture = {
+    source : source; kind : int; phase : int; x : float; y : float; dx : float; dy : float;
+    scale : float; rotation : float;
+  }
+  type gamepad = { source : source; phase : int; control : int; value : float; x : float; y : float }
 
   type surface = {
     width : int;
@@ -107,6 +136,11 @@ module Input : sig
 
   val pointer : bytes -> pointer
   val key : bytes -> key
+  val window_pointer : bytes -> window_pointer
+  val window_keyboard : bytes -> window_keyboard
+  val scroll : bytes -> scroll
+  val gesture : bytes -> gesture
+  val gamepad : bytes -> gamepad
   val frame : bytes -> float
   (** Dimensions are in logical units in the current canvas extent. The window
       extent includes the space beneath a full-size titlebar. *)
@@ -123,6 +157,9 @@ module View : sig
   (** Set semantic colors before writing the root. Each [ThemeColor] role may
       occur once. Colors are Display P3 [0xRRGGBBAA]. *)
   val theme : Buffer.t -> (int * int32) list -> unit
+
+  (** Subscribe to raw window input families before writing the root. Requires [ui.input.v1]. *)
+  val window_input : Buffer.t -> int -> unit
 
   (** Set the complete native window style before writing the root. Combine
       [WindowStyle] flags with [lor]. Requires [ui.window.style.v1]. *)

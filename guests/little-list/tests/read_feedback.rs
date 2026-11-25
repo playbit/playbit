@@ -133,7 +133,9 @@ impl Fixture {
         } else {
             text.as_bytes().to_vec()
         };
-        self.guest.queue_event(self.guest.generation(), Event { kind, target, data }).unwrap();
+        self.guest
+            .queue_event(self.guest.generation(), Event { object_id: 0, kind, target, data })
+            .unwrap();
         self.pump();
     }
     fn changed(&mut self) {

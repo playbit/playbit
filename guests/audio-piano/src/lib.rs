@@ -8,7 +8,10 @@ mod synthesis;
 mod tests;
 
 use keyboard::{Action, HEIGHT, Keyboard, NOTE_MS};
-use playbit_api::abi::syscall::{Error, EventKind, FrameInput, KeyInput, PointerInput};
+use playbit_api::abi::{
+    input::{self, Input},
+    syscall::{Error, EventKind, FrameInput},
+};
 use playbit_api::context::{
     Audio, Completion, Context, Gain, OperationHandle, Sound, SoundInstance, Surface, Timestamp,
 };
@@ -165,6 +168,7 @@ impl Piano {
     }
 
     fn render(&self, context: &mut Context<'_>, view: &mut ViewEncoder<'_>) -> Result<(), Error> {
+        view.window_input(input::POINTER | input::KEYBOARD);
         view.column_start();
         view.text(TextStyle::Title, "Audio Piano");
         view.text(
@@ -268,17 +272,18 @@ fn turn(piano: &mut Piano, context: &mut Context<'_>, view: &mut ViewEncoder<'_>
                 RETRY => piano.retry(context),
                 _ => Ok(()),
             },
-            EventKind::Pointer if event.target == CANVAS => PointerInput::decode(event.data)
-                .and_then(|input| {
-                    let action = piano.keyboard.pointer(input);
-                    piano.act(context, action)
-                }),
-            EventKind::Key if event.target == CANVAS => {
-                KeyInput::decode(event.data).and_then(|input| {
-                    let action = piano.keyboard.key(input);
+            EventKind::WindowPointer if event.target == CANVAS => {
+                event.input().and_then(|(_, input)| {
+                    let Input::Pointer(pointer) = input else { return Err(Error::InvalidArgument) };
+                    let action = piano.keyboard.pointer(pointer);
                     piano.act(context, action)
                 })
             }
+            EventKind::WindowKeyboard => event.input().and_then(|(_, input)| {
+                let Input::Keyboard(key) = input else { return Err(Error::InvalidArgument) };
+                let action = piano.keyboard.key(key.device_key, key.pressed);
+                piano.act(context, action)
+            }),
             EventKind::Frame if event.target == CANVAS => {
                 FrameInput::decode(event.data).map(|frame| {
                     piano.keyboard.advance(frame.elapsed_us.div_ceil(1000));

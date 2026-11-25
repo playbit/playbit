@@ -19,7 +19,7 @@ function page(states, failure) {
         document: { createElement: tag => ({ tag }), body: { classList: { remove() {} } } },
         navigator: { clipboard: { writeText: async text => copied.push(text) } },
         onboarding, error, console: { error: (...args) => failures.push(args) }, status: text => { status = text; },
-        renderedScene: undefined, surfaceDelivery: undefined, retireCanvasPresses() {}, recoveryListAccount: undefined, joining: false, paused: false, opened: false, canJoin: true, attempt: 0, syncTimer: undefined,
+        renderedScene: undefined, surfaceDelivery: undefined, retireSurfaceInput() {}, recoveryListAccount: undefined, joining: false, paused: false, opened: false, canJoin: true, attempt: 0, syncTimer: undefined,
         invitation: { url: "https://playbit.app/s#example", uri: "playbit:session:public:example", session_id: "session", privateKey: {},
             invitation: { session: { id: "session" }, root: { id: "root", share_key_with_service: false, personal: false }} },
         enrollment: { account: "bob-account" }, personalCatalog: [], runtimeVersion: undefined,

@@ -271,7 +271,12 @@ fn real_guest_waits_then_completes_from_generation_scoped_handle_only_event() {
         assert_eq!(
             guest.queue_event(
                 generation,
-                Event { kind: EventKind::ObjectCreationReady, target: 0, data: vec![0; 12] }
+                Event {
+                    object_id: 0,
+                    kind: EventKind::ObjectCreationReady,
+                    target: 0,
+                    data: vec![0; 12]
+                }
             ),
             Err(HostError::InvalidArgument)
         );
@@ -305,7 +310,7 @@ fn terminal_errors_consume_handles_and_queued_hints_but_would_block_retains_them
             assert_eq!(poll(&mut guest, handle), (error as i32, vec![0xa5; 16]));
             assert!(guest.store.data().app.capabilities.operations().next().is_none());
             assert_eq!(guest.store.data().app.events.len(), 1); // Started remains.
-            assert_eq!(guest.store.data().app.queued_bytes, 20);
+            assert_eq!(guest.store.data().app.queued_bytes, abi::EVENT_QUEUE_OVERHEAD);
             assert_eq!(poll(&mut guest, handle).0, HostError::StaleHandle as i32);
             assert_eq!(guest.notify_creation(generation, token), Err(HostError::StaleHandle));
         }
@@ -442,7 +447,7 @@ fn creation_notification_can_retry_after_event_queue_is_drained() {
             guest
                 .queue_event(
                     generation,
-                    Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+                    Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] },
                 )
                 .unwrap();
         }

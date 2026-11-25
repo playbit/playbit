@@ -166,7 +166,13 @@ enum {
     PB_EVENT_FILE_COPY_READY = 8,
     PB_EVENT_FILE_SELECTION_READY = 9,
     PB_EVENT_WAKE = 10,
+    // Original named-canvas pointer. Four little-endian u32 values (16 bytes)
+    // for canvas x, canvas y, phase (move=0, down=1, up=2, cancel=3), and
+    // primary button state (0 or 1). Target is the canvas ID.
     PB_EVENT_POINTER = 11,
+    // Original named-canvas key. Two little-endian u32 values (8 bytes)
+    // for physical key (left=1, right=2, up=3, down=4, space=5) and pressed
+    // state (0 or 1). Target is the canvas ID.
     PB_EVENT_KEY = 12,
     PB_EVENT_FRAME = 13,
     // Payload: u32 edit_count, packed {u32 start,end,inserted_len} edits, UTF-8 value.
@@ -177,7 +183,18 @@ enum {
     PB_EVENT_DATA_READY = 16,
     PB_EVENT_VOLUMES_CHANGED = 17, // target=0, little-endian uint64_t revision payload
     PB_EVENT_CHANNEL_MESSAGE = 18, // handle (8), participant (80), message ID (16), bytes
-    PB_EVENT_CHANNEL_STATUS = 19 // target=0, little-endian int32_t status
+    PB_EVENT_CHANNEL_STATUS = 19, // target=0, little-endian int32_t status
+    // PBPointerInput (56 bytes) or PBPenInput (92 bytes) for PB_POINTER_PEN.
+    // Target is the named canvas ID when applicable, or zero.
+    PB_EVENT_WINDOW_POINTER = 22,
+    // PBKeyboardInput (60 bytes). Target is zero.
+    PB_EVENT_WINDOW_KEYBOARD = 23,
+    // PBScrollInput (44 bytes). Target is zero.
+    PB_EVENT_WINDOW_SCROLL = 24,
+    // PBGestureInput (48 bytes). Target is zero.
+    PB_EVENT_WINDOW_GESTURE = 25,
+    // PBGamepadInput (36 bytes). Target is zero.
+    PB_EVENT_WINDOW_GAMEPAD = 26,
 };
 // Reread identity.read after this advisory event (target zero, empty payload).
 #define PB_EVENT_IDENTITY_CHANGED UINT32_C(0x80000015)
@@ -282,12 +299,246 @@ typedef struct PBSurface {
 enum { PB_RECORD_MAX_BYTES = 4096 };
 #define PB_RECORD_INIT(type) { .size = (uint32_t)sizeof(type), .written = 0 }
 
+// Key codes identify logical and physical keys. Key text uses Unicode scalars.
+typedef enum PBKey {
+    PB_KEY_None = 0,
+    PB_KEY_Space = 1,
+    PB_KEY_Quote = 2,
+    PB_KEY_Comma = 3,
+    PB_KEY_Minus = 4,
+    PB_KEY_Period = 5,
+    PB_KEY_Slash = 6,
+    PB_KEY_0 = 7,
+    PB_KEY_1 = 8,
+    PB_KEY_2 = 9,
+    PB_KEY_3 = 10,
+    PB_KEY_4 = 11,
+    PB_KEY_5 = 12,
+    PB_KEY_6 = 13,
+    PB_KEY_7 = 14,
+    PB_KEY_8 = 15,
+    PB_KEY_9 = 16,
+    PB_KEY_Semicolon = 17,
+    PB_KEY_Equal = 18,
+    PB_KEY_A = 19,
+    PB_KEY_B = 20,
+    PB_KEY_C = 21,
+    PB_KEY_D = 22,
+    PB_KEY_E = 23,
+    PB_KEY_F = 24,
+    PB_KEY_G = 25,
+    PB_KEY_H = 26,
+    PB_KEY_I = 27,
+    PB_KEY_J = 28,
+    PB_KEY_K = 29,
+    PB_KEY_L = 30,
+    PB_KEY_M = 31,
+    PB_KEY_N = 32,
+    PB_KEY_O = 33,
+    PB_KEY_P = 34,
+    PB_KEY_Q = 35,
+    PB_KEY_R = 36,
+    PB_KEY_S = 37,
+    PB_KEY_T = 38,
+    PB_KEY_U = 39,
+    PB_KEY_V = 40,
+    PB_KEY_W = 41,
+    PB_KEY_X = 42,
+    PB_KEY_Y = 43,
+    PB_KEY_Z = 44,
+    PB_KEY_LeftBracket = 45,
+    PB_KEY_Backslash = 46,
+    PB_KEY_RightBracket = 47,
+    PB_KEY_Grave = 48,
+    PB_KEY_Escape = 49,
+    PB_KEY_Enter = 50,
+    PB_KEY_Tab = 51,
+    PB_KEY_Backspace = 52,
+    PB_KEY_Insert = 53,
+    PB_KEY_Delete = 54,
+    PB_KEY_Left = 55,
+    PB_KEY_Right = 56,
+    PB_KEY_Down = 57,
+    PB_KEY_Up = 58,
+    PB_KEY_PageUp = 59,
+    PB_KEY_PageDown = 60,
+    PB_KEY_Home = 61,
+    PB_KEY_End = 62,
+    PB_KEY_CapsLock = 63,
+    PB_KEY_LeftShift = 64,
+    PB_KEY_LeftCtrl = 65,
+    PB_KEY_LeftAlt = 66,
+    PB_KEY_LeftSuper = 67,
+    PB_KEY_MediaNext = 68,
+    PB_KEY_MediaPrev = 69,
+    PB_KEY_MediaPlay = 70,
+    PB_KEY_MediaStop = 71,
+    PB_KEY_World1 = 72,
+    PB_KEY_World2 = 73,
+    PB_KEY_ScrollLock = 74,
+    PB_KEY_NumLock = 75,
+    PB_KEY_PrintScreen = 76,
+    PB_KEY_Pause = 77,
+    PB_KEY_F1 = 78,
+    PB_KEY_F2 = 79,
+    PB_KEY_F3 = 80,
+    PB_KEY_F4 = 81,
+    PB_KEY_F5 = 82,
+    PB_KEY_F6 = 83,
+    PB_KEY_F7 = 84,
+    PB_KEY_F8 = 85,
+    PB_KEY_F9 = 86,
+    PB_KEY_F10 = 87,
+    PB_KEY_F11 = 88,
+    PB_KEY_F12 = 89,
+    PB_KEY_F13 = 90,
+    PB_KEY_F14 = 91,
+    PB_KEY_F15 = 92,
+    PB_KEY_F16 = 93,
+    PB_KEY_F17 = 94,
+    PB_KEY_F18 = 95,
+    PB_KEY_F19 = 96,
+    PB_KEY_F20 = 97,
+    PB_KEY_F21 = 98,
+    PB_KEY_F22 = 99,
+    PB_KEY_F23 = 100,
+    PB_KEY_F24 = 101,
+    PB_KEY_Numpad0 = 102,
+    PB_KEY_Numpad1 = 103,
+    PB_KEY_Numpad2 = 104,
+    PB_KEY_Numpad3 = 105,
+    PB_KEY_Numpad4 = 106,
+    PB_KEY_Numpad5 = 107,
+    PB_KEY_Numpad6 = 108,
+    PB_KEY_Numpad7 = 109,
+    PB_KEY_Numpad8 = 110,
+    PB_KEY_Numpad9 = 111,
+    PB_KEY_NumpadDot = 112,
+    PB_KEY_NumpadDivide = 113,
+    PB_KEY_NumpadMultiply = 114,
+    PB_KEY_NumpadSubtract = 115,
+    PB_KEY_NumpadAdd = 116,
+    PB_KEY_NumpadEnter = 117,
+    PB_KEY_NumpadEquals = 118,
+    PB_KEY_NumpadClear = 119,
+    PB_KEY_RightShift = 120,
+    PB_KEY_RightCtrl = 121,
+    PB_KEY_RightAlt = 122,
+    PB_KEY_RightSuper = 123,
+    PB_KEY_Menu = 124,
+    PB_KEY_VolumeUp = 125,
+    PB_KEY_VolumeDown = 126,
+    PB_KEY_Mute = 127,
+    PB_KEY_COUNT = 128,
+} PBKey;
+
+// Window metadata command 29 takes one little-endian mask word.
+enum {
+    PB_WINDOW_INPUT_POINTER = 1u << 0,
+    PB_WINDOW_INPUT_KEYBOARD = 1u << 1,
+    PB_WINDOW_INPUT_SCROLL = 1u << 2,
+    PB_WINDOW_INPUT_GESTURE = 1u << 3,
+    PB_WINDOW_INPUT_GAMEPAD = 1u << 4
+};
+enum {
+    PB_MOD_SHIFT = 1u << 0, PB_MOD_CTRL = 1u << 1, PB_MOD_ALT = 1u << 2,
+    PB_MOD_META = 1u << 3, PB_MOD_CAPS_LOCK = 1u << 4, PB_MOD_FN = 1u << 5
+};
+enum { PB_POINTER_MOUSE = 1, PB_POINTER_TOUCH, PB_POINTER_TRACKPAD, PB_POINTER_PEN };
+enum {
+    PB_POINTER_PRIMARY = 1u << 0, PB_POINTER_IN_CONTACT = 1u << 1,
+    PB_POINTER_ERASER = 1u << 2, PB_POINTER_INVERTED = 1u << 3,
+    PB_POINTER_COALESCED = 1u << 4, PB_POINTER_PREDICTED = 1u << 5
+};
+enum {
+    PB_POINTER_MOVE = 0, PB_POINTER_DOWN, PB_POINTER_UP, PB_POINTER_CANCEL,
+    PB_POINTER_ENTER, PB_POINTER_LEAVE, PB_POINTER_NO_BUTTON = 255
+};
+enum {
+    PB_BUTTON_LEFT = 0, PB_BUTTON_RIGHT, PB_BUTTON_MIDDLE, PB_BUTTON_X1, PB_BUTTON_X2,
+    PB_BUTTON_COUNT = 16
+};
+enum { PB_INPUT_CHANGED = 0, PB_INPUT_BEGAN, PB_INPUT_ENDED, PB_SCROLL_MOMENTUM };
+enum {
+    PB_SCROLL_PRECISE = 1u << 0, PB_SCROLL_INVERTED = 1u << 1,
+    PB_SCROLL_LINES = 1u << 2, PB_SCROLL_PAGES = 1u << 3
+};
+enum { PB_GESTURE_PAN = 0, PB_GESTURE_PINCH, PB_GESTURE_ROTATE };
+enum {
+    PB_GAMEPAD_CONNECTED = 0, PB_GAMEPAD_DISCONNECTED, PB_GAMEPAD_BUTTON_DOWN,
+    PB_GAMEPAD_BUTTON_UP, PB_GAMEPAD_AXIS_MOVE
+};
+typedef enum PBGamepadButton {
+    PB_GAMEPAD_A = 0, PB_GAMEPAD_B, PB_GAMEPAD_X, PB_GAMEPAD_Y,
+    PB_GAMEPAD_LEFT_SHOULDER, PB_GAMEPAD_RIGHT_SHOULDER, PB_GAMEPAD_LEFT_TRIGGER_BUTTON,
+    PB_GAMEPAD_RIGHT_TRIGGER_BUTTON, PB_GAMEPAD_LEFT_THUMBSTICK, PB_GAMEPAD_RIGHT_THUMBSTICK,
+    PB_GAMEPAD_MENU, PB_GAMEPAD_OPTIONS, PB_GAMEPAD_HOME, PB_GAMEPAD_BUTTON_COUNT
+} PBGamepadButton;
+typedef enum PBGamepadAxis {
+    PB_GAMEPAD_LEFT_X = 0, PB_GAMEPAD_LEFT_Y, PB_GAMEPAD_RIGHT_X, PB_GAMEPAD_RIGHT_Y,
+    PB_GAMEPAD_DPAD_X, PB_GAMEPAD_DPAD_Y, PB_GAMEPAD_LEFT_TRIGGER_AXIS, PB_GAMEPAD_RIGHT_TRIGGER_AXIS,
+    PB_GAMEPAD_AXIS_COUNT
+} PBGamepadAxis;
+
+// Every PB_EVENT_WINDOW_* payload starts with PBInputSource. Integers and
+// IEEE 754 binary32 floats use little-endian byte order. Check the payload
+// length returned by pb_event_poll and copy the bytes to an aligned value of
+// the matching type before accessing it. The event header carries the window ID.
+typedef struct PBInputSource {
+    // Occurrence time in monotonic nanoseconds. Client ID zero means local.
+    uint32_t timestamp_ns_lo, timestamp_ns_hi;
+    uint32_t client_id, device_id;
+    uint16_t modifiers, reserved; // PB_MOD_* bits and a zero word.
+} PBInputSource;
+static inline uint64_t pb_input_timestamp_ns(PBInputSource source) {
+    return ((uint64_t)source.timestamp_ns_hi << 32) | source.timestamp_ns_lo;
+}
+typedef struct PBPointerInput {
+    PBInputSource source;
+    uint32_t pointer_id;
+    uint8_t phase, kind, button, click_count;
+    uint16_t flags, buttons;
+    // Position and delta in logical units, with the origin at the content's
+    // top left. Use canvas_x and canvas_y when the event targets a named canvas.
+    float x, y, dx, dy, canvas_x, canvas_y;
+} PBPointerInput;
+typedef struct PBPenInput {
+    PBPointerInput pointer;
+    float pressure, tangential_pressure, tilt_x, tilt_y, twist;
+    float width, height, altitude, azimuth;
+} PBPenInput;
+typedef struct PBKeyboardInput {
+    PBInputSource source;
+    uint16_t key, device_key; // Logical and physical PB_KEY_* codes.
+    uint8_t pressed, repeat, text_len, reserved;
+    uint32_t text[8]; // The first text_len entries are Unicode scalars.
+} PBKeyboardInput;
+typedef struct PBScrollInput {
+    PBInputSource source;
+    uint8_t kind, phase;
+    uint16_t flags;
+    float x, y, dx, dy, wheel_z; // PB_SCROLL_* flags describe delta units.
+} PBScrollInput;
+typedef struct PBGestureInput {
+    PBInputSource source;
+    uint8_t kind, phase;
+    uint16_t reserved;
+    float x, y, dx, dy, scale, rotation; // Relative scale and clockwise radians.
+} PBGestureInput;
+typedef struct PBGamepadInput {
+    PBInputSource source;
+    uint8_t phase, reserved;
+    uint16_t control; // PBGamepadButton or PBGamepadAxis, according to phase.
+    float value, x, y;
+} PBGamepadInput;
+
 typedef struct PBEvent {
     uint32_t size;
     uint32_t written;
     uint64_t generation;
     uint32_t kind;
     uint32_t target;
+    uint32_t object_id; // Originating window, or zero if unknown.
 } PBEvent;
 enum { PB_DISPLAY_NAME_BYTES = 256 };
 typedef struct PBIdentity {

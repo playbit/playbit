@@ -7,7 +7,7 @@ use crate::{
     runtime::ViewNode,
     ui::desktop::{
         UI_FONT_FAMILY, alert,
-        canvas::{canvas_extent, canvas_frame_target, canvas_id, canvas_step},
+        canvas::{canvas_extent, canvas_frame_target, canvas_step},
         popup,
         scene::{Input, InputAck, Scene},
         text_accessibility_node, text_editor, visual_bell,
@@ -34,11 +34,16 @@ gpui::actions!(playbit_native, [CopySessionLink]);
 #[cfg(feature = "desktop")]
 #[cfg(all(target_os = "macos", feature = "desktop"))]
 mod session_link;
+#[cfg(target_os = "macos")]
+mod surface_input;
 
 const LOG_DRAWER_HEIGHT: f32 = 140.;
 
 pub(crate) struct AppWindow {
     handle: Option<Handle>,
+    object_id: u32,
+    #[cfg(target_os = "macos")]
+    raw_input: surface_input::SurfaceInput,
     quit_on_last_window: bool,
     retained_owners: Rc<Cell<usize>>,
     visible: Rc<Cell<bool>>,
@@ -81,7 +86,6 @@ pub(crate) struct AppWindow {
     audio_activation: Option<gpui::Subscription>,
     frame_callback: bool,
     last_frame: Option<Instant>,
-    held_keys: u8,
     log_open: bool,
     log_empty_id: Entity<()>,
     logs: VecDeque<(String, Entity<()>)>,
@@ -148,6 +152,9 @@ impl AppWindow {
         }));
         let mut this = Self {
             handle,
+            object_id: 0,
+            #[cfg(target_os = "macos")]
+            raw_input: surface_input::SurfaceInput::default(),
             quit_on_last_window: true,
             retained_owners: Rc::new(Cell::new(0)),
             visible: Rc::new(Cell::new(true)),
@@ -190,7 +197,6 @@ impl AppWindow {
             audio_activation: None,
             frame_callback: false,
             last_frame: None,
-            held_keys: 0,
             log_open: false,
             log_empty_id: cx.new(|_| ()),
             logs: VecDeque::new(),
@@ -211,9 +217,9 @@ impl AppWindow {
         #[cfg(feature = "process")]
         self.recovery_notice.take();
 
-        self.held_keys = 0;
         self.scene.cancel_pointer_presses(cx);
         popup::reconcile_guest_menu(cx.entity_id(), None, cx);
+        handle.object_id.store(self.object_id, std::sync::atomic::Ordering::Release);
         self.scene.rebind(input_sender(Some(handle.clone())), cx);
         self.draft_epoch = handle.epoch();
         self.set_audio_visible(false);
@@ -238,9 +244,6 @@ impl AppWindow {
         cx.notify();
     }
     fn apply(&mut self, view: ViewNode, ack: InputAck, cx: &mut Context<Self>) -> bool {
-        if self.view.as_ref().and_then(canvas_id) != canvas_id(&view) {
-            self.held_keys = 0;
-        }
         match self.scene.apply(&view, ack, cx) {
             Ok(()) => {
                 popup::reconcile_guest_menu(cx.entity_id(), Some(&view), cx);
@@ -321,10 +324,12 @@ impl AppWindow {
         #[cfg(not(all(feature = "native-audio", target_os = "macos")))]
         let _ = active;
     }
+    pub(crate) fn begin_modal_input(&mut self) {
+        self.raw_input.begin_modal_input();
+    }
     fn stop_inputs(&mut self, cx: &mut Context<Self>) {
         #[cfg(all(target_os = "macos", feature = "desktop"))]
         self.cancel_session_link();
-        self.held_keys = 0;
         self.feedback = None;
         self.stopped = true;
         self.set_audio_visible(false);
@@ -353,10 +358,11 @@ impl AppWindow {
         }
     }
     fn begin_close(&mut self, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        self.raw_input.detach();
         if !self.closing {
             #[cfg(all(target_os = "macos", feature = "desktop"))]
             self.cancel_session_link();
-            self.held_keys = 0;
             self.closing = true;
             popup::reconcile_guest_menu(cx.entity_id(), None, cx);
             if self.handle.is_none() {
@@ -372,6 +378,8 @@ impl AppWindow {
     }
     fn close(&mut self, cx: &mut Context<Self>) -> bool {
         if self.stopped || self.handle.is_none() {
+            #[cfg(target_os = "macos")]
+            self.raw_input.detach();
             self.set_audio_visible(false);
             self.visible.set(false);
             #[cfg(all(target_os = "macos", feature = "desktop"))]
@@ -386,9 +394,8 @@ impl AppWindow {
             return false;
         }
         if !self.quit_on_last_window {
-            if !self.release_keys() || !self.scene.release_canvas_pointer() {
-                return false;
-            }
+            #[cfg(target_os = "macos")]
+            self.raw_input.finish();
             use playbit_api::abi::environment::Surface;
             let data = Surface { width: 0, height: 0, pixel_scale: 1., inputs: 0 }
                 .encode()
@@ -404,12 +411,17 @@ impl AppWindow {
             ) {
                 return false;
             }
+            #[cfg(target_os = "macos")]
+            self.raw_input.detach();
             // Close only after the bounded visibility notification is accepted.
             // The worker, data host and control publisher retain the same owner.
             // The UI entity stays bound to it too: making its fields read-only
             // would acknowledge private drafts without a guest acknowledgment.
             self.set_audio_visible(false);
             self.visible.set(false);
+            if let Some(handle) = &self.handle {
+                handle.object_id.store(0, std::sync::atomic::Ordering::Release);
+            }
             #[cfg(all(target_os = "macos", feature = "desktop"))]
             self.cancel_session_link();
             return true;
@@ -479,50 +491,8 @@ impl AppWindow {
             });
         });
     }
-    fn key(&mut self, key: u32, pressed: bool) -> bool {
-        if self.closing || self.stopped || !(1..=5).contains(&key) {
-            return false;
-        }
-        let Some(target) = self.view.as_ref().and_then(canvas_id) else { return false };
-        let bit = 1 << (key - 1);
-        if (self.held_keys & bit != 0) == pressed {
-            return true;
-        }
-        let input = Input {
-            kind: EventKind::Key,
-            target,
-            data: playbit_api::abi::syscall::KeyInput { key, pressed }.encode().to_vec(),
-            revision: None,
-        };
-        if !self.handle.as_ref().is_some_and(|handle| handle.send(input, None)) {
-            return false;
-        }
-        if pressed {
-            self.held_keys |= bit;
-        } else {
-            self.held_keys &= !bit;
-        }
-        true
-    }
-    fn release_keys(&mut self) -> bool {
-        for key in 1..=5 {
-            if self.held_keys & (1 << (key - 1)) != 0 && !self.key(key, false) {
-                return false;
-            }
-        }
-        true
-    }
 }
-fn game_key(key: &str) -> Option<u32> {
-    match key {
-        "left" => Some(1),
-        "right" => Some(2),
-        "up" => Some(3),
-        "down" => Some(4),
-        "space" => Some(5),
-        _ => None,
-    }
-}
+
 fn text(text: String, entity: &Entity<()>, live: bool) -> gpui::Div {
     let id = text_editor::accessibility_text_ids(entity.entity_id()).0;
     div().relative().child(text.clone()).child(
@@ -661,6 +631,23 @@ impl Render for AppWindow {
             native_style(presentation, whole_window, session_bar, super::super::zoom::factor(cx));
         let background = chrome.background;
         window.set_macos_window_style(chrome);
+        #[cfg(target_os = "macos")]
+        let mask = self
+            .view
+            .as_ref()
+            .filter(|_| !self.closing && !self.stopped)
+            .map_or(0, ViewNode::input_families);
+        #[cfg(target_os = "macos")]
+        self.raw_input.configure(
+            self.handle.clone(),
+            mask,
+            self.scene.canvas_bounds.clone(),
+            window.is_window_active(),
+            self.view
+                .as_ref()
+                .filter(|view| view.legacy_canvas() != 0)
+                .map(|_| self.focus.is_focused(window)),
+        );
         let mut observe_surface = false;
         let padding = if whole_window { 0. } else { super::super::surface::CONTENT_PADDING };
         let viewport_canvas = !self.closing && extent != CanvasExtent::Inline;
@@ -704,16 +691,6 @@ impl Render for AppWindow {
             // AppKit paints the same backing color under our Metal layer and
             // the titlebar. A translucent root would composite the color twice.
             .when(background.a == 1., |root| root.bg(background))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|this, _, window, _| {
-                    if this.scene.has_canvas_pointer() {
-                        // An accepted canvas press establishes keyboard ownership.
-                        // Editor/control presses keep their own focus handlers.
-                        window.focus(&this.focus);
-                    }
-                }),
-            )
             .on_action(cx.listener(|this, _: &CloseWindow, window, cx| {
                 if this.close(cx) {
                     window.remove_window();
@@ -729,18 +706,6 @@ impl Render for AppWindow {
             }))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let m = event.keystroke.modifiers;
-                if !event.is_held
-                    && !m.control
-                    && !m.alt
-                    && !m.platform
-                    && !m.function
-                    && this.focus.is_focused(window)
-                    && let Some(key) = game_key(&event.keystroke.key)
-                    && this.key(key, true)
-                {
-                    cx.stop_propagation();
-                    return;
-                }
                 if event.keystroke.key == "tab"
                     && !m.control
                     && !m.alt
@@ -763,14 +728,6 @@ impl Render for AppWindow {
                     }
                     cx.stop_propagation();
                 }
-            }))
-            .on_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, _, cx| {
-                if let Some(key) = game_key(&event.keystroke.key)
-                    && this.held_keys & (1 << (key - 1)) != 0
-                    && this.key(key, false)
-                {
-                    cx.stop_propagation();
-                }
             }));
         #[cfg(all(target_os = "macos", feature = "desktop"))]
         {
@@ -784,6 +741,15 @@ impl Render for AppWindow {
                 }));
             }
         }
+        #[cfg(target_os = "macos")]
+        let content = content.when(mask != 0, |content| {
+            let top = if chrome.full_size_content && chrome.transparent_titlebar && !session_bar {
+                window.macos_titlebar_height()
+            } else {
+                px(0.)
+            };
+            content.child(self.raw_input.element(top))
+        });
         let content = div()
             .relative()
             .flex_1()
@@ -1076,6 +1042,11 @@ fn show(
     focus_window: bool,
     cx: &mut App,
 ) -> Result<gpui::WindowHandle<AppWindow>, String> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT_OBJECT_ID: AtomicU32 = AtomicU32::new(1);
+    let object_id = NEXT_OBJECT_ID
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .map_err(|_| "Guest window IDs exhausted")?;
     let _timing = crate::trace::Span::new("ui.native.open_window");
     // Before admission a slow foreground launch has only its recovery message.
     let dimensions = if entity.read(cx).handle.is_none() && !entity.read(cx).error.is_empty() {
@@ -1109,10 +1080,19 @@ fn show(
         |window, cx| {
             window.focus(&entity.read(cx).focus);
             entity.update(cx, |this, cx| {
+                this.object_id = object_id;
+                #[cfg(target_os = "macos")]
+                this.raw_input.attach(window);
+                if let Some(handle) = &this.handle {
+                    handle.object_id.store(object_id, Ordering::Release);
+                }
                 #[cfg(target_os = "macos")]
                 cx.observe_window_activation(window, |this, window, _| {
                     if window.is_window_active() {
                         update_log_menu(this.log_open);
+                        this.raw_input.set_active(true);
+                    } else {
+                        this.raw_input.finish();
                     }
                 })
                 .detach();
@@ -1121,11 +1101,6 @@ fn show(
                     this.startup_requires_focus = focus_window;
                     this.reset_startup(None);
                 }
-                cx.on_blur(&this.focus, window, |this, _, _| {
-                    this.release_keys();
-                    this.scene.release_canvas_pointer();
-                })
-                .detach();
             });
             let weak = entity.downgrade();
             window.on_window_should_close(cx, move |_, cx| {
@@ -1922,6 +1897,8 @@ mod tests {
         let scene = |child| ViewNode::Theme {
             theme: Theme::light(),
             window_background_specified: false,
+            window_input: None,
+            legacy_canvas: 0,
             window_size_constraints: None,
             window_style: Some(WindowStyle::STANDARD | WindowStyle::TRANSPARENT_TITLEBAR),
             child: Box::new(child),
@@ -1990,6 +1967,8 @@ mod tests {
             theme: Theme::light(),
             window_background_specified: false,
             window_style: None,
+            window_input: None,
+            legacy_canvas: 0,
             window_size_constraints: None,
             child: Box::new(ViewNode::ContextMenu {
                 items: vec![MenuEntry::Action {
@@ -2511,196 +2490,6 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn switching_canvas_extent_updates_surface_and_pointer_origin(cx: &mut gpui::TestAppContext) {
-        use crate::ui::desktop::zoom;
-        use playbit_api::abi::{environment::Surface, syscall::PointerInput};
-        cx.update(|cx| {
-            zoom::install(cx);
-            zoom::set_scale(20_000, cx).unwrap();
-        });
-        let canvas = |extent, (width, height)| ViewNode::Canvas {
-            id: 1,
-            width,
-            height,
-            frames: playbit_api::ui::CanvasFrames::Static,
-            extent,
-            clear_color: Some(playbit_api::ui::Color(0x224488ff)),
-            items: vec![],
-        };
-        let (handle, inputs) = Handle::fixture(1);
-        let window = cx.add_window(|_, cx| {
-            AppWindow::new(Some(handle), Some(canvas(CanvasExtent::Viewport, (640, 480))), cx)
-        });
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.run_until_parked();
-        // The fixture stands in for the guest worker, including releasing its input credit.
-        while inputs.try_recv().is_ok() {}
-        // At 200% the last point falls in a partial logical unit on both axes.
-        visual.simulate_resize(size(px(639.), px(479.)));
-        for (extent, expected, position, local) in [
-            (CanvasExtent::Viewport, (287, 207), (36., 36.), (2, 2)),
-            (CanvasExtent::Window, (320, 240), (638.5, 478.5), (319, 239)),
-            (CanvasExtent::Viewport, (287, 207), (36., 36.), (2, 2)),
-        ] {
-            window
-                .update(cx, |this, _, cx| {
-                    assert!(this.apply(canvas(extent, expected), InputAck::default(), cx));
-                })
-                .unwrap();
-            cx.run_until_parked();
-            let mut geometry = None;
-            while let Ok(message) = inputs.try_recv() {
-                if message.input.kind == EventKind::SurfaceChanged {
-                    geometry = Some(Surface::decode(&message.input.data).unwrap());
-                }
-            }
-            let surface = geometry.unwrap();
-            assert_eq!((surface.width, surface.height), expected);
-            let point = gpui::point(px(position.0), px(position.1));
-            visual.simulate_mouse_down(point, gpui::MouseButton::Left, Default::default());
-            let press = inputs.try_recv().unwrap().input;
-            assert_eq!(press.kind, EventKind::Pointer);
-            let pointer = PointerInput::decode(&press.data).unwrap();
-            assert_eq!((pointer.x, pointer.y), local);
-            visual.simulate_mouse_up(point, gpui::MouseButton::Left, Default::default());
-            assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::Pointer);
-        }
-    }
-
-    #[gpui::test]
-    fn canvas_pointer_focus_loss_and_window_close_release_only_accepted_gestures(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let (handle, inputs) = Handle::fixture(1);
-        let view = ViewNode::Canvas {
-            id: 1,
-            width: 32,
-            height: 32,
-            frames: playbit_api::ui::CanvasFrames::Continuous,
-            extent: CanvasExtent::Inline,
-            clear_color: None,
-            items: vec![],
-        };
-        let window = cx.update(|cx| {
-            let window = open("Pointer".into(), Some(handle), Some(view), true, cx).unwrap();
-            bind_window(window, false, Rc::new(Cell::new(1)), "Pointer".into(), cx);
-            window
-        });
-        window.update(cx, |_, window, _| window.activate_window()).unwrap();
-        cx.run_until_parked();
-        while inputs.try_recv().is_ok() {}
-        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
-        visual.simulate_mouse_down(
-            gpui::point(px(20.), px(20.)),
-            gpui::MouseButton::Left,
-            Default::default(),
-        );
-        let press = inputs.try_recv().unwrap().input;
-        assert_eq!(press.kind, EventKind::Pointer);
-        assert_eq!(playbit_api::abi::syscall::PointerInput::decode(&press.data).unwrap().phase, 1);
-        window.update(cx, |this, window, _| assert!(this.focus.is_focused(window))).unwrap();
-        window.update(cx, |_, window, _| window.blur()).unwrap();
-        cx.run_until_parked();
-        let release = inputs.try_recv().unwrap().input;
-        assert_eq!(release.kind, EventKind::Pointer);
-        assert_eq!(
-            playbit_api::abi::syscall::PointerInput::decode(&release.data).unwrap().phase,
-            3
-        );
-        assert!(inputs.is_empty());
-        // The later distinct press is retained until a bounded cancellation
-        // and zero-area surface are both accepted before window-only Close.
-        visual.simulate_mouse_down(
-            gpui::point(px(20.), px(20.)),
-            gpui::MouseButton::Left,
-            Default::default(),
-        );
-        assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::Pointer);
-        window.update(cx, |this, _, cx| assert!(this.close(cx))).unwrap();
-        assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::Pointer);
-        assert_eq!(inputs.try_recv().unwrap().input.kind, EventKind::SurfaceChanged);
-        assert!(inputs.is_empty());
-        assert!(!inputs.is_closed());
-    }
-    #[gpui::test]
-    fn canvas_keys_are_local_release_on_blur_and_do_not_cross_owners(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.text_system()
-            .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(
-                "../../../../assets/InterVariable.ttf"
-            ))])
-            .unwrap();
-        let view = || ViewNode::Canvas {
-            id: 1,
-            width: 32,
-            height: 32,
-            frames: playbit_api::ui::CanvasFrames::Continuous,
-            extent: CanvasExtent::Inline,
-            clear_color: None,
-            items: vec![],
-        };
-        let (first, first_input) = Handle::fixture(1);
-        let (second, second_input) = Handle::fixture(2);
-        let first =
-            cx.update(|cx| open("First kart".into(), Some(first), Some(view()), true, cx).unwrap());
-        let second = cx
-            .update(|cx| open("Second kart".into(), Some(second), Some(view()), true, cx).unwrap());
-        cx.run_until_parked();
-        while first_input.try_recv().is_ok() {}
-        while second_input.try_recv().is_ok() {}
-        first
-            .update(cx, |this, window, _| {
-                window.activate_window();
-                window.focus(&this.focus);
-            })
-            .unwrap();
-        cx.run_until_parked();
-        cx.simulate_keystrokes(first.into(), "up");
-        cx.run_until_parked();
-        let key = first_input.try_recv().unwrap().input;
-        assert_eq!(key.kind, EventKind::Key);
-        assert_eq!(key.target, 1);
-        assert_eq!(
-            playbit_api::abi::syscall::KeyInput::decode(&key.data).unwrap(),
-            playbit_api::abi::syscall::KeyInput { key: 3, pressed: true }
-        );
-        assert!(second_input.is_empty(), "one window never sends input to its sibling");
-        first.update(cx, |_, window, _| window.blur()).unwrap();
-        cx.run_until_parked();
-        let release = first_input.try_recv().unwrap().input;
-        assert_eq!(
-            playbit_api::abi::syscall::KeyInput::decode(&release.data).unwrap(),
-            playbit_api::abi::syscall::KeyInput { key: 3, pressed: false }
-        );
-        assert!(first_input.is_empty());
-        assert!(second_input.is_empty());
-        second.update(cx, |this, window, _| window.focus(&this.focus)).unwrap();
-        cx.simulate_keystrokes(second.into(), "right");
-        cx.dispatch_key_up(second.into(), gpui::Keystroke::parse("right").unwrap());
-        cx.run_until_parked();
-        for pressed in [true, false] {
-            let key = second_input.try_recv().unwrap().input;
-            assert_eq!(
-                playbit_api::abi::syscall::KeyInput::decode(&key.data).unwrap(),
-                playbit_api::abi::syscall::KeyInput { key: 2, pressed }
-            );
-        }
-        assert!(first_input.is_empty());
-        assert!(second_input.is_empty());
-        second
-            .update(cx, |this, _, cx| {
-                assert!(this.key(3, true));
-                assert!(this.key(3, true), "held repeats add no root");
-                this.begin_close(cx);
-                assert_eq!(this.held_keys, 0);
-                assert!(!this.key(3, false));
-            })
-            .unwrap();
-        assert!(second_input.is_closed());
-        assert_eq!(second_input.len(), 1);
-    }
     #[gpui::test]
     fn restore_reuses_private_ui_and_accepts_no_old_input_or_new_owner(
         cx: &mut gpui::TestAppContext,

@@ -153,16 +153,22 @@ fn two_c_apps_use_plain_calls_and_keep_lifecycle_and_generation_separate() {
     assert!(!checked(&second.pump().unwrap()));
     assert_ne!(a.generation, b.generation);
     assert_eq!(
-        first.queue_event(b.generation, Event { kind: EventKind::Click, target: 1, data: vec![] }),
+        first.queue_event(
+            b.generation,
+            Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] }
+        ),
         Err(HostError::StaleHandle)
     );
     first
-        .queue_event(a.generation, Event { kind: EventKind::Click, target: 1, data: vec![] })
+        .queue_event(
+            a.generation,
+            Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
+        )
         .unwrap();
     first
         .queue_event(
             a.generation,
-            Event { kind: EventKind::Submit, target: 2, data: b"test".to_vec() },
+            Event { object_id: 0, kind: EventKind::Submit, target: 2, data: b"test".to_vec() },
         )
         .unwrap();
     assert!(checked(&first.pump().unwrap()));
@@ -317,7 +323,7 @@ fn native_input_to_validated_scene_timing() {
         let start = Instant::now();
         app.queue_event(
             app.generation(),
-            Event { kind: EventKind::Click, target: 1, data: vec![] },
+            Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
         )
         .unwrap();
         let frame = app.pump().unwrap();

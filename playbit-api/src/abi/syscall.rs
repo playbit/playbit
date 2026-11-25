@@ -11,6 +11,8 @@ pub const MEMORY_EXPORT: &str = "memory";
 pub const MAX_CALL_BYTES: usize = 64 * 1024 * 1024;
 /// Logical data values and query output retain their independent 1 MiB budget.
 pub const MAX_DATA_BYTES: usize = 1024 * 1024;
+/// Timestamp-independent envelope charge, including the payload length.
+pub const EVENT_QUEUE_OVERHEAD: usize = 24;
 pub const MAX_EVENT_BYTES: usize =
     /* super::text::MAX_TEXT_BYTES + super::text::TEXT_EVENT_OVERHEAD */
     265220;
@@ -37,8 +39,8 @@ pub const MAX_STARTUP_ARGUMENT_NAME_BYTES: usize = 128;
 pub const MAX_STARTUP_ARGUMENT_JSON_BYTES: usize = 32 * 1024;
 
 // Queue accounting includes generation, kind, target and payload length.
-const _: () = assert!(20 + MAX_EVENT_BYTES <= MAX_CALL_BYTES);
-const _: () = assert!(20 + MAX_EVENT_BYTES <= MAX_QUEUED_EVENT_BYTES);
+const _: () = assert!(EVENT_QUEUE_OVERHEAD + MAX_EVENT_BYTES <= MAX_CALL_BYTES);
+const _: () = assert!(EVENT_QUEUE_OVERHEAD + MAX_EVENT_BYTES <= MAX_QUEUED_EVENT_BYTES);
 const _: () = assert!(MAX_STRING_BYTES + 4 <= MAX_EVENT_BYTES);
 const _: () = assert!(MAX_STARTUP_ARGUMENT_NAME_BYTES <= MAX_STRING_BYTES);
 const _: () = assert!(MAX_STARTUP_ARGUMENT_JSON_BYTES <= MAX_CALL_BYTES);
@@ -489,7 +491,9 @@ pub enum EventKind {
     FileCopyReady = 8,
     FileSelectionReady = 9,
     Wake = 10,
+    /// Original named-canvas pointer input.
     Pointer = 11,
+    /// Original named-canvas keyboard input.
     Key = 12,
     Frame = 13,
     /// Native byte edits and the full committed UTF-8 value; marked text stays native.
@@ -503,6 +507,11 @@ pub enum EventKind {
     ChannelStatus = 19,
     /// Capture generation snapshot at callback entry; not a wake source.
     TraceConfig = 20,
+    WindowPointer = 22,
+    WindowKeyboard = 23,
+    WindowScroll = 24,
+    WindowGesture = 25,
+    WindowGamepad = 26,
     /// Advisory, target zero, empty payload. Reread the identity display name.
     IdentityChanged = 0x8000_0015,
 }
@@ -645,6 +654,9 @@ impl<'a> Reader<'a> {
         let value = self.take(1)?[0];
         assert_eq!(self.position() - before, 1);
         Ok(value)
+    }
+    pub fn u16(&mut self) -> Result<u16, Error> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("take returned two bytes")))
     }
     pub fn u32(&mut self) -> Result<u32, Error> {
         let before = self.position();

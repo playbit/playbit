@@ -268,7 +268,7 @@ impl State {
             *state.work.pending.get(&slot).expect("pending operation retains its accepted root");
         crate::runtime::syscall::events::push_work_event(
             state,
-            Event { kind, target: 0, data: data.to_vec() },
+            Event { object_id: 0, kind, target: 0, data: data.to_vec() },
             Some(root),
         )
     }
@@ -293,7 +293,10 @@ impl State {
         }
         let mut bytes = update.generation.to_le_bytes().to_vec();
         bytes.extend(update.build_id);
-        push_event(state, Event { kind: EventKind::UpdateAvailable, target: 0, data: bytes })?;
+        push_event(
+            state,
+            Event { object_id: 0, kind: EventKind::UpdateAvailable, target: 0, data: bytes },
+        )?;
         state.pending_update = Some(update);
         state.deferred_update = None;
         Ok(())
@@ -328,7 +331,7 @@ impl State {
 
     fn queue_invalidation(&mut self, kind: EventKind) -> bool {
         self.events.iter().any(|queued| queued.kind == kind)
-            || push_event(self, Event { kind, target: 0, data: Vec::new() }).is_ok()
+            || push_event(self, Event { object_id: 0, kind, target: 0, data: Vec::new() }).is_ok()
     }
 
     pub(in crate::runtime) fn set_participants(
@@ -535,7 +538,7 @@ impl State {
         self.wake_deadline = None;
         self.events.retain(|event| {
             if work::discard_on_deactivate(event.kind) {
-                self.queued_bytes -= 20 + event.data.len();
+                self.queued_bytes -= abi::EVENT_QUEUE_OVERHEAD + event.data.len();
                 false
             } else {
                 true

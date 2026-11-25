@@ -58,6 +58,12 @@ pub(super) mod events;
     feature = "desktop-ui"
 ))]
 pub(crate) use events::menu_contains;
+#[cfg(any(
+    all(feature = "native-runtime", feature = "local-store"),
+    feature = "app-host",
+    test
+))]
+pub(crate) use events::route_input;
 pub use events::validate_input;
 pub(super) use events::{push_event, queue_due_wake};
 mod files;

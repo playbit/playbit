@@ -141,7 +141,10 @@ impl Owner {
             data
         };
         self.guest
-            .queue_event(self.guest.generation(), Event { kind, target: 1, data: data.to_vec() })
+            .queue_event(
+                self.guest.generation(),
+                Event { object_id: 0, kind, target: 1, data: data.to_vec() },
+            )
             .unwrap();
     }
 }
@@ -339,7 +342,10 @@ impl Fixture {
             data
         };
         self.guest
-            .queue_event(self.guest.generation(), Event { kind, target, data: data.to_vec() })
+            .queue_event(
+                self.guest.generation(),
+                Event { object_id: 0, kind, target, data: data.to_vec() },
+            )
             .unwrap();
         self.pump();
     }

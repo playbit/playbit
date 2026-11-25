@@ -6,18 +6,19 @@ mod published_prefixes;
 #[used]
 #[allow(unsafe_code, reason = "Read-only compiler layout fixture.")]
 #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "playbit.abi.layout"))]
-static EVENT_LAYOUT: [u32; 5] = [
+static EVENT_LAYOUT: [u32; 6] = [
     size_of::<playbit_api::abi::operations::Event>() as u32,
     align_of::<playbit_api::abi::operations::Event>() as u32,
     core::mem::offset_of!(playbit_api::abi::operations::Event, generation) as u32,
     core::mem::offset_of!(playbit_api::abi::operations::Event, kind) as u32,
     core::mem::offset_of!(playbit_api::abi::operations::Event, target) as u32,
+    core::mem::offset_of!(playbit_api::abi::operations::Event, object_id) as u32,
 ];
 
 #[used]
 #[allow(unsafe_code, reason = "Read-only compiler layout fixture.")]
 #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "playbit.abi.records"))]
-static LAYOUT: [u32; 703] = [
+static LAYOUT: [u32; 705] = [
     size_of::<playbit_api::abi::data::EntryHandle>() as u32,
     align_of::<playbit_api::abi::data::EntryHandle>() as u32,
     5,
@@ -554,7 +555,7 @@ static LAYOUT: [u32; 703] = [
     <playbit_api::abi::pending::Selection as Record>::FIELDS[6].width,
     size_of::<playbit_api::abi::operations::Event>() as u32,
     align_of::<playbit_api::abi::operations::Event>() as u32,
-    5,
+    6,
     core::mem::offset_of!(playbit_api::abi::operations::Event, size) as u32,
     <playbit_api::abi::operations::Event as Record>::FIELDS[0].width,
     core::mem::offset_of!(playbit_api::abi::operations::Event, written) as u32,
@@ -565,6 +566,8 @@ static LAYOUT: [u32; 703] = [
     <playbit_api::abi::operations::Event as Record>::FIELDS[3].width,
     core::mem::offset_of!(playbit_api::abi::operations::Event, target) as u32,
     <playbit_api::abi::operations::Event as Record>::FIELDS[4].width,
+    core::mem::offset_of!(playbit_api::abi::operations::Event, object_id) as u32,
+    <playbit_api::abi::operations::Event as Record>::FIELDS[5].width,
     size_of::<playbit_api::abi::operations::Identity>() as u32,
     align_of::<playbit_api::abi::operations::Identity>() as u32,
     10,

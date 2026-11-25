@@ -46,9 +46,10 @@ pub(super) fn validate_scene_capabilities(
             }
             super::file_ops::address(state, *file, VolumeRights::READ).map(|_| ())
         }
-        ViewNode::Theme { child, window_style, window_size_constraints, .. } => {
+        ViewNode::Theme { child, window_style, window_size_constraints, window_input, .. } => {
             let supported = state.host.supported_features();
-            if (window_style.is_some() && !supported.contains(&WINDOW_STYLE_FEATURE))
+            if (window_input.is_some() && !supported.contains(&playbit_api::abi::input::FEATURE))
+                || (window_style.is_some() && !supported.contains(&WINDOW_STYLE_FEATURE))
                 || (window_size_constraints.is_some()
                     && !supported.contains(&WINDOW_SIZE_CONSTRAINTS_FEATURE))
             {

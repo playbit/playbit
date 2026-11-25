@@ -501,7 +501,7 @@ mod tests {
             managed
                 .queue_event(
                     first_generation,
-                    Event { kind: EventKind::Click, target: 1, data: vec![] },
+                    Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
                 )
                 .unwrap();
             managed
@@ -515,7 +515,7 @@ mod tests {
             assert_eq!(
                 managed.queue_event(
                     first_generation,
-                    Event { kind: EventKind::Click, target: 1, data: vec![] }
+                    Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] }
                 ),
                 Err(HostError::StaleHandle)
             );

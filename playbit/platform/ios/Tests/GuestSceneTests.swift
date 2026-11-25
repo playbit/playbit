@@ -4,6 +4,7 @@ import Foundation
         let scene: GuestScene
         do {
             let root = SceneFixture(kind: 1)
+            root.fields.window_input = 3
             let field = SceneFixture(kind: 5, text: "A\0é draft", placeholder: "Type here")
             field.fields.id = 7; field.fields.read_only = 1; field.fields.multiline = 1
             let canvas = SceneFixture(kind: 7)
@@ -22,6 +23,7 @@ import Foundation
         }
         // Native owners are gone; all Swift text and rectangle storage remains valid.
         precondition(scene.kind == .column && scene.children.count == 2)
+        precondition(scene.windowInput == 3 && scene.children[0].windowInput == 0)
         precondition(scene.children[0].text == "A\0é draft")
         precondition(scene.children[0].placeholder == "Type here")
         precondition(scene.children[0].readOnly && scene.children[0].multiline)
@@ -47,6 +49,6 @@ import Foundation
         let staticCanvas = SceneFixture(kind: 7)
         let copiedStatic = try GuestScene.read(staticCanvas.pointer)
         precondition(copiedStatic.frames == 0 && copiedStatic.clearColor == nil)
-        print("GuestSceneTests: typed fields, copied text/pixel lifetimes, embedded NUL, frame policy and malformed spans passed")
+        print("GuestSceneTests: typed fields, window input, copied text/pixel lifetimes, embedded NUL, frame policy and malformed spans passed")
     }
 }

@@ -136,7 +136,7 @@ IosSchedule pb_ios_reply_schedule(const IosReply *);
 const IosScene *pb_ios_reply_scene(const IosReply *);
 void pb_ios_reply_free(IosReply *);
 typedef struct {
-    uint32_t kind, id, style, state;
+    uint32_t kind, id, style, state, window_input;
     uint8_t disabled, multiline, read_only;
     const uint8_t *text;
     size_t text_len;
@@ -163,7 +163,7 @@ const IosScene *pb_ios_scene_child(const IosScene *, size_t index);
 SceneCanvasItem pb_ios_scene_canvas_item(const IosScene *, size_t index);
 // channel: 0 public, 1 testing. Unknown values and conflicting profile markers fail.
 IosReply *pb_ios_open(const char *profile, uint8_t channel, IosEngine **output);
-IosReply *pb_ios_app_input(IosEngine *, uint64_t id, const uint8_t *instance, size_t instance_len, uint32_t kind, uint32_t target, const uint8_t *data, size_t data_len);
+IosReply *pb_ios_app_input(IosEngine *, uint64_t id, const uint8_t *instance, size_t instance_len, uint32_t kind, uint32_t target, uint32_t object_id, const uint8_t *data, size_t data_len);
 IosReply *pb_ios_status(IosEngine *, uint64_t id);
 IosReply *pb_ios_prepare_sign_in(IosEngine *, uint64_t id);
 IosReply *pb_ios_transfer_status(IosEngine *, uint64_t id);

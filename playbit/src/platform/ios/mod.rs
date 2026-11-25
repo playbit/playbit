@@ -8,17 +8,9 @@ mod audio;
 #[cfg(feature = "phase1-qualification")]
 mod keychain_qualification;
 use crate::engine::{Engine, Request};
-use crate::runtime::{ViewNode, decode_view};
-fn decode_scene(bytes: &[u8]) -> Result<ViewNode, String> {
-    let scene = decode_view(bytes)
-        .map_err(|_| "The app scene is invalid. The previous view is retained.")?;
-    scene::storage(&scene)?;
-    Ok(scene)
-}
+use crate::runtime::ViewNode;
 
-/// Exercise the current scene adoption boundary with a zero-width canvas.
-/// Only the simulator qualification build exposes this probe; no JSON parser
-/// or second production decoder participates in native scene adoption.
+/// Exercise the guest runtime's scene decoder with a zero-width canvas.
 #[cfg(feature = "phase1-qualification")]
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_ios_qualification_malformed_scene() -> u8 {
@@ -35,7 +27,7 @@ pub extern "C" fn pb_ios_qualification_malformed_scene() -> u8 {
         bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         bytes.extend_from_slice(payload);
     }
-    u8::from(decode_scene(&bytes).is_ok())
+    u8::from(crate::runtime::decode_view(&bytes).is_ok())
 }
 
 // Deliberate host failure, only in the existing simulator qualification build.
@@ -186,9 +178,9 @@ impl IosState {
                         }
                         LocalReply::Frame(value) => {
                             if !value.view.is_empty() {
-                                let scene = decode_scene(&value.view)?;
-                                scene::storage(&scene)?;
-                                retained_scene = Some(scene);
+                                let scene = self.owner.apps.scene(value.instance)?;
+                                scene::storage(scene)?;
+                                retained_scene = Some(scene.clone());
                             }
                             retained_presentation = Some(presentation::Metadata {
                                 instance: value.instance,
@@ -686,6 +678,7 @@ pub unsafe extern "C" fn pb_ios_app_input(
     instance_len: usize,
     kind: u32,
     target: u32,
+    object_id: u32,
     data: *const u8,
     data_len: usize,
 ) -> *mut IosReply {
@@ -709,7 +702,7 @@ pub unsafe extern "C" fn pb_ios_app_input(
         submit_local(
             handle,
             id,
-            LocalRequest::Input { instance, kind, target, data: data.to_vec() },
+            LocalRequest::Input { instance, kind, target, object_id, data: data.to_vec() },
         )
     })
 }
@@ -1398,6 +1391,7 @@ mod tests {
                         instance.len(),
                         value["kind"].as_u64().unwrap().try_into().unwrap(),
                         value["target"].as_u64().unwrap().try_into().unwrap(),
+                        1,
                         data.as_ptr(),
                         data.len(),
                     )
@@ -2173,6 +2167,7 @@ mod tests {
                     instance.as_ptr(),
                     instance_len,
                     2,
+                    1,
                     1,
                     std::ptr::null(),
                     data_len,

@@ -5,7 +5,7 @@ use super::{
     HostError, HostResult, Opcode, State, abi, files::validate_scene_capabilities,
     require_supported,
 };
-use crate::runtime::decode_view;
+use crate::runtime::{ViewNode, decode_view};
 use std::time::{Duration, Instant};
 
 pub(in crate::runtime) fn log(state: &mut State, message: &str) -> HostResult<()> {
@@ -37,8 +37,17 @@ pub(in crate::runtime) fn view_submit(state: &mut State, scene: &[u8]) -> HostRe
     if scene.len() > state.view_bytes_limit as usize {
         return Err(HostError::LimitExceeded);
     }
-    let view = decode_view(scene).map_err(|_| HostError::InvalidArgument)?;
+    let mut view = decode_view(scene).map_err(|()| HostError::InvalidArgument)?;
     validate_scene_capabilities(state, &view)?;
+    // The presented scene outlives this turn. Remember the first explicit window-input
+    // subscription so subsequent omissions disable input and still admit pending releases.
+    if let ViewNode::Theme { window_input, .. } = &mut view {
+        if window_input.is_some() {
+            state.uses_window_input = true;
+        } else if state.uses_window_input {
+            *window_input = Some(0);
+        }
+    }
     state.view = Some(view);
     state.view_bytes = Some(scene.to_vec());
     assert!(state.view.is_some());
@@ -67,7 +76,7 @@ pub(in crate::runtime) fn wake_after(
     state.events.retain(|queued| {
         let event = &queued.event;
         if event.kind == abi::EventKind::Wake {
-            state.queued_bytes -= 20;
+            state.queued_bytes -= abi::EVENT_QUEUE_OVERHEAD;
             false
         } else {
             true
@@ -101,7 +110,7 @@ pub(in crate::runtime) fn observe_volumes(state: &mut State, revision: u64) -> H
     }
     state.events.retain(|queued| {
         if queued.event.kind == abi::EventKind::VolumesChanged {
-            state.queued_bytes -= 20 + queued.event.data.len();
+            state.queued_bytes -= abi::EVENT_QUEUE_OVERHEAD + queued.event.data.len();
             false
         } else {
             true
@@ -118,6 +127,7 @@ pub(in crate::runtime) fn queue_volume_change(state: &mut State) {
         return;
     }
     let event = super::Event {
+        object_id: 0,
         kind: abi::EventKind::VolumesChanged,
         target: 0,
         data: state.volume_revision.to_le_bytes().to_vec(),
@@ -142,6 +152,9 @@ mod tests {
     impl Host for LocalHost {
         fn supported_operations(&self) -> &[Opcode] {
             &[]
+        }
+        fn supported_features(&self) -> &[&str] {
+            &[playbit_api::abi::input::FEATURE]
         }
     }
     fn instance() -> State {
@@ -249,24 +262,78 @@ mod tests {
     }
 
     #[test]
+    fn window_input_release_survives_a_turn_that_omits_the_subscription() {
+        // Present a named canvas, opt in, then omit the mask on a later turn.
+        use playbit_api::abi::input::{self, Input, Key, Keyboard, Source};
+        use playbit_api::ui::CanvasFrames;
+        let mut state = instance();
+        let mut encoder_state = playbit_api::context::ContextState::default();
+        let key = |pressed| {
+            let input = Input::Keyboard(Keyboard {
+                key: Key::Up,
+                device_key: Key::Up,
+                pressed,
+                repeat: false,
+                text: ['\0'; 8],
+                text_len: 0,
+            });
+            Event {
+                object_id: 1,
+                kind: input.kind(),
+                target: 0,
+                data: input.encode(Source::default()),
+            }
+        };
+        for (mask, expected) in [
+            (None, Some(abi::EventKind::Key)),
+            (Some(input::KEYBOARD), Some(abi::EventKind::WindowKeyboard)),
+            (None, None),
+            (None, None),
+        ] {
+            state.begin_turn(Instant::now()).unwrap();
+            let mut encoder = encoder_state.view();
+            if let Some(mask) = mask {
+                encoder.window_input(mask);
+            }
+            encoder.column_start();
+            encoder.canvas(7, 16, 16, CanvasFrames::Static, &[]);
+            encoder.column_end();
+            view_submit(&mut state, &encoder.finish()).unwrap();
+            let view = state.finish_frame().into_view().unwrap();
+            let route =
+                |pressed| super::super::route_input(&view, key(pressed)).unwrap().map(|e| e.kind);
+            assert_eq!(route(true), expected);
+            assert_eq!(route(false), expected.or(Some(abi::EventKind::WindowKeyboard)));
+        }
+    }
+
+    #[test]
     fn typed_wake_replacement_keeps_other_events_and_rejects_before_mutation() {
         let mut state = instance();
         let now = Instant::now();
-        push_event(&mut state, Event { kind: abi::EventKind::Wake, target: 0, data: vec![] })
-            .unwrap();
         push_event(
             &mut state,
-            Event { kind: abi::EventKind::DataChanged, target: 0, data: vec![1, 2, 3] },
+            Event { object_id: 0, kind: abi::EventKind::Wake, target: 0, data: vec![] },
+        )
+        .unwrap();
+        push_event(
+            &mut state,
+            Event {
+                object_id: 0,
+                kind: abi::EventKind::DataChanged,
+                target: 0,
+                data: vec![1, 2, 3],
+            },
         )
         .unwrap();
         let before = state.events.clone();
         assert_eq!(wake_after(&mut state, 0, now), Err(HostError::InvalidArgument));
         assert_eq!(state.events, before);
-        assert_eq!(state.queued_bytes, 63);
+        assert_eq!(state.queued_bytes, 3 * abi::EVENT_QUEUE_OVERHEAD + 3);
         assert_eq!(state.wake_deadline, None);
         wake_after(&mut state, abi::MIN_WAKE_DELAY_MS, now).unwrap();
         assert_eq!(state.events.len(), 2);
-        assert_eq!(state.queued_bytes, 43);
+        assert_eq!(state.queued_bytes, 2 * abi::EVENT_QUEUE_OVERHEAD + 3);
         assert_eq!(state.events[1].event.data, [1, 2, 3]);
         assert_eq!(
             state.wake_deadline,
@@ -297,7 +364,7 @@ mod tests {
         while state.events.len() < super::super::MAX_QUEUED_EVENTS {
             push_event(
                 &mut state,
-                Event { kind: abi::EventKind::DataChanged, target: 0, data: vec![] },
+                Event { object_id: 0, kind: abi::EventKind::DataChanged, target: 0, data: vec![] },
             )
             .unwrap();
         }

@@ -206,7 +206,11 @@ fn check_accounting(state: &State) {
     // This independent recount is deliberately a release assertion in tests.
     assert_eq!(
         state.queued_bytes,
-        state.events.iter().map(|queued| 20 + queued.event.data.len()).sum::<usize>()
+        state
+            .events
+            .iter()
+            .map(|queued| abi::EVENT_QUEUE_OVERHEAD + queued.event.data.len())
+            .sum::<usize>()
     );
     state.assert_invariants();
 }
@@ -223,6 +227,7 @@ fn every_queue_mutation_preserves_bytes_and_unrelated_events() {
             push_event(
                 &mut state,
                 Event {
+                    object_id: 0,
                     kind: EventKind::DataChanged,
                     target: index as u32,
                     data: vec![42; index % 17],
@@ -241,7 +246,7 @@ fn every_queue_mutation_preserves_bytes_and_unrelated_events() {
             (EventKind::FileSelectionReady, vec![0; 8]),
             (EventKind::DataChanged, request.to_vec()),
         ] {
-            push_event(&mut state, Event { kind, target: 0, data }).unwrap();
+            push_event(&mut state, Event { object_id: 0, kind, target: 0, data }).unwrap();
             check_accounting(&state);
         }
         control::wake_after(&mut state, 1000, Instant::now()).unwrap();
@@ -253,7 +258,7 @@ fn every_queue_mutation_preserves_bytes_and_unrelated_events() {
             assert_eq!(
                 push_event(
                     &mut state,
-                    Event { kind: EventKind::DataChanged, target: 0, data: vec![] }
+                    Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] }
                 ),
                 Err(HostError::LimitExceeded)
             );
@@ -261,7 +266,7 @@ fn every_queue_mutation_preserves_bytes_and_unrelated_events() {
         }
         consume_operation(&mut state, handle, pending);
         assert_eq!(state.events.len(), retained + 3);
-        assert_eq!(state.queued_bytes, before - 28);
+        assert_eq!(state.queued_bytes, before - (8 + abi::EVENT_QUEUE_OVERHEAD));
         check_accounting(&state);
         let before = state.queued_bytes;
         assert_eq!(
@@ -270,7 +275,7 @@ fn every_queue_mutation_preserves_bytes_and_unrelated_events() {
         );
         assert_eq!(state.queued_bytes, before);
         control::wake_after(&mut state, 1000, Instant::now()).unwrap();
-        assert_eq!(state.queued_bytes, before - 20);
+        assert_eq!(state.queued_bytes, before - abi::EVENT_QUEUE_OVERHEAD);
         assert!(state.events.iter().all(|queued| queued.event.kind != EventKind::Wake));
         check_accounting(&state);
         for index in 0..retained + 2 {
@@ -332,7 +337,12 @@ fn benchmark_diagnostic_scans() {
             for _ in 1..size {
                 push_event(
                     &mut state,
-                    Event { kind: EventKind::DataChanged, target: 0, data: vec![42; 16] },
+                    Event {
+                        object_id: 0,
+                        kind: EventKind::DataChanged,
+                        target: 0,
+                        data: vec![42; 16],
+                    },
                 )
                 .unwrap();
             }
@@ -348,6 +358,7 @@ fn benchmark_diagnostic_scans() {
                 push_event(
                     &mut state,
                     Event {
+                        object_id: 0,
                         kind: EventKind::FileSelectionReady,
                         target: 0,
                         data: request.to_vec(),

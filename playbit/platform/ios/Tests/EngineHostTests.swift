@@ -58,7 +58,7 @@ func submitFixture(_ handle: OpaquePointer?, _ id: UInt64) -> OpaquePointer? {
     return first ? step(["id": id, "ok": true, "data": ["first": true]]) : step()
 }
 func pb_ios_app_input(_ handle: OpaquePointer?, _ id: UInt64, _ instance: UnsafePointer<UInt8>?, _ instanceLen: Int,
-                  _ kind: UInt32, _ target: UInt32, _ data: UnsafePointer<UInt8>?, _ dataLen: Int) -> OpaquePointer? {
+                  _ kind: UInt32, _ target: UInt32, _ objectID: UInt32, _ data: UnsafePointer<UInt8>?, _ dataLen: Int) -> OpaquePointer? {
     precondition(Identifier.decode(String(decoding: UnsafeBufferPointer(start: instance, count: instanceLen), as: UTF8.self), bytes: 16) == [UInt8](repeating: 0xaa, count: 16) && kind == 14 && target == 7)
     precondition(Array(UnsafeBufferPointer(start: data, count: dataLen)) == Array(repeating: 65, count: GuestTextEdits.payloadBytesMax))
     return submitFixture(handle, id)

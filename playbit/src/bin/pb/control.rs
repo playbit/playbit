@@ -31,14 +31,19 @@ pub(super) fn run(
                 target: args[3].parse().map_err(usage_error)?,
                 data: args[4].as_bytes().to_vec(),
             },
-            "key" if args.len() == 6 => {
-                let pressed = match args[5].as_str() {
+            "key" if (5..=6).contains(&args.len()) => {
+                let target = if args.len() == 6 {
+                    Some(args[3].parse().map_err(usage_error)?)
+                } else {
+                    None
+                };
+                let key = &args[args.len() - 2];
+                let pressed = match args[args.len() - 1].as_str() {
                     "down" => true,
                     "up" => false,
                     _ => return Err(usage_error("Expected key transition down or up")),
                 };
-                Operation::key(args[3].parse().map_err(usage_error)?, &args[4], pressed)
-                    .map_err(usage_error)?
+                Operation::key(target, key, pressed).map_err(usage_error)?
             }
             "pointer" if (7..=8).contains(&args.len()) => Operation::pointer(
                 args[3].parse().map_err(usage_error)?,
@@ -122,6 +127,28 @@ pub(super) fn wait_owner(
 #[allow(clippy::unwrap_used, reason = "Tests assert exact tool selection syntax.")]
 mod tests {
     use super::*;
+    #[test]
+    fn canvas_and_window_keys_reach_the_owner_lookup() {
+        // Stop both published command forms after parsing and before resolving any live owner.
+        for keys in [vec!["7", "up", "down"], vec!["F12", "up"]] {
+            let args = ["input", "123456789ABCDEFGHJKLMN", "key"]
+                .into_iter()
+                .chain(keys)
+                .map(String::from)
+                .collect::<Vec<_>>();
+            let result = run(
+                &args,
+                Path::new("."),
+                &|request| {
+                    assert!(matches!(request, Request::InstanceList { .. }));
+                    Err("parsed key input".into())
+                },
+                playbit::release_channel::ReleaseChannel::Testing,
+            );
+            assert_eq!(result.unwrap_err().to_string(), "parsed key input");
+        }
+    }
+
     #[test]
     fn instance_selection_is_explicit_and_preserves_input_payloads() {
         let args: Vec<String> = [

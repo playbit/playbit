@@ -1419,7 +1419,7 @@ fn local_guest_yields_and_receives_a_real_engine_syscall_completion() {
     let mut logs = Vec::new();
     guest.deactivate();
     assert_eq!(
-        guest.input(Event { kind: EventKind::Click, target: 1, data: vec![] }),
+        guest.input(Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] }),
         Err(HostError::Conflict)
     );
     while guest.accepted_work_pending() {
@@ -1454,8 +1454,12 @@ fn guest_execution_and_input_do_not_create_an_engine_vm() {
     assert_eq!(first.logs, vec!["turn"]);
     assert!(!guest.ready(Instant::now()));
     assert!(!guest.accepted_work_pending());
-    assert!(guest.input(Event { kind: EventKind::Click, target: 999, data: vec![] }).is_err());
-    guest.input(Event { kind: EventKind::Click, target: 1, data: vec![] }).unwrap();
+    assert!(
+        guest
+            .input(Event { object_id: 0, kind: EventKind::Click, target: 999, data: vec![] })
+            .is_err()
+    );
+    guest.input(Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] }).unwrap();
     assert!(guest.ready(Instant::now()));
     let frame = guest.pump().unwrap();
     assert!(frame.view.is_some());
@@ -1681,7 +1685,7 @@ fn rename_allows_full_guest_queue_to_drain_before_retrying_channel_completion() 
             .guest
             .queue_event(
                 guest.generation(),
-                Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+                Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] },
             )
             .unwrap();
     }
@@ -1887,7 +1891,7 @@ fn unavailable_gui_folder_can_be_repaired_and_removed_in_the_running_wasm_instan
     assert_eq!(engine.services.store.delivery_revision(), revision);
     assert_eq!(guest.generation(), generation);
     assert_eq!(guest.guest.volume_handle(*binding.root.as_bytes()), Some(root));
-    guest.input(Event { kind: EventKind::Click, target: 1, data: vec![] }).unwrap();
+    guest.input(Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] }).unwrap();
     assert!(guest.pump().unwrap().view.is_some());
 }
 

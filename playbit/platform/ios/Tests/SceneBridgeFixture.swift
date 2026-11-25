@@ -1,7 +1,7 @@
 // C bridge fixture for testing the production Swift scene copy independently of UIKit.
 import Foundation
 struct SceneNode {
-    var kind: UInt32 = 0, id: UInt32 = 0, style: UInt32 = 0, state: UInt32 = 0
+    var kind: UInt32 = 0, id: UInt32 = 0, style: UInt32 = 0, state: UInt32 = 0, window_input: UInt32 = 0
     var disabled: UInt8 = 0, multiline: UInt8 = 0, read_only: UInt8 = 0
     var text: UnsafePointer<UInt8>?, text_len = 0
     var placeholder: UnsafePointer<UInt8>?, placeholder_len = 0

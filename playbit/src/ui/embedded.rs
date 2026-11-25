@@ -20,7 +20,7 @@ pub enum Request {
     Management(EngineRequest),
     Open { session: String },
     Frame { instance: Id },
-    Input { instance: Id, kind: u32, target: u32, data: Vec<u8> },
+    Input { instance: Id, kind: u32, target: u32, object_id: u32, data: Vec<u8> },
     Logs { instance: Id, after: Option<crate::engine::LogCursor> },
     Quit { instance: Id },
 }
@@ -346,8 +346,10 @@ impl EmbeddedOwner {
                 Ok(Reply::Opened { instance, generation: self.apps.generation(instance)? })
             }
             Request::Frame { instance } => self.guest_reply(engine, instance),
-            Request::Input { instance, kind, target, data } => {
-                self.apps.input(instance, crate::engine::input_event(kind, target, data)?)?;
+            Request::Input { instance, kind, target, object_id, data } => {
+                let mut event = crate::engine::input_event(kind, target, data)?;
+                event.object_id = object_id;
+                self.apps.input(instance, event)?;
                 if self.apps.advance(true) {
                     engine.state_changed();
                 }
@@ -497,7 +499,13 @@ mod tests {
             self.owner.apps.id(&self.session).unwrap()
         }
         fn input(&self, target: u32) -> Request {
-            Request::Input { instance: self.instance(), kind: 2, target, data: vec![] }
+            Request::Input {
+                object_id: 1,
+                instance: self.instance(),
+                kind: 2,
+                target,
+                data: vec![],
+            }
         }
     }
 
@@ -669,7 +677,11 @@ mod tests {
         assert_eq!(frame.session.id, f.session);
         assert_eq!(frame.invitation, Some(f.engine.invitation(&f.session).unwrap()));
         assert_eq!(frame.logs, ["turn"]);
-        f.app(3, Request::Input { instance: second, kind: 2, target: 1, data: vec![] }).unwrap();
+        f.app(
+            3,
+            Request::Input { object_id: 1, instance: second, kind: 2, target: 1, data: vec![] },
+        )
+        .unwrap();
         assert!(f.advance(false, true).response.unwrap().1.is_ok());
         assert_eq!(f.owner.apps.logs(first).unwrap(), ["turn"]);
         assert_eq!(f.owner.apps.logs(second).unwrap(), ["turn", "turn"]);
@@ -678,7 +690,11 @@ mod tests {
             Reply::Quit { instance, drain_failed: false } if instance == second));
         f.app(5, Request::Frame { instance: second }).unwrap();
         assert!(f.advance(false, true).response.unwrap().1.is_err(), "stale owner cannot resume");
-        f.app(6, Request::Input { instance: first, kind: 2, target: 1, data: vec![] }).unwrap();
+        f.app(
+            6,
+            Request::Input { object_id: 1, instance: first, kind: 2, target: 1, data: vec![] },
+        )
+        .unwrap();
         assert!(f.advance(false, true).response.unwrap().1.is_ok());
         assert_eq!(f.owner.apps.logs(first).unwrap(), ["turn", "turn"]);
         assert!(f.advance(false, true).response.is_none(), "reads and errors cannot replay a turn");
@@ -734,6 +750,7 @@ mod tests {
             f.app(
                 1,
                 Request::Input {
+                    object_id: 1,
                     instance: f.instance(),
                     kind: 3,
                     target: 1,
@@ -753,8 +770,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(maximum.len(), playbit_api::abi::syscall::MAX_EVENT_BYTES);
-        f.app(2, Request::Input { instance: f.instance(), kind: 14, target: 1, data: maximum })
-            .expect("complete metadata allowance reaches the embedded queue");
+        f.app(
+            2,
+            Request::Input {
+                object_id: 1,
+                instance: f.instance(),
+                kind: 14,
+                target: 1,
+                data: maximum,
+            },
+        )
+        .expect("complete metadata allowance reaches the embedded queue");
         assert_eq!(f.owner.pending.len(), 1);
     }
     #[test]

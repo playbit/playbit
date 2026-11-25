@@ -89,7 +89,13 @@ pub struct Event<'a> {
     pub generation: u64,
     pub kind: EventKind,
     pub target: u32,
+    pub object_id: u32,
     pub data: &'a [u8],
+}
+impl Event<'_> {
+    pub fn input(&self) -> Result<(crate::abi::input::Source, crate::abi::input::Input), Error> {
+        crate::abi::input::Input::decode(self.kind, self.data)
+    }
 }
 fn status(value: i64) -> Result<(), Error> {
     if value == 0 { Ok(()) } else { Err(Error::try_from(value).unwrap_or(Error::Internal)) }

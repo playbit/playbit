@@ -320,7 +320,7 @@ impl App {
         } else {
             data
         };
-        let event = Event { kind, target, data };
+        let event = Event { object_id: 0, kind, target, data };
         match &mut self.backend {
             Backend::Native(app) => app.queue_event(app.generation(), event).unwrap(),
             Backend::Wasm(app) => app.queue_event(app.generation(), event).unwrap(),

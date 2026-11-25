@@ -143,7 +143,7 @@ impl WasmOwner {
         self.guest
             .queue_event(
                 self.guest.generation(),
-                Event { kind: EventKind::DataChanged, target: 0, data: vec![] },
+                Event { object_id: 0, kind: EventKind::DataChanged, target: 0, data: vec![] },
             )
             .unwrap();
         self.settle();

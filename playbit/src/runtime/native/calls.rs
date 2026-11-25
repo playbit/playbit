@@ -116,6 +116,7 @@ pub(super) unsafe extern "C" fn pb_event_poll(
                     generation: u64::from(state.generation),
                     kind: ready.kind as u32,
                     target: ready.target,
+                    object_id: ready.object_id,
                     ..abi::Event::default()
                 },
             )?;

@@ -58,7 +58,7 @@ fn input(owner: &mut WasmOwner, kind: EventKind, target: u32, text: &str) {
     } else {
         text.as_bytes().to_vec()
     };
-    owner.input(Event { kind, target, data }).unwrap();
+    owner.input(Event { object_id: 0, kind, target, data }).unwrap();
 }
 
 #[test]
@@ -89,7 +89,8 @@ fn gallery_renders_review_one_matrix_and_enabled_checks_toggle_without_mixed() {
             }
             ViewNode::TextField { multiline, .. } => assert!(!multiline),
             ViewNode::Checkbox { id, state, disabled, .. } => {
-                let event = Event { kind: EventKind::Click, target: *id, data: vec![] };
+                let event =
+                    Event { object_id: 0, kind: EventKind::Click, target: *id, data: vec![] };
                 if *disabled {
                     assert!(owner.input(event).is_err());
                 } else {
@@ -160,7 +161,11 @@ fn edits_survive_other_controls_and_oversized_text_is_visible_and_recoverable() 
         (EventKind::TextChanged, 33, "read only"),
         (EventKind::Submit, 33, "read only"),
     ] {
-        assert!(owner.input(Event { kind, target, data: text.as_bytes().to_vec() }).is_err());
+        assert!(
+            owner
+                .input(Event { object_id: 0, kind, target, data: text.as_bytes().to_vec() })
+                .is_err()
+        );
     }
     owner.quit();
 }
@@ -188,7 +193,11 @@ fn buttons_report_each_activation_and_disabled_variants_reject_input() {
         );
     }
     for id in [4, 8, 43] {
-        assert!(owner.input(Event { kind: EventKind::Click, target: id, data: vec![] }).is_err());
+        assert!(
+            owner
+                .input(Event { object_id: 0, kind: EventKind::Click, target: id, data: vec![] })
+                .is_err()
+        );
     }
     owner.quit();
 }
@@ -222,7 +231,9 @@ fn popup_and_context_actions_use_menu_targets_and_reject_disabled_items() {
     input(&mut owner, EventKind::Click, 114, "");
     for id in [89, 98, 99, 113, 115] {
         assert!(
-            owner.input(Event { kind: EventKind::Click, target: id, data: vec![] }).is_err(),
+            owner
+                .input(Event { object_id: 0, kind: EventKind::Click, target: id, data: vec![] })
+                .is_err(),
             "disabled menu or non-action target {id} should reject Click"
         );
     }
@@ -241,13 +252,14 @@ fn benchmark_basic_controls() {
         for index in 0..1000 {
             let event = if index % 2 == 0 {
                 Event {
+                    object_id: 0,
                     kind: EventKind::TextChanged,
                     target: 30,
                     data: playbit_api::abi::text::TextInput::encode(&text, &[])
                         .expect("fixture edit"),
                 }
             } else {
-                Event { kind: EventKind::Click, target: 10, data: vec![] }
+                Event { object_id: 0, kind: EventKind::Click, target: 10, data: vec![] }
             };
             let start = Instant::now();
             owner.input(event).unwrap();
@@ -278,7 +290,11 @@ fn segmented_selection_roundtrips_and_disabled_inputs_are_rejected() {
         assert_eq!(selected, Some(target));
     }
     for target in [120, 130, 132, 140, 141, 142, 143] {
-        assert!(owner.input(Event { kind: EventKind::Click, target, data: vec![] }).is_err());
+        assert!(
+            owner
+                .input(Event { object_id: 0, kind: EventKind::Click, target, data: vec![] })
+                .is_err()
+        );
     }
     owner.quit();
 }

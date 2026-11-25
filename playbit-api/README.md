@@ -272,6 +272,12 @@ while visible; the host retains at most one pending frame input. Micro Kart
 opts into continuous frames. A frame event addressed to a static or replaced
 Canvas is rejected by the current scene's input validator.
 
+Use `canvas.events()` for canvas-targeted pointer, key and frame events, or
+`canvas.frames()` for frame timing alone. Calling `view.window_input(families)`
+opts the guest into window input. Read subscribed families from
+`context.raw_events()`. On subsequent scene submissions, omitting
+`window_input` disables those families. A held input can still deliver its release.
+
 On macOS, use `CanvasExtent::Viewport` for the padded content area or
 `CanvasExtent::Window` to cover the window edge to edge, including beneath
 visible window controls. Declare `ui.canvas.viewport.v1` or `ui.canvas.window.v1`

@@ -314,7 +314,9 @@ or stale operations between events.
 nonnegative result gives the payload length. If that length exceeds capacity,
 the host leaves the payload and queue unchanged and sets `written=0`. Otherwise
 it writes the header and payload and consumes exactly one event. `WouldBlock`
-means the queue is empty.
+means the queue is empty. The original 24-byte event header is a supported
+prefix. Output with room for the full `object_id` field reports `written=28`.
+The full C/Rust record has size 32 and alignment 8.
 
 `pb_event_poll_deadline` takes the same outputs and an absolute deadline in
 the monotonic nanoseconds returned by `pb_clock_read`. A queued event returns
@@ -368,7 +370,8 @@ are unchanged; none may carry `OPTIONAL_EVENT_KIND_BIT` (`0x80000000`).
 | IDs | Required semantics |
 | --- | --- |
 | 1 (`Started`) | Instance lifecycle |
-| 2, 3, 11–14 (`Click`, `Submit`, `Pointer`, `Key`, `Frame`, `TextChanged`) | Admitted user input and requested frame delivery |
+| 2, 3, 13, 14 (`Click`, `Submit`, `Frame`, `TextChanged`) | Admitted control input and requested canvas frame delivery |
+| 22–26 (`WindowPointer`, `WindowKeyboard`, `WindowScroll`, `WindowGesture`, `WindowGamepad`) | Opt-in window input. See [the event payload reference](../../syscalls.md#window-input). |
 | 4–6, 10, 15, 17 (`DataChanged`, `PresenceChanged`, `UpdateAvailable`, `Wake`, `SurfaceChanged`, `VolumesChanged`) | Existing data, environment and execution notifications |
 | 7–9, 16 (`ObjectCreationReady`, `FileCopyReady`, `FileSelectionReady`, `DataReady`) | Operation completion |
 | 18–19 (`ChannelMessage`, `ChannelStatus`) | Ordered channel data and terminal state |

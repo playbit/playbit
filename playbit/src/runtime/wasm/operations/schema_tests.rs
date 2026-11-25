@@ -314,9 +314,12 @@ fn async_schema_roundtrip_all_kinds_pending_and_retained_short_output() {
         let volume = volume(&store);
         let invoke = invoke(&mut store, &instance);
         let memory = instance.get_memory(&mut store, "memory").unwrap();
-        word(memory.data_mut(&mut store), 1408, event::SIZEOF);
-        assert_eq!(call(&mut store, &instance, &invoke, Opcode::EventPoll, [1408, 1432, 8, 0]), 0);
-        assert_eq!(number(memory.data(&store), 1408 + event::KIND), EventKind::Started as u32);
+        let header = 1408;
+        let payload = header + event::SIZEOF as usize;
+        let poll = [header as u64, payload as u64, 8, 0];
+        word(memory.data_mut(&mut store), header, event::SIZEOF);
+        assert_eq!(call(&mut store, &instance, &invoke, Opcode::EventPoll, poll), 0);
+        assert_eq!(number(memory.data(&store), header + event::KIND), EventKind::Started as u32);
         for kind in 1..=7 {
             inputs(memory.data_mut(&mut store));
             word(memory.data_mut(&mut store), 256 + field_input::KIND, kind);
@@ -376,16 +379,13 @@ fn async_schema_roundtrip_all_kinds_pending_and_retained_short_output() {
             let token = records.lock().unwrap().calls.len() as u64;
             let epoch = store.data().app.generation();
             store.data_mut().app.notify_data(epoch, token).unwrap();
+            assert_eq!(call(&mut store, &instance, &invoke, Opcode::EventPoll, poll), 8);
             assert_eq!(
-                call(&mut store, &instance, &invoke, Opcode::EventPoll, [1408, 1432, 8, 0]),
-                8
-            );
-            assert_eq!(
-                number(memory.data(&store), 1408 + event::KIND),
+                number(memory.data(&store), header + event::KIND),
                 EventKind::DataReady as u32
             );
-            assert_eq!(number(memory.data(&store), 1432), slot);
-            assert_eq!(number(memory.data(&store), 1436), generation);
+            assert_eq!(number(memory.data(&store), payload), slot);
+            assert_eq!(number(memory.data(&store), payload + 4), generation);
             word(memory.data_mut(&mut store), 1024 + schema::BYTES_CAPACITY, 7);
             let mut expected = memory.data(&store).to_vec();
             for (offset, count) in [

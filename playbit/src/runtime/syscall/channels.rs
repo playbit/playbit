@@ -97,6 +97,7 @@ pub(in crate::runtime) fn receive(state: &mut State, token: u64) -> HostResult<b
             push_event(
                 state,
                 Event {
+                    object_id: 0,
                     kind: EventKind::ChannelStatus,
                     target: 0,
                     data: (error as i32).to_le_bytes().to_vec(),
@@ -117,7 +118,9 @@ fn admit_delivery(
     // enough events. Ordinary readiness retries it without repeating I/O.
     let (count, bytes) = match result {
         Ok(events) => events.iter().fold((0, 0), |(count, bytes), event| match event {
-            crate::session_channel::Event::Presence { .. } => (count + 1, bytes + 20),
+            crate::session_channel::Event::Presence { .. } => {
+                (count + 1, bytes + abi::EVENT_QUEUE_OVERHEAD)
+            }
             crate::session_channel::Event::Message { data, .. } => {
                 (count + 1, bytes + 124 + data.len())
             }
@@ -171,7 +174,10 @@ fn message(
         payload.extend(sender.encode().map_err(|_| HostError::Internal)?);
         payload.extend(message);
         payload.extend(data);
-        push_event(state, Event { kind: EventKind::ChannelMessage, target: 0, data: payload })
+        push_event(
+            state,
+            Event { object_id: 0, kind: EventKind::ChannelMessage, target: 0, data: payload },
+        )
     } else {
         state.host.channel_consumed(
             state.context.identity.instance_id,
@@ -196,6 +202,7 @@ pub(in crate::runtime) fn activate(state: &mut State) {
         let _ = push_event(
             state,
             Event {
+                object_id: 0,
                 kind: EventKind::ChannelStatus,
                 target: 0,
                 data: (error as i32).to_le_bytes().to_vec(),

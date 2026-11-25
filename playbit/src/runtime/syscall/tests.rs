@@ -398,7 +398,7 @@ fn semantic_input_rejects_invalid_payloads_and_disabled_menu_ancestors() {
             }],
         },
     ]);
-    let click = Event { kind: EventKind::Click, target: 1, data: Vec::new() };
+    let click = Event { object_id: 0, kind: EventKind::Click, target: 1, data: Vec::new() };
     assert_eq!(validate_input(&view, &click), Ok(()));
     assert_eq!(
         validate_input(&view, &Event { data: vec![1], ..click.clone() }),
@@ -415,18 +415,27 @@ fn semantic_input_rejects_invalid_payloads_and_disabled_menu_ancestors() {
     assert_eq!(
         validate_input(
             &view,
-            &Event { kind: EventKind::Submit, target: 2, data: "Résumé".as_bytes().to_vec() }
+            &Event {
+                object_id: 0,
+                kind: EventKind::Submit,
+                target: 2,
+                data: "Résumé".as_bytes().to_vec()
+            }
         ),
         Ok(())
     );
     assert_eq!(
-        validate_input(&view, &Event { kind: EventKind::Submit, target: 2, data: vec![255] }),
+        validate_input(
+            &view,
+            &Event { object_id: 0, kind: EventKind::Submit, target: 2, data: vec![255] }
+        ),
         Err(HostError::InvalidArgument)
     );
     assert_eq!(
         validate_input(
             &view,
             &Event {
+                object_id: 0,
                 kind: EventKind::Submit,
                 target: 2,
                 data: vec![b'a'; abi::MAX_EVENT_BYTES + 1]
@@ -435,7 +444,10 @@ fn semantic_input_rejects_invalid_payloads_and_disabled_menu_ancestors() {
         Err(HostError::LimitExceeded)
     );
     assert_eq!(
-        validate_input(&view, &Event { kind: EventKind::DataChanged, ..click.clone() }),
+        validate_input(
+            &view,
+            &Event { object_id: 0, kind: EventKind::DataChanged, ..click.clone() }
+        ),
         Err(HostError::InvalidArgument)
     );
     assert_eq!(
@@ -777,6 +789,8 @@ fn object_file_scene_requires_current_read_capabilities_and_rejects_path_images(
                 theme: playbit_api::ui::Theme::light(),
                 window_background_specified: false,
                 window_style: None,
+                window_input: None,
+                legacy_canvas: 0,
                 window_size_constraints: None,
                 child: Box::new(crate::runtime::ViewNode::Column(vec![
                     crate::runtime::ViewNode::FileImage {
@@ -1319,7 +1333,12 @@ fn real_conformance_guest_runs_on_native_and_pulley() {
         guest
             .queue_event(
                 generation,
-                Event { kind: EventKind::Click, target: 7, data: b"Clicked".to_vec() },
+                Event {
+                    object_id: 0,
+                    kind: EventKind::Click,
+                    target: 7,
+                    data: b"Clicked".to_vec(),
+                },
             )
             .unwrap();
         assert_eq!(guest.pump().unwrap().logs(), ["Clicked"]);
@@ -1378,12 +1397,14 @@ fn text_changed_is_bounded_committed_utf8_for_enabled_editors_only() {
         read_only: false,
     };
     let mut event = Event {
+        object_id: 0,
         kind: EventKind::TextChanged,
         target: 2,
         data: playbit_api::abi::text::TextInput::encode("Résumé 👋", &[]).expect("fixture edit"),
     };
     assert_eq!(validate_input(&editor, &event), Ok(()));
     let mut submitted = Event {
+        object_id: 0,
         kind: EventKind::Submit,
         target: 2,
         data: vec![b'a'; playbit_api::abi::text::MAX_TEXT_BYTES],
@@ -1484,7 +1505,7 @@ fn event_retries_preserve_queue_and_guest_epochs_are_independent_of_handles() {
         first
             .queue_event(
                 old_generation,
-                Event { kind: EventKind::Submit, target: 7, data: b"hello".to_vec() },
+                Event { object_id: 0, kind: EventKind::Submit, target: 7, data: b"hello".to_vec() },
             )
             .unwrap();
         write(&mut first, 64, &[0xa5; 24]);
@@ -1506,7 +1527,7 @@ fn event_retries_preserve_queue_and_guest_epochs_are_independent_of_handles() {
         assert_eq!(
             replacement.queue_event(
                 old_generation,
-                Event { kind: EventKind::Click, target: 1, data: vec![] }
+                Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] }
             ),
             Err(HostError::StaleHandle)
         );
@@ -1854,7 +1875,7 @@ fn trapped_generation_refuses_reentry_input_and_wakes() {
             assert_eq!(
                 guest.queue_event(
                     generation,
-                    Event { kind: EventKind::Click, target: 1, data: vec![] }
+                    Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] }
                 ),
                 Err(HostError::Conflict)
             );
@@ -1886,11 +1907,17 @@ fn busy_guests_and_unbounded_event_queues_fail_safely() {
     let generation = guest.generation();
     for _ in 1..MAX_QUEUED_EVENTS {
         guest
-            .queue_event(generation, Event { kind: EventKind::Click, target: 1, data: vec![] })
+            .queue_event(
+                generation,
+                Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
+            )
             .unwrap();
     }
     assert_eq!(
-        guest.queue_event(generation, Event { kind: EventKind::Click, target: 1, data: vec![] }),
+        guest.queue_event(
+            generation,
+            Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] }
+        ),
         Err(HostError::LimitExceeded)
     );
 }

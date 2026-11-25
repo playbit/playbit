@@ -3,8 +3,8 @@ extern crate alloc;
 
 use super::{Context, Event, EventKind, PollError, ffi, trace::TraceBuffer};
 use crate::abi::syscall::{
-    Error, FrameInput, KeyInput, MAX_EVENT_BYTES, MAX_QUEUED_EVENT_BYTES, MAX_QUEUED_EVENTS,
-    OPTIONAL_EVENT_KIND_BIT, PointerInput,
+    EVENT_QUEUE_OVERHEAD, Error, FrameInput, MAX_EVENT_BYTES, MAX_QUEUED_EVENT_BYTES,
+    MAX_QUEUED_EVENTS, OPTIONAL_EVENT_KIND_BIT,
 };
 use alloc::vec::Vec;
 use core::{ops::Range, ptr::NonNull};
@@ -20,6 +20,7 @@ struct Record {
     generation: u64,
     kind: EventKind,
     target: u32,
+    object_id: u32,
     data: Range<usize>,
 }
 
@@ -67,10 +68,12 @@ impl EventBuffer {
         let mut charged = 0;
         while consumed < MAX_QUEUED_EVENTS {
             let remaining = MAX_QUEUED_EVENT_BYTES - charged;
-            if remaining < 20 {
+            if remaining < EVENT_QUEUE_OVERHEAD {
                 break;
             }
-            let capacity = (self.bytes.len() - start).min(MAX_EVENT_BYTES).min(remaining - 20);
+            let capacity = (self.bytes.len() - start)
+                .min(MAX_EVENT_BYTES)
+                .min(remaining - EVENT_QUEUE_OVERHEAD);
             let mut header = ffi::Event::default();
             // SAFETY: the callback owns raw; initialized header and payload are disjoint outputs.
             let length = unsafe {
@@ -92,7 +95,7 @@ impl EventBuffer {
                 return Err(Error::LimitExceeded);
             }
             // Draining can admit deferred host notifications. Leave overflow queued for next turn.
-            if length + 20 > remaining {
+            if length + EVENT_QUEUE_OVERHEAD > remaining {
                 break;
             }
             if length > capacity {
@@ -102,7 +105,7 @@ impl EventBuffer {
                 continue;
             }
             consumed += 1;
-            charged += length + 20;
+            charged += length + EVENT_QUEUE_OVERHEAD;
             let Some(kind) = classify(&header, &self.bytes[start..start + length], trace)? else {
                 continue;
             };
@@ -113,6 +116,7 @@ impl EventBuffer {
                 generation: header.generation,
                 kind,
                 target: header.target,
+                object_id: header.object_id,
                 data: start..start + length,
             });
             start += length;
@@ -156,6 +160,7 @@ impl EventBuffer {
             generation: record.generation,
             kind: record.kind,
             target: record.target,
+            object_id: record.object_id,
             data: &self.bytes[record.data.clone()],
         }
     }
@@ -217,6 +222,7 @@ impl Context<'_> {
                 generation: header.generation,
                 kind,
                 target: header.target,
+                object_id: header.object_id,
                 data: &payload[..length],
             });
         }
@@ -238,6 +244,12 @@ fn classify(
     }
     if kind == EventKind::IdentityChanged && (header.target != 0 || !data.is_empty()) {
         return Err(Error::InvalidArgument);
+    }
+    if crate::abi::input::Input::family(kind) != 0 {
+        if header.object_id == 0 {
+            return Err(Error::InvalidArgument);
+        }
+        crate::abi::input::Input::decode(kind, data)?;
     }
     if is_ui(kind) {
         validate_ui(kind, header.target, data)?;
@@ -270,8 +282,8 @@ fn validate_ui(kind: EventKind, target: u32, data: &[u8]) -> Result<(), Error> {
         EventKind::Submit => {
             core::str::from_utf8(data).map(|_| ()).map_err(|_| Error::InvalidArgument)
         }
-        EventKind::Pointer => PointerInput::decode(data).map(|_| ()),
-        EventKind::Key => KeyInput::decode(data).map(|_| ()),
+        EventKind::Pointer => crate::abi::syscall::PointerInput::decode(data).map(|_| ()),
+        EventKind::Key => crate::abi::syscall::KeyInput::decode(data).map(|_| ()),
         EventKind::Frame => FrameInput::decode(data).map(|_| ()),
         _ => Err(Error::InvalidArgument),
     }
@@ -299,10 +311,15 @@ fn event_kind(value: u32) -> Result<Option<EventKind>, Error> {
         18 => EventKind::ChannelMessage,
         19 => EventKind::ChannelStatus,
         20 => EventKind::TraceConfig,
+        22 => EventKind::WindowPointer,
+        23 => EventKind::WindowKeyboard,
+        24 => EventKind::WindowScroll,
+        25 => EventKind::WindowGesture,
+        26 => EventKind::WindowGamepad,
         value if value == EventKind::IdentityChanged as u32 => EventKind::IdentityChanged,
         unknown
             if unknown & OPTIONAL_EVENT_KIND_BIT != 0
-                && unknown & !OPTIONAL_EVENT_KIND_BIT > EventKind::TraceConfig as u32 =>
+                && unknown & !OPTIONAL_EVENT_KIND_BIT > EventKind::WindowGamepad as u32 =>
         {
             return Ok(None);
         }

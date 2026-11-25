@@ -74,6 +74,7 @@ interface HostExports extends ObjectHost, WorkExports {
     pb_automatic_ready: (length: number) => number;
     pb_automatic_failed: (length: number) => number;
     pb_scope_addresses: (length: number) => number;
+    pb_web_validate_surface_input: (kind: number, length: number) => number;
     pb_web_validate_text_input: (length: number) => number;
     pb_output: () => number;
     pb_version: () => number;
@@ -1757,7 +1758,7 @@ async function startGuest(candidate: GuestInstance) {
     operations.refreshVolumes();
     guest = candidate; guestFailure = undefined; scene = null;
     guestWork.queue({ kind: 1, target: 0, data: new Uint8Array() });
-    if (surface) guestWork.queue({ kind: 15, target: 0, data: surface });
+    if (surface) guestWork.queue({ kind: 15, target: 0, objectId: windowObjectId, data: surface });
     if(managed)operations.pb_session?.();
     await enterGuest();
     if (!scene && candidate.deadline?.parked) {
@@ -2030,6 +2031,8 @@ function watchRecoveryList(account: string): void {
     recoveryList = { account, stop, task };
 }
 async function open(args: RuntimeOpenArgs) {
+    if (windowObjectId === 0xffff_ffff) throw new Error("Guest window IDs exhausted");
+    windowObjectId++;
     if (recoveryList) throw Error('The recovery list must close before opening a guest');
     const started = performance.now();
     const installation = await installationIdentity();
@@ -2934,15 +2937,32 @@ function validateNativeText(data: Uint8Array): void {
     const status = host.exports.pb_web_validate_text_input(data.length);
     if (status < 0) throw Object.assign(new Error("Invalid native text edit"), { code: status });
 }
+let windowObjectId = 0;
+function validateGuestInput(kind: number, target: number, data: Uint8Array, revision?: number): void {
+    const legacyCanvas = scene?.window?.legacyCanvas;
+    if (kind >= 22 && kind <= 26) {
+        hostInput(data);
+        const status = host.exports.pb_web_validate_surface_input(kind, data.length);
+        if (status < 0) throw Object.assign(new Error("Invalid surface input"), { code: status });
+        if (target && (kind !== 22 || (!status && scene?.controls.get(target)?.kind !== "canvas"))) {
+            throw new Error("Invalid surface input target");
+        }
+        const mask = scene?.window?.input;
+        if (mask === undefined || (!status && !(mask & (1 << (kind - 22))))) throw new Error("Input family is disabled");
+    } else {
+        if ((kind === 11 || kind === 12) && !legacyCanvas) throw new Error("Original canvas input is disabled");
+        validateInput(scene!.controls, kind, target, data, validateNativeText, revision);
+    }
+}
 function acceptInput(args: Extract<RuntimeRequest, { method: "input" }>["args"]): AcceptedInput {
     if (engineFailure) throw engineFailure;
     if (guestFailure) throw guestFailure;
     if (!guest || !scene) throw new Error("The app is stopped; reload the page to restart it");
     if (args.data.length > MAX_TEXT_EVENT_BYTES) throw new Error("Guest input exceeds the event limit");
     const data = new Uint8Array(args.data);
-    validateInput(scene.controls, args.kind, args.target, data, validateNativeText, args.menuRevision);
+    validateGuestInput(args.kind, args.target, data, args.menuRevision);
 
-    return { root: guestWork.input(data.length), event: { kind: args.kind, target: args.target, data } };
+    return { root: guestWork.input(data.length), event: { kind: args.kind, target: args.target, objectId: windowObjectId, data } };
 }
 async function handle({ id, method, args }: RuntimeRequest, accepted?: AcceptedInput) {
     let queued = false;
@@ -2963,7 +2983,7 @@ async function handle({ id, method, args }: RuntimeRequest, accepted?: AcceptedI
                 self.postMessage({ id }); return;
             }
             validateSurface(args);
-            guestWork.queue({ kind: 15, target: 0, data: args });
+            guestWork.queue({ kind: 15, target: 0, objectId: windowObjectId, data: args });
             surface = args;
             await enterGuest(); result = presentation();
         } else if (method === "input") {
@@ -2971,7 +2991,7 @@ async function handle({ id, method, args }: RuntimeRequest, accepted?: AcceptedI
             await refreshPersonal();
             operations.refreshVolumes();
             if (!accepted) throw new Error("Input requires an accepted session-instance root");
-            validateInput(scene!.controls, accepted.event.kind, accepted.event.target, accepted.event.data, validateNativeText, args.menuRevision);
+            validateGuestInput(accepted.event.kind, accepted.event.target, accepted.event.data, args.menuRevision);
             guestWork.queueAccepted(accepted.root, accepted.event); queued = true;
             await enterGuest(); result = presentation();
         } else if (method === "retry_update") {

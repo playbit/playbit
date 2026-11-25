@@ -6,7 +6,10 @@ use playbit::runtime::{
     ViewNode, decode_view,
     syscall::{Event, validate_input},
 };
-use playbit_api::abi::syscall::{EventKind, FrameInput, KeyInput, PointerInput};
+use playbit_api::abi::{
+    input::{self, Input, Key, Keyboard, Pointer, Source},
+    syscall::{EventKind, FrameInput},
+};
 use playbit_api::ui::{CanvasFrames, CanvasItem, CanvasRect, Color};
 
 fn view() -> Vec<u8> {
@@ -48,52 +51,67 @@ fn canvas_round_trip_and_decoder_enforce_geometry() {
 }
 
 #[test]
-fn input_is_typed_bounded_and_scoped_to_the_current_canvas() {
-    let view = decode_view(&view()).unwrap();
-    let pointer = PointerInput { x: 320, y: 400, phase: 1, buttons: 1 };
-    let mut event = Event { kind: EventKind::Pointer, target: 17, data: pointer.encode().to_vec() };
-    assert!(validate_input(&view, &event).is_ok());
-    event.target = 18;
-    assert!(validate_input(&view, &event).is_err());
-    event.target = 17;
-    event.data = PointerInput { x: 321, ..pointer }.encode().to_vec();
-    assert!(validate_input(&view, &event).is_err());
-    event.kind = EventKind::Click;
-    event.data.clear();
-    assert!(validate_input(&view, &event).is_err());
-    event.kind = EventKind::Key;
-    event.data = KeyInput { key: 1, pressed: true }.encode().to_vec();
-    assert!(validate_input(&view, &event).is_ok());
-    event.data[0] = 0;
-    assert!(validate_input(&view, &event).is_err());
-    event.kind = EventKind::Frame;
-    event.data = FrameInput { elapsed_us: 16_667 }.encode().to_vec();
-    assert!(validate_input(&view, &event).is_ok());
-    event.data = FrameInput { elapsed_us: 100_001 }.encode().to_vec();
-    assert!(validate_input(&view, &event).is_err());
-}
-
-#[test]
-fn static_canvas_rejects_frames_but_retains_pointer_and_key_input() {
+fn window_input_admission_uses_family_and_origin_and_canvas_frames_are_opt_in() {
     let mut bytes = view();
-    // Header/column/command, then width and height.
-    bytes[30..34].copy_from_slice(&(CanvasFrames::Static as u32).to_le_bytes());
+    let mut input_command = vec![playbit_api::ui::VIEW_WINDOW_INPUT];
+    input_command.extend(0u32.to_le_bytes());
+    input_command.extend(4u32.to_le_bytes());
+    input_command.extend((input::POINTER | input::KEYBOARD).to_le_bytes());
+    bytes.splice(4..4, input_command);
     let scene = decode_view(&bytes).unwrap();
-    for (kind, data, accepted) in [
-        (EventKind::Frame, FrameInput { elapsed_us: 16_667 }.encode().to_vec(), false),
-        (
-            EventKind::Pointer,
-            PointerInput { x: 10, y: 20, phase: 1, buttons: 1 }.encode().to_vec(),
-            true,
-        ),
-        (EventKind::Key, KeyInput { key: 1, pressed: true }.encode().to_vec(), true),
-    ] {
-        assert_eq!(validate_input(&scene, &Event { kind, target: 17, data }).is_ok(), accepted);
-    }
-    for invalid in [2u32, u32::MAX] {
-        bytes[30..34].copy_from_slice(&invalid.to_le_bytes());
-        assert!(decode_view(&bytes).is_err());
-    }
+    let pointer = Input::Pointer(Pointer {
+        id: 2,
+        kind: input::MOUSE,
+        phase: input::POINTER_DOWN,
+        button: 0,
+        click_count: 1,
+        flags: input::PRIMARY,
+        buttons: 1,
+        x: 325.,
+        y: 410.,
+        dx: 0.,
+        dy: 0.,
+        canvas_x: 320.,
+        canvas_y: 400.,
+        pen: None,
+    });
+    let mut event = Event {
+        object_id: 1,
+        kind: pointer.kind(),
+        target: 17,
+        data: pointer.encode(Source::default()),
+    };
+    assert!(validate_input(&scene, &event).is_ok());
+    event.target = 0;
+    assert!(validate_input(&scene, &event).is_ok());
+    event.object_id = 0;
+    assert!(validate_input(&scene, &event).is_err());
+    let keyboard = Input::Keyboard(Keyboard {
+        key: Key::Q,
+        device_key: Key::A,
+        pressed: true,
+        repeat: false,
+        text: ['\0'; 8],
+        text_len: 0,
+    });
+    event = Event {
+        object_id: 2,
+        kind: keyboard.kind(),
+        target: 0,
+        data: keyboard.encode(Source::default()),
+    };
+    assert!(validate_input(&scene, &event).is_ok());
+    event.target = 17;
+    assert!(validate_input(&scene, &event).is_err());
+    event = Event {
+        object_id: 2,
+        kind: EventKind::Frame,
+        target: 17,
+        data: FrameInput { elapsed_us: 16_667 }.encode().into(),
+    };
+    assert!(validate_input(&scene, &event).is_ok());
+    bytes[43..47].copy_from_slice(&(CanvasFrames::Static as u32).to_le_bytes());
+    assert!(validate_input(&decode_view(&bytes).unwrap(), &event).is_err());
 }
 
 #[test]

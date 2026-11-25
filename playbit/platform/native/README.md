@@ -757,7 +757,8 @@ precedes decoding; renderer feature, node and text limits remain separate.
 
 Mac native/Wasm windows and the iOS host deliver `EventKind::SurfaceChanged` (C:
 `PB_EVENT_SURFACE_CHANGED`) through the existing event queue, initially and when
-viewport size, pixel scale or input facilities change. Target is zero. Decode
+viewport size, pixel scale or input facilities change. Target is zero and
+`object_id` identifies the originating guest window. Decode
 its exact 16-byte payload with `Surface::decode(event.data)`; retain the returned
 value in app state. There is no geometry polling or new syscall. An embedding
 host supplies the same event through its existing app-input function.
@@ -798,8 +799,7 @@ The app uses the wide layout before its first surface event.
 The iOS host measures its safe-area/keyboard-bounded scroll viewport, subtracts
 the status/update rows and outer insets, and supplies touch/keyboard input bits.
 It retains the native editor when a container changes between row and column.
-The web window producer is not implemented yet. Surface events do not supply
-resource-limit discovery.
+The web host reports its guest content viewport and browser input capabilities.
 Surface events do not promise delivery before the first app turn: the Mac host
 needs an initial view to lay out. The measured four-window resize path currently
 exceeds the <8-ms readiness target; ordinary task clicks remain below it in the

@@ -32,5 +32,6 @@ pub mod authenticated;
 
 pub(crate) mod invocation;
 
+pub mod input;
 pub mod text;
 pub mod trace;

@@ -864,6 +864,7 @@ fn ocaml_counter_matches_rust_scene_and_retains_state() {
                 .queue_event(
                     guest.generation(),
                     Event {
+                        object_id: 0,
                         kind: EventKind::Click,
                         target: 1,
                         data: if count == 1 { vec![42; 512] } else { Vec::new() },
@@ -877,7 +878,7 @@ fn ocaml_counter_matches_rust_scene_and_retains_state() {
         guest
             .queue_event(
                 guest.generation(),
-                Event { kind: EventKind::Click, target: 2, data: Vec::new() },
+                Event { object_id: 0, kind: EventKind::Click, target: 2, data: Vec::new() },
             )
             .unwrap();
         assert_eq!(guest.pump().unwrap().logs(), &["Count: 0 (1001 events)"]);
@@ -1089,6 +1090,7 @@ fn deadline_poll_publishes_then_resumes_the_selected_guest_stack() {
             .queue_event(
                 first.generation(),
                 syscall::Event {
+                    object_id: 0,
                     kind: syscall::EventKind::Submit,
                     target: 7,
                     data: vec![42, 2, 3],
@@ -1144,8 +1146,12 @@ fn session_info_stays_with_its_guest_across_deadline_waits() {
             (tag, guest)
         });
         for (tag, guest) in guests.iter_mut().rev() {
-            let event =
-                syscall::Event { kind: syscall::EventKind::Submit, target: 7, data: vec![*tag] };
+            let event = syscall::Event {
+                object_id: 0,
+                kind: syscall::EventKind::Submit,
+                target: 7,
+                data: vec![*tag],
+            };
             guest.queue_event(guest.generation(), event).unwrap();
             guest.pump().unwrap();
         }
@@ -1221,7 +1227,12 @@ fn deadline_poll_refills_fuel_on_suspension_only() {
             guest
                 .queue_event(
                     guest.generation(),
-                    syscall::Event { kind: syscall::EventKind::Click, target: 7, data: Vec::new() },
+                    syscall::Event {
+                        object_id: 0,
+                        kind: syscall::EventKind::Click,
+                        target: 7,
+                        data: Vec::new(),
+                    },
                 )
                 .unwrap();
             assert_eq!(guest.pump().unwrap().logs(), &["resumed"]);
@@ -1262,7 +1273,12 @@ fn deadline_poll_retirement_cancels_timeouts_and_drains_accepted_events() {
                 guest
                     .queue_event(
                         guest.generation(),
-                        syscall::Event { kind: syscall::EventKind::Click, target: 7, data: vec![] },
+                        syscall::Event {
+                            object_id: 0,
+                            kind: syscall::EventKind::Click,
+                            target: 7,
+                            data: vec![],
+                        },
                     )
                     .unwrap();
             }

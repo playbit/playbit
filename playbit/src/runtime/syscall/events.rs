@@ -3,6 +3,7 @@ use super::{
     Event, EventKind, HostError, HostResult, MAX_QUEUED_EVENT_BYTES, MAX_QUEUED_EVENTS, State, abi,
 };
 use crate::runtime::{MenuEntry, ViewNode};
+use playbit_api::abi::input as abi_input;
 use std::time::Instant;
 
 fn editable_field_accepts(disabled: bool, read_only: bool, kind: EventKind) -> bool {
@@ -56,18 +57,98 @@ fn contains(view: &ViewNode, event: &Event) -> bool {
                 && *id == event.target
                 && matches!(event.kind, EventKind::Submit | EventKind::TextChanged)
         }
-        ViewNode::Canvas { id, width, height, frames, .. } => {
+        ViewNode::Canvas { id, frames, .. } => {
             *id != 0
                 && *id == event.target
                 && match event.kind {
-                    EventKind::Pointer => abi::PointerInput::decode(&event.data)
-                        .is_ok_and(|input| input.x <= *width && input.y <= *height),
-                    EventKind::Key => true,
+                    EventKind::Pointer | EventKind::Key => true,
                     EventKind::Frame => *frames == playbit_api::ui::CanvasFrames::Continuous,
                     _ => false,
                 }
         }
         ViewNode::FileImage { .. } | ViewNode::JpegImage { .. } | ViewNode::Text { .. } => false,
+    }
+}
+
+fn canvas_dimensions(view: &ViewNode, id: u32) -> Option<(u32, u32)> {
+    match view {
+        ViewNode::Theme { child, .. }
+        | ViewNode::Scroll { child, .. }
+        | ViewNode::ContextMenu { child, .. } => canvas_dimensions(child, id),
+        ViewNode::Column(children) | ViewNode::Row(children) | ViewNode::List(children) => {
+            children.iter().find_map(|child| canvas_dimensions(child, id))
+        }
+        ViewNode::Canvas { id: canvas, width, height, .. } if *canvas == id => {
+            Some((*width, *height))
+        }
+        _ => None,
+    }
+}
+
+/// The original named-canvas record selects the released canvas payloads.
+/// Convert at admission so the current SDK and host input collectors share one path.
+#[cfg(any(all(feature = "native-runtime", feature = "local-store"), feature = "app-host", test))]
+pub(crate) fn route_input(view: &ViewNode, mut event: Event) -> HostResult<Option<Event>> {
+    let canvas = view.legacy_canvas();
+    if canvas != 0 && abi_input::Input::family(event.kind) != 0 {
+        if event.object_id == 0 {
+            return Err(HostError::InvalidArgument);
+        }
+        let (_, input) = abi_input::Input::decode(event.kind, &event.data)?;
+        match input {
+            abi_input::Input::Keyboard(key) if event.target == 0 && !key.repeat => {
+                use abi_input::Key;
+                let code = match key.device_key {
+                    Key::Left => 1,
+                    Key::Right => 2,
+                    Key::Up => 3,
+                    Key::Down => 4,
+                    Key::Space => 5,
+                    _ => return Ok(None),
+                };
+                event.kind = EventKind::Key;
+                event.target = canvas;
+                event.data = abi::KeyInput { key: code, pressed: key.pressed }.encode().into();
+            }
+            abi_input::Input::Pointer(pointer)
+                if event.target != 0 && pointer.flags & abi_input::PRIMARY != 0 =>
+            {
+                let primary = u32::from(pointer.buttons & 1);
+                if pointer.phase >= abi_input::POINTER_ENTER
+                    || (pointer.phase == abi_input::POINTER_MOVE && primary == 0)
+                    || (matches!(pointer.phase, abi_input::POINTER_DOWN | abi_input::POINTER_UP)
+                        && pointer.button != 0)
+                {
+                    return Ok(None);
+                }
+                let Some((width, height)) = canvas_dimensions(view, event.target) else {
+                    return Ok(None);
+                };
+                event.kind = EventKind::Pointer;
+                event.data = abi::PointerInput {
+                    x: (pointer.canvas_x.round() as u32).min(width),
+                    y: (pointer.canvas_y.round() as u32).min(height),
+                    phase: u32::from(pointer.phase),
+                    buttons: primary,
+                }
+                .encode()
+                .into();
+            }
+            _ => return Ok(None),
+        }
+    }
+    if event.kind == EventKind::WindowPointer
+        && event.object_id != 0
+        && event.target != 0
+        && canvas_dimensions(view, event.target).is_none()
+        && !abi_input::Input::decode(event.kind, &event.data)?.1.ends_sequence()
+    {
+        return Ok(None);
+    }
+    match validate_input(view, &event) {
+        Err(HostError::Unsupported) if abi_input::Input::family(event.kind) != 0 => Ok(None),
+        Err(error) => Err(error),
+        Ok(()) => Ok(Some(event)),
     }
 }
 
@@ -86,14 +167,43 @@ pub fn validate_input(view: &crate::runtime::ViewNode, event: &Event) -> HostRes
         }
         return playbit_api::abi::environment::Surface::decode(&event.data).map(|_| ());
     }
+    let family = abi_input::Input::family(event.kind);
+    if family != 0 {
+        let (_, input) = abi_input::Input::decode(event.kind, &event.data)?;
+        if event.object_id == 0 {
+            return Err(HostError::InvalidArgument);
+        }
+        let ViewNode::Theme { window_input: Some(mask), .. } = view else {
+            return Err(HostError::Unsupported);
+        };
+        if family & *mask == 0 && !input.ends_sequence() {
+            return Err(HostError::Unsupported);
+        }
+        if event.target != 0
+            && (!matches!(input, abi_input::Input::Pointer(_))
+                || (!input.ends_sequence() && canvas_dimensions(view, event.target).is_none()))
+        {
+            return Err(HostError::InvalidArgument);
+        }
+        return Ok(());
+    }
     match event.kind {
         EventKind::Click if event.data.is_empty() => {}
         EventKind::TextChanged => {
             playbit_api::abi::text::TextInput::decode(&event.data)?;
         }
         EventKind::Submit if std::str::from_utf8(&event.data).is_ok() => {}
-        EventKind::Pointer if abi::PointerInput::decode(&event.data).is_ok() => {}
-        EventKind::Key if abi::KeyInput::decode(&event.data).is_ok() => {}
+        EventKind::Key if view.legacy_canvas() != 0 && event.target != 0 => {
+            abi::KeyInput::decode(&event.data)?;
+        }
+        EventKind::Pointer if view.legacy_canvas() != 0 && event.target != 0 => {
+            let pointer = abi::PointerInput::decode(&event.data)?;
+            if !canvas_dimensions(view, event.target)
+                .is_some_and(|(width, height)| pointer.x <= width && pointer.y <= height)
+            {
+                return Err(HostError::InvalidArgument);
+            }
+        }
         EventKind::Frame if abi::FrameInput::decode(&event.data).is_ok() => {}
         _ => return Err(HostError::InvalidArgument),
     }
@@ -115,10 +225,11 @@ pub(in crate::runtime) fn push_work_event(
     assert!(state.queued_bytes <= MAX_QUEUED_EVENT_BYTES);
     let before_count = state.events.len();
     let before_bytes = state.queued_bytes;
-    let event_bytes = 20 + event.data.len();
+    let event_bytes = abi::EVENT_QUEUE_OVERHEAD + event.data.len();
     if event.data.len() > abi::MAX_EVENT_BYTES
         || state.events.len() == MAX_QUEUED_EVENTS
-        || state.queued_bytes + event.data.len() + 20 > MAX_QUEUED_EVENT_BYTES
+        || state.queued_bytes + event.data.len() + abi::EVENT_QUEUE_OVERHEAD
+            > MAX_QUEUED_EVENT_BYTES
     {
         return Err(HostError::LimitExceeded);
     }
@@ -129,7 +240,7 @@ pub(in crate::runtime) fn push_work_event(
         }
         None => state.work.new_root()?,
     };
-    state.queued_bytes += event.data.len() + 20;
+    state.queued_bytes += event.data.len() + abi::EVENT_QUEUE_OVERHEAD;
     state.events.push_back(crate::runtime::instance::QueuedEvent::new(event, root));
     assert_eq!(state.events.len(), before_count + 1);
     assert_eq!(state.queued_bytes, before_bytes + event_bytes);
@@ -146,7 +257,9 @@ pub(in crate::runtime) fn queue_due_wake(state: &mut State, now: Instant) {
         return;
     }
     let _timing = crate::trace::Span::new("guest.wake");
-    if push_event(state, Event { kind: EventKind::Wake, target: 0, data: Vec::new() }).is_ok() {
+    if push_event(state, Event { object_id: 0, kind: EventKind::Wake, target: 0, data: Vec::new() })
+        .is_ok()
+    {
         state.wake_deadline = None;
     }
     // A full event queue keeps the deadline. The host drains a turn and retries
@@ -183,7 +296,7 @@ pub(in crate::runtime) fn take_event(state: &mut State) -> HostResult<Event> {
             message,
         )?;
     }
-    let event_bytes = 20 + peek_event(state)?.data.len();
+    let event_bytes = abi::EVENT_QUEUE_OVERHEAD + peek_event(state)?.data.len();
     let count = state.events.len();
     let bytes = state.queued_bytes;
     assert!(bytes <= MAX_QUEUED_EVENT_BYTES);

@@ -418,6 +418,7 @@ fn selection_queue_pressure_and_stale_forged_or_wrong_kind_callbacks_are_safe() 
             guest.queue_event(
                 generation,
                 Event {
+                    object_id: 0,
                     kind: EventKind::FileSelectionReady,
                     target: 0,
                     data: [
@@ -431,7 +432,10 @@ fn selection_queue_pressure_and_stale_forged_or_wrong_kind_callbacks_are_safe() 
         );
         for _ in 1..MAX_QUEUED_EVENTS {
             guest
-                .queue_event(generation, Event { kind: EventKind::Click, target: 1, data: vec![] })
+                .queue_event(
+                    generation,
+                    Event { object_id: 0, kind: EventKind::Click, target: 1, data: vec![] },
+                )
                 .unwrap();
         }
         assert_eq!(guest.notify_file_selection(generation, TOKEN), Err(HostError::LimitExceeded));
