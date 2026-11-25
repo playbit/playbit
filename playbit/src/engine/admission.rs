@@ -121,6 +121,7 @@ request_routes! {
     DesktopLaunch => None, Concurrent,
     UiZoom { .. } => None, Concurrent,
     BrowserDrafts { .. } => None, Concurrent,
+    DecideVolumeInvitation { .. } => None, Concurrent,
     DeleteVolume { .. } => None, Concurrent,
     DuplicateVolume { .. } => None, Network,
     DuplicateEntry { .. } => None, Network,

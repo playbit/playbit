@@ -5,6 +5,7 @@
 //! payloads before service admission. It does not confer authorization. The base58, hex-payload
 //! and base64 scans are data-plane loops bounded by their validated lengths.
 
+use crate::store::Id;
 use serde::{Deserialize, Serialize};
 
 mod denial;
@@ -14,6 +15,43 @@ pub const SERVICE_DESTINATION: &[u8] = b"service";
 pub const BUILD_DISPLAY_LIMIT: usize = 132 * 1024;
 /// Decoded bound of a registered invitation envelope; the store seals within it.
 pub const INVITATION_ENVELOPE_LIMIT: usize = 4096;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VolumeInvitationOffer {
+    pub share_key_with_service: bool,
+    /// Recipient-encrypted descriptor and volume credentials. AP never opens it.
+    pub envelope: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VolumeInvitationItem {
+    pub volume: Id,
+    pub owner: Id,
+    pub owner_name: Option<String>,
+    pub clock: u64,
+    pub share_key_with_service: bool,
+    pub envelope: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum VolumeInvitationEvent {
+    Upsert { item: VolumeInvitationItem },
+    Remove { volume: Id, clock: u64 },
+    KeyReady,
+    PeerAvailable { volume: Id },
+    Ready,
+    Gap,
+}
+
+pub fn volume_invitation_key_message(account: Id, public_key: &[u8; 32]) -> Vec<u8> {
+    let mut bytes = b"app.playbit.volume-invitation.key.v1\0".to_vec();
+    bytes.extend_from_slice(account.as_bytes());
+    bytes.extend_from_slice(public_key);
+    bytes
+}
 
 /// The account replica orders concurrent writes by clock, then by the original
 /// envelope bytes. Use the same order for its service-readable name projection.
@@ -151,6 +189,51 @@ pub enum ServiceRequest {
         operation_id: String,
         volume_id: String,
         email: String,
+    },
+    RegisterVolumeInvitationKey {
+        operation_id: String,
+        public_key: [u8; 32],
+        signature: Vec<u8>,
+    },
+    GetVolumeInvitationKey {
+        operation_id: String,
+        volume: Id,
+        recipient: Id,
+    },
+    PutVolumeInvitationPolicy {
+        operation_id: String,
+        volume: Id,
+        clock: u64,
+        recipients: Vec<Id>,
+    },
+    PutVolumeInvitation {
+        operation_id: String,
+        volume: Id,
+        recipient: Id,
+        clock: u64,
+        invitation: Option<VolumeInvitationOffer>,
+    },
+    ListVolumeInvitationRecipients {
+        operation_id: String,
+        volume: Id,
+        after: Option<Id>,
+    },
+    WatchVolumeInvitations {
+        operation_id: String,
+    },
+    VolumePeerListen {
+        operation_id: String,
+        volume: Id,
+    },
+    VolumePeerSubscribe {
+        operation_id: String,
+        volume: Id,
+    },
+    VolumePeerRequest {
+        operation_id: String,
+        volume: Id,
+        database_id: crate::store::DatabaseId,
+        direction: SyncDirection,
     },
     RegisterVolume {
         operation_id: String,
@@ -394,6 +477,19 @@ pub enum ServiceRequest {
     },
 }
 
+// fuzz: ap_codec
+fn validate_provider_push(token: &str, bundle: &str) -> Result<(), &'static str> {
+    if token.is_empty()
+        || token.len() > 256
+        || !token.len().is_multiple_of(2)
+        || !is_hex(token, token.len())
+        || !["playbit.engine", "playbit.engine.debug"].contains(&bundle)
+    {
+        return Err("invalid File Provider push registration");
+    }
+    Ok(())
+}
+
 impl ServiceRequest {
     pub fn operation_id(&self) -> &str {
         match self {
@@ -404,6 +500,15 @@ impl ServiceRequest {
             | Self::RegisterFileProviderAccountPush { operation_id, .. }
             | Self::InvalidateFileProviderAccountPush { operation_id, .. } => operation_id,
             Self::ResolveVolumeGrantee { operation_id, .. }
+            | Self::RegisterVolumeInvitationKey { operation_id, .. }
+            | Self::GetVolumeInvitationKey { operation_id, .. }
+            | Self::PutVolumeInvitationPolicy { operation_id, .. }
+            | Self::PutVolumeInvitation { operation_id, .. }
+            | Self::ListVolumeInvitationRecipients { operation_id, .. }
+            | Self::WatchVolumeInvitations { operation_id }
+            | Self::VolumePeerListen { operation_id, .. }
+            | Self::VolumePeerSubscribe { operation_id, .. }
+            | Self::VolumePeerRequest { operation_id, .. }
             | Self::RegisterVolume { operation_id, .. }
             | Self::RegisterSession { operation_id, .. }
             | Self::UploadBuild { operation_id, .. }
@@ -448,6 +553,15 @@ impl ServiceRequest {
         self.validate_identity()?;
         self.validate_running_scope()?;
         match self {
+            Self::RegisterVolumeInvitationKey { .. }
+            | Self::PutVolumeInvitation { .. }
+            | Self::PutVolumeInvitationPolicy { .. } => self.validate_volume_invitation(),
+            Self::GetVolumeInvitationKey { .. }
+            | Self::ListVolumeInvitationRecipients { .. }
+            | Self::WatchVolumeInvitations { .. }
+            | Self::VolumePeerListen { .. }
+            | Self::VolumePeerSubscribe { .. }
+            | Self::VolumePeerRequest { .. } => Ok(()),
             Self::PutAccountDisplayName { name, record_key, clock, ciphertext, .. } => {
                 validate_id32(record_key, "invalid display name record key")?;
                 display_name_version(name, clock, ciphertext).map(|_| ())
@@ -457,15 +571,7 @@ impl ServiceRequest {
             | Self::RevokePublisherKey { .. } => self.validate_publisher(),
             Self::RegisterFileProviderAccountPush { token, bundle, .. }
             | Self::InvalidateFileProviderAccountPush { token, bundle, .. } => {
-                if token.is_empty()
-                    || token.len() > 256
-                    || token.len() % 2 != 0
-                    || !is_hex(token, token.len())
-                    || !["playbit.engine", "playbit.engine.debug"].contains(&bundle.as_str())
-                {
-                    return Err("invalid File Provider push registration");
-                }
-                Ok(())
+                validate_provider_push(token, bundle)
             }
             Self::GetBuildIdentity { build_id, .. } => {
                 validate_id32(build_id, "invalid build identity")
@@ -508,6 +614,39 @@ impl ServiceRequest {
                 request.validate_scope(session_id, build_id, volume_id)
             }
             Self::UploadBuild { .. } => self.validate_upload_build(),
+        }
+    }
+
+    // fuzz: ap_codec
+    fn validate_volume_invitation(&self) -> Result<(), &'static str> {
+        match self {
+            Self::RegisterVolumeInvitationKey { public_key, signature, .. } => {
+                (*public_key != [0; 32] && signature.len() == 64)
+                    .then_some(())
+                    .ok_or("invalid volume invitation public key proof")
+            }
+            Self::PutVolumeInvitation { clock, invitation, .. } => {
+                if *clock == 0 {
+                    return Err("invalid volume invitation clock");
+                }
+                if let Some(offer) = invitation {
+                    canonical_base64url(&offer.envelope, INVITATION_ENVELOPE_LIMIT)
+                        .map_err(|_| "invalid volume invitation envelope")?;
+                }
+                Ok(())
+            }
+            Self::PutVolumeInvitationPolicy { clock, recipients, .. } => {
+                // Encoded once in an AP record, within the request and 400-KiB
+                // central item limits even at maximum canonical ID width.
+                if *clock == 0
+                    || recipients.len() > 12_000
+                    || recipients.windows(2).any(|pair| pair[0] >= pair[1])
+                {
+                    return Err("invalid volume invitation recipient policy");
+                }
+                Ok(())
+            }
+            _ => unreachable!("volume invitation validation has a volume invitation operation"),
         }
     }
 
@@ -1000,6 +1139,8 @@ pub enum InvitationStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PeerEvent {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub live: bool,
     pub build_id: String,
     pub request_id: String,
     pub requester_account_id: String,
@@ -1079,7 +1220,7 @@ mod tests {
         // Exercise every wire operation with valid fields, then corrupt each identity.
         let fixtures: Vec<serde_json::Value> =
             serde_json::from_str(include_str!("../../../tests/fixtures/ap-requests.json")).unwrap();
-        assert_eq!(fixtures.len(), 43);
+        assert_eq!(fixtures.len(), 52);
         for fixture in fixtures {
             let request: ServiceRequest = serde_json::from_value(fixture.clone()).unwrap();
             assert_eq!(request.validate(), Ok(()), "{}", fixture["op"]);

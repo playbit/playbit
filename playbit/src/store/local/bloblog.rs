@@ -98,6 +98,28 @@ impl LocalStore {
         })
     }
 
+    /// Capture one private page and its source cut under the same admission gate.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn private_log_page(
+        &self,
+        access: &Access,
+        volume: Id,
+        log: EntryId,
+        cursor: Option<&Cursor>,
+    ) -> Result<bloblog::ReplicaPage> {
+        if access.invitation_peer.is_none() {
+            return Err(Error::AccessDenied("private log reader required"));
+        }
+        self.with_bloblog(access, volume, log, Permission::Read, false, |store, index| {
+            Ok(bloblog::ReplicaPage {
+                page: store.get_committed(cursor)?,
+                source: self.source_snapshot_token(volume)?,
+                policy_revision: MetadataPolicy::read(index)?.revision(),
+                database_clock: store.database.clock().as_u64(),
+            })
+        })
+    }
+
     /// A verified service page can initialize a read-only participant's backing.
     pub fn bloblog_receive(
         &self,

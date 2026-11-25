@@ -115,9 +115,24 @@ impl Codec for UpdateAuthority {
         }
     }
 }
+impl Record {
+    fn read_deletion(body: View<'_>, mode: Mode) -> Result<Self> {
+        let fields = body.fields(mode, &[1])?;
+        Ok(Self::VolumeDeleted {
+            volume: fields.required(1, mode)?,
+            withdrawal_owner: fields.optional(2)?.map(|value| Id::read(value, mode)).transpose()?,
+        })
+    }
+}
+
 impl Codec for Record {
     fn write(&self, out: &mut Vec<u8>) -> Result<()> {
         match self {
+            Self::VolumeVisibility { volume, hidden_reason } => {
+                record::variant(out, 9);
+                record::put(out, 1, volume)?;
+                record::put(out, 2, hidden_reason)
+            }
             Self::AppVisibility { app, removed } => {
                 record::variant(out, 8);
                 record::put(out, 1, app)?;
@@ -132,9 +147,14 @@ impl Codec for Record {
                 record::put(out, 1, volume)?;
                 record::put(out, 2, credentials)
             }
-            Self::VolumeDeleted { volume } => {
+            Self::VolumeDeleted { volume, withdrawal_owner } => {
                 record::variant(out, 3);
-                record::put(out, 1, volume)
+                record::put(out, 1, volume)?;
+                if let Some(owner) = withdrawal_owner {
+                    out.extend_from_slice(&2u16.to_le_bytes());
+                    record::element(out, owner)?;
+                }
+                Ok(())
             }
             Self::Invitation { invitation, app_name } => {
                 record::variant(out, 4);
@@ -171,6 +191,13 @@ impl Codec for Record {
         let (tag, body) = value.variant()?;
         body.body(record::STRUCT)?;
         match tag {
+            9 => {
+                let fields = body.fields(mode, &[1, 2])?;
+                Ok(Self::VolumeVisibility {
+                    volume: fields.required(1, mode)?,
+                    hidden_reason: fields.required(2, mode)?,
+                })
+            }
             1 => Ok(Self::DisplayName { name: body.fields(mode, &[1])?.required(1, mode)? }),
             2 => {
                 let fields = body.fields(mode, &[1, 2])?;
@@ -179,7 +206,7 @@ impl Codec for Record {
                     credentials: fields.required(2, mode)?,
                 })
             }
-            3 => Ok(Self::VolumeDeleted { volume: body.fields(mode, &[1])?.required(1, mode)? }),
+            3 => Self::read_deletion(body, mode),
             4 => {
                 let fields = body.fields(mode, &[1])?;
                 Ok(Self::Invitation {

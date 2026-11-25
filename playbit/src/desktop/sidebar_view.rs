@@ -6,10 +6,15 @@ use playbit_api::ui::{Theme, ThemeColor as Role};
 
 pub(super) fn sort_volumes(volumes: &mut [crate::store::Volume]) {
     if volumes.len() <= 256 {
-        volumes.sort_unstable_by(|a, b| {
-            crate::ui::collation::compare(&a.name, &b.name).then_with(|| a.id.cmp(&b.id))
-        });
+        volumes.sort_unstable_by(compare_volumes);
     }
+}
+
+pub(super) fn compare_volumes(
+    a: &crate::store::Volume,
+    b: &crate::store::Volume,
+) -> std::cmp::Ordering {
+    crate::ui::collation::compare(&a.name, &b.name).then_with(|| a.id.cmp(&b.id))
 }
 
 pub(super) struct VolumeRename {
@@ -54,18 +59,14 @@ impl Shell {
                 }
                 browser::ListNavigation::PreviousColumn => {
                     let id = browser.read(cx).volume.id;
-                    if let Some(index) = self.volumes.iter().position(|volume| volume.id == id)
+                    let page = self.visible_volume_page();
+                    if let Some(index) = self.volumes[page.ordinary]
+                        .iter()
+                        .chain(&self.invited_volumes[page.invited])
+                        .position(|row| row.id == id)
                         && let Some(control) = self.navigation_controls.get(&format!("volume-{id}"))
                     {
-                        let pending_before = self.volumes.len() < 256
-                            && self
-                                .pending_volume
-                                .as_ref()
-                                .is_some_and(|pending| pending.position(&self.volumes) <= index);
-                        self.volume_scroll.scroll_to_item(
-                            index + usize::from(pending_before),
-                            gpui::ScrollStrategy::Top,
-                        );
+                        self.reveal_sidebar_row(index, false);
                         control.update(cx, |control, cx| control.focus_from_arrow(window, cx));
                         cx.notify();
                     }
@@ -223,17 +224,22 @@ impl Shell {
             .iter()
             .map(|draft| format!("volume-draft-{}", draft.id))
             .collect();
+        let page = self.visible_volume_page();
+        let volume_keys: std::collections::BTreeSet<_> = self.volumes[page.ordinary]
+            .iter()
+            .chain(&self.invited_volumes[page.invited])
+            .map(|volume| format!("volume-{}", volume.id))
+            .collect();
         self.navigation_controls.retain(|key, control| {
-            let keep = draft_keys.contains(key)
+            let keep = volume_keys.contains(key)
+                || draft_keys.contains(key)
                 || key.starts_with("recent-")
                 || key == "join"
                 || key == "account"
                 || key == "sidebar-volumes"
                 || key == "sidebar-sessions"
                 || key.starts_with("application-")
-                || sessions.iter().any(|s| s.id == *key)
-                || self.volumes.len() <= 256
-                    && self.volumes.iter().any(|volume| *key == format!("volume-{}", volume.id));
+                || sessions.iter().any(|s| s.id == *key);
             if !keep {
                 control.update(cx, |control, _| control.retire());
             }
@@ -352,18 +358,28 @@ impl Shell {
                 }
             },
         ));
-        let entries = self.volumes.clone();
+        enum Row {
+            Control(Entity<controls::Control>),
+            Rename(Entity<text_editor::TextEditor>, bool),
+            Heading(application_browser::Section),
+        }
         let mut rows = Vec::new();
-        if entries.len() > 256 {
-            volumes = volumes.child(
-                self.host_text(
-                    HostText::VolumeCapacity,
-                    "Volume list exceeds the 256-volume display limit.",
+        let page = self.visible_volume_page();
+        self.volume_page = page.index;
+        for invited in [false, true] {
+            let entries = if invited {
+                if page.invited.is_empty() {
+                    continue;
+                }
+                rows.push(Row::Heading(self.application_section(
+                    "volume-invitations",
+                    "Invitations",
                     cx,
-                )
-                .text_size(ui(13.)),
-            );
-        } else {
+                )));
+                self.invited_volumes[page.invited.clone()].to_vec()
+            } else {
+                self.volumes[page.ordinary.clone()].to_vec()
+            };
             for volume in entries {
                 let editor = self
                     .volume_rename
@@ -376,62 +392,59 @@ impl Shell {
                         .as_ref()
                         .is_some_and(|browser| browser.read(cx).volume.id == volume.id);
                 self.applications.push_volume_row(volume.id, selected);
-                rows.push((self.volume_button(volume, selected, cx), editor, selected));
+                let control = self.volume_button(volume, selected, invited, cx);
+                rows.push(match editor {
+                    Some(editor) => Row::Rename(editor, selected),
+                    None => Row::Control(control),
+                });
             }
-            if let Some(pending) = &self.pending_volume
-                && rows.len() < 256
+            if !invited
+                && self.sidebar_volume_count() < 256
+                && let Some(pending) = &self.pending_volume
             {
-                rows.insert(
-                    pending.position(&self.volumes),
-                    (pending.control.clone(), None, false),
-                );
+                rows.insert(pending.position(&self.volumes), Row::Control(pending.control.clone()));
             }
         }
         let apps = self.application_rows(cx);
-        let heading =
-            (!apps.is_empty()).then(|| self.application_section("volume-app-data", "App data", cx));
-        let count = rows.len() + usize::from(heading.is_some()) + apps.len();
-        if count > 0 {
+        if !apps.is_empty() {
+            rows.push(Row::Heading(self.application_section("volume-app-data", "App data", cx)));
+            rows.extend(apps.into_iter().map(Row::Control));
+        }
+        if !rows.is_empty() {
             volumes = volumes
                 .child(
-                    gpui::uniform_list("volumes", count, move |range, _, _| {
+                    gpui::uniform_list("volumes", rows.len(), move |range, _, _| {
                         range
                             .map(|i| {
                                 let frame = div().h(ui(32.)).px(ui(4.));
-                                if i >= rows.len() {
-                                    if i == rows.len() {
-                                        return frame.children(heading.clone());
-                                    }
-                                    return frame.child(apps[i - rows.len() - 1].clone());
+                                match &rows[i] {
+                                    Row::Control(control) => frame.child(control.clone()),
+                                    Row::Heading(heading) => frame.child(heading.clone()),
+                                    Row::Rename(editor, selected) => frame.child(
+                                        div()
+                                            .h_full()
+                                            .flex()
+                                            .items_center()
+                                            .gap(ui(6.))
+                                            .px(ui(8.))
+                                            .rounded(ui(4.))
+                                            .when(*selected, |row| {
+                                                row.bg(rgba(theme().color(Role::MenuSelection).0))
+                                            })
+                                            .child(
+                                                gpui::svg()
+                                                    .path("volume-cell")
+                                                    .size(ui(16.))
+                                                    .flex_none()
+                                                    .text_color(if *selected {
+                                                        gpui::white()
+                                                    } else {
+                                                        gpui::black()
+                                                    }),
+                                            )
+                                            .child(div().flex_1().min_w_0().child(editor.clone())),
+                                    ),
                                 }
-                                let (control, editor, selected) = &rows[i];
-                                let row = if let Some(editor) = editor {
-                                    div()
-                                        .h_full()
-                                        .flex()
-                                        .items_center()
-                                        .gap(ui(6.))
-                                        .px(ui(8.))
-                                        .rounded(ui(4.))
-                                        .when(*selected, |row| {
-                                            row.bg(rgba(theme().color(Role::MenuSelection).0))
-                                        })
-                                        .child(
-                                            gpui::svg()
-                                                .path("volume-cell")
-                                                .size(ui(16.))
-                                                .flex_none()
-                                                .text_color(if *selected {
-                                                    gpui::white()
-                                                } else {
-                                                    gpui::black()
-                                                }),
-                                        )
-                                        .child(div().flex_1().min_w_0().child(editor.clone()))
-                                } else {
-                                    div().child(control.clone())
-                                };
-                                frame.child(row)
                             })
                             .collect::<Vec<_>>()
                     })
@@ -440,7 +453,7 @@ impl Shell {
                     .h_full(),
                 )
                 .child(crate::ui::desktop::scrollbar::Scrollbars::overlay(&self.volume_scrollbars));
-        } else if self.volumes.is_empty() {
+        } else if self.sidebar_volume_count() == 0 {
             volumes = volumes.child(
                 self.host_text(
                     HostText::EmptyVolumes,
@@ -456,12 +469,22 @@ impl Shell {
                 .text_color(rgba(theme().color(Role::TextSecondary).0)),
             );
         }
+        if page.pages > 1 {
+            return div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(volumes)
+                .child(self.volume_page_controls(&page, cx));
+        }
         volumes
     }
     fn volume_button(
         &mut self,
         volume: crate::store::Volume,
         selected: bool,
+        invited: bool,
         cx: &mut Context<Self>,
     ) -> Entity<controls::Control> {
         let id = volume.id;
@@ -482,6 +505,7 @@ impl Shell {
         );
         self.volume_row_interactions(&control, id, cx);
         let rename = (selected
+            && !invited
             && self.volume_rename.is_none()
             && self
                 .browser
@@ -552,8 +576,7 @@ impl Shell {
         let Some(draft) = drafts::get_for(self.account.id, id, cx) else {
             return;
         };
-        let Some(volume) = self.volumes.iter().find(|volume| volume.id == draft.volume).cloned()
-        else {
+        let Some(volume) = self.catalog_volume(draft.volume).cloned() else {
             self.error = "The volume containing these local changes is unavailable.".into();
             cx.notify();
             return;
@@ -568,18 +591,27 @@ impl Shell {
     }
 
     pub(super) fn catalog_volume(&self, id: crate::store::Id) -> Option<&crate::store::Volume> {
-        self.volumes.iter().chain(&self.scoped_volumes).find(|volume| volume.id == id)
+        self.volumes
+            .iter()
+            .chain(&self.invited_volumes)
+            .chain(&self.scoped_volumes)
+            .find(|volume| volume.id == id)
     }
 
     pub(super) fn set_browser_volumes(&self, browser: &mut browser::Browser) {
-        let mut volumes = Vec::new();
-        if self.volumes.len() + self.scoped_volumes.len() <= 256 {
-            volumes.extend(self.volumes.iter().chain(&self.scoped_volumes).cloned());
-            if !self.scoped_volumes.is_empty() {
-                sort_volumes(&mut volumes);
-            }
+        let page = self.visible_volume_page();
+        let mut volumes: Vec<_> = self.volumes[page.ordinary]
+            .iter()
+            .chain(&self.invited_volumes[page.invited])
+            .chain(&self.scoped_volumes)
+            .take(256)
+            .cloned()
+            .collect();
+        if !self.scoped_volumes.is_empty() || !self.invited_volumes.is_empty() {
+            sort_volumes(&mut volumes);
         }
         browser.set_volumes(volumes);
+        self.set_browser_invitation(browser);
     }
 
     pub(super) fn select_volume(
@@ -634,6 +666,14 @@ impl Shell {
             Some(cx.subscribe(&browser, |host, _, notice: &browser::Notice, cx| {
                 host.show_visual_bell(&notice.0, "draft-changes", cx)
             }));
+        self.browser_decision = Some(cx.subscribe(
+            &browser,
+            |host, browser, decision: &volume_invitations::Decision, cx| {
+                if host.browser.as_ref() == Some(&browser) {
+                    host.decide_volume_invitation(browser.read(cx).volume.id, decision.accept, cx);
+                }
+            },
+        ));
         self.browser = Some(browser);
         cx.notify();
         true
@@ -669,13 +709,17 @@ impl Shell {
             return false;
         }
         let row = self.volumes[index].clone();
-        let pending_before = self.volumes.len() < 256
+        self.reveal_ordinary_volume_page(index);
+        let page = self.visible_volume_page();
+        let pending_before = self.sidebar_volume_count() < 256
             && self
                 .pending_volume
                 .as_ref()
                 .is_some_and(|pending| pending.position(&self.volumes) <= index);
-        self.volume_scroll
-            .scroll_to_item(index + usize::from(pending_before), gpui::ScrollStrategy::Top);
+        self.volume_scroll.scroll_to_item(
+            index - page.ordinary.start + usize::from(pending_before),
+            gpui::ScrollStrategy::Top,
+        );
         let host = cx.weak_entity();
         let editor = cx.new(|cx| {
             let editor_id = cx.entity_id();
@@ -1862,10 +1906,19 @@ mod tests {
             host.sidebar_view(true, cx);
             assert_ne!(host.navigation_controls[&format!("volume-{}", second)].entity_id(), other);
             assert!(!host.navigation_controls.contains_key(&format!("volume-{first}")));
-            host.volumes = vec![volume(first, "Overflow"); 257];
-            host.sidebar_volumes = true;
+            let last = crate::store::Id::from_bytes(256_u128.to_be_bytes());
+            host.volumes.extend(
+                (1_u128..=256)
+                    .map(|i| volume(crate::store::Id::from_bytes(i.to_be_bytes()), "Other")),
+            );
+            let retained = host.navigation_controls[&format!("volume-{second}")].entity_id();
             host.sidebar_view(true, cx);
-            assert!(host.navigation_controls.keys().all(|key| !key.starts_with("volume-")));
+            assert_eq!(host.navigation_controls[&format!("volume-{second}")].entity_id(), retained);
+            assert!(!host.navigation_controls.contains_key(&format!("volume-{last}")));
+            host.volume_page = 1;
+            host.sidebar_view(true, cx);
+            assert!(host.navigation_controls.contains_key(&format!("volume-{last}")));
+            assert!(!host.navigation_controls.contains_key(&format!("volume-{second}")));
         });
         assert!(
             requests.try_recv().is_err(),

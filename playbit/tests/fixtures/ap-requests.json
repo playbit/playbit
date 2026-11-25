@@ -205,6 +205,60 @@
     "email": "codec@example.invalid"
   },
   {
+    "op": "register_volume_invitation_key",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "public_key": [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    "signature": [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+  },
+  {
+    "op": "get_volume_invitation_key",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "volume": "NCX9PNbvZtwyXe5YjATFzi",
+    "recipient": "1111111111111111"
+  },
+  {
+    "op": "put_volume_invitation_policy",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "volume": "NCX9PNbvZtwyXe5YjATFzi",
+    "clock": 1,
+    "recipients": ["1111111111111111"]
+  },
+  {
+    "op": "put_volume_invitation",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "volume": "NCX9PNbvZtwyXe5YjATFzi",
+    "recipient": "1111111111111111",
+    "clock": 1,
+    "invitation": {"share_key_with_service": false, "envelope": "AQ"}
+  },
+  {
+    "op": "list_volume_invitation_recipients",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "volume": "NCX9PNbvZtwyXe5YjATFzi",
+    "after": null
+  },
+  {
+    "op": "watch_volume_invitations",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi"
+  },
+  {
+    "op": "volume_peer_listen",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "volume": "NCX9PNbvZtwyXe5YjATFzi"
+  },
+  {
+    "op": "volume_peer_subscribe",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "volume": "NCX9PNbvZtwyXe5YjATFzi"
+  },
+  {
+    "op": "volume_peer_request",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "volume": "NCX9PNbvZtwyXe5YjATFzi",
+    "database_id": "index",
+    "direction": "pull"
+  },
+  {
     "op": "register_volume",
     "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
     "volume_id": "NCX9PNbvZtwyXe5YjATFzi",

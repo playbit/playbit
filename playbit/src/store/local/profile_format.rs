@@ -82,6 +82,10 @@ pub(super) fn enable_shared_sessions(store: &LocalStore) -> Result<()> {
     enable_app_scopes(store, profile::format::SHARED_SESSION)
 }
 
+pub(super) fn enable_volume_invitations(store: &LocalStore) -> Result<()> {
+    enable_app_scopes(store, profile::format::VOLUME_INVITATIONS)
+}
+
 #[cfg(any(feature = "connected-engine", test))]
 pub(super) fn enable_world_projection(store: &LocalStore) -> Result<()> {
     enable_app_scopes(store, profile::format::WORLD_PROJECTION)

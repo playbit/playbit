@@ -445,10 +445,13 @@ on reconnect. IDs, data, permissions and existing invitations stay the same.
 `pb volume grant VOLUME_ID EMAIL r` sets that existing account's volume grant to
 read-only; `rw` sets read/write. Email resolution goes through AP and requires the
 volume owner. Other subjects and object overrides are preserved; an existing
-public grant still applies. The command does not send mail, transfer credentials,
-or select personal volumes for an app. Share a supported session invitation
-separately; a permission grant alone does not transfer its capability or publish
-unsupported local scopes.
+public grant still applies. For a personal volume, a named grant appears in the
+recipient’s Volumes tab under Invitations. They can use the granted permissions
+as soon as the volume is available. Accept moves it into their ordinary list.
+Decline & Leave hides it across their account, including after a later grant.
+The owner can change or withdraw access in Permissions. Peer-only volumes need
+an online owner device for initial data transfer. App sessions continue to use
+session invitation links.
 Unknown accounts fail without changing permissions. The successful JSON result
 reports the resolved account and access; progress goes to stderr.
 

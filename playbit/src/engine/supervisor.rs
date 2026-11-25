@@ -420,7 +420,7 @@ impl Engine {
             | Request::EntryDetails { .. } | Request::EntryRevisions { .. }
             | Request::CreateDatabase { .. } | Request::CreateDatabaseIn { .. } | Request::RenameEntry { .. } | Request::RenameEntryComponent { .. } | Request::KvRename { .. }
             | Request::RemoveEntry { .. } | Request::EntryPermissions { .. }
-            | Request::DeleteVolume { .. } | Request::LabelVolume { .. } | Request::CreateVolume { .. }
+            | Request::DecideVolumeInvitation { .. } | Request::DeleteVolume { .. } | Request::LabelVolume { .. } | Request::CreateVolume { .. }
             | Request::InitializeRoot { .. } | Request::InitializeApp { .. } | Request::AppVolumes { .. } | Request::AutomaticVolumes { .. } | Request::OpenAppVolume { .. } | Request::OpenAutomaticVolume { .. } | Request::SessionReference { .. } | Request::BloblogCreate { .. } | Request::BloblogCreateIn { .. }
             | Request::Schema { .. } | Request::CreateObject { .. }
             | Request::ReadObject { .. } | Request::EditObject { .. }
@@ -553,7 +553,8 @@ impl Engine {
         self.network.report_onboarding(self.services.store.clone());
         let sessions = self.services.store.retained_sessions()?;
         self.network.refresh_builds(self.services.store.clone(), self.completion.wake.clone())?;
-        let volumes = self.services.store.volumes()?;
+        let listing = self.services.store.volume_listing()?;
+        let volumes = listing.volumes;
         let automatic_volume_ids = self.services.store.automatic_volume_ids(&volumes)?;
         let invitation_status = self.invitation_status();
         let desktop_invitation = match &invitation_status {
@@ -573,6 +574,8 @@ impl Engine {
             account_key_backup: self.services.store.account_key_backup()?,
             volumes,
             automatic_volume_ids,
+            volume_invitations: listing.invitations,
+            volume_invitation_owners: listing.owners,
             examples: crate::examples::EXAMPLES
                 .iter()
                 .map(|example| reply::ExampleInfo {
@@ -677,7 +680,7 @@ impl Engine {
             },
 
             #[rustfmt::skip]
-            request @ (Request::DeleteVolume { .. } | Request::LabelVolume { .. } | Request::CreateVolume { .. }
+            request @ (Request::DecideVolumeInvitation { .. } | Request::DeleteVolume { .. } | Request::LabelVolume { .. } | Request::CreateVolume { .. }
             | Request::InitializeRoot { .. }) => {
                 self.dispatch_local_volumes(request, &access)?
             },
@@ -878,6 +881,10 @@ impl Engine {
             Request::LabelVolume { volume, label } => {
                 let renamed = self.services.store.label_volume(access, volume, &label)?;
                 Reply::Volume(renamed)
+            }
+            Request::DecideVolumeInvitation { volume, accept } => {
+                self.services.store.decide_volume_invitation(volume, accept)?;
+                Reply::VolumeInvitationDecided { volume, accept }
             }
             Request::DeleteVolume { volume } => {
                 self.services.store.delete_volume(volume)?;

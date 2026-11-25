@@ -122,6 +122,12 @@ impl Shell {
         let target = control.downgrade();
         control.update(cx, |control, _| {
             control.set_context_menu(Rc::new(move |event, window, cx| {
+                if host
+                    .upgrade()
+                    .is_none_or(|host| !host.read(cx).volumes.iter().any(|row| row.id == volume))
+                {
+                    return;
+                }
                 let host = host.clone();
                 let owner = window.window_handle();
                 let activate = Rc::new(move |action, cx: &mut App| {

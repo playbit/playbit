@@ -54,7 +54,7 @@ async function project(account: string, state: unknown, record: AccountRecord): 
         throw Error('Unlock this account’s private credentials before synchronizing');
     }
     if (record.kind === 'display_name') return { ...row, display_name: record.name };
-    if (record.kind === 'app_visibility') return row;
+    if (record.kind === 'app_visibility' || record.kind === 'volume_visibility') return row;
     if (record.kind === 'volume_deleted') {
         const deleted = [...new Set([...(row.deleted_volumes ?? []), record.volume])];
         if (deleted.length > 4096) throw Error('Account deletion capacity exceeded');

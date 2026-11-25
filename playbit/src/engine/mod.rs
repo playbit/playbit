@@ -359,6 +359,10 @@ pub enum Request {
     },
     LocalProtocol,
     Status,
+    DecideVolumeInvitation {
+        volume: Id,
+        accept: bool,
+    },
     DeleteVolume {
         volume: Id,
     },

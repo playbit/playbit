@@ -40,11 +40,15 @@ impl Synchronization {
         scope: ClientScope,
         timing: crate::trace::Interval,
     ) -> Result<Self> {
-        let volumes = remote_volumes(store)?
-            .into_iter()
-            .filter(|volume| volume.owner == store.account().id && scope.admits(volume.id))
-            .map(|volume| volume.id)
-            .collect::<Vec<_>>();
+        let mut volumes = Vec::new();
+        for volume in remote_volumes(store)? {
+            if scope.admits(volume.id)
+                && (volume.owner == store.account().id
+                    || (!scope.provider() && store.has_direct_volume_grant(volume.id)?))
+            {
+                volumes.push(volume.id);
+            }
+        }
         Ok(Self {
             total: volumes.len(),
             volumes,
@@ -67,7 +71,12 @@ impl Synchronization {
             Phase::Files => self.files(remote, store)?,
             Phase::Finish => {
                 let result = self.first_error.take().map_or(Ok(()), Err);
-                remote.finish_synchronization(store, result, &self.unavailable_sessions)?;
+                remote.finish_synchronization(
+                    store,
+                    result,
+                    &self.volumes,
+                    &self.unavailable_sessions,
+                )?;
                 return Ok(true);
             }
         }
@@ -111,10 +120,17 @@ impl Synchronization {
                 Some(TransferProgress::Volumes { current: self.next + 1, total: self.total }),
                 &remote.completion,
             );
-            let result = store
-                .volume(volume)
-                .map_err(Into::into)
-                .and_then(|descriptor| remote.sync_owned_volume(store, descriptor));
+            let result = store.volume(volume).map_err(Into::into).and_then(|descriptor| {
+                if descriptor.owner == store.account().id {
+                    remote.sync_owned_volume(store, descriptor)
+                } else {
+                    remote.sync_direct_volume(store, volume)?;
+                    if !descriptor.share_key_with_service {
+                        remote.checkpoint_direct_volume(volume)?;
+                    }
+                    Ok(())
+                }
+            });
             let deferred = result
                 .as_ref()
                 .is_err_and(|error| error.is::<wire::SharedServiceUpgradeRequired>());
@@ -179,11 +195,19 @@ impl Synchronization {
     }
 
     fn begin_files(&mut self, store: &LocalStore) -> Result<()> {
-        self.volumes = remote_volumes(store)?
-            .into_iter()
-            .filter(|volume| self.scope.admits(volume.id))
-            .map(|volume| volume.id)
-            .collect();
+        // Inbox delivery can install credentials during this operation. A new direct
+        // grant gets its own initialization before inspecting or fencing its backings.
+        let mut admitted = std::mem::take(&mut self.volumes);
+        admitted.sort_unstable();
+        for volume in remote_volumes(store)? {
+            if self.scope.admits(volume.id)
+                && (volume.owner == store.account().id
+                    || admitted.binary_search(&volume.id).is_ok()
+                    || !store.has_direct_volume_grant(volume.id)?)
+            {
+                self.volumes.push(volume.id);
+            }
+        }
         self.total = self.volumes.len();
         self.next = 0;
         self.phase = Phase::Files;
@@ -223,6 +247,50 @@ impl Synchronization {
 #[allow(clippy::unwrap_used, reason = "Tests assert successful isolated fixture operations.")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_offer_received_during_sync_joins_the_next_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let owner = LocalStore::open(dir.path().join("owner")).unwrap();
+        let recipient = LocalStore::open(dir.path().join("recipient")).unwrap();
+        let secret = [41; 16];
+        recipient
+            .save_recovery_state(&crate::store::RecoveryState {
+                secret,
+                acknowledged: true,
+                revision: 1,
+                synchronized_digest: None,
+                pending: None,
+            })
+            .unwrap();
+        let local = recipient.create_volume("Existing", true).unwrap().id;
+        let start = || {
+            Synchronization::new(
+                &recipient,
+                ClientScope::FullClient,
+                crate::trace::Interval::new("replication.sync"),
+            )
+            .unwrap()
+        };
+        let mut running = start();
+        let shared = owner.create_volume("Incoming", true).unwrap().id;
+        let account = recipient.account().id;
+        owner.grant_volume(&Access::owner(owner.account().id), shared, account, false).unwrap();
+        let clock = owner.volume_invitation_policy(shared).unwrap().unwrap().clock;
+        let key =
+            crate::store::account_key::volume_invitation_public_key(account, &secret).unwrap();
+        let envelope = owner.seal_volume_invitation(shared, account, clock, &key).unwrap();
+        recipient
+            .apply_volume_invitation(owner.account().id, shared, clock, true, &envelope, None)
+            .unwrap();
+
+        running.begin_files(&recipient).unwrap();
+        assert_eq!(running.volumes, [local]);
+        let mut next = start();
+        assert!(next.volumes.contains(&shared));
+        next.begin_files(&recipient).unwrap();
+        assert!(next.volumes.contains(&shared));
+    }
 
     #[test]
     fn account_only_provider_never_admits_volumes_or_session_phase() {

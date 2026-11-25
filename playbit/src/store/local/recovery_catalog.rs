@@ -320,9 +320,15 @@ impl LocalStore {
                 scopes.push(scope);
             }
         }
+        let session_volumes: BTreeSet<_> =
+            invitations.iter().map(|invite| invite.session.replica_volume()).collect();
         let mut volumes = Vec::new();
         for volume in self.volumes()? {
-            if !self.replication_supported(volume.id)? {
+            if !self.replication_supported(volume.id)?
+                || volume.owner != self.account.id
+                    && !session_volumes.contains(&volume.id)
+                    && self.has_volume_inbox_entry(volume.id)?
+            {
                 continue;
             }
             match self.credentials(volume.id) {
@@ -497,26 +503,26 @@ impl LocalStore {
         prepare_catalog: impl FnOnce() -> Result<RecoveryCatalog>,
         commit_allowed: impl FnOnce(&mut kvdb::WriteTxn<'_, RedbStorage>) -> Result<bool>,
     ) -> Result<Option<(usize, usize)>> {
+        self.import_credentials_under_grant(None, prepare_catalog, commit_allowed)
+    }
+
+    pub(super) fn import_credentials_under_grant(
+        &self,
+        direct_volume: Option<Id>,
+        prepare_catalog: impl FnOnce() -> Result<RecoveryCatalog>,
+        commit_allowed: impl FnOnce(&mut kvdb::WriteTxn<'_, RedbStorage>) -> Result<bool>,
+    ) -> Result<Option<(usize, usize)>> {
         let _timing = crate::trace::Interval::new("recovery.import");
         // Validate incoming credentials before preparing files. The
         // profile gate is never held while waiting for a volume or filesystem.
-        let catalog = {
-            let _timing = crate::trace::Interval::new("recovery.import_preflight");
-            let catalog = prepare_catalog()?;
-            let _profile = self.lock_profile()?;
-            self.validate_incoming_catalog(&catalog)?;
-            if catalog
-                .invitations
-                .iter()
-                .any(|invitation| invitation.session.shared_volume.is_some())
-            {
-                profile_format::enable_shared_sessions(self)?;
-            }
-            catalog
-        };
-        let preparation = crate::trace::Interval::new("recovery.import_files");
-        self.prepare_recovered_volume_files(&catalog)?;
-        drop(preparation);
+        let catalog = self.prepare_credential_import(prepare_catalog)?;
+        // Directory changes participate in the same volume admission gate as
+        // ordinary writes and incoming replication. Always acquire it before
+        // the profile lock, including when a withdrawal raced file preparation.
+        let operations = direct_volume
+            .map(|volume| self.access_operations(&Access::owner(self.account.id), volume))
+            .transpose()?;
+        let _guards = operations.as_ref().map(OperationLocks::lock).transpose()?;
         // Import/adoption may have completed during file preparation. Revalidate
         // again and insert only absent identities: existing version/denial wins.
         let profile_wait = crate::trace::Interval::new("recovery.import_profile_wait");
@@ -529,30 +535,8 @@ impl LocalStore {
             profile_format::enable_hosted_app_scopes(self)?;
         }
         let previous = self.metadata.begin_read()?;
-        let mut new_volumes = 0;
         let mut tx = self.metadata.begin_write(now_unix_secs())?;
-        for item in &catalog.volumes {
-            if previous.has(format!("deleted-volume/{}", item.volume.id).as_bytes())? {
-                continue;
-            }
-            let key = format!("volume/{}", item.volume.id);
-            if tx.get(key.as_bytes())?.is_some() {
-                if !tx.has(format!("credentials/{}", item.volume.id).as_bytes())? {
-                    tx.put(
-                        format!("credentials/{}", item.volume.id).as_bytes(),
-                        &encode(&item.credentials)?,
-                    )?;
-                    new_volumes += 1;
-                }
-                continue;
-            }
-            tx.put(key.as_bytes(), &encode(&item.volume)?)?;
-            tx.put(
-                format!("credentials/{}", item.volume.id).as_bytes(),
-                &encode(&item.credentials)?,
-            )?;
-            new_volumes += 1;
-        }
+        let new_volumes = Self::import_volume_credentials(&catalog, &previous, &mut tx)?;
         for session in &sessions {
             tx.put(format!("session/{}", session.session.id).as_bytes(), &encode(session)?)?;
         }
@@ -576,6 +560,61 @@ impl LocalStore {
         drop(_profile);
         self.announce_recovered_capabilities(&catalog, &sessions, &previous)?;
         Ok(Some((sessions.len(), new_volumes)))
+    }
+
+    fn prepare_credential_import(
+        &self,
+        prepare_catalog: impl FnOnce() -> Result<RecoveryCatalog>,
+    ) -> Result<RecoveryCatalog> {
+        let catalog = {
+            let _timing = crate::trace::Interval::new("recovery.import_preflight");
+            let catalog = prepare_catalog()?;
+            let _profile = self.lock_profile()?;
+            self.validate_incoming_catalog(&catalog)?;
+            if catalog
+                .invitations
+                .iter()
+                .any(|invitation| invitation.session.shared_volume.is_some())
+            {
+                profile_format::enable_shared_sessions(self)?;
+            }
+            catalog
+        };
+        let preparation = crate::trace::Interval::new("recovery.import_files");
+        self.prepare_recovered_volume_files(&catalog)?;
+        drop(preparation);
+        Ok(catalog)
+    }
+
+    fn import_volume_credentials(
+        catalog: &RecoveryCatalog,
+        previous: &kvdb::ReadTxn<'_, RedbStorage>,
+        tx: &mut kvdb::WriteTxn<'_, RedbStorage>,
+    ) -> Result<usize> {
+        let mut new_volumes = 0;
+        for item in &catalog.volumes {
+            if previous.has(format!("deleted-volume/{}", item.volume.id).as_bytes())? {
+                continue;
+            }
+            let key = format!("volume/{}", item.volume.id);
+            if tx.get(key.as_bytes())?.is_some() {
+                if !tx.has(format!("credentials/{}", item.volume.id).as_bytes())? {
+                    tx.put(
+                        format!("credentials/{}", item.volume.id).as_bytes(),
+                        &encode(&item.credentials)?,
+                    )?;
+                    new_volumes += 1;
+                }
+                continue;
+            }
+            tx.put(key.as_bytes(), &encode(&item.volume)?)?;
+            tx.put(
+                format!("credentials/{}", item.volume.id).as_bytes(),
+                &encode(&item.credentials)?,
+            )?;
+            new_volumes += 1;
+        }
+        Ok(new_volumes)
     }
 
     fn announce_recovered_capabilities(

@@ -48,16 +48,21 @@ impl LocalStore {
         if self.volume_deleted(volume)? {
             return Ok(());
         }
-        self.volume(volume)?;
+        let descriptor = self.volume(volume)?;
+        let withdrawal_owner = self.withdrawal_owner_on_delete(volume)?;
+        if withdrawal_owner.is_some() {
+            profile_format::enable_volume_invitations(self)?;
+        }
         let mut tx = self.metadata.begin_write(now_unix_secs())?;
-        tx.put(format!("deleted-volume/{volume}").as_bytes(), &[])?;
+        self.stage_volume_deletion(&mut tx, volume, withdrawal_owner)?;
         let changed = self.queue_account_record(
             &mut tx,
-            &crate::store::account::Record::VolumeDeleted { volume },
+            &crate::store::account::Record::VolumeDeleted { volume, withdrawal_owner },
         )?;
         tx.commit()?;
         self.committed_account_record(changed);
         self.changes.observed_changed(Some(volume));
+        self.notify_volume_invitation_policy(&descriptor);
         Ok(())
     }
 }

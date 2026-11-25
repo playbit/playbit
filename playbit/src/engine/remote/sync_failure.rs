@@ -54,6 +54,11 @@ pub(super) fn reason<'a>(error: &'a (dyn Error + 'static)) -> &'a (dyn Error + '
     error.downcast_ref::<Failure>().map_or(error, |failure| failure.cause.as_ref())
 }
 
+pub(super) fn volume_id(error: &(dyn Error + 'static)) -> Option<Id> {
+    let error = error.downcast_ref::<Pending>().map_or(error, |pending| pending.0.as_ref());
+    error.downcast_ref::<Failure>().map(|failure| failure.key.volume)
+}
+
 /// Only an entry capture in this exact volume can defer World at room launch.
 #[cfg(feature = "app-host")]
 pub(super) fn missing_entry_backing(volume: Id, error: &(dyn Error + 'static)) -> bool {

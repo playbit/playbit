@@ -18,7 +18,7 @@ impl Remote {
         let prepared = self.begin_account_sync(store)?;
         self.finish_account_sync(store, prepared)
     }
-    pub(super) fn account_metadata_ready(&self) -> Result<()> {
+    fn account_metadata_ready(&mut self, store: &Arc<LocalStore>) -> Result<()> {
         if let Some(live) = &self.live {
             if !live.account_installed() {
                 return Ok(());
@@ -26,6 +26,8 @@ impl Remote {
             self.runtime.block_on(live.account_receive_fence())?;
             self.account_ready.store(true, std::sync::atomic::Ordering::Release);
             self.completion.notify();
+            // Install the recipient's saved decisions before showing the inbox.
+            self.start_volume_invitations(store)?;
         }
         Ok(())
     }
@@ -71,7 +73,7 @@ impl Remote {
         prepared: Option<crate::engine::live::PreparedAccount>,
     ) -> Result<()> {
         let Some(prepared) = prepared else {
-            return self.account_metadata_ready();
+            return self.account_metadata_ready(store);
         };
         let result = (|| {
             let publisher = self.live.as_ref().ok_or("live account unavailable")?.publisher();
@@ -113,7 +115,7 @@ impl Remote {
             )?;
         }
         result?;
-        self.account_metadata_ready()
+        self.account_metadata_ready(store)
     }
 
     pub(super) fn recover_account(

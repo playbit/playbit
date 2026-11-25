@@ -18,9 +18,11 @@ pub const OPTIONAL_FEATURES: &[&str] = &[
     SHARED_SESSION,
     SESSION_PARTICIPANTS_ACL,
     WORLD_REPLICA,
+    VOLUME_INVITATIONS,
     super::channel::DISPLAY_NAMES_FEATURE,
 ];
 pub const WORLD_REPLICA: &str = "world-replica.v1";
+pub const VOLUME_INVITATIONS: &str = "volume-invitations.v1";
 const SHARED_SESSION: &str = "shared-session.v1";
 const SESSION_PARTICIPANTS_ACL: &str = "session-participants-acl.v1";
 mod admission;
@@ -94,6 +96,15 @@ impl std::error::Error for ServiceFailure {}
 
 pub(super) fn required_features(request: &ServiceRequest) -> &'static [&'static str] {
     match request {
+        ServiceRequest::RegisterVolumeInvitationKey { .. }
+        | ServiceRequest::GetVolumeInvitationKey { .. }
+        | ServiceRequest::PutVolumeInvitationPolicy { .. }
+        | ServiceRequest::PutVolumeInvitation { .. }
+        | ServiceRequest::ListVolumeInvitationRecipients { .. }
+        | ServiceRequest::WatchVolumeInvitations { .. }
+        | ServiceRequest::VolumePeerListen { .. }
+        | ServiceRequest::VolumePeerSubscribe { .. }
+        | ServiceRequest::VolumePeerRequest { .. } => &[VOLUME_INVITATIONS],
         ServiceRequest::WorldReplica { .. } => &[WORLD_REPLICA],
         ServiceRequest::PublishBloblog { .. } | ServiceRequest::GetBloblog { .. } => {
             &["bloblog-append-v1"]

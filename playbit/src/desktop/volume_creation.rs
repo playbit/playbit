@@ -25,7 +25,7 @@ impl Shell {
             );
             return;
         }
-        if self.volumes.len() >= 256 {
+        if self.sidebar_volume_count() >= 256 {
             self.show_visual_bell(
                 "The 256-volume display limit has been reached.",
                 "menu-talk",

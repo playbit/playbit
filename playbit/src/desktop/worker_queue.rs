@@ -200,6 +200,7 @@ fn retained_bytes(request: &Request) -> Option<usize> {
         | Request::PrepareSignIn
         | Request::Status
         | Request::DeleteVolume { .. }
+        | Request::DecideVolumeInvitation { .. }
         | Request::DuplicateVolume { .. }
         | Request::DuplicateEntry { .. }
         | Request::Entries { .. }

@@ -21,15 +21,24 @@ fn observe_source(
     delta: &kvdb::sync::Delta<'_>,
     entries: &RefCell<BTreeSet<crate::store::EntryId>>,
     objects: &RefCell<BTreeSet<Id>>,
+    writer: Option<(Id, &volume_index::IndexSnapshot<'_, RedbStorage>)>,
 ) -> Result<()> {
     if policy.database == DatabaseId::Index && volume_index::is_index_key(delta.key) {
+        if let Some((writer, before)) = writer {
+            before.authorize_source(
+                policy.volume.volume(),
+                policy.volume.default_permissions(),
+                writer,
+                delta,
+            )?;
+        }
         let id = volume_index::validate_source(delta)?;
         let mut touched = entries.borrow_mut();
         if touched.len() == volume_index::MAX_REPAIR_IDS && !touched.contains(&id) {
             return Err(Error::LimitExceeded);
         }
         touched.insert(id);
-    } else if let Some(object) = policy.validate_source(delta, None)? {
+    } else if let Some(object) = policy.validate_source(delta, writer.map(|(id, _)| id))? {
         let mut touched = objects.borrow_mut();
         if touched.len() == 64 && !touched.contains(&object) {
             return Err(Error::LimitExceeded);
@@ -37,6 +46,70 @@ fn observe_source(
         touched.insert(object);
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct ReceivedSources {
+    entries: RefCell<BTreeSet<crate::store::EntryId>>,
+    objects: RefCell<BTreeSet<Id>>,
+    rejected: RefCell<Option<Error>>,
+    changes_policy: std::cell::Cell<bool>,
+    acl_tie: std::cell::Cell<bool>,
+}
+
+impl ReceivedSources {
+    fn resolve(
+        &self,
+        policy: &DatabasePolicy,
+        owner_policy: bool,
+        writer: Option<(Id, &volume_index::IndexSnapshot<'_, RedbStorage>)>,
+        delta: &kvdb::sync::Delta<'_>,
+    ) -> kvdb::sync::Resolution {
+        use kvdb::{Resolver, sync::EntState};
+        if let Err(error) = observe_source(policy, delta, &self.entries, &self.objects, writer) {
+            *self.rejected.borrow_mut() = Some(error);
+            return kvdb::sync::Resolution::KeepLocal;
+        }
+        if owner_policy
+            && policy.database == DatabaseId::Index
+            && delta.key == DEFAULT_PERMISSIONS_KEY
+        {
+            self.changes_policy.set(true);
+            if let (
+                EntState::Present { clock: a, value: left },
+                EntState::Present { clock: b, value: right },
+            ) = (delta.local, delta.remote)
+            {
+                self.acl_tie.set(a == b && left != right);
+            }
+        }
+        kvdb::Lww.resolve(delta)
+    }
+}
+
+fn repair_delta_indexes<'db, R: kvdb::Resolver>(
+    receiver: kvdb::DeltaReceiver<'db, RedbStorage, R>,
+    database: DatabaseId,
+    namespace: Option<(crate::store::EntryId, &[u8])>,
+    bytes: &[u8],
+    ids: &[crate::store::EntryId],
+) -> Result<kvdb::DeltaReceiver<'db, RedbStorage, R>> {
+    if let Some((entry, evidence)) = namespace {
+        receiver.qualify_local_indexes(|local| -> Result<bool> {
+            let changed = volume_index::namespace::live::apply(local, entry, bytes, evidence)?;
+            volume_index::repair(local, ids)?;
+            volume_index::namespace::source::cut::project(local)?.write_current(local)?;
+            Ok(changed)
+        })
+    } else {
+        receiver.repair_local_indexes(|local| -> Result<()> {
+            if database == DatabaseId::Index {
+                volume_index::repair(local, ids)?;
+                volume_index::namespace::source::cut::project(local)?.write_current(local)?;
+            }
+            Ok(())
+        })
+    }
 }
 
 fn validate_pending(
@@ -554,7 +627,23 @@ impl LocalStore {
         let _guards = operations.lock()?;
         let index = self.db(volume, DatabaseId::Index)?;
         let policy = DatabasePolicy::read_source(&index, database)?;
-        let grant = self.admit_access(access, &policy.volume)?;
+        // An ACL update can follow the account's offer on a separate stream.
+        // Admit the authenticated Index feed while ordinary reads/edits wait
+        // for its current policy. A directory withdrawal still fences it.
+        let identity = policy.volume.volume();
+        let grant = if database == DatabaseId::Index
+            && access.session_id().is_none()
+            && access.account == self.account.id
+            && identity.personal
+            && identity.owner != self.account.id
+            && self.has_direct_volume_grant(volume)?
+        {
+            self.require_account_authority()?;
+            self.check_participant(volume, access.account)?;
+            None
+        } else {
+            self.admit_access(access, &policy.volume)?
+        };
         let actor = self.data_actor(access, policy.volume.volume())?;
         policy.ordinary_protocol()?;
         if let Some(entry) = entry {
@@ -574,7 +663,107 @@ impl LocalStore {
             // It cannot initialize an absent backing or merge into a rejected one.
             return Err(Error::NotFound(Error::PENDING_BACKING));
         }
-        self.apply_received_delta(volume, database, &policy, bytes, entry.zip(evidence))
+        self.apply_received_delta(volume, database, &policy, bytes, entry.zip(evidence), None)
+    }
+
+    /// A private stream joins the owner and one specifically named human.
+    /// Both endpoints recheck direct membership beside the actual database policy.
+    pub(super) fn admit_private_invitation_peer(
+        &self,
+        access: &Access,
+        policy: &MetadataPolicy,
+        peer: Id,
+    ) -> Result<()> {
+        use crate::store::object_contract::{Principal, Subject};
+        let volume = policy.volume();
+        let local = self.account.id;
+        if peer == local
+            || (access.account != local && access.account != peer)
+            || !volume.personal
+            || volume.share_key_with_service
+        {
+            return Err(Error::AccessDenied("private invitation peer identity"));
+        }
+        self.require_account_authority()?;
+        let grantee = if local == volume.owner {
+            peer
+        } else if peer == volume.owner && self.has_direct_volume_grant(volume.id)? {
+            local
+        } else {
+            return Err(Error::AccessDenied("private invitation peer binding"));
+        };
+        if !policy
+            .default_permissions()
+            .grants
+            .iter()
+            .any(|grant| grant.subject == Subject::Principal(Principal::Human(grantee)))
+        {
+            return Err(Error::AccessDenied("private volume direct grant required"));
+        }
+        self.check_participant(volume.id, local)?;
+        self.check_participant(volume.id, peer)
+    }
+
+    pub fn private_invitation_delta(
+        &self,
+        volume: Id,
+        database: DatabaseId,
+        recipient: Id,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>> {
+        let access = Access::owner(self.account.id);
+        let operations = self.access_operations(&access, volume)?;
+        let _guards = operations.lock()?;
+        let index = self.db(volume, DatabaseId::Index)?;
+        let policy = DatabasePolicy::read_source(&index, database)?;
+        self.admit_private_invitation_peer(&access, &policy.volume, recipient)?;
+        self.require_current_direct_acl(&access, &policy.volume)?;
+        let entries =
+            crate::store::authorize_publication_delta(&index, &policy, access.account, bytes)?;
+        if entries.is_empty() {
+            self.check_authority(&access, volume, None)?;
+        }
+        for entry in entries {
+            self.check_authority(&access, volume, Some(entry))?;
+        }
+        crate::store::project_replica_delta(&policy, ReplicaReader::Participant(recipient), bytes)
+    }
+
+    pub fn apply_private_invitation_delta(
+        &self,
+        volume: Id,
+        database: DatabaseId,
+        writer: Id,
+        bytes: &[u8],
+    ) -> Result<bool> {
+        let access = Access::owner(self.account.id);
+        let operations = self.access_operations(&access, volume)?;
+        let _guards = operations.lock()?;
+        let index = self.db(volume, DatabaseId::Index)?;
+        let policy = DatabasePolicy::read_source(&index, database)?;
+        self.admit_private_invitation_peer(&access, &policy.volume, writer)?;
+        if database != DatabaseId::Index {
+            self.require_current_direct_acl(&access, &policy.volume)?;
+        }
+        self.check_authority(
+            &access,
+            volume,
+            match database {
+                DatabaseId::Entry(entry) => Some(entry),
+                _ => None,
+            },
+        )?;
+        policy.authorize_reader(ReplicaReader::Participant(access.account))?;
+        if let DatabaseId::Entry(entry) = database
+            && !volume_index::IndexSnapshot::new(index.begin_read()?).backing_ready(entry)?
+        {
+            return Err(Error::NotFound(Error::PENDING_BACKING));
+        }
+        let snapshot = volume_index::IndexSnapshot::new(index.begin_read()?);
+        // The owner forwards accepted records with their original object editor
+        // and clocks. The grantee may originate only its own admitted writes.
+        let writer = (writer != policy.volume.volume().owner).then_some((writer, &snapshot));
+        Ok(self.apply_received_delta(volume, database, &policy, bytes, None, writer)?.applied > 0)
     }
 
     fn apply_received_delta(
@@ -584,30 +773,25 @@ impl LocalStore {
         policy: &DatabasePolicy,
         bytes: &[u8],
         namespace: Option<(crate::store::EntryId, &[u8])>,
+        private_writer: Option<(Id, &volume_index::IndexSnapshot<'_, RedbStorage>)>,
     ) -> Result<kvdb::SyncOutcome> {
-        use kvdb::{Resolver, sync::Resolution};
-        let entries = RefCell::new(BTreeSet::new());
-        let objects = RefCell::new(BTreeSet::new());
-        let rejected = RefCell::new(None);
-        let resolver =
-            |delta: &kvdb::sync::Delta<'_>| match observe_source(policy, delta, &entries, &objects)
-            {
-                Ok(()) => kvdb::Lww.resolve(delta),
-                Err(error) => {
-                    *rejected.borrow_mut() = Some(error);
-                    Resolution::KeepLocal
-                }
-            };
+        let sources = ReceivedSources::default();
+        let owner_policy =
+            self.account.id == policy.volume.volume().owner && policy.volume.volume().personal;
+        let resolver = |delta: &kvdb::sync::Delta<'_>| {
+            sources.resolve(policy, owner_policy, private_writer, delta)
+        };
         let name_changed = self.prepare_received_volume_name(volume, database, bytes)?;
         let backing = self.db(volume, database)?;
-        let mut receiver = kvdb::DeltaReceiver::new(
-            &backing,
-            resolver,
-            now_unix_secs(),
-            crate::store::MAX_REPLICA_DELTA_BYTES,
-        )?;
+        let receiver = if private_writer.is_some() {
+            kvdb::DeltaReceiver::new_with_delta
+        } else {
+            kvdb::DeltaReceiver::new
+        };
+        let mut receiver =
+            receiver(&backing, resolver, now_unix_secs(), crate::store::MAX_REPLICA_DELTA_BYTES)?;
         receiver.process(bytes)?;
-        if let Some(error) = rejected.borrow_mut().take() {
+        if let Some(error) = sources.rejected.borrow_mut().take() {
             return Err(error);
         }
         if database == DatabaseId::Index
@@ -616,31 +800,51 @@ impl LocalStore {
                 Some(crate::store::EntryType::ObjectDb)
             )
         {
-            validate_pending(receiver.pending_transaction()?, database, &objects.borrow())?;
+            validate_pending(receiver.pending_transaction()?, database, &sources.objects.borrow())?;
         }
-        let ids: Vec<_> = entries.borrow().iter().copied().collect();
-        let receiver = if let Some((entry, evidence)) = namespace {
-            receiver.qualify_local_indexes(|local| -> Result<bool> {
-                let changed = volume_index::namespace::live::apply(local, entry, bytes, evidence)?;
-                volume_index::repair(local, &ids)?;
-                volume_index::namespace::source::cut::project(local)?.write_current(local)?;
-                Ok(changed)
-            })?
-        } else {
-            receiver.repair_local_indexes(|local| -> Result<()> {
-                if database == DatabaseId::Index {
-                    volume_index::repair(local, &ids)?;
-                    volume_index::namespace::source::cut::project(local)?.write_current(local)?;
-                }
-                Ok(())
-            })?
-        };
+        let ids: Vec<_> = sources.entries.borrow().iter().copied().collect();
+        if let Some((writer, _)) = private_writer {
+            for entry in &ids {
+                self.check_authority(&Access::owner(writer), volume, Some(*entry))?;
+                self.check_authority(&Access::owner(self.account.id), volume, Some(*entry))?;
+            }
+        }
+        let receiver = repair_delta_indexes(receiver, database, namespace, bytes, &ids)?;
+        let outcome =
+            self.finish_received_delta(volume, database, receiver, private_writer.is_some())?;
+        if name_changed {
+            self.project_volume_name(volume)?;
+        }
+        if sources.acl_tie.get() {
+            self.restate_volume_acl(volume, self.index(volume)?.default_permissions())?;
+        }
+        if owner_policy
+            && (sources.acl_tie.get()
+                || outcome.committed
+                    && (sources.changes_policy.get() || database == DatabaseId::Revocations))
+        {
+            self.notify_volume_invitation_policy(policy.volume.volume());
+        }
+        Ok(outcome)
+    }
+
+    fn finish_received_delta<R: kvdb::Resolver>(
+        &self,
+        volume: Id,
+        database: DatabaseId,
+        receiver: kvdb::DeltaReceiver<'_, RedbStorage, R>,
+        relay: bool,
+    ) -> Result<kvdb::SyncOutcome> {
+        if relay {
+            let (outcome, delta) = receiver.finish_with_delta()?;
+            if let Some(delta) = delta {
+                self.changes.publish(volume, database, delta);
+            }
+            return Ok(outcome);
+        }
         let outcome = receiver.finish()?;
         if outcome.committed {
             self.changes.observed_database_changed(volume, database);
-        }
-        if name_changed {
-            self.project_volume_name(volume)?;
         }
         Ok(outcome)
     }
@@ -771,7 +975,10 @@ impl LocalStore {
         }
         if let Some(permission) = permission {
             policy.authorize(self.data_actor(access, policy.volume.volume())?, permission)?;
-        } else if access.session_id.is_none() && access.account != policy.volume.volume.owner {
+        } else if access.session_id.is_none()
+            && access.invitation_peer.is_none()
+            && access.account != policy.volume.volume.owner
+        {
             return Err(Error::AccessDenied("replica owner or session admission required"));
         }
         policy.ordinary_protocol()?;
@@ -858,21 +1065,24 @@ impl LocalStore {
         let actor = self.data_actor(access, policy.volume.volume())?;
         let append = append_relayer(&policy, actor)?;
         let before = volume_index::IndexSnapshot::new(index.begin_read()?);
+        // Validate every policy write and every authenticated grantee's own records.
+        let grantee =
+            access.invitation_peer.is_some() && access.account != policy.volume.volume.owner;
+        let writer =
+            (grantee || append || !matches!(database, DatabaseId::Entry(_))).then_some(actor);
         let rejected = RefCell::new(None);
         let resolver = |delta: &kvdb::sync::SyncDelta<'_>| {
             let admitted = if database == DatabaseId::Index && volume_index::is_index_key(delta.key)
             {
                 volume_index::with_sync_delta(delta, |source| {
                     before.authorize_source(
-                        &policy.volume.volume,
+                        policy.volume.volume(),
                         policy.volume.default_permissions(),
                         actor,
                         source,
                     )
                 })
             } else {
-                // Reserved policy writes always require the authenticated owner.
-                let writer = (append || !matches!(database, DatabaseId::Entry(_))).then_some(actor);
                 policy.validate_sync_source_as(delta, writer).map(|_| ())
             };
             if let Err(error) = admitted {
@@ -887,23 +1097,25 @@ impl LocalStore {
             validate_replica(tx, &policy)
         };
         let scratch = self.path.join(crate::paths::STAGING);
-        if database == DatabaseId::Index {
-            // This resolver admits the authenticated relayer and validates every
-            // index source. Publish qualified controls in that same transaction;
-            // detached copies through merge_index_replica remain source-only.
-            merge_sender(
-                &scratch,
-                kvdb::sync::SyncSender::new(source)?,
-                &target,
-                resolver,
-                validate,
-                |local| {
+        let relay_private =
+            access.invitation_peer.is_some() && self.account.id == policy.volume.volume.owner;
+        let delta = merge_sender_changes(
+            &scratch,
+            kvdb::sync::SyncSender::new(source)?,
+            &target,
+            resolver,
+            validate,
+            |local| {
+                if database == DatabaseId::Index {
                     volume_index::repair_all(local)?;
-                    volume_index::namespace::source::cut::project(local)?.write_current(local)
-                },
-            )?;
-        } else {
-            merge_replica(&scratch, source, &target, resolver, validate)?;
+                    volume_index::namespace::source::cut::project(local)?.write_current(local)?;
+                }
+                Ok(())
+            },
+            relay_private,
+        )?;
+        if let Some(delta) = delta {
+            self.changes.publish(volume, database, delta);
         }
         Ok(())
     }

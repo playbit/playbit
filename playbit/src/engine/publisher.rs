@@ -261,6 +261,7 @@ impl Default for Notices {
     }
 }
 struct Signals {
+    private_feeds: Arc<super::peer::PrivateFeeds>,
     notices: Mutex<Notices>,
     completion: Arc<Wake>,
 }
@@ -467,6 +468,9 @@ pub(crate) struct Publisher {
     fence_busy: Arc<AtomicBool>,
 }
 impl Publisher {
+    pub(super) fn private_feeds(&self) -> Arc<super::peer::PrivateFeeds> {
+        self.signals.private_feeds.clone()
+    }
     pub(crate) fn start(
         handle: &Handle,
         store: Arc<LocalStore>,
@@ -489,7 +493,11 @@ impl Publisher {
         // never replace or close. AsyncFd deregisters before dropping it.
         #[allow(unsafe_code, reason = "The feed owns its stable readiness socket.")]
         let feed = unsafe { AsyncFd::register(FeedFd(receiver)) }.map_err(io::Error::from)?;
-        let signals = Arc::new(Signals { notices: Mutex::new(Notices::default()), completion });
+        let signals = Arc::new(Signals {
+            private_feeds: Default::default(),
+            notices: Mutex::new(Notices::default()),
+            completion,
+        });
         let (commands, receive) = mpsc::channel(COMMAND_LIMIT);
         let status = store.change_status();
         let actor = handle.spawn(
@@ -603,6 +611,16 @@ impl Publisher {
         if volumes.is_empty() {
             return Ok(Vec::new());
         }
+        self.drain_and_fence(volumes).await
+    }
+
+    // Private deltas leave the same committed-change FIFO as hosted records.
+    // Drain its prefix before asking the private stream to checkpoint its peer.
+    pub(super) async fn drain_private_changes(&self) -> Result<()> {
+        self.drain_and_fence(&[]).await.map(|_| ())
+    }
+
+    async fn drain_and_fence(&self, volumes: &[PublishKey]) -> Result<Vec<FencedVolume>> {
         self.fence_busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| "publication fence is busy")?;
@@ -1519,12 +1537,14 @@ impl Actor {
     fn observe(&mut self, status: FeedStatus) {
         if status.closed.is_some() {
             self.status = status;
+            self.signals.private_feeds.gap();
             self.fail("committed-change feed closed; reopen required");
             self.signals.notices.lock().expect("mutex is not poisoned").observed = Some(status);
             return;
         }
         if status.epoch != self.status.epoch || status.gap_generation != self.status.gap_generation
         {
+            self.signals.private_feeds.gap();
             for (id, state) in &mut self.volumes {
                 // Preparing has not established its snapshot boundary yet.
                 if matches!(state.phase, Phase::Ready { gap, .. } | Phase::Bootstrapping { gap } if status.epoch != self.status.epoch || gap != status.gap_generation)
@@ -1573,6 +1593,7 @@ impl Actor {
             return;
         }
         let record = Arc::new(record);
+        self.signals.private_feeds.publish(&record);
         let selected: Vec<_> = self
             .volumes
             .keys()
@@ -2219,6 +2240,7 @@ mod tests {
         completion.set_nonblocking(true).unwrap();
         read.set_nonblocking(true).unwrap();
         let signals = Arc::new(Signals {
+            private_feeds: Default::default(),
             notices: Mutex::new(Notices::default()),
             completion: Arc::new(Wake::unix(completion)),
         });
@@ -3049,6 +3071,7 @@ mod tests {
                 fence_busy: Arc::new(AtomicBool::new(false)),
                 control_slots: Arc::new(Semaphore::new(0)),
                 signals: Arc::new(Signals {
+                    private_feeds: Default::default(),
                     notices: Mutex::new(Notices::default()),
                     completion: Arc::new(Wake::unix(completion)),
                 }),
@@ -3889,6 +3912,7 @@ mod tests {
             fence_busy: Arc::new(AtomicBool::new(false)),
             control_slots: Arc::new(Semaphore::new(COMMAND_LIMIT)),
             signals: Arc::new(Signals {
+                private_feeds: Default::default(),
                 notices: Mutex::new(Notices::default()),
                 completion: Arc::new(Wake::unix(completion)),
             }),
@@ -3982,6 +4006,7 @@ mod tests {
         completion.set_nonblocking(true).unwrap();
         drop(read);
         let signals = Signals {
+            private_feeds: Default::default(),
             notices: Mutex::new(Notices::default()),
             completion: Arc::new(Wake::unix(completion)),
         };

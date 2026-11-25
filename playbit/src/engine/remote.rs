@@ -11,6 +11,7 @@ mod onboarding;
 mod publisher;
 pub(super) mod sync_failure;
 mod synchronization;
+mod volume_invitations;
 pub(super) mod world;
 use super::completion::Wake;
 use crate::engine::{
@@ -113,6 +114,8 @@ pub(crate) struct NetworkHandles {
     #[cfg(feature = "app-host")]
     pub(crate) connection_status: Arc<super::ap_status::Status>,
     account_ready: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(feature = "app-host")]
+    pub(super) volume_invitations_changed: Arc<std::sync::atomic::AtomicBool>,
     #[allow(
         dead_code,
         reason = "Retain the shared resource while the background operation owns Remote."
@@ -254,6 +257,7 @@ pub struct Remote {
     progress: Arc<Progress>,
     connection_status: Arc<super::ap_status::Status>,
     account_ready: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) volume_invitations_changed: Arc<std::sync::atomic::AtomicBool>,
     runtime: Arc<tokio::runtime::Runtime>,
     received: Arc<crate::engine::replication::ReplicaNotices>,
     completion: Arc<Wake>,
@@ -279,6 +283,7 @@ pub struct Remote {
     connection_watch: Option<crate::engine::connection_watch::ConnectionWatch>,
     reconnect: Option<Reconnect>,
     initializations: initialization::Initializations,
+    volume_invitation_watch: Option<volume_invitations::Watch>,
     authenticated_connection: Arc<Mutex<Option<Arc<ApConnection>>>>,
     // Published to data workers only after AP confirms the current document on this transport.
     sync_connection: Arc<Mutex<Option<Arc<ApConnection>>>>,
@@ -291,6 +296,7 @@ pub struct Remote {
     pending_availability: bool,
     private_availability: bool,
     private_peer_waiting: bool,
+    private_invitation_waiting: bool,
     identity: ClientIdentity,
     replacement_required: bool,
     identity_path: PathBuf,
@@ -308,9 +314,9 @@ struct CapturedControls {
 impl PullReceipt {
     /// Log snapshots qualify a source cut. Their plaintext projection cannot
     /// acknowledge an ordinary kvdb encrypted-at-rest root on AP.
-    fn from_log(receipt: &crate::store::bloblog::ReplicaPage) -> Self {
+    fn from_log(receipt: &crate::store::bloblog::ReplicaPage, ap_source: bool) -> Self {
         Self {
-            ap_source: true,
+            ap_source,
             source: receipt.source,
             revision: DurableRevision {
                 revision: receipt.database_clock,
@@ -402,6 +408,8 @@ impl Remote {
             #[cfg(feature = "app-host")]
             connection_status: self.connection_status.clone(),
             account_ready: self.account_ready.clone(),
+            #[cfg(feature = "app-host")]
+            volume_invitations_changed: self.volume_invitations_changed.clone(),
             runtime: self.runtime.clone(),
             blobs: self.blob_transport(),
             received: self.received.clone(),
@@ -475,7 +483,9 @@ impl Remote {
         let Some(live) = &self.live else {
             return Ok(false);
         };
-        if store.volume(volume)?.owner == store.account().id {
+        if store.volume(volume)?.owner == store.account().id
+            || store.has_direct_volume_grant(volume)?
+        {
             // Terminal application persists the fence before reporting Gap.
             // An installed stream cannot substitute for current authority.
             return Ok(
@@ -512,14 +522,17 @@ impl Remote {
             return Ok(());
         };
         let mut volumes = Vec::with_capacity(super::live::SCOPE_LIMIT);
+        let selected = selected.map(|ids| ids.iter().copied().collect::<BTreeSet<_>>());
         for volume in remote_volumes(store)? {
             if !volume.share_key_with_service
-                || selected.is_some_and(|ids| !ids.contains(&volume.id))
+                || selected.as_ref().is_some_and(|ids| !ids.contains(&volume.id))
                 || !self.scope.read().admits(volume.id)
             {
                 continue;
             }
-            let required = if volume.owner == store.account().id {
+            let required = if volume.owner == store.account().id
+                || store.has_direct_volume_grant(volume.id)?
+            {
                 self.service_covers_reader(store, volume.id, None)
                     .map_err(|error| sync_failure::volume(store, volume.id, error))?
             } else {
@@ -1079,6 +1092,8 @@ impl Remote {
             connection_watch: None,
             reconnect: None,
             initializations: Default::default(),
+            volume_invitation_watch: None,
+            volume_invitations_changed: Default::default(),
             #[cfg(feature = "app-host")]
             missing_owner_backings: Default::default(),
             authenticated_connection: Arc::new(Mutex::new(None)),
@@ -1092,6 +1107,7 @@ impl Remote {
             pending_availability: false,
             private_availability: false,
             private_peer_waiting: false,
+            private_invitation_waiting: false,
             identity: ClientIdentity::load(&identity_path).map_err(|error| {
                 #[cfg(target_vendor = "apple")]
                 {
@@ -1551,6 +1567,7 @@ impl Remote {
         ));
     }
     pub fn disconnect(&mut self) {
+        self.volume_invitation_watch = None;
         self.account_ready.store(false, std::sync::atomic::Ordering::Release);
         self.reconnect = None;
         self.initializations.clear();
@@ -1807,6 +1824,11 @@ impl Remote {
         self.consume_publisher_failures()?;
         self.availability_checked = false;
         self.progress.set(Some(TransferProgress::Account), &self.completion);
+        // Explicit sync retries any exhausted owner deliveries. Preparing an app
+        // or a publication can reuse the inbox without fetching all grants.
+        if let Some(watch) = &self.volume_invitation_watch {
+            watch.rescan.notify_one();
+        }
         let account = self.begin_account_sync(store)?;
         self.finish_account_sync(store, account)?;
         Ok(())
@@ -1815,15 +1837,24 @@ impl Remote {
         &mut self,
         store: &LocalStore,
         volumes: Result<()>,
+        targets: &[Id],
         unavailable_sessions: &BTreeSet<String>,
     ) -> Result<()> {
         self.progress.set(Some(TransferProgress::Finishing), &self.completion);
         let result = volumes
-            .and_then(|_| self.live_fence(store, None, Some(unavailable_sessions), false))
+            .and_then(|_| self.live_fence(store, Some(targets), Some(unavailable_sessions), false))
             .and_then(|_| self.refresh_availability(store));
         match &result {
             Ok(()) => self.private_peer_waiting = false,
-            Err(error) if waiting_peer(error.as_ref()) => self.private_peer_waiting = true,
+            Err(error) if waiting_peer(error.as_ref()) => {
+                if sync_failure::volume_id(error.as_ref())
+                    .is_some_and(|id| store.has_direct_volume_grant(id).unwrap_or(false))
+                {
+                    self.private_invitation_waiting = true;
+                } else {
+                    self.private_peer_waiting = true;
+                }
+            }
             Err(_) => {}
         }
         self.traffic.retain(|session, _| {
@@ -1940,6 +1971,9 @@ impl Remote {
         }
         // Peer and session-event listeners are restored by their existing
         // lifecycle callers; a replica retry must not force unrelated admission.
+        if let Err(error) = self.start_volume_invitations(store) {
+            first_error.get_or_insert(error);
+        }
         let availability = self.refresh_availability(store);
         first_error.map_or(availability, Err)
     }
@@ -2182,10 +2216,13 @@ impl Remote {
             self.recover_bound_volume(store, session, volume.id, connection)?
         } else {
             let _attempt = crate::trace::Span::new("replication.recover_owner_attempt");
-            if volume.owner != store.account().id {
-                return Err("replica owner scope changed".into());
+            if volume.owner == store.account().id {
+                self.bootstrap_owner_volume(store, volume)?
+            } else if store.has_direct_volume_grant(volume.id)? {
+                self.capture_direct_volume(store, volume.id)?
+            } else {
+                return Err("replica account no longer has a direct volume grant".into());
             }
-            self.bootstrap_owner_volume(store, volume)?
         };
         let live = self.live.as_mut().expect("account binding initialized live replication");
         self.runtime.block_on(async {
@@ -2273,11 +2310,19 @@ impl Remote {
         let _timing = crate::trace::Span::new("replication.availability_facts");
         let mut pending = !store.pending_operations()?.is_empty();
         let mut private = false;
+        let mut invitation_waiting = false;
         for volume in remote_volumes(store)? {
             if !self.scope.read().admits(volume.id) {
                 continue;
             }
             let scope_error = |error| sync_failure::volume(store, volume.id, error);
+            if volume.personal
+                && !volume.share_key_with_service
+                && volume.owner != store.account().id
+                && store.has_direct_volume_grant(volume.id).map_err(scope_error)?
+            {
+                invitation_waiting |= !self.private_invitation_connected(volume.id);
+            }
             if store
                 .replica_root(volume.id, crate::store::DatabaseId::Index)
                 .map_err(scope_error)?
@@ -2291,15 +2336,27 @@ impl Remote {
             }
             private |= !volume.share_key_with_service
                 || store.has_service_excluded_data(volume.id).map_err(scope_error)?;
+            if volume.personal
+                && !volume.share_key_with_service
+                && volume.owner == store.account().id
+            {
+                // The owner retains these bytes to serve authenticated peer reads.
+                continue;
+            }
             let access = Access::owner(store.account().id);
-            pending |= !store
-                .pending_entry_blobs(&access, volume.id, None)
-                .map_err(scope_error)?
-                .versions
-                .is_empty();
+            match store.pending_entry_blobs(&access, volume.id, None) {
+                Ok(page) => pending |= !page.versions.is_empty(),
+                // A retained copy has no pending unscoped uploads after withdrawal.
+                Err(crate::store::Error::AccessDenied("direct volume grant withdrawn")) => {}
+                Err(crate::store::Error::AccessDenied(
+                    "direct volume grant requires current permissions",
+                )) => pending = true,
+                Err(error) => return Err(scope_error(error)),
+            }
         }
         self.pending_availability = pending;
         self.private_availability = private;
+        self.private_invitation_waiting = invitation_waiting;
         self.availability_checked = true;
         Ok(())
     }
@@ -2339,7 +2396,7 @@ impl Remote {
         }
         // Unrelated hosted publication/recovery must preserve a known private
         // peer wait. Only a successful full synchronization clears this fact.
-        if self.private_peer_waiting {
+        if self.private_peer_waiting || self.private_invitation_waiting {
             return "Waiting for an authorized peer";
         }
         if !self.availability_checked {
@@ -2399,7 +2456,8 @@ impl Remote {
             && self.connection.as_ref().is_some_and(|connection| !connection.is_closed())
             && (self.live.as_ref().is_some_and(|live| live.publisher().needs_initialization())
                 || self.initializations.wake_after(Instant::now()) == Some(Duration::ZERO)
-                || self.blob_transfers.logs.needs_preparation())
+                || self.blob_transfers.logs.needs_preparation()
+                || self.peer_invitations_ready())
     }
     #[cfg(feature = "app-host")]
     pub(crate) fn initialization_retrying(
@@ -2469,6 +2527,16 @@ impl Remote {
             return controls.map(|_| ());
         }
         let mut volumes = publisher.take_initializations();
+        for id in self.take_ready_peer_invitations(super::publisher::VOLUME_LIMIT - volumes.len()) {
+            if store.has_direct_volume_grant(id)? {
+                if !volumes.contains(&id) {
+                    volumes.push(id);
+                }
+            } else if store.volume(id).is_ok_and(|v| v.owner != store.account().id && v.personal) {
+                self.retire_direct_grant(id)?;
+                volumes.retain(|v| *v != id);
+            }
+        }
         self.initializations.select(&mut volumes, Instant::now());
         volumes.retain(|volume| self.scope.read().admits(*volume));
         if volumes.is_empty() && matches!(controls, Ok(false)) {
@@ -2488,6 +2556,8 @@ impl Remote {
                 let descriptor = store.volume(*volume)?;
                 if descriptor.owner == store.account().id {
                     self.sync_owned(store, std::slice::from_ref(volume))
+                } else if store.has_direct_volume_grant(*volume)? {
+                    self.sync_direct_volume(store, *volume)
                 } else if self.has_live_volume(store, *volume)?
                     && !self.initializations.tracked(*volume)
                 {
@@ -2534,7 +2604,9 @@ impl Remote {
                 initialization::retain_error(&mut first_error, error);
             } else {
                 self.initializations.forget(*volume);
-                if !store.volume(*volume)?.share_key_with_service {
+                if !store.volume(*volume)?.share_key_with_service
+                    && !store.has_direct_volume_grant(*volume)?
+                {
                     self.private_peer_waiting = true;
                 }
             }
@@ -2695,14 +2767,38 @@ impl Remote {
             }
             Ok(())
         })();
+        self.complete_volume_capture(store, id, result, false)?;
+        #[cfg(feature = "app-host")]
+        self.rearm_selection_watches(store, id)?;
+        Ok(())
+    }
+
+    fn complete_volume_capture(
+        &mut self,
+        store: &LocalStore,
+        id: Id,
+        result: Result<()>,
+        direct: bool,
+    ) -> Result<()> {
         if let Err(error) = result {
             let receiving = self.live.as_ref().is_some_and(|live| live.has_receiver(id));
-            self.initializations.failed_capture(
-                id,
-                &sync_failure::reason(error.as_ref()).to_string(),
-                Instant::now(),
-                receiving,
-            )?;
+            let cause = sync_failure::reason(error.as_ref()).to_string();
+            // Directory offers can arrive before the hosted grant and its initial data.
+            // Each bounded bootstrap retry rechecks the actual ACL at the source.
+            let waiting = direct
+                && (matches!(
+                    cause.as_str(),
+                    super::peer::SUBSCRIPTION_BUSY
+                        | "authorized peer is busy"
+                        | "direct volume peer account capacity exhausted"
+                        | "direct volume peer capacity exhausted"
+                        | "direct volume permission required"
+                        | "access denied: direct volume grant requires current permissions"
+                ) || cause == "waiting for an authorized peer"
+                    && store.volume(id)?.share_key_with_service);
+            let reason =
+                if waiting { "waiting for initial volume synchronization" } else { &cause };
+            self.initializations.failed_capture(id, reason, Instant::now(), receiving)?;
             if self.initializations.scheduled(id) {
                 return Err(Box::new(initialization::Pending(sync_failure::volume(
                     store, id, error,
@@ -2711,8 +2807,6 @@ impl Remote {
             return Err(error);
         }
         self.initializations.forget(id);
-        #[cfg(feature = "app-host")]
-        self.rearm_selection_watches(store, id)?;
         Ok(())
     }
     fn sync_registrations(
@@ -3081,14 +3175,15 @@ impl Remote {
         {
             return Err("waiting for an authorized peer to provide private-volume data".into());
         }
-        let session = if descriptor.owner == store.account().id {
-            None
-        } else {
-            let Some(session) = self.sync_blob_session(store, volume, synchronized)? else {
-                return Ok(());
+        let session =
+            if descriptor.owner == store.account().id || store.has_direct_volume_grant(volume)? {
+                None
+            } else {
+                let Some(session) = self.sync_blob_session(store, volume, synchronized)? else {
+                    return Ok(());
+                };
+                Some(session)
             };
-            Some(session)
-        };
         self.sync_blob_volume(store, volume, session)
     }
 
@@ -3124,6 +3219,11 @@ impl Remote {
         volume: Id,
         session: Option<&str>,
     ) -> Result<()> {
+        let descriptor = store.volume(volume)?;
+        let private_personal = descriptor.personal && !descriptor.share_key_with_service;
+        if private_personal && descriptor.owner == store.account().id {
+            return Ok(()); // Owner file bodies are served from their pinned local versions.
+        }
         let access = session.map_or_else(
             || Access::owner(store.account().id),
             |id| Access::session(store.account().id, id),
@@ -3132,6 +3232,12 @@ impl Remote {
         loop {
             let page = store.pending_entry_blobs(&access, volume, after)?;
             if !page.versions.is_empty() {
+                if private_personal && session.is_none() {
+                    return Err(
+                        "private file version is available only on the device that created it"
+                            .into(),
+                    );
+                }
                 let live = self.live.as_ref().ok_or("live replication is unavailable")?;
                 self.runtime
                     .block_on(live.publisher().fence(&[volume]))
@@ -3320,25 +3426,27 @@ impl Remote {
         private_root: bool,
     ) -> Result<()> {
         let result = self.capture_session_volume(store, session, volume, private_root);
-        // Only an actual admitted World capture owns its volume's source-readiness
-        // episode. Open returning unavailable for another room/build must leave it alone.
-        if session.is_distinct_world(volume) {
-            if let Err(error) = result {
+        let world = session.is_distinct_world(volume);
+        if let Err(error) = result {
+            let cause = sync_failure::reason(error.as_ref()).to_string();
+            // Account discovery and session bootstrap share AP request credits.
+            // A pre-dispatch rejection is safe to retry for either kind of volume.
+            // Only a distinct World owns retries for other source-readiness waits.
+            if world || cause == initialization::AP_CAPACITY {
                 let error = sync_failure::volume(store, volume, error);
-                self.initializations.failed(
-                    volume,
-                    &sync_failure::reason(error.as_ref()).to_string(),
-                    Instant::now(),
-                )?;
+                self.initializations.failed(volume, &cause, Instant::now())?;
                 return Err(if self.initializations.scheduled(volume) {
                     Box::new(initialization::Pending(error))
                 } else {
                     error
                 });
             }
+            return Err(error);
+        }
+        if world {
             self.initializations.forget(volume);
         }
-        result
+        Ok(())
     }
 
     fn capture_session_volume(
@@ -3792,7 +3900,6 @@ impl Remote {
                 Err(error) => return Err(error.into()),
             }
         }
-        let session = session.ok_or("private synchronization requires a session")?;
         let result = crate::engine::peer::pull_into(
             &self.runtime,
             self.connection.as_ref().ok_or("AP disconnected")?,
@@ -3802,9 +3909,10 @@ impl Remote {
             database,
             target,
         );
-        if result
-            .as_ref()
-            .is_err_and(|error| error.downcast_ref::<super::peer::VerifiedDenial>().is_some())
+        if let Some(session) = session
+            && result
+                .as_ref()
+                .is_err_and(|error| error.downcast_ref::<super::peer::VerifiedDenial>().is_some())
         {
             store.record_session_denial(session, "session participant revoked")?;
         }
@@ -3856,7 +3964,11 @@ impl Remote {
         repair: ControlRepair<'_>,
     ) -> Result<bool> {
         match repair {
-            ControlRepair::ServiceRead if session.is_some() => Ok(false),
+            ControlRepair::ServiceRead
+                if session.is_some() || store.volume(volume)?.owner != store.account().id =>
+            {
+                Ok(false)
+            }
             ControlRepair::ServiceRead => store
                 .restore_owner_service_read(volume, index, |bytes| {
                     let request = ServiceRequest::PublishReplica {
@@ -4562,30 +4674,41 @@ impl Remote {
             Some(session) => !store.volume(session.replica_volume())?.share_key_with_service,
             None => false,
         };
-        if !store.volume(volume)?.share_key_with_service || private_root {
+        let private = !store.volume(volume)?.share_key_with_service;
+        if private_root
+            || private && (session.is_some() || !store.has_direct_volume_grant(volume)?)
+        {
             return Err("waiting for initial database synchronization".into());
         }
+        let connection = self.connection.as_ref().ok_or("AP disconnected")?;
         let mut cursor = None;
         loop {
-            let request = ServiceRequest::GetBloblog {
-                operation_id: Id::generate()?.to_string(),
-                volume_id: volume.to_string(),
-                session_id: session.map(|s| s.id.clone()),
-                build_id: session.map(|s| s.resolved_build_id.clone()),
-                log_id: log,
-                cursor: cursor.as_ref().map(ToString::to_string),
+            let receipt = if private {
+                super::peer::pull_log_page(
+                    &self.runtime,
+                    connection,
+                    store,
+                    volume,
+                    log,
+                    cursor.as_ref(),
+                )?
+            } else {
+                let request = ServiceRequest::GetBloblog {
+                    operation_id: Id::generate()?.to_string(),
+                    volume_id: volume.to_string(),
+                    session_id: session.map(|s| s.id.clone()),
+                    build_id: session.map(|s| s.resolved_build_id.clone()),
+                    log_id: log,
+                    cursor: cursor.as_ref().map(ToString::to_string),
+                };
+                let response = self.runtime.block_on(wire::request(connection, &request))?;
+                serde_json::from_value(response.data.ok_or("missing bloblog page")?)?
             };
-            let response = self.runtime.block_on(wire::request(
-                self.connection.as_ref().ok_or("AP disconnected")?,
-                &request,
-            ))?;
-            let receipt: crate::store::bloblog::ReplicaPage =
-                serde_json::from_value(response.data.ok_or("missing bloblog page")?)?;
             receipt.cut()?;
             if !cut.accepts(receipt.source, receipt.policy_revision) {
                 return Ok(None);
             }
-            let pulled = PullReceipt::from_log(&receipt);
+            let pulled = PullReceipt::from_log(&receipt, !private);
             let page = receipt.page;
             if page.more && (page.entries.is_empty() || cursor.as_ref() == Some(&page.cursor)) {
                 return Err("bloblog catch-up did not advance".into());
@@ -4734,7 +4857,6 @@ impl Remote {
                         Err(error) => return Err(scope_error(error)),
                     }
                 }
-                let session = session.ok_or("private synchronization requires a session")?;
                 crate::engine::peer::push(
                     &self.runtime,
                     self.connection.as_ref().ok_or("AP disconnected")?,
@@ -4814,6 +4936,7 @@ impl Remote {
 }
 impl Drop for Remote {
     fn drop(&mut self) {
+        self.volume_invitation_watch = None;
         if let Some(lookup) = self.address_lookup.take() {
             lookup.abort();
         }
@@ -6511,6 +6634,34 @@ mod tests {
         assert_eq!(remote.connection_status.snapshot().state, ApConnectionState::Live);
         assert_eq!(remote.connection_status.snapshot().hostname, "localhost");
         ap.closed
+    }
+
+    #[test]
+    fn unanswered_invitation_discovery_leaves_the_replica_worker_available() {
+        let directory = tempfile::tempdir().unwrap();
+        let (_receive, completion) = UnixStream::pair().unwrap();
+        let mut remote = Remote::open(directory.path(), Arc::new(Wake::unix(completion))).unwrap();
+        let store = Arc::new(LocalStore::open(directory.path().join("store")).unwrap());
+        let ap = crate::network::ap::testing::silent_authenticating_server();
+        remote.set_test_transport(ap.config);
+        remote.identity = preissued_identity(&store);
+        remote.authenticate(&store).unwrap();
+        remote.connection = remote.authenticated_transport();
+        remote.ensure_live(&store).unwrap();
+        store
+            .save_recovery_state(&crate::store::RecoveryState {
+                secret: [7; 16],
+                acknowledged: true,
+                revision: 1,
+                synchronized_digest: None,
+                pending: None,
+            })
+            .unwrap();
+
+        remote.start_volume_invitations(&store).unwrap();
+        ap.request_held.recv_timeout(Duration::from_secs(5)).unwrap();
+        remote.refresh_availability(&store).unwrap();
+        assert!(remote.availability_checked);
     }
 
     #[test]

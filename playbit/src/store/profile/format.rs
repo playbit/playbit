@@ -11,6 +11,7 @@ pub const HOSTED_APP_SCOPES: &str = "hosted-app-scopes.v1";
 pub const WORLD_PROJECTION: &str = "world-projection.v1";
 pub const APP_LOCAL_ERASURE: &str = "app-local-erasure.v1";
 pub const SHARED_SESSION: &str = "shared-session.v1";
+pub const VOLUME_INVITATIONS: &str = "volume-invitations.v1";
 pub const UPDATE_REQUIRED: &str = "This profile requires a different version of Playbit. Its saved data has been kept. Open it with a compatible version or choose a new empty profile.";
 
 #[derive(Deserialize, Serialize)]
@@ -59,7 +60,14 @@ fn validate_supported(bytes: &[u8], supported: &[&str]) -> Result<()> {
 pub fn validate(bytes: &[u8]) -> Result<()> {
     validate_supported(
         bytes,
-        &[LOCAL_APP_SCOPES, HOSTED_APP_SCOPES, SHARED_SESSION, WORLD_PROJECTION, APP_LOCAL_ERASURE],
+        &[
+            LOCAL_APP_SCOPES,
+            HOSTED_APP_SCOPES,
+            SHARED_SESSION,
+            WORLD_PROJECTION,
+            APP_LOCAL_ERASURE,
+            VOLUME_INVITATIONS,
+        ],
     )
 }
 /// Add the minimum capability needed to keep older clients from treating local

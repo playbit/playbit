@@ -72,20 +72,24 @@ impl Shell {
         true
     }
 
-    fn reveal_sidebar_row(&self, index: usize, down: bool) {
+    pub(in crate::desktop) fn reveal_sidebar_row(&self, index: usize, down: bool) {
         let strategy = if down { gpui::ScrollStrategy::Bottom } else { gpui::ScrollStrategy::Top };
         if !self.sidebar_volumes {
             self.session_scroll.scroll_to_item(index, strategy);
             return;
         }
-        let app = matches!(self.applications.columns[0][index].target, Target::Application(_));
-        let pending_before = self.volumes.len() < 256
+        let page = self.visible_volume_page();
+        let app = index >= page.ordinary.len() + page.invited.len();
+        let invitation_header = !page.invited.is_empty() && index >= page.ordinary.len();
+        let pending_before = self.sidebar_volume_count() < 256
             && self
                 .pending_volume
                 .as_ref()
                 .is_some_and(|pending| pending.position(&self.volumes) <= index);
-        self.volume_scroll
-            .scroll_to_item(index + usize::from(app) + usize::from(pending_before), strategy);
+        self.volume_scroll.scroll_to_item(
+            index + usize::from(invitation_header) + usize::from(app) + usize::from(pending_before),
+            strategy,
+        );
     }
 
     fn navigate_application_browser(

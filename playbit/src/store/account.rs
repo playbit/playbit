@@ -10,7 +10,7 @@ pub use format::UNSUPPORTED;
 #[cfg(all(not(target_arch = "wasm32"), feature = "local-store"))]
 pub(crate) use format::{is_unsupported, unsupported};
 use kvdb::Clock;
-pub use record::{Credentials, Record, validate_display_name};
+pub use record::{Credentials, DECLINE_INVITATION, Record, validate_display_name};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "local-store"))]
 pub(crate) fn decode_plaintext(plain: &[u8]) -> Result<format::Decoded> {

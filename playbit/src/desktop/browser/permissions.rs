@@ -374,7 +374,7 @@ impl Browser {
                 .as_ref()
                 .map_or_else(|| "You".into(), |name| format!("{name} (You)"))
         } else if account == self.volume.owner {
-            "Owner".into()
+            self.owner_name.clone().unwrap_or_else(|| "Owner".into())
         } else {
             "Account".into()
         }

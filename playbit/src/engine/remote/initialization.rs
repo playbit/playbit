@@ -8,6 +8,7 @@ pub(super) const CHANGING_CUT: &str =
     "volume source kept changing during bootstrap; no received stage was adopted";
 const RETRY_LIMIT: u8 = 6;
 const FIRST_DELAY: Duration = Duration::from_millis(250);
+pub(super) const AP_CAPACITY: &str = "AP request capacity exhausted";
 
 /// A scheduled retry is pending. Each attempt checks current authorization.
 #[derive(Debug)]
@@ -26,7 +27,7 @@ fn retryable_error(error: &str) -> bool {
             | "waiting for initial volume synchronization"
             // AP rejects admission before dispatching any operation. Reuse the
             // same finite bootstrap episode, never retry uncertain transport loss.
-            | "AP request capacity exhausted"
+            | AP_CAPACITY
     )
 }
 

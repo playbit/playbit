@@ -57,6 +57,7 @@ fn only_a_dependency_owner_denial_for_this_account_becomes_verified() {
         update_authority: crate::store::UpdateAuthority::Creator,
     };
     let event = PeerEvent {
+        live: false,
         build_id: session.resolved_build_id.clone(),
         request_id: crate::identifier::encode(&[0x11; 16]),
         requester_account_id: account.to_string(),
@@ -107,6 +108,7 @@ fn a_qualified_old_transfer_denial_cannot_fence_an_adopted_build() {
         )
         .unwrap();
     let event = PeerEvent {
+        live: false,
         build_id: build,
         request_id: crate::identifier::encode(&[0x11; 16]),
         requester_account_id: account.to_string(),

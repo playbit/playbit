@@ -45,8 +45,9 @@ algorithms and host syscall capabilities.
 | --- | --- | --- |
 | `display_name` | `settings/display-name` | Independent presentation; variant 1, field 1 name. |
 | `app_visibility` | `optional/app_visibility/{publisher ID}/{app ID}` | Independent presentation, variant 8. Field 1 is the app identity and field 2 is the boolean `removed`. Both fields are required. |
+| `volume_visibility` | `optional/volume_visibility/{volume ID}` | Independent presentation, variant 9. Field 1 contains the volume ID and field 2 is an optional string containing the reason for hiding the volume. Both fields are required. |
 | `volume` | `volume/{volume ID}` | Mandatory account authority; variant 2, fields 1 volume, 2 credentials. |
-| `volume_deleted` | `deleted-volume/{volume ID}` | Mandatory account authority; variant 3, field 1 volume ID. |
+| `volume_deleted` | `deleted-volume/{volume ID}` | Mandatory account authority. Variant 3 stores the volume ID in field 1. Optional field 2 identifies the owner account whose direct grants must be withdrawn after deletion. A reader always applies the account deletion. When field 2 is absent, a native owner with retained grant evidence can republish that evidence with the tombstone. |
 | `invitation` | `session/{session ID}` | Mandatory account authority; variant 4, fields 1 invitation, 2 app name. |
 | `personal_volumes` | `session-mounts/{session ID}` | Mandatory account authority; variant 5, fields 1 session ID, 2 selected grants. |
 | `hosted_volume` | `volume/{volume ID}` | Mandatory account authority; variant 6, fields 1 volume, 2 credentials, 3 World scope. Scope variant 1 has fields 1 app identity, 2 original build, 3 initialization fingerprint. |
@@ -59,6 +60,16 @@ with `removed = false`. Invitation and volume credentials remain intact.
 Browser clients apply this preference to their recovered app list. Opening an
 invitation in the browser can still launch a removed app; restoring its account
 listing requires an explicit import or join in the native app.
+
+For a current direct grant on a personal volume, no volume visibility record
+means the invitation is pending. Accepting writes an absent reason in field 2,
+which lists the volume with accepted volumes. Declining writes
+`decline_invitation`, which hides it from the account's volume list. A reason
+contains 1–64 lowercase ASCII letters, digits or underscores. Clients preserve
+unrecognized reasons and honor the hidden state. Withdrawing and later
+regranting a permission preserves the account's decision. Each device receives
+current grant membership separately, and authorization always checks the
+current permission policy.
 
 Known authority classifications cannot change. Unknown optional kinds must use
 `optional/{kind}/{nonempty suffix}`; they cannot overwrite or add conditions to

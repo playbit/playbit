@@ -24,6 +24,7 @@ mod records;
 mod schema;
 mod scrolling;
 mod values;
+mod volume_invitation;
 pub(super) use failure::Failure;
 pub(super) use navigation::ListNavigation;
 pub(super) use records::settle_record_publication;
@@ -48,6 +49,9 @@ impl gpui::EventEmitter<Notice> for Browser {}
 
 pub struct Browser {
     pub volume: Volume,
+    pub(super) volume_invitation: Option<super::volume_invitations::Review>,
+    pub(super) owner_name: Option<String>,
+    invitation_link_focus: gpui::FocusHandle,
     volume_details: Option<crate::store::VolumeDetails>,
     permission_refresh: failure::PermissionRefresh,
     payload_size: payload_size::PayloadSize,
@@ -133,6 +137,9 @@ impl Browser {
                 .is_ok()
         });
         let mut browser = Self {
+            volume_invitation: None,
+            owner_name: None,
+            invitation_link_focus: cx.focus_handle().tab_stop(true),
             finder_volume: volume.personal,
             available_volumes: vec![volume.clone()],
             shared_volume_owners: BTreeMap::new(),

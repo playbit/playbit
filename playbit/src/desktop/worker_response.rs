@@ -68,6 +68,9 @@ pub(super) struct WorkerResponse {
     pub(super) saved_invitations: Option<Vec<crate::store::InvitationPreview>>,
     pub(super) status_volumes: Option<Vec<crate::store::Volume>>,
     pub(super) status_scoped_volumes: Vec<crate::store::Volume>,
+    pub(super) volume_invitations: Vec<crate::store::Id>,
+    pub(super) volume_invitation_owners: BTreeMap<crate::store::Id, String>,
+    pub(super) volume_decided: Option<(crate::store::Id, bool)>,
     pub(super) volume_created: Option<crate::store::Volume>,
     pub(super) app_removal_impact: Option<crate::store::AppRemovalImpact>,
     pub(super) erased_app_volumes: Vec<crate::store::Id>,
@@ -145,6 +148,7 @@ impl WorkerResponse {
                 | R::Permissions { .. }
                 | R::AgreementAccepted
                 | R::InvitationPreview(_)
+                | R::VolumeInvitationDecided { .. }
                 | R::InvitationStatus { .. }
                 | R::InvitationPaused { .. } => {
                     Ok(Self::from_reply(archive.into_owned().map_err(|e| e.to_string())))
@@ -226,6 +230,11 @@ impl WorkerResponse {
         self.status_scoped_volumes = volumes
             .extract_if(.., |volume| automatic_volume_ids.binary_search(&volume.id).is_ok())
             .collect();
+        // Bounded catalogs are sorted in place by the shell. Sort overflow
+        // catalogs on this worker so each page uses the same display order.
+        if volumes.len() > 256 {
+            volumes.sort_unstable_by(super::sidebar_view::compare_volumes);
+        }
         self.status_volumes = Some(volumes);
     }
 
@@ -272,6 +281,15 @@ impl WorkerResponse {
         {
             return Err("Invalid AP hostname in engine status".into());
         }
+        if status.volume_invitations.len() > status.volumes.len()
+            || status.volume_invitation_owners.len() > status.volumes.len()
+            || status
+                .volume_invitation_owners
+                .iter()
+                .any(|(_, name)| name.len() > crate::session_channel::DISPLAY_NAME_BYTES)
+        {
+            return Err("Invalid volume invitation metadata in engine status.".into());
+        }
         let mut response = Self::new(Ok(()));
         if status.startup.len() > crate::engine::session_instance::MAX_STARTUP_PROGRESS {
             return Err("Startup status exceeds its capacity".into());
@@ -316,6 +334,9 @@ impl WorkerResponse {
             deserialize::<_, Error>(&status.volumes)?,
             &deserialize::<Vec<crate::store::Id>, Error>(&status.automatic_volume_ids)?,
         );
+        response.volume_invitations = deserialize::<_, Error>(&status.volume_invitations)?;
+        response.volume_invitation_owners =
+            deserialize::<_, Error>(&status.volume_invitation_owners)?;
         response.status_account = Some(deserialize::<_, Error>(&status.account)?);
         response.status_account_profile = Some(deserialize::<_, Error>(&status.account_profile)?);
         response.account_key_backup = Some(deserialize::<_, Error>(&status.account_key_backup)?);
@@ -427,6 +448,9 @@ impl WorkerResponse {
                 response.account_response = Some(AccountResponse::DisplayName(display_name));
             }
             Reply::InvitationPreview(preview) => response.invitation_preview = Some(preview),
+            Reply::VolumeInvitationDecided { volume, accept } => {
+                response.volume_decided = Some((volume, accept));
+            }
             Reply::InvitationStatus { invitation_status }
             | Reply::InvitationPaused { invitation_status, .. } => {
                 response.invitation_status = Some(invitation_status);
@@ -496,6 +520,16 @@ impl WorkerResponse {
             self.result = Err("Invalid AP hostname in engine status".into());
             return;
         }
+        if status.volume_invitations.len() > status.volumes.len()
+            || status.volume_invitation_owners.len() > status.volumes.len()
+            || status
+                .volume_invitation_owners
+                .values()
+                .any(|name| name.len() > crate::session_channel::DISPLAY_NAME_BYTES)
+        {
+            self.result = Err("Invalid volume invitation metadata in engine status.".into());
+            return;
+        }
         self.startup = Some(status.startup);
         self.status_ap_connection = Some(status.ap_connection);
         self.account_identity =
@@ -518,6 +552,8 @@ impl WorkerResponse {
         status.invitations.truncate(application_browser::MAX_SESSIONS + 1);
         self.saved_invitations = Some(status.invitations);
         self.set_status_volumes(status.volumes, &status.automatic_volume_ids);
+        self.volume_invitations = status.volume_invitations;
+        self.volume_invitation_owners = status.volume_invitation_owners;
         self.session_activity = Some(status.session_activity);
         self.application_catalog = Some(status.sessions.clone());
         self.imported_apps = Some(status.imported_apps);
@@ -575,6 +611,9 @@ impl WorkerResponse {
             saved_invitations: None,
             status_volumes: None,
             status_scoped_volumes: Vec::new(),
+            volume_invitations: Vec::new(),
+            volume_invitation_owners: BTreeMap::new(),
+            volume_decided: None,
             volume_created: None,
             app_removal_impact: None,
             erased_app_volumes: Vec::new(),
@@ -856,8 +895,12 @@ mod tests {
         };
         status.volumes = vec![ordinary.clone(), scoped.clone()];
         status.automatic_volume_ids = vec![scoped.id];
+        status.volume_invitations = vec![ordinary.id];
+        status.volume_invitation_owners.insert(ordinary.owner, "Frank".into());
         let response = WorkerResponse::from_archive(Ok(status_archive(status)));
         assert!(response.result.is_ok());
+        assert_eq!(response.volume_invitations, [ordinary.id]);
+        assert_eq!(response.volume_invitation_owners[&ordinary.owner], "Frank");
         assert_eq!(response.status_volumes.unwrap(), [ordinary]);
         assert_eq!(response.status_scoped_volumes, [scoped]);
         assert_eq!(response.status_enrolled, Some(true));

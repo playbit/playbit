@@ -401,15 +401,16 @@ impl LocalStore {
         access: &Access,
         received: &ReceivedVolume,
     ) -> Result<bool> {
-        let id = access
-            .session_id
-            .as_ref()
-            .ok_or(Error::AccessDenied("session required for revocation bootstrap"))?;
         let operations = self.access_operations(access, received.volume)?;
         let _guards = operations.lock()?;
-        let session = self.session(id)?;
-        if (session.replica_volume() != received.volume
-            && !session.is_distinct_world(received.volume))
+        let admitted = if let Some(id) = &access.session_id {
+            let session = self.session(id)?;
+            session.replica_volume() == received.volume
+                || session.is_distinct_world(received.volume)
+        } else {
+            self.has_direct_volume_grant(received.volume)?
+        };
+        if !admitted
             || access.account != self.account.id
             || !received.identity.same_identity(&self.volume(received.volume)?)
             || self.local_database_key(received.volume)? != received.database_key
@@ -421,6 +422,9 @@ impl LocalStore {
         self.merge_received_revocations(received.volume, &received.revocations, &target, true)?;
         let changed = before != replica_root(&target)?;
         self.check_received_denial(access)?;
+        if access.session_id.is_none() {
+            self.check_participant(received.volume, access.account)?;
+        }
         Ok(changed)
     }
 
@@ -434,6 +438,17 @@ impl LocalStore {
         let operations = self.access_operations(access, volume)?;
         let gate = self.volume_operation(volume)?;
         let _guards = operations.lock_for_publication(&gate)?;
+        let owner_policy = received.identity.owner == self.account.id && received.identity.personal;
+        let tied_acl = if owner_policy {
+            let index = self.db(volume, DatabaseId::Index)?;
+            let previous = index.begin_read()?;
+            let incoming = received.metadata.begin_read()?;
+            let acl = previous.get_with_clock(&DEFAULT_PERMISSIONS_KEY)?;
+            let other = incoming.get_with_clock(&DEFAULT_PERMISSIONS_KEY)?;
+            matches!((acl, other), (Some((a, left)), Some((b, right))) if a == b && left.as_ref() != right.as_ref())
+        } else {
+            false
+        };
         let revocations = self.db(volume, DatabaseId::Revocations)?;
         let before_revocations = replica_root(&revocations)?;
         let pending = if let Some(pending) = self.pending_publication(volume)? {
@@ -484,6 +499,12 @@ impl LocalStore {
             databases_changed,
         };
         self.finish_received_publication(received, &pending, &gate)?;
+        if tied_acl {
+            self.restate_volume_acl(volume, self.index(volume)?.default_permissions())?;
+        }
+        if owner_policy && (tied_acl || outcome.metadata_changed || outcome.revocations_changed) {
+            self.notify_volume_invitation_policy(&received.identity);
+        }
         self.changes.observed_changed(Some(volume));
         Ok(outcome)
     }
@@ -564,9 +585,7 @@ impl LocalStore {
             return Err(Error::AccessDenied("staged database credentials changed"));
         }
         let descriptor = self.volume(volume)?;
-        if !MetadataPolicy::read(&received.metadata)?.volume.same_identity(&descriptor) {
-            return Err(Error::AccessDenied("replica volume mismatch"));
-        }
+        let direct_clock = self.check_received_identity(access, received, &descriptor)?;
         if let Some(entry) = received.entry_scope {
             return self.prepare_received_entry_publication(access, received, entry);
         }
@@ -583,7 +602,7 @@ impl LocalStore {
                 // Read. The retained policy identifies the baseline. Both the
                 // received and final policies below must admit the actual binding.
                 previous.validate_world_binding(&session)?;
-            } else {
+            } else if direct_clock.is_none() {
                 self.authorize_received(access, &previous, true)?;
             }
         } else {
@@ -613,7 +632,28 @@ impl LocalStore {
             &revocations,
             false,
         )?;
-        self.check_received_denial(access)
+        self.check_received_denial(access)?;
+        if access.session_id.is_none() {
+            self.check_participant(volume, access.account)?;
+        }
+        Ok(())
+    }
+
+    fn check_received_identity(
+        &self,
+        access: &Access,
+        received: &ReceivedVolume,
+        descriptor: &Volume,
+    ) -> Result<Option<u64>> {
+        let direct_clock = self.direct_offer_clock(access, descriptor)?;
+        let policy = MetadataPolicy::read(&received.metadata)?;
+        if !policy.volume.same_identity(descriptor) {
+            return Err(Error::AccessDenied("replica volume mismatch"));
+        }
+        if let Some(clock) = direct_clock {
+            self.check_direct_acl(access.account, &policy, &received.metadata, clock)?;
+        }
+        Ok(direct_clock)
     }
 
     fn check_received_quarantine(&self, received: &ReceivedVolume) -> Result<()> {
@@ -695,6 +735,7 @@ impl LocalStore {
         if participant_revoked(&received.revocations, access.account)? {
             return Err(Error::AccessDenied("revoked volume participant"));
         }
+        self.direct_offer_clock(access, policy.volume())?;
         let Some(id) = &access.session_id else { return Ok(()) };
         if self.session_denial(id)?.is_some() {
             return Err(Error::AccessDenied("session participant revoked"));
@@ -876,6 +917,10 @@ impl LocalStore {
         retained: bool,
     ) -> Result<()> {
         self.check_received_denial(access)?;
+        self.direct_offer_clock(access, policy.volume())?;
+        if access.session_id.is_none() {
+            self.check_participant(policy.volume.id, access.account)?;
+        }
         if let Some(id) = &access.session_id {
             let mut session = self.session(id)?;
             if !retained && let Some(version) = &access.build_id {

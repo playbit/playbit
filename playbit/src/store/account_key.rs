@@ -38,6 +38,27 @@ fn derive(seed: &AccountKey, salt: &[u8], info: &[u8]) -> Result<[u8; 32]> {
 pub fn backup_key(account: Id, seed: &AccountKey) -> Result<[u8; 32]> {
     derive(seed, account.as_bytes(), b"app.playbit.account.backup.v1")
 }
+pub(crate) fn volume_invitation_keypair(
+    account: Id,
+    seed: &AccountKey,
+) -> Result<(
+    <hpke::kem::X25519HkdfSha256 as hpke::Kem>::PrivateKey,
+    <hpke::kem::X25519HkdfSha256 as hpke::Kem>::PublicKey,
+)> {
+    use hpke::Kem;
+    let material = zeroize::Zeroizing::new(derive(
+        seed,
+        account.as_bytes(),
+        b"app.playbit.volume-invitation.recipient.v1",
+    )?);
+    Ok(hpke::kem::X25519HkdfSha256::derive_keypair(material.as_slice()))
+}
+
+/// Dedicated recipient encryption key shared by the account's unlocked devices.
+pub fn volume_invitation_public_key(account: Id, seed: &AccountKey) -> Result<[u8; 32]> {
+    use hpke::Serializable;
+    Ok(volume_invitation_keypair(account, seed)?.1.to_bytes().into())
+}
 fn signing_key(seed: &AccountKey) -> Result<Ed25519KeyPair> {
     Ed25519KeyPair::from_seed_unchecked(&derive(seed, SALT, b"app.playbit.account.signing.v1")?)
         .map_err(|_| Error::Internal("could not construct the account signing key"))

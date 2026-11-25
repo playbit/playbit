@@ -551,7 +551,7 @@ pub fn required(request: &R) -> Result<usize> {
         | R::InstanceLaunchFailed { .. } | R::InstanceChannelsAck { .. } | R::InstanceChannelsClose { .. } | R::InstanceEvents { .. } | R::ToolContextClose { .. }
         | R::ToolContextOpen { scope: crate::engine::service_call::ArchivedToolScope::Account }
         | R::ToolContextOpen { scope: crate::engine::service_call::ArchivedToolScope::Volume(_) | crate::engine::service_call::ArchivedToolScope::BrowserVolume(_) }
-        | R::DeleteVolume { .. } | R::DuplicateVolume { .. } | R::DuplicateEntry { .. }
+        | R::DecideVolumeInvitation { .. } | R::DeleteVolume { .. } | R::DuplicateVolume { .. } | R::DuplicateEntry { .. }
         | R::LocalProtocol | R::AcceptAgreement { .. } | R::Entries { .. } | R::DirectoryEntries { .. } | R::VolumeDetails { .. } | R::EntryDetails { .. }
         | R::EntryRevisions { .. } | R::RejectedEntries { .. } | R::Objects { .. } | R::ReadObject { .. }
         | R::RemoveObject { .. } | R::RemoveEntry { .. } | R::Status | R::DesktopLaunch | R::WaitChanges { .. }

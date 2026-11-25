@@ -27,6 +27,49 @@ impl Read for BoundedInput {
 fn input(length: u64) -> BoundedInput {
     BoundedInput { remaining: length, calls: 0, interrupt: true, fail_after: None }
 }
+
+#[cfg(feature = "connected-engine")]
+#[test]
+fn private_entry_pulls_require_both_the_current_named_grant_and_entry_read() {
+    use crate::store::object_contract::{Grant, Subject};
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalStore::open(directory.path()).unwrap();
+    let owner = Access::owner(store.account().id);
+    let reader = Id::generate().unwrap();
+    let peer = Access::private_volume_peer(reader, reader);
+    let volume = store.create_volume("Private files", false).unwrap().id;
+    let entry = store.create_blob(&owner, volume, "attachment", b"readable").unwrap().id;
+    let log = store.create_bloblog(&owner, volume, "log").unwrap().id;
+    let version = store.blob_version(&owner, EntryAddress { volume, entry }, None).unwrap();
+    store.grant_volume(&owner, volume, reader, false).unwrap();
+    store.encrypt_peer_blob_version(&peer, &version).unwrap();
+    assert!(store.private_log_page(&peer, volume, log, None).unwrap().page.entries.is_empty());
+    for id in [entry, log] {
+        store.set_entry_permissions(&owner, volume, id, EntryAcl::Replace(Acl::default())).unwrap();
+    }
+    assert!(matches!(
+        store.encrypt_peer_blob_version(&peer, &version),
+        Err(Error::AccessDenied(_))
+    ));
+    assert!(matches!(
+        store.private_log_page(&peer, volume, log, None),
+        Err(Error::AccessDenied(_))
+    ));
+    for id in [entry, log] {
+        store.set_entry_permissions(&owner, volume, id, EntryAcl::Inherit).unwrap();
+    }
+    let public = Grant { subject: Subject::Public, permissions: vec![Permission::Read] };
+    store.set_permissions(&owner, volume, Acl { grants: vec![public] }).unwrap();
+    assert!(matches!(
+        store.encrypt_peer_blob_version(&peer, &version),
+        Err(Error::AccessDenied(_))
+    ));
+    assert!(matches!(
+        store.private_log_page(&peer, volume, log, None),
+        Err(Error::AccessDenied(_))
+    ));
+}
+
 #[test]
 fn large_short_read_import_is_bounded_deduplicated_and_records_publication_time() {
     let directory = tempfile::tempdir().unwrap();

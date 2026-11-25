@@ -16,6 +16,7 @@ mod queries;
 mod removal;
 mod scrolling;
 mod view;
+pub(super) use view::Section;
 
 pub(super) const MAX_SESSIONS: usize = 256;
 

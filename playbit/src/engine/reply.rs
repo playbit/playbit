@@ -289,6 +289,8 @@ pub struct Status {
     pub account_key_backup: crate::store::AccountKeyBackup,
     pub account: crate::store::Account,
     pub volumes: Vec<crate::store::Volume>,
+    pub volume_invitations: Vec<Id>,
+    pub volume_invitation_owners: std::collections::BTreeMap<Id, String>,
     /// Sorted IDs of materialized app and session scopes for the desktop catalog.
     #[serde(skip)]
     pub(crate) automatic_volume_ids: Vec<Id>,
@@ -486,6 +488,10 @@ pub enum Reply {
     },
     Status(Box<Status>),
     Volume(#[rkyv(with = rkyv::with::AsBox)] crate::store::Volume),
+    VolumeInvitationDecided {
+        volume: Id,
+        accept: bool,
+    },
     VolumeDeleted {
         volume: Id,
     },
@@ -597,6 +603,10 @@ impl ArchivedReply {
             Q::BrowserDrafts { account, operation } => {
                 matches!(self, Self::BrowserDrafts { account: found, result }
                     if found.0 == *account.as_bytes() && result.matches_operation(operation))
+            }
+            Q::DecideVolumeInvitation { volume, accept } => {
+                matches!(self, Self::VolumeInvitationDecided { volume: found, accept: decision }
+                    if found.0 == *volume.as_bytes() && decision == accept)
             }
             Q::DeleteVolume { volume } => {
                 matches!(self, Self::VolumeDeleted { volume: found } if found.0 == *volume.as_bytes())

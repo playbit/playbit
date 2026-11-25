@@ -53,6 +53,8 @@ pub(crate) use session_list::SessionActivity;
 mod snapshot;
 mod ui_zoom;
 mod volume_actions;
+mod volume_invitations;
+pub use volume_invitations::{VolumeInvitationPolicy, VolumeInvitationPublication, VolumeListing};
 mod work_offline;
 mod world;
 use crate::store::AppScope;
@@ -250,10 +252,23 @@ pub struct Access {
     /// Retained File authority is tied to the exact consent incarnation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     personal_incarnation: Option<(Id, Id)>,
+    /// Authenticated transport endpoint for one direct private volume exchange.
+    #[serde(skip)]
+    invitation_peer: Option<Id>,
 }
 impl Access {
     pub fn owner(account: Id) -> Self {
-        Self { account, session_id: None, build_id: None, personal_incarnation: None }
+        Self {
+            account,
+            session_id: None,
+            build_id: None,
+            personal_incarnation: None,
+            invitation_peer: None,
+        }
+    }
+    #[cfg(any(feature = "connected-engine", test))]
+    pub(crate) fn private_volume_peer(account: Id, peer: Id) -> Self {
+        Self { invitation_peer: Some(peer), ..Self::owner(account) }
     }
     pub fn session(account: Id, session_id: impl Into<String>) -> Self {
         Self {
@@ -261,6 +276,7 @@ impl Access {
             session_id: Some(session_id.into()),
             build_id: None,
             personal_incarnation: None,
+            invitation_peer: None,
         }
     }
     pub fn session_version(
@@ -273,6 +289,7 @@ impl Access {
             session_id: Some(session_id.into()),
             build_id: Some(version.into()),
             personal_incarnation: None,
+            invitation_peer: None,
         }
     }
     #[cfg(any(feature = "native-runtime", feature = "wasm-runtime", test))]
@@ -526,17 +543,43 @@ fn merge_index_with_publication<R: kvdb::sync::SyncResolver>(
 
 fn merge_sender<R: kvdb::sync::SyncResolver>(
     scratch: &Path,
-    mut sender: kvdb::sync::SyncSender<'_, RedbStorage>,
+    sender: kvdb::sync::SyncSender<'_, RedbStorage>,
     target: &Database,
     resolver: R,
     validate: impl FnOnce(&kvdb::WriteTxn<'_, RedbStorage>) -> Result<()>,
     repair: impl FnOnce(&mut kvdb::LocalIndexes<'_, '_, RedbStorage>) -> Result<()>,
 ) -> Result<()> {
+    merge_sender_changes(scratch, sender, target, resolver, validate, repair, false)?;
+    Ok(())
+}
+
+/// A receiving owner can forward only the entries actually admitted and
+/// committed. An oversized result uses the ordinary feed's pull-required gap.
+fn merge_sender_changes<R: kvdb::sync::SyncResolver>(
+    scratch: &Path,
+    mut sender: kvdb::sync::SyncSender<'_, RedbStorage>,
+    target: &Database,
+    resolver: R,
+    validate: impl FnOnce(&kvdb::WriteTxn<'_, RedbStorage>) -> Result<()>,
+    repair: impl FnOnce(&mut kvdb::LocalIndexes<'_, '_, RedbStorage>) -> Result<()>,
+    capture: bool,
+) -> Result<Option<kvdb::CommittedDelta>> {
     let _timing = crate::trace::Span::new("replica.copy");
     use kvdb::sync::{SyncReceiver, SyncStatus};
     let staging = sync_staging(scratch)?;
     let mut request = Vec::with_capacity(256 * 1024);
-    let mut receiver = SyncReceiver::new(target, resolver, staging, now_unix_secs(), &mut request)?;
+    let mut receiver = if capture {
+        SyncReceiver::new_with_delta(
+            target,
+            resolver,
+            staging,
+            now_unix_secs(),
+            crate::store::MAX_REPLICA_DELTA_BYTES,
+            &mut request,
+        )?
+    } else {
+        SyncReceiver::new(target, resolver, staging, now_unix_secs(), &mut request)?
+    };
     let mut fragment = vec![0; 256 * 1024];
     loop {
         sender.process(&request)?;
@@ -552,8 +595,12 @@ fn merge_sender<R: kvdb::sync::SyncResolver>(
         if completed {
             sender.process(&request)?;
             validate(receiver.pending_transaction()?)?;
-            receiver.repair_local_indexes(repair)?.finish()?;
-            return Ok(());
+            let receiver = receiver.repair_local_indexes(repair)?;
+            if capture {
+                return Ok(receiver.finish_with_delta()?.1);
+            }
+            receiver.finish()?;
+            return Ok(None);
         }
         if request.is_empty() {
             return Err(Error::Internal("local replica synchronization made no progress"));
@@ -848,6 +895,8 @@ pub struct LocalStore {
     account: Account,
     installation: Id,
     changes: crate::store::change_feed::CommittedChangeFeed,
+    #[cfg(feature = "connected-engine")]
+    volume_invitation_policy_events: tokio::sync::broadcast::Sender<Id>,
     #[cfg(any(feature = "connected-engine", feature = "native-runtime"))]
     guest_display_name: tokio::sync::watch::Sender<String>,
     volume_names_generation: std::sync::atomic::AtomicU64,
@@ -1159,13 +1208,7 @@ impl LocalStore {
             blob_cache_path,
             installation: profile::installation(&metadata)?,
             #[cfg(any(feature = "connected-engine", feature = "native-runtime"))]
-            guest_display_name: {
-                let name: Option<String> = get(&metadata, b"settings/display-name")?;
-                if let Some(name) = &name {
-                    crate::store::account::validate_display_name(name)?;
-                }
-                tokio::sync::watch::Sender::new(name.unwrap_or_default())
-            },
+            guest_display_name: Self::open_guest_display_name(&metadata)?,
             metadata,
             #[cfg(feature = "app-host")]
             session_catalog_epoch,
@@ -1175,6 +1218,8 @@ impl LocalStore {
             recovery_persistence,
             account,
             changes: changes()?,
+            #[cfg(feature = "connected-engine")]
+            volume_invitation_policy_events: tokio::sync::broadcast::channel(32).0,
             volume_names_generation: std::sync::atomic::AtomicU64::new(0),
             profile: Mutex::new(()),
             desktop_preview: Mutex::new(None),
@@ -1204,6 +1249,15 @@ impl LocalStore {
             _lock: lock,
         };
         Self::finish_open(store)
+    }
+
+    #[cfg(any(feature = "connected-engine", feature = "native-runtime"))]
+    fn open_guest_display_name(metadata: &Database) -> Result<tokio::sync::watch::Sender<String>> {
+        let name: Option<String> = get(metadata, b"settings/display-name")?;
+        if let Some(name) = &name {
+            crate::store::account::validate_display_name(name)?;
+        }
+        Ok(tokio::sync::watch::Sender::new(name.unwrap_or_default()))
     }
 
     fn finish_open(store: Self) -> Result<Self> {
@@ -2086,6 +2140,7 @@ impl LocalStore {
         }
         self.committed_account_record(account_changed);
         self.changes.publish(volume.id, crate::store::DatabaseId::Index, delta);
+        self.notify_volume_invitation_policy(&volume);
         Ok(volume)
     }
     pub fn volumes(&self) -> Result<Vec<Volume>> {
@@ -2177,6 +2232,7 @@ impl LocalStore {
         tx.commit()?;
         if changed {
             self.volume_names_generation.fetch_add(1, std::sync::atomic::Ordering::Release);
+            self.notify_volume_invitation_policy(&previous);
         }
         Ok(())
     }
@@ -2394,6 +2450,9 @@ impl LocalStore {
         {
             let _timing = crate::trace::Span::new("storage.commit");
             tx.commit()?;
+        }
+        if let PendingKind::RegisterVolume { volume } = &operation.operation {
+            self.notify_volume_invitation_policy(volume);
         }
         Ok(())
     }
@@ -2710,6 +2769,7 @@ impl LocalStore {
             crate::store::MAX_REPLICA_DELTA_BYTES,
         )?;
         self.changes.publish(index.volume.id, crate::store::DatabaseId::Index, delta);
+        self.notify_volume_invitation_policy(&index.volume);
         Ok(())
     }
     /// Resolve the local account’s retained invitation against the Shared binding.
@@ -2729,6 +2789,9 @@ impl LocalStore {
         access: &Access,
         index: &MetadataPolicy,
     ) -> Result<Option<PersonalVolumeGrant>> {
+        if let Some(peer) = access.invitation_peer {
+            self.admit_private_invitation_peer(access, index, peer)?;
+        }
         self.admit_access_with_file_session(access, index, None)
     }
     /// Only retained File staging/control supplies a captured identity here.
@@ -2742,6 +2805,7 @@ impl LocalStore {
     ) -> Result<Option<PersonalVolumeGrant>> {
         self.require_account_authority()?;
         self.check_participant(index.volume.id, access.account)?;
+        self.require_current_direct_acl(access, index)?;
         let Some(id) = &access.session_id else {
             return Ok(None);
         };
@@ -2916,6 +2980,17 @@ impl LocalStore {
             tx.commit_with_delta()?
         };
         self.changes.publish(volume, crate::store::DatabaseId::Revocations, delta);
+        self.notify_volume_invitation_policy(&index.volume);
+        if index.volume.personal && index.volume.owner == self.account.id {
+            let subject = crate::store::object_contract::Subject::Principal(
+                crate::store::object_contract::Principal::Human(account),
+            );
+            if index.permissions.grants.iter().any(|grant| grant.subject == subject) {
+                let mut permissions = index.permissions;
+                permissions.grants.retain(|grant| grant.subject != subject);
+                self.restate_volume_acl(volume, &permissions)?;
+            }
+        }
         Ok(())
     }
     #[cfg(any(test, all(not(target_os = "ios"), feature = "process")))]

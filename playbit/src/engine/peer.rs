@@ -37,8 +37,12 @@ use tokio::{
     sync::Semaphore,
     task::JoinHandle,
 };
+mod contents;
 mod failure;
+pub(super) mod personal;
+pub(super) use contents::{pull_file, pull_log_page};
 pub(super) use failure::VerifiedDenial;
+pub(super) use personal::{LiveUpdates, PrivateFeeds, prepare_subscription};
 
 const CHUNK: usize = 256 * 1024 - 29;
 const DATA: u8 = 1;
@@ -46,8 +50,12 @@ const FINISHED: u8 = 2;
 const RECEIPT: u8 = 3;
 const ERROR: u8 = 4;
 const READY: u8 = 5;
+const PULL_DATABASE: u8 = 7;
+const PULL_FILE: u8 = 8;
+const PULL_LOG: u8 = 9;
 const IDLE: Duration = Duration::from_secs(30);
 const MAX_RESPONSES: usize = 2;
+pub(super) const SUBSCRIPTION_BUSY: &str = "private volume subscription capacity exhausted";
 
 // Shared by all session listeners in this process. The blocking job owns its
 // permit through its final durable receipt, even if its listener is canceled.
@@ -170,28 +178,70 @@ pub async fn listen(
         build_id: session.resolved_build_id.clone(),
         proof: store.session_proof(&session.id, store.account().id)?,
     };
+    listen_for(connection, store, request, Some(session.id), None).await
+}
+
+pub(super) async fn listen_volume(
+    connection: Arc<ApConnection>,
+    store: Arc<LocalStore>,
+    volume: Id,
+    updates: LiveUpdates,
+) -> Result<JoinHandle<()>> {
+    let descriptor = store.volume(volume)?;
+    if !descriptor.personal
+        || descriptor.share_key_with_service
+        || descriptor.owner != store.account().id
+    {
+        return Err("Private volume offers require the owner of a peer-only personal volume".into());
+    }
+    let request =
+        ServiceRequest::VolumePeerListen { operation_id: Id::generate()?.to_string(), volume };
+    listen_for(connection, store, request, None, Some((volume, updates))).await
+}
+
+async fn listen_for(
+    connection: Arc<ApConnection>,
+    store: Arc<LocalStore>,
+    request: ServiceRequest,
+    session: Option<String>,
+    private: Option<(Id, LiveUpdates)>,
+) -> Result<JoinHandle<()>> {
     let mut stream = wire::begin(&connection, &request).await?;
     wire::response(&mut stream, request.operation_id()).await?;
     let runtime = Handle::current();
     let responses = response_slots();
     Ok(tokio::spawn(async move {
         loop {
-            let event = match wire::receive_data(&mut stream)
-                .await
-                .and_then(|bytes| offered_event(&bytes, &session.id, store.account().id))
-            {
+            let event = match wire::receive_data(&mut stream).await.and_then(|bytes| {
+                offered_event(&bytes, session.as_deref().unwrap_or(""), store.account().id)
+            }) {
                 Ok(event) => event,
                 Err(error) => {
                     // This task owns the offered stream, not a local input. End
                     // this offer; a future explicit sync may install a new one.
                     // The requesting peer receives stream failure/unavailability.
-                    crate::diagnostic!("Private database offer ended for {}: {error}", session.id);
+                    crate::diagnostic!("Private database offer ended: {error}");
                     break;
                 }
             };
+            if let Some((volume, _)) = &private
+                && (!event.build_id.is_empty() || event.volume_id != volume.to_string())
+            {
+                crate::diagnostic!("Private volume offer scope differs");
+                break;
+            }
             let connection = connection.clone();
             let store = store.clone();
             let runtime = runtime.clone();
+            if event.live {
+                let Some((volume, feeds)) = &private else { break };
+                if let Err(error) =
+                    personal::offer_live(connection, store, *volume, event, feeds.clone()).await
+                {
+                    crate::diagnostic!("Private volume subscription offer failed: {error}");
+                }
+                continue;
+            }
             let credit = responses
                 .clone()
                 .acquire_owned()
@@ -220,18 +270,19 @@ fn offered_event(bytes: &[u8], session: &str, account: Id) -> Result<PeerEvent> 
 /// volume/database destination. READY and encrypted receipt remain mandatory;
 /// no live store merge or session admission occurs here. The coordinator must
 /// freshly authorize and adopt the complete volume before treating it as ready.
-pub fn pull_into(
+pub fn pull_into<'a>(
     runtime: &Runtime,
     connection: &ApConnection,
     store: &LocalStore,
-    session: &Session,
+    session: impl Into<Option<&'a Session>>,
     volume: Id,
     database: crate::store::DatabaseId,
     target: &Database,
 ) -> Result<ReplicaReceipt> {
+    let session = session.into();
     let key = validate_target(store, volume, database, target)?;
     let (mut stream, mut cipher, event) = begin_request(
-        runtime,
+        runtime.handle(),
         connection,
         store,
         session,
@@ -241,6 +292,9 @@ pub fn pull_into(
         key,
     )?;
     let result = runtime.block_on(async {
+        if session.is_none() {
+            send(&mut stream, &mut cipher, PULL_DATABASE, &[]).await?;
+        }
         ready(&mut stream, &mut cipher).await?;
         pull(
             &store.profile_path().join(crate::paths::STAGING),
@@ -260,22 +314,26 @@ pub fn pull_into(
         }
         Ok(received)
     });
-    failure::qualify(result, store, session, &event)
+    match session {
+        Some(session) => failure::qualify(result, store, session, &event),
+        None => result,
+    }
 }
 
 /// Publish the current authorized view and wait for the encrypted receiver's
 /// durable receipt. Run outside the runtime's async context.
-pub fn push(
+pub fn push<'a>(
     runtime: &Runtime,
     connection: &ApConnection,
     store: &LocalStore,
-    session: &Session,
+    session: impl Into<Option<&'a Session>>,
     volume: Id,
     database: crate::store::DatabaseId,
 ) -> Result<DurableRevision> {
+    let session = session.into();
     let key = volume_key(store, volume, database)?;
     let (mut stream, mut cipher, event) = begin_request(
-        runtime,
+        runtime.handle(),
         connection,
         store,
         session,
@@ -284,8 +342,14 @@ pub fn push(
         SyncDirection::Push,
         key,
     )?;
+    let peer = Id::parse(&event.responder_account_id)?;
     let projected = store.with_authorized_replica(
-        &Access::session_version(store.account().id, &session.id, &session.resolved_build_id),
+        &session.map_or_else(
+            || Access::private_volume_peer(store.account().id, peer),
+            |session| {
+                Access::session_version(store.account().id, &session.id, &session.resolved_build_id)
+            },
+        ),
         volume,
         database,
         None,
@@ -294,7 +358,7 @@ pub fn push(
                 &store.profile_path().join(crate::paths::STAGING),
                 db,
                 policy,
-                ReplicaReader::Participant(Id::parse(&event.responder_account_id)?),
+                ReplicaReader::Participant(peer),
             )
         },
     )?;
@@ -336,34 +400,74 @@ fn validate_target(
     reason = "Keep the explicit boundary inputs together without introducing a one-use parameter object."
 )]
 fn begin_request(
-    runtime: &Runtime,
+    runtime: &Handle,
     connection: &ApConnection,
     store: &LocalStore,
-    session: &Session,
+    session: Option<&Session>,
     volume: Id,
     database: crate::store::DatabaseId,
     direction: SyncDirection,
     database_key: [u8; 32],
 ) -> Result<(ApStream, Cipher, PeerEvent)> {
-    if session.shared_volume.is_some() {
-        return Err("Shared volumes require hosted replication".into());
-    }
-    let request = ServiceRequest::PeerRequest {
-        operation_id: Id::generate()?.to_string(),
-        session_id: session.id.clone(),
-        build_id: session.resolved_build_id.clone(),
-        proof: store.session_proof(&session.id, store.account().id)?,
-        volume_id: volume.to_string(),
-        database_id: database,
-        direction,
+    let request = if let Some(session) = session {
+        if session.shared_volume.is_some() {
+            return Err("Shared volumes require hosted replication".into());
+        }
+        ServiceRequest::PeerRequest {
+            operation_id: Id::generate()?.to_string(),
+            session_id: session.id.clone(),
+            build_id: session.resolved_build_id.clone(),
+            proof: store.session_proof(&session.id, store.account().id)?,
+            volume_id: volume.to_string(),
+            database_id: database,
+            direction,
+        }
+    } else {
+        if !store.has_direct_volume_grant(volume)? || store.volume(volume)?.share_key_with_service {
+            return Err("Private transfer requires a current direct invitation".into());
+        }
+        ServiceRequest::VolumePeerRequest {
+            operation_id: Id::generate()?.to_string(),
+            volume,
+            database_id: database,
+            direction,
+        }
     };
     let mut stream = runtime.block_on(wire::begin(connection, &request))?;
     let response = runtime.block_on(wire::response(&mut stream, request.operation_id()))?;
     let event: PeerEvent =
         serde_json::from_value(response.data.ok_or("missing peer transfer scope")?)?;
-    validate_event(&event, store.account().id, session, volume, database, direction)?;
+    if let Some(session) = session {
+        validate_event(&event, store.account().id, session, volume, database, direction)?;
+    } else {
+        if event.live {
+            return Err("Unexpected live offer for database transfer".into());
+        }
+        validate_volume_event(&event, store, volume, database, direction)?;
+    }
     let cipher = Cipher::new(database_key, &event, true)?;
     Ok((stream, cipher, event))
+}
+
+fn validate_volume_event(
+    event: &PeerEvent,
+    store: &LocalStore,
+    volume: Id,
+    database: crate::store::DatabaseId,
+    direction: SyncDirection,
+) -> Result<()> {
+    if !event.session_id.is_empty()
+        || !event.build_id.is_empty()
+        || event.volume_id != volume.to_string()
+        || event.requester_account_id != store.account().id.to_string()
+        || event.responder_account_id != store.volume(volume)?.owner.to_string()
+        || event.database_id != database
+        || event.direction != direction
+        || Id::parse(&event.request_id).is_err()
+    {
+        return Err("AP personal volume peer scope mismatch".into());
+    }
+    Ok(())
 }
 
 fn validate_event(
@@ -374,7 +478,8 @@ fn validate_event(
     database: crate::store::DatabaseId,
     direction: SyncDirection,
 ) -> Result<()> {
-    if event.requester_account_id != account.to_string()
+    if event.live
+        || event.requester_account_id != account.to_string()
         || event.session_id != session.id
         || event.build_id != session.resolved_build_id
         || event.volume_id != volume.to_string()
@@ -421,12 +526,17 @@ fn respond(
     runtime.block_on(wire::response(&mut stream, request.operation_id()))?;
     // Only the trusted runtime obtains the database key; it never crosses AP.
     let key = volume_key(store, volume, event.database_id)?;
-    // A participant may have the catalog record without a local backing yet.
-    // Open its local replica before the existing per-request authorization and transfer.
-    // The local tree's hash key carries no peer encryption authority.
-    store.with_replica(volume, event.database_id, |_| Ok(()))?;
     let mut cipher = Cipher::new(key, event, false)?;
-    let access = Access::session_version(account, &event.session_id, &event.build_id);
+    let access = if event.session_id.is_empty() {
+        Access::private_volume_peer(account, account)
+    } else {
+        Access::session_version(account, &event.session_id, &event.build_id)
+    };
+    if contents::respond(runtime, store, &access, event, &mut stream, &mut cipher)? {
+        return Ok(());
+    }
+    // A retained catalog can precede its ordinary database backing.
+    store.with_replica(volume, event.database_id, |_| Ok(()))?;
     let result = match event.direction {
         SyncDirection::Pull => respond_pull(
             runtime,
@@ -635,6 +745,7 @@ mod tests {
     use super::*;
     fn event() -> PeerEvent {
         PeerEvent {
+            live: false,
             build_id: crate::identifier::encode(&[0xab; 32]),
             request_id: crate::identifier::encode(&[0x11; 16]),
             requester_account_id: crate::identifier::encode(&[0x22; 16]),

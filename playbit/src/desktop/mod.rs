@@ -55,6 +55,8 @@ mod theme;
 #[cfg(target_os = "macos")]
 pub mod update;
 mod volume_creation;
+mod volume_invitations;
+mod volume_pages;
 mod welcome_view;
 mod worker;
 mod worker_copy;

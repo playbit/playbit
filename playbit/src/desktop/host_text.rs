@@ -18,7 +18,7 @@ pub(super) enum Text {
     NameDialogLabel,
     EmptySessions,
     EmptyVolumes,
-    VolumeCapacity,
+    VolumePage,
     ArtworkError,
     PanelTitle,
     OpeningTitle,

@@ -86,6 +86,8 @@ impl Browser {
                 .flex()
                 .child(div().flex_1().min_w(ui(240.)).h_full().child(self.kv_panel(window, cx)))
                 .child(self.kv_editor_column(editor_width, cx))
+        } else if self.selected.is_none() && self.volume_invitation.is_some() {
+            self.volume_invitation_panel(cx)
         } else if self.selected.is_none()
             || (!self.show_entry_details
                 && self.details.as_ref().is_some_and(|details| {

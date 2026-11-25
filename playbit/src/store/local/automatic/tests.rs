@@ -948,7 +948,7 @@ fn deferred_scopes_stay_local_while_supported_shared_recovers() {
     store.delete_volume(shared).unwrap();
     let deletion = store.pending_account_record(None).unwrap().unwrap();
     assert!(matches!(decode(&deletion),
-        crate::store::account::Record::VolumeDeleted { volume } if volume == shared));
+        crate::store::account::Record::VolumeDeleted { volume, .. } if volume == shared));
     assert_eq!(store.account_record_dependencies(&deletion).unwrap(), [None, None]);
     // Seeding a deleted creator scope must retain its tombstone and the saved
     // empty consent without calling the now-unavailable session accessor.
@@ -966,7 +966,7 @@ fn deferred_scopes_stay_local_while_supported_shared_recovers() {
                     if id == session.id));
                 retained[0] = true;
             }
-            crate::store::account::Record::VolumeDeleted { volume } => {
+            crate::store::account::Record::VolumeDeleted { volume, .. } => {
                 assert_eq!(volume, shared);
                 retained[1] = true;
             }

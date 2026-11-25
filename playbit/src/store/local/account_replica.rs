@@ -479,6 +479,7 @@ impl LocalStore {
             }
             Record::DisplayName { .. }
             | Record::VolumeDeleted { .. }
+            | Record::VolumeVisibility { .. }
             | Record::AppVisibility { .. } => Ok(()),
         }
     }
@@ -540,32 +541,54 @@ impl LocalStore {
             let _validation = crate::trace::Span::new("account.adopt_validate");
             self.open_account_record(&cipher, opaque, clock, &ciphertext)?
         };
+        let changed = self.project_account_record(opaque, clock, &ciphertext, decoded)?;
+        if changed {
+            self.changes.observed_changed(None);
+        }
+        Ok(changed)
+    }
+
+    fn project_account_record(
+        &self,
+        opaque: &[u8; 32],
+        clock: Clock,
+        ciphertext: &[u8],
+        decoded: Option<Record>,
+    ) -> Result<bool> {
         let visibility = match &decoded {
             Some(Record::AppVisibility { app, removed }) => {
                 Some((self.removed_app_key(app), *removed))
             }
             _ => None,
         };
+        let volume_visibility = match &decoded {
+            Some(Record::VolumeVisibility { volume, hidden_reason }) => {
+                Some((self.volume_decision_key(*volume), encode(hidden_reason)?))
+            }
+            _ => None,
+        };
         let finish = |tx: &mut WriteTxn<'_, RedbStorage>| {
-            if Self::adopt_account_intent(tx, opaque, clock, &ciphertext)? {
+            if Self::adopt_account_intent(tx, opaque, clock, ciphertext)? {
                 return Ok(true);
             }
             // A previous reader may have saved this optional record without
             // interpreting it. Repair only the exact already-accepted winner.
-            if let Some((key_name, removed)) = &visibility
-                && tx.has(key_name.as_bytes())? != *removed
-                && let Some(retained) = tx.get(&key(RECORD, opaque))?
-            {
-                return Ok(
-                    PendingAccountRecord::parts(opaque, &retained)? == (clock, ciphertext.as_ref())
-                );
+            let repair = if let Some((name, removed)) = &visibility {
+                tx.has(name.as_bytes())? != *removed
+            } else if let Some((name, reason)) = &volume_visibility {
+                tx.get(name.as_bytes())?.as_deref() != Some(reason.as_slice())
+            } else {
+                false
+            };
+            if repair && let Some(retained) = tx.get(&key(RECORD, opaque))? {
+                return Ok(PendingAccountRecord::parts(opaque, &retained)? == (clock, ciphertext));
             }
             Ok(false)
         };
-        let changed: Result<bool> = match decoded {
-            None => self.adopt_optional_account_record(opaque, clock, &ciphertext),
-            Some(Record::VolumeDeleted { volume }) => {
-                self.adopt_account_volume_deletion(volume, finish)
+        match decoded {
+            None => self.adopt_optional_account_record(opaque, clock, ciphertext),
+            Some(Record::VolumeDeleted { volume, withdrawal_owner }) => {
+                self.adopt_account_volume_deletion(volume, withdrawal_owner, finish)
             }
             Some(Record::Volume { volume, credentials }) => {
                 if self.account_volume_requires_invitation(volume.id)? {
@@ -586,29 +609,49 @@ impl LocalStore {
                 self.adopt_account_invitation(invitation, app_name, Some(scope), finish)
             }
             Some(record) => self.adopt_account_projection(&record, finish),
-        };
-        let changed = changed?;
-        if changed {
-            self.changes.observed_changed(None);
         }
-        Ok(changed)
     }
 
     fn adopt_account_volume_deletion(
         &self,
         volume: Id,
+        withdrawal_owner: Option<Id>,
         finish: impl FnOnce(&mut WriteTxn<'_, RedbStorage>) -> Result<bool>,
     ) -> Result<bool> {
         let operations = self.operations(&[volume])?;
         let gate = self.volume_operation(volume)?;
         let _guards = operations.lock_for_publication(&gate)?;
         let _profile = self.lock_profile()?;
+        if withdrawal_owner.is_some_and(|owner| owner != self.account.id) {
+            return Err(Error::AccessDenied("volume withdrawal belongs to a different account"));
+        }
+        let recorded_owner = withdrawal_owner;
+        let withdrawal_owner = match recorded_owner {
+            Some(owner) => Some(owner),
+            None => self.withdrawal_owner_on_delete(volume)?,
+        };
+        if withdrawal_owner.is_some() {
+            profile_format::enable_volume_invitations(self)?;
+        }
         let mut tx = self.metadata.begin_write(now_unix_secs())?;
         if !finish(&mut tx)? {
             return Ok(false);
         }
-        tx.put(format!("deleted-volume/{volume}").as_bytes(), &[])?;
+        self.stage_volume_deletion(&mut tx, volume, withdrawal_owner)?;
+        // Forward owner evidence learned here. Even if a bare tombstone won
+        // a concurrent account edit, a device without DB1 can now finish it.
+        let restated = recorded_owner.is_none()
+            && withdrawal_owner.is_some()
+            && self.queue_account_record(
+                &mut tx,
+                &Record::VolumeDeleted { volume, withdrawal_owner },
+            )?;
         tx.commit()?;
+        self.committed_account_record(restated);
+        #[cfg(feature = "connected-engine")]
+        if withdrawal_owner.is_some() {
+            let _ = self.volume_invitation_policy_events.send(volume);
+        }
         self.changes.observed_changed(Some(volume));
         Ok(true)
     }
@@ -650,6 +693,9 @@ impl LocalStore {
         }
 
         match record {
+            Record::VolumeVisibility { volume, hidden_reason } => {
+                tx.put(self.volume_decision_key(*volume).as_bytes(), &encode(hidden_reason)?)?;
+            }
             Record::AppVisibility { app, removed } => {
                 self.project_app_visibility(&mut tx, app, *removed)?;
             }
@@ -772,8 +818,9 @@ impl LocalStore {
                     binding.role != crate::package::AutomaticVolumeRole::Root
                         || !volume.share_key_with_service
                 }) || self.account_volume_requires_invitation(volume.id)?
+                    || volume.owner != self.account.id && self.has_volume_inbox_entry(volume.id)?
             }
-            Record::VolumeDeleted { volume } => {
+            Record::VolumeDeleted { volume, .. } => {
                 // Deletion carries no credentials. Read the retained Shared
                 // identity even after its availability fence has been applied.
                 !self.replication_supported(*volume)?
@@ -974,6 +1021,17 @@ impl LocalStore {
             }
             self.seed_account_record(&Record::AppVisibility { app, removed: true })?;
         }
+        let prefix = format!("volume-decision/{}/", self.account.id);
+        for entry in source.iter_from(prefix.as_bytes()) {
+            let (key, bytes) = entry?;
+            let Some(suffix) = key.strip_prefix(prefix.as_bytes()) else { break };
+            let id = std::str::from_utf8(suffix)
+                .map_err(|_| Error::corrupt("volume decision ID is not UTF-8"))?;
+            self.seed_account_record(&Record::VolumeVisibility {
+                volume: Id::parse(id)?,
+                hidden_reason: decode(&bytes)?,
+            })?;
+        }
         let _profile = self.lock_profile()?;
         put(&self.metadata, b"account-seeded", &true)
     }
@@ -986,11 +1044,20 @@ impl LocalStore {
             }
             let volume: Volume = decode(&bytes)?;
             if self.volume_deleted(volume.id)? {
-                self.seed_account_record(&Record::VolumeDeleted { volume: volume.id })?;
+                let key = format!("deleted-volume/{}", volume.id);
+                let withdrawal_owner = source
+                    .get(key.as_bytes())?
+                    .filter(|value| value.as_ref() == self.account.id.as_bytes())
+                    .map(|_| self.account.id);
+                self.seed_account_record(&Record::VolumeDeleted {
+                    volume: volume.id,
+                    withdrawal_owner,
+                })?;
                 continue;
             }
             if !self.replication_supported(volume.id)?
                 || self.account_volume_requires_invitation(volume.id)?
+                || self.has_volume_inbox_entry(volume.id)?
             {
                 continue;
             }
@@ -1053,6 +1120,37 @@ mod tests {
             clock,
             ciphertext: cipher.seal(&key, clock, &record.encode().unwrap()).unwrap(),
         }
+    }
+
+    #[test]
+    fn owner_reconciles_an_older_account_tombstone_against_the_local_grant() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(directory.path()).unwrap();
+        unlock(&store, true);
+        let volume = store.create_volume("Private", false).unwrap().id;
+        let creation = store.pending_account_record(None).unwrap().unwrap();
+        store.acknowledge_account_record(&creation).unwrap();
+        let access = Access::owner(store.account.id);
+        store.grant_volume(&access, volume, Id::from_bytes([9; 16]), false).unwrap();
+        let old_tombstone = sealed(
+            &store,
+            Record::VolumeDeleted { volume, withdrawal_owner: None },
+            Clock::from_u64(102),
+        );
+        store.stage_account_record(&old_tombstone).unwrap().unwrap();
+        store.reconcile_account_records().unwrap();
+        assert!(store.volumes().unwrap().is_empty());
+        assert!(matches!(
+            store.volume_invitation_publication(volume).unwrap(),
+            Some(VolumeInvitationPublication::Withdrawal)
+        ));
+        let upgraded = store.pending_account_record(None).unwrap().unwrap();
+        assert!(upgraded.clock > old_tombstone.clock);
+        let cipher = store.unlocked_account_cipher().unwrap();
+        let plain = cipher.open(&upgraded.key, upgraded.clock, &upgraded.ciphertext).unwrap();
+        assert!(matches!(Record::decode(&plain).unwrap(),
+            Record::VolumeDeleted {withdrawal_owner:Some(owner), ..} if owner == store.account.id
+        ));
     }
 
     #[test]
@@ -1281,8 +1379,11 @@ mod tests {
         let mut target = LocalStore::open(directory.path().join("target")).unwrap();
         target.bind_authenticated_account(source.account.id).unwrap();
         unlock(&target, true);
-        let deletion =
-            sealed(&source, Record::VolumeDeleted { volume: retired.id }, Clock::from_u64(102));
+        let deletion = sealed(
+            &source,
+            Record::VolumeDeleted { volume: retired.id, withdrawal_owner: None },
+            Clock::from_u64(102),
+        );
         let old = sealed(
             &source,
             Record::Volume {
@@ -2482,7 +2583,7 @@ mod tests {
             let deleted = drain(&recipient);
             assert_eq!(deleted.len(), 1);
             assert!(matches!(plaintext(&recipient, &deleted[0]),
-                Record::VolumeDeleted { volume } if volume == shared));
+                Record::VolumeDeleted { volume, .. } if volume == shared));
             assert_eq!(recipient.account_record_dependencies(&deleted[0]).unwrap(), [None, None]);
             let deletion = recipient.stage_account_record(&deleted[0]).unwrap().unwrap();
             creator.receive_account_delta(&deletion).unwrap();
@@ -2584,7 +2685,9 @@ mod tests {
                     2
                 }
                 Record::DisplayName { .. } => panic!("this fixture has no display name"),
-                Record::AppVisibility { .. } => panic!("this fixture has no removed app"),
+                Record::AppVisibility { .. } | Record::VolumeVisibility { .. } => {
+                    panic!("this fixture has no listing decisions")
+                }
                 Record::VolumeDeleted { .. } => panic!("this fixture has no deleted volume"),
                 Record::HostedVolume { .. } | Record::HostedInvitation { .. } => {
                     panic!("this fixture has no automatic scope")

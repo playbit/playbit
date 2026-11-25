@@ -61,8 +61,7 @@ impl Shell {
         }
         match target {
             Target::Volume(id) => {
-                let Some(volume) = self.volumes.iter().find(|volume| volume.id == id).cloned()
-                else {
+                let Some(volume) = self.catalog_volume(id).cloned() else {
                     return false;
                 };
                 return self.select_volume(volume, cx);

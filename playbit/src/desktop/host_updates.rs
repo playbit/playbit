@@ -534,18 +534,24 @@ impl Shell {
     }
     fn apply_status_volumes(
         &mut self,
-        mut status_volumes: Option<Vec<crate::store::Volume>>,
+        status_volumes: Option<Vec<crate::store::Volume>>,
         scoped_volumes: Vec<crate::store::Volume>,
+        invitations: Vec<crate::store::Id>,
+        invitation_owners: BTreeMap<crate::store::Id, String>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if let Some(volumes) = &mut status_volumes {
-            super::sidebar_view::sort_volumes(volumes);
-        }
-        let volumes_changed = status_volumes.as_ref().is_some_and(|volumes| {
-            volumes != &self.volumes || scoped_volumes != self.scoped_volumes
-        });
-        if let Some(volumes) = status_volumes {
+        if let Some(mut volumes) = status_volumes {
+            super::sidebar_view::sort_volumes(&mut volumes);
+            let invitations: std::collections::BTreeSet<_> = invitations.into_iter().collect();
+            let invited: Vec<_> =
+                volumes.extract_if(.., |volume| invitations.contains(&volume.id)).collect();
+            let volumes_changed = volumes != self.volumes
+                || invited != self.invited_volumes
+                || scoped_volumes != self.scoped_volumes
+                || invitation_owners != self.volume_invitation_owners;
             self.volumes = volumes;
+            self.invited_volumes = invited;
+            self.volume_invitation_owners = invitation_owners;
             self.scoped_volumes = scoped_volumes;
             if self.volume_rename.as_ref().is_some_and(|rename| {
                 !self.volumes.iter().any(|volume| volume.id == rename.volume())
@@ -560,16 +566,20 @@ impl Shell {
                 self.browser = None;
             }
             if let Some(browser) = &self.browser {
-                browser.update(cx, |browser, _| {
+                browser.update(cx, |browser, cx| {
                     self.set_browser_volumes(browser);
                     if let Some(volume) = self.catalog_volume(browser.volume.id) {
                         browser.volume = volume.clone();
                     }
                     browser.refresh();
+                    if volumes_changed {
+                        cx.notify();
+                    }
                 });
             }
+            return volumes_changed;
         }
-        volumes_changed
+        false
     }
     fn apply_invitation_status(
         &mut self,
@@ -651,6 +661,7 @@ impl Shell {
         }
         if account_changed {
             self.applications = Default::default();
+            self.volume_decision = None;
         }
         if self.account_profile.unlocked && self.account.id != crate::store::Id::from_bytes([0; 16])
         {
@@ -664,6 +675,8 @@ impl Shell {
         let volumes_changed = self.apply_status_volumes(
             response.status_volumes.take(),
             std::mem::take(&mut response.status_scoped_volumes),
+            std::mem::take(&mut response.volume_invitations),
+            std::mem::take(&mut response.volume_invitation_owners),
             cx,
         );
         let mut saved_invitations_changed =
@@ -918,6 +931,7 @@ impl Shell {
         if !self.begin_response(&mut response, cx) {
             return;
         }
+        self.finish_volume_decision(&response, cx);
         if !self.receive_invitation_admission(&response, cx) {
             return;
         }
@@ -1010,17 +1024,19 @@ impl Shell {
         }
         if let Some(id) = response.volume_label.take() {
             if let Some(volume) = response.volume_created.take()
-                && let Some(row) = self.volumes.iter_mut().find(|row| row.id == id)
+                && let Some(previous) = self.volumes.iter().position(|row| row.id == id)
             {
-                *row = volume;
-                super::sidebar_view::sort_volumes(&mut self.volumes);
+                self.volumes.remove(previous);
+                let position = self.insert_ordinary_volume(volume);
+                if self.browser.as_ref().is_some_and(|browser| browser.read(cx).volume.id == id) {
+                    self.reveal_ordinary_volume_page(position);
+                }
             }
             self.finish_volume_rename(id, response.result.is_ok(), cx);
         } else if let Some(volume) = response.volume_created.take() {
             let id = volume.id;
             if !self.volumes.iter().any(|row| row.id == id) && self.volumes.len() < 256 {
-                self.volumes.push(volume.clone());
-                super::sidebar_view::sort_volumes(&mut self.volumes);
+                self.insert_ordinary_volume(volume.clone());
             }
             if !self.sidebar_volumes
                 || self.volume_rename.is_some()
@@ -1117,6 +1133,10 @@ impl Shell {
             invitation_resume: None,
             saved_invitations: Vec::new(),
             volumes: Vec::new(),
+            invited_volumes: Vec::new(),
+            volume_invitation_owners: BTreeMap::new(),
+            volume_decision: None,
+            volume_page: 0,
             scoped_volumes: Vec::new(),
             sessions: Vec::new(),
             first_account_update: false,
@@ -1147,6 +1167,7 @@ impl Shell {
             navigation_controls: BTreeMap::new(),
             browser: None,
             browser_notice: None,
+            browser_decision: None,
             draft_retirement: None,
             _draft_observer: cx.observe_global::<drafts::Drafts>(|host,cx| {
                 if let Some(browser)=&host.browser {

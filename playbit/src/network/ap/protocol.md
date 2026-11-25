@@ -1603,6 +1603,103 @@ share the existing recovery importer. Existing device session adoption/denial
 remain local; session-scoped consent retains newer local intent and cannot admit
 an unknown or foreign-owned volume. 
 
+## Direct personal volume invitations
+
+Discovery advertises `volume-invitations.v1` when AP can retain and deliver
+account-addressed volume invitations. Owner operations require the authenticated
+owner of the registered volume. A recipient watches its own inbox on the
+existing connection. Direct volume sharing uses its own operations and requires
+no session, app, invitation link or session possession proof.
+
+1. The client registers a dedicated X25519 public encryption key with
+   `RegisterVolumeInvitationKey`. The immutable account vault verifier must
+   verify an Ed25519 signature over ASCII `app.playbit.volume-invitation.key.v1`,
+   a zero byte, the raw 16-byte account ID, and the 32-byte public key.
+2. The owner publishes the source ACL clock and sorted direct human recipients
+   with `PutVolumeInvitationPolicy`. `ListVolumeInvitationRecipients` pages
+   through prior deliveries, with at most 32 recipient/clock pairs per page.
+   `GetVolumeInvitationKey` accepts a recipient in the current policy. An
+   absent key returns null. An account-neutral `key_ready` wakes a subscribed
+   owner to recheck missing recipients. The bounded AP interest filter can
+   coalesce readiness and can cause an extra recheck.
+3. `PutVolumeInvitation` carries the volume, recipient, original source clock
+   and either a recipient-sealed envelope or a withdrawal. The envelope is
+   unpadded base64url of at most 4096 bytes. The volume name, database key and
+   blob key are inside it. AP checks membership and the precise policy version
+   at commit. An equivalent same-generation offer keeps the existing encrypted
+   bytes. A stale owner cannot restore a withdrawn recipient.
+   The binary envelope begins with version byte 1 and a 32-byte encapsulated
+   key, followed by RFC 9180 base-mode HPKE ciphertext. The suite is
+   X25519/HKDF-SHA256/AES-128-GCM. HPKE info is the ASCII string
+   `app.playbit.volume-invitation.envelope.v1`. Associated data concatenates
+   the raw 16-byte owner, recipient and volume IDs, then the original ACL clock
+   as a little-endian u64. Plaintext is JSON with `volume` and `credentials`.
+4. `WatchVolumeInvitations` first returns a correlated service acknowledgment.
+   Subsequent flags-zero service data frames carry a JSON `VolumeInvitationEvent`.
+   The initial stream sends each current upsert or withdrawal and then `ready`.
+   AP registers the watcher before reading this snapshot. Upserts, removals and
+   readiness events continue on that stream. Clients apply each volume's clock,
+   tolerating duplicates across the snapshot boundary. A terminal `gap` or
+   disconnect requires a replacement subscription.
+
+```mermaid
+sequenceDiagram
+    participant O as Owner device
+    participant A as AP
+    participant R as Recipient device
+    R->>A: Register signed encryption key
+    R->>A: Watch account invitations
+    A-->>R: Retained offers and withdrawals, then ready
+    O->>A: Publish current ACL clock and direct recipients
+    O->>A: Get recipient encryption key
+    A-->>O: Public key
+    O->>A: Store recipient-sealed volume at the ACL clock
+    A-->>R: Upsert
+    R->>R: Decrypt preview and save account decision
+    O->>A: Publish newer ACL removing recipient
+    A-->>R: Remove
+```
+
+A hosted personal volume's current, individually named human grantee may use
+ordinary unscoped catalog replication. AP checks current directory membership,
+the registered owner and personal role, the hosted index's named human grant,
+effective Read and revocation state. Event subscription installation and
+directory withdrawal share the volume ordering guard. Withdrawal retires a
+direct catalog subscription even when the hosted index is still catching up.
+Entry ACLs control each projection. Maintenance and initial control database
+provisioning remain owner operations.
+
+For a private personal volume, the registered owner uses `VolumePeerListen`.
+AP routes a request to an owner connection that successfully reconciled the
+volume's currently committed ACL clock. The connection retains its revision
+across listener setup and refreshes it on later grants. Recipients wait for a
+current owner when all online owner devices hold older revisions. A policy
+advance closes transfers and subscriptions admitted at the earlier revision,
+including when the same recipient retains a different permission.
+Private volume listeners have their own bounded per-account and global
+allowances so active app sessions retain their routing capacity.
+`VolumePeerRequest` and `VolumePeerSubscribe` admit the addressed recipient
+under the current directory policy. AP relays only ciphertext to the owner's
+authenticated connection. Direct `PeerEvent` records have empty session and
+build IDs. A live subscription sets `live` to true, uses the Index/Pull
+designation and keeps the authenticated duplex stream until a policy advance or
+disconnection. The existing `PeerReply` binds the responder's connection and
+request ID. The source checks the current data policy for each transfer.
+After an unavailable peer returns, the recipient receives `peer_available`
+on its inbox stream.
+
+A direct peer pull identifies a database, a file version, or an append-log page
+inside the encrypted stream. File bodies travel in bounded chunks. The receiver
+checks the authorized version and digest before admitting the bytes to its
+local cache. Append-log pages use the same source cut as the other backings in
+the volume snapshot, including an empty log.
+
+When a recipient explicitly synchronizes a private volume, its publisher drains
+the committed local changes and sends a checkpoint on the live stream after
+those deltas. The owner echoes the checkpoint after applying the preceding
+deltas durably. A disconnected peer, a feed gap or a missed deadline fails
+the checkpoint. Ordinary local edits continue without waiting for this exchange.
+
 ## Invitation envelopes and readiness
 
 `RegisterSession` carries the creator's sealed invitation envelope (base64url,

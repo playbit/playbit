@@ -1675,6 +1675,10 @@ impl Engine {
             self.provider_revision = self.services.store.delivery_provider_revision(None, None).0;
             self.state_changed();
         }
+        if self.network.volume_invitations_changed.swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            self.state_changed();
+        }
         let account_ready = self.network.account_initialized();
         if account_ready != self.account_ready_cache {
             self.account_ready_cache = account_ready;

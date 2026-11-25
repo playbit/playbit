@@ -17,6 +17,14 @@ pub const MAX_ENTRY_BLOB_BYTES: usize = crate::store::MAX_BLOB_PLAINTEXT_BYTES a
 const MAX_PREPARATIONS: usize = 2;
 const UPLOAD_PAGE: usize = 64;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlobReceipt {
+    Hosted,
+    PendingUpload,
+    #[cfg(feature = "connected-engine")]
+    PrivatePeer,
+}
+
 pub struct BlobUploadPage {
     pub versions: Vec<BlobVersion>,
     pub next: Option<(EntryId, EntryId)>,
@@ -757,9 +765,31 @@ impl LocalStore {
     /// Sealing and hashing run outside the authorization boundary. Recheck the
     /// exact retained version and current write rights before returning bytes.
     pub fn encrypt_blob_version(&self, access: &Access, version: &BlobVersion) -> Result<fs::File> {
+        self.seal_blob_version(access, version, Permission::Write)
+    }
+
+    /// Serve only an authenticated reader's exact retained file revision.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn encrypt_peer_blob_version(
+        &self,
+        access: &Access,
+        version: &BlobVersion,
+    ) -> Result<fs::File> {
+        if access.invitation_peer.is_none() {
+            return Err(Error::AccessDenied("private file reader required"));
+        }
+        self.seal_blob_version(access, version, Permission::Read)
+    }
+
+    fn seal_blob_version(
+        &self,
+        access: &Access,
+        version: &BlobVersion,
+        permission: Permission,
+    ) -> Result<fs::File> {
         use std::io::Seek;
-        self.check_blob_version(access, version, Permission::Write)?;
-        let mut plaintext = self.verify_blob_for(access, version, Permission::Write)?;
+        self.check_blob_version(access, version, permission)?;
+        let mut plaintext = self.verify_blob_for(access, version, permission)?;
         let _preparation = Preparation::enter(&self.entry_blobs.active)?;
         let mut ciphertext =
             super::blob_files::blob_transfer_file(&self.path.join(crate::paths::STAGING))?;
@@ -777,7 +807,7 @@ impl LocalStore {
         rustix::io::retry_on_intr(|| rustix::fs::fsync(&ciphertext))
             .map_err(|error| io(error.into()))?;
         ciphertext.rewind().map_err(io)?;
-        self.check_blob_version(access, version, Permission::Write)?;
+        self.check_blob_version(access, version, permission)?;
         Ok(ciphertext)
     }
 
@@ -790,10 +820,36 @@ impl LocalStore {
         ciphertext: &mut impl std::io::Read,
         durable: bool,
     ) -> Result<()> {
+        let receipt = if durable { BlobReceipt::Hosted } else { BlobReceipt::PendingUpload };
+        self.receive_blob(access, version, ciphertext, receipt)
+    }
+
+    /// A file received from its private owner remains pinned for offline use.
+    /// Its recipient has no obligation to publish it to the hosted outbox.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn receive_peer_blob_version(
+        &self,
+        access: &Access,
+        version: &BlobVersion,
+        ciphertext: &mut impl std::io::Read,
+    ) -> Result<()> {
+        let mut access = access.clone();
+        access.invitation_peer = Some(self.volume(version.address.volume)?.owner);
+        self.receive_blob(&access, version, ciphertext, BlobReceipt::PrivatePeer)
+    }
+
+    fn receive_blob(
+        &self,
+        access: &Access,
+        version: &BlobVersion,
+        ciphertext: &mut impl std::io::Read,
+        receipt: BlobReceipt,
+    ) -> Result<()> {
         self.check_blob_version(access, version, Permission::Read)?;
         let _preparation = Preparation::enter(&self.entry_blobs.active)?;
-        let mut plaintext =
-            super::blob_files::BlobStage::new(&self.blob_stage_directory(durable)?)?;
+        let mut plaintext = super::blob_files::BlobStage::new(
+            &self.blob_stage_directory(receipt == BlobReceipt::Hosted)?,
+        )?;
         crate::store::open_blob_to(
             &self.credentials(version.address.volume)?.blob_key,
             version,
@@ -801,7 +857,7 @@ impl LocalStore {
             &mut plaintext.file,
         )?;
         plaintext.sync()?;
-        self.publish_received_blob(access, version, &plaintext, durable)
+        self.publish_received_blob(access, version, &plaintext, receipt)
     }
 
     fn publish_received_blob(
@@ -809,8 +865,9 @@ impl LocalStore {
         access: &Access,
         version: &BlobVersion,
         plaintext: &super::blob_files::BlobStage,
-        durable: bool,
+        receipt: BlobReceipt,
     ) -> Result<()> {
+        let durable = receipt == BlobReceipt::Hosted;
         for _ in 0..2 {
             let mut destinations = vec![self.blob_path(&version.digest, durable)];
             let retained = self.blob_path(&version.digest, false);
@@ -838,7 +895,7 @@ impl LocalStore {
                 continue;
             }
             super::initialization::sync_directory(&self.path)?;
-            self.retain_received_entry_blob(version, durable)?;
+            self.retain_received_entry_blob(version, receipt)?;
             let database = self.db(version.address.volume, crate::store::DatabaseId::Index)?;
             let current = match IndexSnapshot::new(database.begin_read()?)
                 .blob_version(version.address, None)
@@ -857,7 +914,11 @@ impl LocalStore {
         Err(Error::LocalContention("blob cache changed during verified publication"))
     }
 
-    fn retain_received_entry_blob(&self, version: &BlobVersion, durable: bool) -> Result<()> {
+    fn retain_received_entry_blob(
+        &self,
+        version: &BlobVersion,
+        receipt: BlobReceipt,
+    ) -> Result<()> {
         let key = format!(
             "{}{}/{}/{}",
             pin_prefix(&version.digest),
@@ -867,14 +928,17 @@ impl LocalStore {
         );
         let mut tx = self.metadata.begin_write(now_unix_secs())?;
         tx.put(key.as_bytes(), &encode(version)?)?;
-        let changed = durable && tx.get(durable_key(version).as_bytes())?.is_none();
-        if durable {
+        let changed =
+            receipt == BlobReceipt::Hosted && tx.get(durable_key(version).as_bytes())?.is_none();
+        if receipt == BlobReceipt::Hosted {
             tx.put(durable_key(version).as_bytes(), &encode(&true)?)?;
             if changed {
                 Self::advance_provider_upload(&mut tx, version.address.volume)?;
             }
             retire_upload(&mut tx, version)?;
-        } else if tx.get(durable_key(version).as_bytes())?.is_none() {
+        } else if receipt == BlobReceipt::PendingUpload
+            && tx.get(durable_key(version).as_bytes())?.is_none()
+        {
             queue_upload(&mut tx, version)?;
         }
         tx.commit()?;

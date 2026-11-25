@@ -34,7 +34,10 @@ export function accountPlain(record) {
         break;
     case 'display_name': key = 'settings/display-name'; payload = variant(1, [1, text(record.name)]); break;
     case 'volume': key = `volume/${record.volume.id}`; payload = variant(2, [1, volume(record.volume)], [2, credentials(record.credentials)]); break;
-    case 'volume_deleted': key = `deleted-volume/${record.volume}`; payload = variant(3, [1, id(record.volume)]); break;
+    case 'volume_deleted':
+        key = `deleted-volume/${record.volume}`; payload = variant(3, [1, id(record.volume)]);
+        if (record.withdrawal_owner !== undefined) payload = join(payload, field(2, id(record.withdrawal_owner)));
+        break;
     case 'invitation': {
         key = `session/${record.invitation.session.id}`;
         payload = variant(4, [1, invitation(record.invitation)]);

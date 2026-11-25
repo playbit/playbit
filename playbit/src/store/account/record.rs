@@ -27,6 +27,10 @@ pub struct Credentials {
     pub blob_key: [u8; 32],
 }
 
+/// Permanent reason stored for a recipient's explicit decline. Other nonempty
+/// reason codes still hide a volume without acquiring this reason's meaning.
+pub const DECLINE_INVITATION: &str = "decline_invitation";
+
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(
@@ -34,6 +38,10 @@ pub struct Credentials {
     reason = "Account records keep bounded decoded values inline without a second allocation."
 )]
 pub enum Record {
+    VolumeVisibility {
+        volume: Id,
+        hidden_reason: Option<String>,
+    },
     AppVisibility {
         app: crate::package::AppIdentity,
         removed: bool,
@@ -47,6 +55,8 @@ pub enum Record {
     },
     VolumeDeleted {
         volume: Id,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        withdrawal_owner: Option<Id>,
     },
     Invitation {
         invitation: Invitation,
@@ -114,8 +124,23 @@ impl Record {
                     return Err(Error::InvalidInput("invalid app name"));
                 }
             }
+            Self::VolumeVisibility { hidden_reason, .. } => {
+                if hidden_reason.as_ref().is_some_and(|reason| {
+                    reason.is_empty()
+                        || reason.len() > 64
+                        || !reason.bytes().all(|byte| {
+                            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+                        })
+                }) {
+                    return Err(Error::InvalidInput("invalid hidden volume reason"));
+                }
+            }
             Self::VolumeDeleted { .. } => {}
         }
+        self.validate_hosted_scope()
+    }
+
+    fn validate_hosted_scope(&self) -> Result<()> {
         match self {
             Self::HostedVolume { volume, scope, .. } => {
                 scope.validate()?;
@@ -147,6 +172,7 @@ impl Record {
 
     pub(crate) fn logical_key(&self) -> Result<String> {
         Ok(match self {
+            Self::VolumeVisibility { volume, .. } => format!("optional/volume_visibility/{volume}"),
             Self::AppVisibility { app, .. } => {
                 format!("optional/app_visibility/{}/{}", app.publisher, app.app_id)
             }
@@ -154,7 +180,7 @@ impl Record {
             Self::Volume { volume, .. } | Self::HostedVolume { volume, .. } => {
                 format!("volume/{}", volume.id)
             }
-            Self::VolumeDeleted { volume } => format!("deleted-volume/{volume}"),
+            Self::VolumeDeleted { volume, .. } => format!("deleted-volume/{volume}"),
             Self::Invitation { invitation, .. } | Self::HostedInvitation { invitation, .. } => {
                 format!("session/{}", invitation.session.id)
             }
@@ -166,6 +192,7 @@ impl Record {
     }
     pub(super) fn kind(&self) -> &'static str {
         match self {
+            Self::VolumeVisibility { .. } => "volume_visibility",
             Self::AppVisibility { .. } => "app_visibility",
             Self::DisplayName { .. } => "display_name",
             Self::HostedVolume { .. } => "hosted_volume",

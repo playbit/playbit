@@ -204,13 +204,27 @@ impl BlobTransport {
                     self.handle.as_ref().ok_or("connected blob runtime is unavailable")?;
                 #[cfg(feature = "connected-engine")]
                 {
-                    runtime.block_on(self.download_file(
-                        store.clone(),
-                        access.clone(),
-                        session,
-                        version.clone(),
-                        Arc::new(credit),
-                    ))?
+                    let volume = version.address.volume;
+                    if !store.volume(volume)?.share_key_with_service
+                        && store.has_direct_volume_grant(volume)?
+                    {
+                        let mut body = crate::engine::peer::pull_file(
+                            runtime,
+                            self.current_connection()?.as_ref(),
+                            &store,
+                            version,
+                        )?;
+                        store.receive_peer_blob_version(&access, version, &mut body)?;
+                        store.verify_blob_version(&access, version)?
+                    } else {
+                        runtime.block_on(self.download_file(
+                            store.clone(),
+                            access.clone(),
+                            session,
+                            version.clone(),
+                            Arc::new(credit),
+                        ))?
+                    }
                 }
                 #[cfg(not(feature = "connected-engine"))]
                 {

@@ -1202,6 +1202,18 @@ impl LiveReplicas {
             crate::identifier::decode(&session.id)?,
             crate::identifier::decode(&session.resolved_build_id)?,
         ));
+        self.retire_volume_authority(volume, authority).await
+    }
+
+    pub(crate) async fn retire_direct_grant(&mut self, volume: Id) -> Result<()> {
+        self.retire_volume_authority(volume, None).await
+    }
+
+    async fn retire_volume_authority(
+        &mut self,
+        volume: Id,
+        authority: Option<([u8; 32], [u8; 32])>,
+    ) -> Result<()> {
         let mut index = 0;
         while index < self.entries.len() {
             let key = self.entries[index].key;

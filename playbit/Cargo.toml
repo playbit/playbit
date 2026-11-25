@@ -148,7 +148,7 @@ presentation = []
 dev_always_render = ["desktop-ui", "gpui/dev_always_render"]
 # Concrete compositions: core local embedding, connected Wasm host, and native
 # product adapters. These gates select dependencies as well as entry points.
-local-store = ["ap-protocol", "kvdb/redb", "dep:core-foundation", "dep:crossbeam-queue", "dep:dirs", "dep:getrandom", "dep:parking_lot", "dep:redb", "dep:ring", "dep:rustix", "dep:security-framework", "dep:security-framework-sys", "dep:zeroize"]
+local-store = ["ap-protocol", "kvdb/redb", "dep:core-foundation", "dep:crossbeam-queue", "dep:dirs", "dep:getrandom", "dep:hpke", "dep:parking_lot", "dep:rand", "dep:redb", "dep:ring", "dep:rustix", "dep:security-framework", "dep:security-framework-sys", "dep:zeroize"]
 # Shared AP wire codecs for constrained transports; no socket, TLS or local-store dependency.
 ap-protocol = []
 # Bounded native WebSocket adapter; TLS/socket ownership remains with its host.
@@ -227,6 +227,12 @@ dirs = { version = "5", optional = true }
 # Tier A platform entropy for storage and guest random.fill; removal requires
 # equivalent secure OS RNG adapters on every native host.
 getrandom = { version = "0.3", optional = true }
+# Tier A: RFC 9180 keeps private volume credentials sealed to the recipient.
+# hpke adds 17 transitive packages to the root lock. Removal requires another
+# interoperable HPKE implementation. The already locked rand CSPRNG adapts
+# fallible platform entropy to HPKE's infallible sender-RNG interface.
+rand = { version = "0.10", default-features = false, features = ["std_rng"], optional = true }
+hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "x25519", "aes"], optional = true }
 gpui = { version = "=0.2.2", default-features = false, features = ["font-kit"], optional = true }
 # Tier C: route GPUI and dependency diagnostics into the desktop process log.
 # Already used by GPUI; removal requires replacing its logging facade.
