@@ -228,6 +228,11 @@ impl Browser {
         let theme = theme();
         self.kv.key.update(cx, |editor, cx| {
             editor.set_theme(&theme);
+            editor.set_binary(self.kv.key_encoding == Encoding::Hex, cx);
+            let partial = (self.kv.key_encoding == Encoding::Hex)
+                .then(|| partial_hex_byte(editor.text()))
+                .flatten();
+            editor.set_validation_underline(partial, cx);
             editor.set_read_only(
                 !editable
                     || (!self.kv.creating && !renameable)
@@ -271,7 +276,8 @@ impl Browser {
             .px(ui(12.))
             .pb(ui(12.))
             .child(self.kv_field(DraftField::Key, cx))
-            .child(self.kv_field(DraftField::Value, cx));
+            .child(self.kv_field(DraftField::Value, cx))
+            .children(self.kv_insert_control(cx).map(|insert| div().flex_none().child(insert)));
         if self.kv.saved {
             crate::trace::mark("ui.browser.kv.saved_rendered");
         }
@@ -322,6 +328,28 @@ impl Browser {
             .when(!key, |field| field.flex_1().min_h_0())
             .child(editor)
             .child(toggle)
+    }
+
+    fn kv_insert_control(&mut self, cx: &mut Context<Self>) -> Option<Entity<controls::Control>> {
+        if !self.kv_uses_binary_value() || !self.kv_can_edit(cx) {
+            return None;
+        }
+        let owner = self.kv.owner();
+        let editor = self.kv.value.read(cx);
+        let state = if editor.inserts_hex_bytes() { CheckState::On } else { CheckState::Off };
+        let disabled = !editor.can_insert_hex();
+        Some(self.control(
+            "kv-insert".into(),
+            "Insert bytes",
+            controls::Kind::Checkbox(state),
+            disabled,
+            move |this, cx| {
+                if this.kv.owner() == owner && this.kv_uses_binary_value() && this.kv_can_edit(cx) {
+                    this.kv.value.update(cx, |editor, cx| editor.toggle_hex_insert(cx));
+                }
+            },
+            cx,
+        ))
     }
 
     pub(in crate::desktop::browser) fn kv_actions(&mut self, cx: &mut Context<Self>) -> gpui::Div {

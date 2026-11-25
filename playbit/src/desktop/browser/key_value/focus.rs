@@ -8,16 +8,18 @@ enum Stop {
     Value,
     KeyEncoding,
     ValueEncoding,
+    Insert,
     Discard,
     Save,
     Reload,
 }
 
-const STOPS: [Stop; 7] = [
+const STOPS: [Stop; 8] = [
     Stop::Key,
     Stop::Value,
     Stop::KeyEncoding,
     Stop::ValueEncoding,
+    Stop::Insert,
     Stop::Discard,
     Stop::Save,
     Stop::Reload,
@@ -73,8 +75,9 @@ impl Browser {
             Stop::ValueEncoding => {
                 self.kv.value_representation.read(cx).focus_handle(cx).is_focused(window)
             }
-            Stop::Discard | Stop::Save | Stop::Reload => {
+            Stop::Insert | Stop::Discard | Stop::Save | Stop::Reload => {
                 let key = match stop {
+                    Stop::Insert => "kv-insert",
                     Stop::Discard => "kv-discard",
                     Stop::Save => "kv-save",
                     _ => "kv-reload",
@@ -98,6 +101,11 @@ impl Browser {
             Stop::ValueEncoding => {
                 self.kv.pending.is_none()
                     && self.kv.value_representation.read(cx).focus_handle(cx).tab_stop
+            }
+            Stop::Insert => {
+                self.rendered_controls.contains("kv-insert")
+                    && self.kv_can_edit(cx)
+                    && self.kv.value.read(cx).can_insert_hex()
             }
             Stop::Discard => {
                 self.rendered_controls.contains("kv-discard")
@@ -139,8 +147,9 @@ impl Browser {
                     group.show_keyboard_focus_if_focused(window, cx);
                 });
             }
-            Stop::Discard | Stop::Save | Stop::Reload => {
+            Stop::Insert | Stop::Discard | Stop::Save | Stop::Reload => {
                 let key = match stop {
+                    Stop::Insert => "kv-insert",
                     Stop::Discard => "kv-discard",
                     Stop::Save => "kv-save",
                     _ => "kv-reload",

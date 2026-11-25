@@ -29,6 +29,7 @@ use gpui::{
 
 #[cfg(target_os = "macos")]
 mod context_menu;
+pub(crate) mod hex;
 mod text_checking;
 
 const CARET_BLINK_DELAY: Duration = Duration::from_millis(500);
@@ -191,12 +192,6 @@ enum DragGranularity {
 enum CaretAffinity {
     Upstream,
     Downstream,
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum TextAreaMode {
-    Text,
-    Binary,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -568,7 +563,10 @@ pub struct TextEditor {
     email_code: bool,
     tabular_numerals: bool,
     inspector_field: bool,
-    text_area: Option<TextAreaMode>,
+    text_area: bool,
+    hex: Option<hex::Format>,
+    canonical_hex: bool,
+    hex_input: hex::InputMode,
     validation_underline: Option<Range<usize>>,
     literal: bool,
     checking_inserted_range: Option<Range<usize>>,
@@ -627,7 +625,10 @@ impl TextEditor {
             email_code: false,
             tabular_numerals: false,
             inspector_field: false,
-            text_area: None,
+            text_area: false,
+            hex: None,
+            canonical_hex: false,
+            hex_input: hex::InputMode::Overwrite,
             validation_underline: None,
             literal: false,
             checking_inserted_range: None,
@@ -770,7 +771,7 @@ impl TextEditor {
             }
             cx.notify();
         }
-        if read_only && self.text_area.is_none() {
+        if read_only && !self.text_area {
             use playbit_api::ui::ThemeColor as Role;
             self.base_style.background =
                 gpui::Hsla::from(gpui::rgba(theme.color(Role::PanelBackground).0));
@@ -813,16 +814,22 @@ impl TextEditor {
     pub fn inspector_text_area(text: impl Into<String>, cx: &mut Context<Self>) -> Self {
         let mut editor = Self::new("", cx).inspector_field().literal();
         editor.buffer = Buffer::from(text.into());
-        editor.text_area = Some(TextAreaMode::Text);
+        editor.text_area = true;
         editor.apply_inspector_style();
         editor
     }
-    /// Hex formatting belongs to the value owner; offsets remain presentation.
     pub fn set_binary(&mut self, binary: bool, cx: &mut Context<Self>) {
-        let Some(mode) = self.text_area else { return };
-        let next = if binary { TextAreaMode::Binary } else { TextAreaMode::Text };
-        if mode != next {
-            self.text_area = Some(next);
+        let next = binary.then_some(if self.text_area {
+            hex::Format::Grouped
+        } else {
+            hex::Format::Compact
+        });
+        if self.hex != next {
+            self.hex = next;
+            self.hex_input = hex::InputMode::Overwrite;
+            self.refresh_hex_format();
+            self.model_generation =
+                self.model_generation.checked_add(1).expect("text model generation exhausted");
             self.layout = None;
             self.scroll_x = Pixels::ZERO;
             self.scroll_to_caret = true;
@@ -832,7 +839,7 @@ impl TextEditor {
     fn text_font(&self) -> gpui::Font {
         if self.selectable_id {
             gpui::Font { features: typography::identifier_features(), ..control_font() }
-        } else if self.text_area == Some(TextAreaMode::Binary) {
+        } else if self.hex.is_some() {
             font("Menlo")
         } else if self.email_code || self.tabular_numerals {
             tabular_font()
@@ -848,7 +855,7 @@ impl TextEditor {
         self.base_style.corner_radius = px(2.);
         self.base_style.border_width = px(0.5);
         self.base_style.text = gpui::rgba(0x000000e6).into();
-        if self.text_area.is_some() {
+        if self.text_area {
             self.base_style.background = gpui::white();
         }
     }
@@ -887,6 +894,8 @@ impl TextEditor {
     /// Runtime snapshots use acknowledge instead, preserving pending edits/IME.
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.buffer = self.fresh_buffer(String::new());
+        self.hex_input.finish_byte();
+        self.refresh_hex_format();
         self.validation_underline = None;
         self.layout = None;
         self.revision.changed();
@@ -911,6 +920,8 @@ impl TextEditor {
             && self.max_bytes.is_none_or(|limit| value.len() <= limit)
         {
             self.buffer = self.fresh_buffer(value.to_owned());
+            self.hex_input.finish_byte();
+            self.refresh_hex_format();
             self.validation_underline = None;
             // Model replacements do not advance the local edit/acknowledgment
             // sequence, but must retire actions captured against the old value.
@@ -1015,6 +1026,10 @@ impl TextEditor {
     }
 
     fn did_change(&mut self, cx: &mut Context<Self>) {
+        self.hex_input.finish_byte();
+        if self.hex.is_some() && !self.canonical_hex {
+            self.refresh_hex_format();
+        }
         self.validation_underline = None;
         self.revision.changed();
         self.checking_inserted_range = None;
@@ -1051,8 +1066,16 @@ impl TextEditor {
                 if self.read_only {
                     return;
                 }
-                let Some(text) = self.input_text(value) else { return };
                 let len = self.buffer.as_str().len();
+                if let Some(format) = self.hex_format() {
+                    if value.is_empty() {
+                        self.delete_hex_selection(format, 0..len, cx);
+                    } else {
+                        self.paste_hex(0..len, value, cx);
+                    }
+                    return;
+                }
+                let Some(text) = self.input_text(value) else { return };
                 replace_platform_text(&mut self.buffer, Some(0..len), &text);
                 self.did_change(cx);
             }
@@ -1072,7 +1095,7 @@ impl TextEditor {
                     return;
                 };
                 self.focus_handle.focus(window);
-                self.buffer.set_selection(Selection::new(anchor, head));
+                self.buffer.set_selection(self.hex_selection(Selection::new(anchor, head)));
                 self.scroll_to_caret = true;
                 self.accessibility_scroll = true;
                 self.primary_affinity = CaretAffinity::Downstream;
@@ -1199,15 +1222,11 @@ impl TextEditor {
         if self.max_bytes.is_some_and(|limit| text.len() > limit) {
             return None;
         }
-        Some(if self.text_area.is_some() {
-            text.to_owned()
-        } else {
-            text.replace(['\r', '\n'], "")
-        })
+        Some(if self.text_area { text.to_owned() } else { text.replace(['\r', '\n'], "") })
     }
 
     fn insert_newline(&mut self, cx: &mut Context<Self>) {
-        if self.text_area.is_none() {
+        if self.hex.is_some() || !self.text_area {
             self.commit(cx);
         } else if self.enabled && !self.read_only && self.buffer.marked_range().is_none() {
             self.buffer.commit_edit_group();
@@ -1233,7 +1252,16 @@ impl TextEditor {
     }
 
     fn move_logically(&mut self, movement: Movement, extend: bool, cx: &mut Context<Self>) {
-        self.buffer.move_selections(movement, extend);
+        if let Some(selection) = self.hex_format().and_then(|format| {
+            format.movement(self.text(), self.buffer.primary_selection(), movement, extend)
+        }) {
+            self.buffer.set_selection(selection);
+        } else {
+            self.buffer.move_selections(movement, extend);
+            if self.hex_format().is_some() {
+                self.buffer.set_selection(self.hex_selection(self.buffer.primary_selection()));
+            }
+        }
         self.preferred_x = None;
         self.scroll_to_caret = true;
         self.primary_affinity = CaretAffinity::Downstream;
@@ -1285,7 +1313,7 @@ impl TextEditor {
                 },
             ));
             let moved = if extend {
-                Selection::new(selection.anchor, target.offset)
+                self.hex_selection(Selection::new(selection.anchor, target.offset))
             } else {
                 Selection::caret(target.offset)
             };
@@ -1325,7 +1353,7 @@ impl TextEditor {
             let row = layout.visual_row_range_at(selection.head, affinity);
             let target = if start { row.start } else { row.end };
             let moved = if extend {
-                Selection::new(selection.anchor, target)
+                self.hex_selection(Selection::new(selection.anchor, target))
             } else {
                 Selection::caret(target)
             };
@@ -1342,6 +1370,38 @@ impl TextEditor {
             if start { CaretAffinity::Downstream } else { CaretAffinity::Upstream };
         self.reset_caret_blink();
         cx.notify();
+    }
+
+    fn delete(&mut self, backward: bool, unit: DeleteUnit, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        if let Some(format) = self.hex_format() {
+            self.delete_hex(format, backward, cx);
+        } else {
+            if backward {
+                self.buffer.backspace(unit);
+            } else {
+                self.buffer.delete_forward(unit);
+            }
+            self.did_change(cx);
+        }
+    }
+
+    fn delete_to_line_edge(&mut self, start: bool, cx: &mut Context<Self>) {
+        if self.read_only {
+            return;
+        }
+        let before = self.buffer.selections().to_vec();
+        self.move_to_visual_line_edge(start, true, cx);
+        if self.buffer.selections() != before.as_slice() {
+            if let Some(format) = self.hex_format() {
+                self.delete_hex_selection(format, self.buffer.primary_selection().range(), cx);
+            } else {
+                self.buffer.replace_selections("");
+                self.did_change(cx);
+            }
+        }
     }
 
     fn copy(&self, cx: &mut App) {
@@ -1367,6 +1427,10 @@ impl TextEditor {
         }
         self.buffer.commit_edit_group();
         self.copy(cx);
+        if let Some(format) = self.hex_format() {
+            self.delete_hex_selection(format, self.buffer.primary_selection().range(), cx);
+            return;
+        }
         if self.buffer.selections().iter().any(|selection| !selection.is_empty()) {
             self.buffer.replace_selections("");
             self.did_change(cx);
@@ -1379,9 +1443,11 @@ impl TextEditor {
             // Bound text copying/validation on the local input path. Short fields
             // use their tighter limit; code entry allows grouping separators.
             const MAX_CLIPBOARD_TEXT_BYTES: usize = 64 * 1024;
-            let limit = if self.email_code {
+            let limit = if let Some(format) = self.hex_format() {
+                self.hex_clipboard_limit(format)
+            } else if self.email_code {
                 32
-            } else if self.text_area.is_some() {
+            } else if self.text_area {
                 self.max_bytes.unwrap_or(MAX_CLIPBOARD_TEXT_BYTES)
             } else {
                 self.max_bytes.unwrap_or(MAX_CLIPBOARD_TEXT_BYTES).min(MAX_CLIPBOARD_TEXT_BYTES)
@@ -1399,6 +1465,10 @@ impl TextEditor {
         let Some(text) = self.clipboard_text(cx) else {
             return;
         };
+        if self.hex_format().is_some() {
+            self.paste_hex(self.buffer.primary_selection().range(), &text, cx);
+            return;
+        }
         let Some(text) = self.input_text(&text) else { return };
         self.buffer.commit_edit_group();
         self.buffer.replace_selections(&text);
@@ -1408,13 +1478,27 @@ impl TextEditor {
     fn click(&mut self, event: &MouseDownEvent, layout: &LayoutSnapshot) {
         let hit = layout.hit_test(event.position);
         let offset = hit.offset;
-        let (granularity, origin) = selection_for_click(&self.buffer, hit, event.click_count);
-        let mut other_selections =
-            if event.modifiers.platform { self.buffer.selections().to_vec() } else { Vec::new() };
+        let (granularity, origin) = if self.hex_format().is_some() && event.click_count == 2 {
+            (
+                DragGranularity::Grapheme,
+                self.hex_selection(selection_for_pointer(
+                    &self.buffer,
+                    hit,
+                    DragGranularity::Grapheme,
+                )),
+            )
+        } else {
+            selection_for_click(&self.buffer, hit, event.click_count)
+        };
+        let mut other_selections = if event.modifiers.platform && self.hex_format().is_none() {
+            self.buffer.selections().to_vec()
+        } else {
+            Vec::new()
+        };
 
         if granularity == DragGranularity::Grapheme && event.modifiers.shift {
             let anchor = self.buffer.primary_selection().anchor;
-            self.buffer.set_selection(Selection::new(anchor, offset));
+            self.buffer.set_selection(self.hex_selection(Selection::new(anchor, offset)));
             self.selection_drag = Some(SelectionDrag {
                 granularity,
                 origin: Selection::caret(anchor),
@@ -1446,16 +1530,29 @@ impl TextEditor {
         } else {
             Selection::new(drag.origin.end(), target.start())
         };
-        self.buffer.set_selections_with_primary(active, drag.other_selections);
+        self.buffer.set_selections_with_primary(self.hex_selection(active), drag.other_selections);
         self.primary_affinity = hit.affinity;
         self.reset_caret_blink();
+    }
+
+    fn grouped_hex(&self) -> bool {
+        self.hex == Some(hex::Format::Grouped)
+    }
+
+    fn horizontal_scroll_limit(&self, content: Pixels, viewport: Pixels) -> Pixels {
+        if self.grouped_hex() || self.email_code {
+            Pixels::ZERO
+        } else {
+            (content - viewport).max(Pixels::ZERO)
+        }
     }
 
     fn scroll_by(&mut self, delta: Point<Pixels>, cx: &mut Context<Self>) {
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
-        let maximum_x = (layout.content_width - layout.bounds.size.width).max(Pixels::ZERO);
+        let maximum_x =
+            self.horizontal_scroll_limit(layout.content_width, layout.bounds.size.width);
         let maximum_y = (layout.content_height - layout.bounds.size.height).max(Pixels::ZERO);
         let scroll_x = (self.scroll_x + delta.x).clamp(Pixels::ZERO, maximum_x);
         let scroll_y = (self.scroll_y + delta.y).clamp(Pixels::ZERO, maximum_y);
@@ -1594,7 +1691,7 @@ impl Render for TextEditor {
             .flex()
             .flex_col()
             .when(self.message_scroll.is_some(), |field| field.min_h_0())
-            .when(self.text_area.is_some(), |field| field.flex_1().h_full().min_h_0())
+            .when(self.text_area, |field| field.flex_1().h_full().min_h_0())
             .p(self.style.padding)
             .when_some(self.style.trailing_padding, |field, padding| field.pr(padding))
             .when(!self.email_code && self.message_scroll.is_none(), |field| {
@@ -1714,54 +1811,22 @@ impl Render for TextEditor {
             .when(!self.read_only && self.enabled, |field| {
                 field
                     .on_action(cx.listener(|this, _: &Backspace, _, cx| {
-                        if this.read_only {
-                            return;
-                        }
-                        this.buffer.backspace(DeleteUnit::Grapheme);
-                        this.did_change(cx);
+                        this.delete(true, DeleteUnit::Grapheme, cx);
                     }))
                     .on_action(cx.listener(|this, _: &DeleteForward, _, cx| {
-                        if this.read_only {
-                            return;
-                        }
-                        this.buffer.delete_forward(DeleteUnit::Grapheme);
-                        this.did_change(cx);
+                        this.delete(false, DeleteUnit::Grapheme, cx);
                     }))
                     .on_action(cx.listener(|this, _: &DeleteWordBackward, _, cx| {
-                        if this.read_only {
-                            return;
-                        }
-                        this.buffer.backspace(DeleteUnit::Word);
-                        this.did_change(cx);
+                        this.delete(true, DeleteUnit::Word, cx);
                     }))
                     .on_action(cx.listener(|this, _: &DeleteWordForward, _, cx| {
-                        if this.read_only {
-                            return;
-                        }
-                        this.buffer.delete_forward(DeleteUnit::Word);
-                        this.did_change(cx);
+                        this.delete(false, DeleteUnit::Word, cx);
                     }))
                     .on_action(cx.listener(|this, _: &DeleteToLineStart, _, cx| {
-                        if this.read_only {
-                            return;
-                        }
-                        let before = this.buffer.selections().to_vec();
-                        this.move_to_visual_line_edge(true, true, cx);
-                        if this.buffer.selections() != before.as_slice() {
-                            this.buffer.replace_selections("");
-                            this.did_change(cx);
-                        }
+                        this.delete_to_line_edge(true, cx);
                     }))
                     .on_action(cx.listener(|this, _: &DeleteToLineEnd, _, cx| {
-                        if this.read_only {
-                            return;
-                        }
-                        let before = this.buffer.selections().to_vec();
-                        this.move_to_visual_line_edge(false, true, cx);
-                        if this.buffer.selections() != before.as_slice() {
-                            this.buffer.replace_selections("");
-                            this.did_change(cx);
-                        }
+                        this.delete_to_line_edge(false, cx);
                     }))
                     .on_action(cx.listener(|this, _: &Cut, _, cx| this.cut(cx)))
                     .on_action(cx.listener(|this, _: &Paste, _, cx| this.paste(cx)))
@@ -1770,6 +1835,7 @@ impl Render for TextEditor {
                             return;
                         }
                         if this.buffer.undo() {
+                            this.refresh_hex_format();
                             this.did_change(cx);
                         }
                     }))
@@ -1778,6 +1844,7 @@ impl Render for TextEditor {
                             return;
                         }
                         if this.buffer.redo() {
+                            this.refresh_hex_format();
                             this.did_change(cx);
                         }
                     }))
@@ -1961,7 +2028,7 @@ impl Element for TextEditorElement {
         let editor = self.editor.read(cx);
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
-        if editor.text_area.is_some() {
+        if editor.text_area {
             style.size.height = relative(1.0).into();
             style.min_size.height = px(0.).into();
             style.flex_grow = 1.;
@@ -2024,12 +2091,8 @@ impl Element for TextEditorElement {
     ) -> Self::PrepaintState {
         let editor = self.editor.read(cx);
         let viewport = bounds;
-        // Four offset digits plus an eight-point gap stay fixed as hex scrolls.
-        let gutter = if editor.text_area == Some(TextAreaMode::Binary) {
-            zoom::pixels(window, 40.)
-        } else {
-            Pixels::ZERO
-        };
+        // Four offset digits plus an eight-point gap.
+        let gutter = if editor.grouped_hex() { zoom::pixels(window, 40.) } else { Pixels::ZERO };
         let bounds = Bounds::new(
             point(bounds.left() + gutter, bounds.top()),
             size((bounds.size.width - gutter).max(Pixels::ZERO), bounds.size.height),
@@ -2044,7 +2107,8 @@ impl Element for TextEditorElement {
             underline: None,
             strikethrough: None,
         };
-        let wraps = editor.message_scroll.is_some() || editor.text_area == Some(TextAreaMode::Text);
+        // An older malformed draft may contain a line wider than a complete hex row.
+        let wraps = editor.message_scroll.is_some() || (editor.text_area && !editor.canonical_hex);
         let wrap_width = Some(if wraps { bounds.size.width } else { Pixels::MAX });
         let placeholder = if text.is_empty() && !editor.email_code {
             editor.placeholder.clone().map(|placeholder| {
@@ -2100,13 +2164,18 @@ impl Element for TextEditorElement {
                     newline_after: newline_after && row_end == len,
                 });
             }
-            let hex_offset = (gutter > Pixels::ZERO).then_some(hex_digits / 2);
-            if hex_offset.is_some() {
-                hex_digits += editor.buffer.as_str()[start..start + len]
-                    .bytes()
-                    .filter(u8::is_ascii_hexdigit)
-                    .count();
-            }
+            let hex_offset = (gutter > Pixels::ZERO).then(|| {
+                if editor.canonical_hex {
+                    line_index * 16
+                } else {
+                    let offset = hex_digits / 2;
+                    hex_digits += editor.text()[start..start + len]
+                        .bytes()
+                        .filter(u8::is_ascii_hexdigit)
+                        .count();
+                    offset
+                }
+            });
             lines.push(LayoutLine { start, shaped: line, hex_offset });
             start = (start + len + 1).min(editor.buffer.as_str().len());
             top += height;
@@ -2115,11 +2184,7 @@ impl Element for TextEditorElement {
             .last()
             .map(|row| row.top + editor.style.line_height)
             .unwrap_or(editor.style.line_height);
-        let maximum_scroll_x = if editor.email_code {
-            Pixels::ZERO
-        } else {
-            (content_width - bounds.size.width).max(Pixels::ZERO)
-        };
+        let maximum_scroll_x = editor.horizontal_scroll_limit(content_width, bounds.size.width);
         let maximum_scroll = (content_height - bounds.size.height).max(Pixels::ZERO);
         let mut scroll_x = editor.scroll_x.clamp(Pixels::ZERO, maximum_scroll_x);
         let mut scroll_y = editor.scroll_y.clamp(Pixels::ZERO, maximum_scroll);
@@ -2160,6 +2225,13 @@ impl Element for TextEditorElement {
             }
             layout.scroll_x = scroll_x;
             layout.scroll_y = scroll_y;
+            if editor.grouped_hex()
+                && focus_handle.is_focused(window)
+                && window.is_window_active()
+                && let Some(caret) = layout.position_for_offset(primary_head, primary_affinity)
+            {
+                window.request_autoscroll(Bounds::new(caret, size(px(1.), line_height)));
+            }
         }
         let hitbox = window.insert_hitbox(viewport, HitboxBehavior::Normal);
         window.set_focus_handle(&focus_handle, cx);
@@ -2168,14 +2240,13 @@ impl Element for TextEditorElement {
             let _span = crate::trace::Span::new("ui.text.accessibility");
             let (id, run_id) = accessibility_text_ids(cx.entity_id());
             let text = editor.buffer.as_str();
-            let mut node =
-                Node::new(if editor.message_scroll.is_some() || editor.text_area.is_some() {
-                    Role::MultilineTextInput
-                } else if editor.masked {
-                    Role::PasswordInput
-                } else {
-                    Role::TextInput
-                });
+            let mut node = Node::new(if editor.message_scroll.is_some() || editor.text_area {
+                Role::MultilineTextInput
+            } else if editor.masked {
+                Role::PasswordInput
+            } else {
+                Role::TextInput
+            });
             node.set_bounds(Rect::new(
                 viewport.left().to_f64(),
                 viewport.top().to_f64(),
@@ -2200,8 +2271,7 @@ impl Element for TextEditorElement {
             if editor.message_scroll.is_some() {
                 node.set_live(gpui::accesskit::Live::Polite);
             }
-            if editor.message_scroll.is_some() || editor.text_area.is_some() || editor.selectable_id
-            {
+            if editor.message_scroll.is_some() || editor.text_area || editor.selectable_id {
                 node.set_value(text);
             }
             node.add_action(Action::SetTextSelection);
@@ -2483,8 +2553,13 @@ impl Element for TextEditorElement {
                 return;
             }
             let delta = event.delta.pixel_delta(line_height);
-            editor.update(cx, |editor, cx| editor.scroll_by(point(-delta.x, -delta.y), cx));
-            cx.stop_propagation();
+            let grouped_hex = editor.read(cx).grouped_hex();
+            if !grouped_hex || delta.y != Pixels::ZERO {
+                editor.update(cx, |editor, cx| editor.scroll_by(point(-delta.x, -delta.y), cx));
+            }
+            if !grouped_hex || delta.x == Pixels::ZERO {
+                cx.stop_propagation();
+            }
         });
     }
 }
@@ -2647,6 +2722,16 @@ impl EntityInputHandler for TextEditor {
             return;
         }
         let _timing = crate::trace::Span::new("ui.text.input");
+        if let Some(format) = self.hex_format() {
+            let len = self.text().len();
+            let range = range
+                .map(|range| {
+                    range.start.min(range.end).min(len)..range.end.max(range.start).min(len)
+                })
+                .unwrap_or_else(|| self.buffer.primary_selection().range());
+            self.type_hex(format, range, text, cx);
+            return;
+        }
         let Some(text) = self.input_text(text) else { return };
         let range = range.map(|range| utf16_range_to_utf8(self.buffer.as_str(), range));
         if !self.permits_platform_edit(range.as_ref(), &text) {
@@ -2684,7 +2769,7 @@ impl EntityInputHandler for TextEditor {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.enabled || self.read_only || self.masked || self.email_code {
+        if !self.enabled || self.read_only || self.masked || self.email_code || self.hex.is_some() {
             return;
         }
         let _timing = crate::trace::Span::new("ui.text.composition");
@@ -2905,12 +2990,99 @@ mod tests {
             editor.clear(cx);
             editor.paste(cx);
             assert_eq!(editor.text(), text);
+            cx.write_to_clipboard(ClipboardItem::new_string("00".into()));
+            let revision = editor.revision.current;
+            editor.paste(cx);
+            assert_eq!(editor.text(), text);
+            assert_eq!(editor.revision.current, revision);
+            editor.select_all(cx);
+            let spaced = "00 ".repeat(60 * 1024);
+            cx.write_to_clipboard(ClipboardItem::new_string(spaced));
+            editor.paste(cx);
+            assert_eq!(editor.text(), hex::Format::Grouped.display(&vec![0; 60 * 1024]));
+            editor.toggle_hex_insert(cx);
+            editor.buffer.set_selection(Selection::caret(0));
+            let revision = editor.revision.current;
+            editor.type_hex(hex::Format::Grouped, 0..0, "a", cx);
+            assert_eq!(editor.text(), hex::Format::Grouped.display(&vec![0; 60 * 1024]));
+            assert_eq!(editor.revision.current, revision);
+            editor.select_all(cx);
+            editor.copy(cx);
         });
         let ordinary = cx.new(|cx| TextEditor::new("", cx).bound_edits(138239));
         ordinary.update(cx, |editor, cx| {
             editor.paste(cx);
             assert!(editor.text().is_empty(), "ordinary fields retain their clipboard bound");
         });
+    }
+
+    #[gpui::test]
+    fn binary_editor_uses_byte_selections_and_keeps_rows_aligned_through_edits(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(install_keybindings);
+        let bytes: Vec<_> = (0..18).collect();
+        let window = cx.add_window(|window, cx| {
+            let mut editor =
+                TextEditor::inspector_text_area(hex::Format::Grouped.display(&bytes), cx)
+                    .bound_edits(256);
+            editor.set_binary(true, cx);
+            window.focus(&editor.focus_handle);
+            window.activate_window();
+            editor
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        let caret = |visual: &mut gpui::VisualTestContext, offset| {
+            window
+                .update(visual, |editor, _, cx| {
+                    editor.buffer.set_selection(Selection::caret(offset));
+                    cx.notify();
+                })
+                .unwrap();
+        };
+        let check = |visual: &mut gpui::VisualTestContext, expected: &[u8]| {
+            window
+                .update(visual, |editor, _, _| {
+                    assert_eq!(editor.text(), hex::Format::Grouped.display(expected));
+                })
+                .unwrap();
+        };
+        caret(&mut visual, 33);
+        visual.simulate_input("A");
+        visual.simulate_input("B");
+        let mut expected = bytes.clone();
+        expected[15] = 0xab;
+        check(&mut visual, &expected);
+        // The caret crossed the newline. Shift-Right and Cut select only byte 16.
+        visual.simulate_keystrokes("shift-right cmd-x");
+        expected.remove(16);
+        check(&mut visual, &expected);
+        window
+            .update(&mut visual, |_, _, cx| {
+                assert_eq!(
+                    cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+                    Some("10")
+                );
+                cx.write_to_clipboard(ClipboardItem::new_string("FE \r\n 00".into()));
+            })
+            .unwrap();
+        visual.simulate_keystrokes("cmd-v");
+        expected.splice(16..16, [0xfe, 0x00]);
+        check(&mut visual, &expected);
+        visual.simulate_keystrokes("backspace");
+        expected.remove(17);
+        check(&mut visual, &expected);
+        visual.simulate_keystrokes("cmd-z");
+        expected.insert(17, 0x00);
+        check(&mut visual, &expected);
+        visual.simulate_keystrokes("cmd-shift-z");
+        expected.remove(17);
+        check(&mut visual, &expected);
+        caret(&mut visual, 9);
+        visual.simulate_keystrokes("delete");
+        expected.remove(4);
+        check(&mut visual, &expected);
     }
 
     #[gpui::test]
@@ -2924,7 +3096,7 @@ mod tests {
             ))])
             .unwrap();
         let line = "00010203 04050607 08090a0b 0c0d0e0f";
-        let value = format!("{line}\n10 11\n{}", vec![line; 18].join("\n"));
+        let value = format!("{}\n1011", vec![line; 19].join("\n"));
         let window = cx.add_window(|_, cx| {
             let mut editor = TextEditor::inspector_text_area(value.clone(), cx).bound_edits(138239);
             editor.set_binary(true, cx);
@@ -2942,7 +3114,7 @@ mod tests {
         assert!(state.layout.content_width > state.layout.bounds.size.width);
         assert_eq!(
             state.layout.lines.iter().take(3).map(|line| line.hex_offset).collect::<Vec<_>>(),
-            vec![Some(0), Some(16), Some(18)]
+            vec![Some(0), Some(16), Some(32)]
         );
         editor.update(&mut visual, |editor, cx| {
             editor.scroll_by(point(px(24.), px(16.)), cx);
@@ -2956,7 +3128,7 @@ mod tests {
             .draw(point(px(0.), px(0.)), viewport, |_, _| TextEditorElement::new(editor.clone()));
         assert_eq!(scrolled.layout.bounds, state.layout.bounds);
         assert_eq!(scrolled.layout.scroll_y, px(16.));
-        assert!(scrolled.layout.scroll_x > Pixels::ZERO);
+        assert_eq!(scrolled.layout.scroll_x, Pixels::ZERO);
         editor.update(&mut visual, |editor, cx| editor.set_binary(false, cx));
         let (_, wrapped) = visual
             .draw(point(px(0.), px(0.)), viewport, |_, _| TextEditorElement::new(editor.clone()));

@@ -2,6 +2,9 @@
 use super::*;
 use crate::ui::desktop::zoom::length as ui;
 
+// Fits a full 16-byte row, offset gutter, field padding and representation control.
+const BINARY_INSPECTOR_WIDTH: f32 = 352.;
+
 impl Browser {
     pub(super) fn panes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let active = window.is_window_active();
@@ -74,12 +77,14 @@ impl Browser {
 
     fn lower_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
         let content = if !self.overview && (self.kv_address().is_some() || self.kv_editor_open()) {
+            let editor_width =
+                if self.kv_uses_binary_value() { BINARY_INSPECTOR_WIDTH } else { INSPECTOR_WIDTH };
             div()
                 .size_full()
-                .min_w(ui(MIN_WIDTH))
+                .min_w(ui(MIN_WIDTH + editor_width - INSPECTOR_WIDTH))
                 .flex()
                 .child(div().flex_1().min_w(ui(240.)).h_full().child(self.kv_panel(window, cx)))
-                .child(self.kv_editor_column(cx))
+                .child(self.kv_editor_column(editor_width, cx))
         } else if self.selected.is_none()
             || (!self.show_entry_details
                 && self.details.as_ref().is_some_and(|details| {
@@ -106,9 +111,9 @@ impl Browser {
         content.debug_selector(|| "browser-content".into())
     }
 
-    fn kv_editor_column(&mut self, cx: &mut Context<Self>) -> gpui::Div {
+    fn kv_editor_column(&mut self, width: f32, cx: &mut Context<Self>) -> gpui::Div {
         let column = div()
-            .w(ui(INSPECTOR_WIDTH))
+            .w(ui(width))
             .h_full()
             .flex_none()
             .flex()

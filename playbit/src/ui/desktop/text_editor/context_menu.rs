@@ -20,8 +20,12 @@ impl TextEditor {
             PASTE => {
                 !self.read_only
                     && self.clipboard_text(cx).is_some_and(|text| {
-                        !text.is_empty()
-                            && self.input_text(&text).is_some_and(|text| !text.is_empty())
+                        if self.hex_format().is_some() {
+                            self.hex_paste_digits(&text).is_some()
+                        } else {
+                            !text.is_empty()
+                                && self.input_text(&text).is_some_and(|text| !text.is_empty())
+                        }
                     })
             }
             _ => false,
@@ -34,8 +38,17 @@ impl TextEditor {
         if let Some(offset) = hit.unit_offset
             && !self.buffer.selections().iter().any(|selection| selection.range().contains(&offset))
         {
-            let range = self.buffer.word_range_at(offset);
-            self.buffer.set_selection(Selection::new(range.start, range.end));
+            let selection = if self.hex_format().is_some() {
+                self.hex_selection(selection_for_pointer(
+                    &self.buffer,
+                    hit,
+                    DragGranularity::Grapheme,
+                ))
+            } else {
+                let range = self.buffer.word_range_at(offset);
+                Selection::new(range.start, range.end)
+            };
+            self.buffer.set_selection(selection);
             self.primary_affinity = hit.affinity;
         }
         self.selection_drag = None;

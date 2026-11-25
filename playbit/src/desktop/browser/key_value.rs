@@ -7,6 +7,7 @@ use crate::{
         key_value::{Chunk, MAX_BYTES, Page, Root},
         volume_index::EntryAddress,
     },
+    ui::desktop::text_editor::hex::Format as HexFormat,
 };
 mod drafts;
 mod focus;
@@ -18,7 +19,7 @@ mod tests;
 // One read contains a complete writable value or a bounded read-only preview.
 // Hex values use four 4-byte groups per 16-byte line.
 const CHUNK_BYTES: u32 = MAX_BYTES as u32;
-const MAX_DISPLAY: usize = MAX_BYTES * 2 + (MAX_BYTES - 1) / 4;
+const MAX_DISPLAY: usize = HexFormat::Grouped.display_len(MAX_BYTES * 2);
 const RETIRED_READ_HINT: &str = "The data changed while loading. Reload to continue.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,6 +309,10 @@ impl Browser {
 
     pub(super) fn kv_editor_open(&self) -> bool {
         self.kv.selected.is_some() || self.kv.creating
+    }
+
+    pub(super) fn kv_uses_binary_value(&self) -> bool {
+        self.kv_editor_open() && self.kv.value_encoding == Encoding::Hex
     }
 
     pub(super) fn kv_status_hint(&self) -> Option<&'static str> {
@@ -877,23 +882,10 @@ impl Browser {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        write!(text, "{byte:02x}").expect("formatting into a string");
-    }
-    text
+    HexFormat::Compact.display(bytes)
 }
 fn hex_value(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut text = String::with_capacity(bytes.len() * 2 + bytes.len().saturating_sub(1) / 4);
-    for (index, byte) in bytes.iter().enumerate() {
-        if index > 0 && index.is_multiple_of(4) {
-            text.push(if index.is_multiple_of(16) { '\n' } else { ' ' });
-        }
-        write!(text, "{byte:02x}").expect("formatting into a string");
-    }
-    text
+    HexFormat::Grouped.display(bytes)
 }
 
 fn parse_hex_value(text: &str, limit: usize) -> Result<Vec<u8>, &'static str> {

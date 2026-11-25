@@ -303,7 +303,15 @@ impl Browser {
         self.kv.read_unavailable = state.read_unavailable;
         self.kv.dirty = true;
         self.kv.key.update(cx, |editor, cx| editor.acknowledge(None, &state.key_text, cx));
-        self.kv.value.update(cx, |editor, cx| editor.acknowledge(None, &state.value_text, cx));
+        let formatted = (self.kv.value_encoding == Encoding::Hex)
+            .then(|| {
+                parse_hex_value(&state.value_text, MAX_BYTES).ok().map(|bytes| hex_value(&bytes))
+            })
+            .flatten();
+        // Older drafts may contain user-entered spaces or unfinished input.
+        // Reformat complete bytes and retain the original input if it cannot be parsed.
+        let value = formatted.as_deref().unwrap_or(&state.value_text);
+        self.kv.value.update(cx, |editor, cx| editor.acknowledge(None, value, cx));
         self.overview = false;
         self.hint.clear();
         self.cancel_detail_loading();

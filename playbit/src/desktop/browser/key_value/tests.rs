@@ -171,11 +171,14 @@ fn raw_new_rows_survive_paging_and_retire_the_previous_read(cx: &mut gpui::TestA
     let (key, value) = window
         .update(cx, |browser, _, _| (browser.kv.key.clone(), browser.kv.value.clone()))
         .unwrap();
+    cx.run_until_parked();
     gpui::AnyWindowHandle::from(window)
         .update(cx, |_, window, cx| {
             key.update(cx, |editor, cx| editor.replace_text_in_range(Some(0..0), "0", window, cx));
             value.update(cx, |editor, cx| {
-                editor.replace_text_in_range(Some(0..0), "aa f", window, cx)
+                for digit in ["a", "a", "f"] {
+                    editor.replace_text_in_range(None, digit, window, cx);
+                }
             });
         })
         .unwrap();
@@ -189,7 +192,7 @@ fn raw_new_rows_survive_paging_and_retire_the_previous_read(cx: &mut gpui::TestA
                 panic!("KV draft")
             };
             assert_eq!(raw.key_text, "0");
-            assert_eq!(raw.value_text, "aa f");
+            assert_eq!(raw.value_text, "aaf");
             assert!(raw.original_key.is_none());
             browser.select_kv_key(b"other".to_vec(), cx);
             let obsolete = data(&requests);
@@ -213,7 +216,7 @@ fn raw_new_rows_survive_paging_and_retire_the_previous_read(cx: &mut gpui::TestA
             assert!(browser.restore_kv_draft(id, cx));
             assert_eq!(browser.kv.draft_id, Some(id));
             assert_eq!(browser.kv.key.read(cx).text(), "0");
-            assert_eq!(browser.kv.value.read(cx).text(), "aa f");
+            assert_eq!(browser.kv.value.read(cx).text(), "aaf");
             assert!(!browser.kv_can_save(cx));
             browser.new_kv_value(cx);
             browser.capture_kv_draft(cx).unwrap();
@@ -1153,18 +1156,18 @@ fn partial_hex_edit_keeps_the_viewport_and_size_until_a_complete_value_can_save(
         .debug_bounds("kv-value-field")
         .unwrap();
     let value = window.update(cx, |browser, _, _| browser.kv.value.clone()).unwrap();
-    let replace = |text: &str, cx: &mut gpui::TestAppContext| {
+    let append = |text: &str, cx: &mut gpui::TestAppContext| {
         gpui::AnyWindowHandle::from(window)
             .update(cx, |_, window, cx| {
                 value.update(cx, |editor, cx| {
                     let length = editor.text().encode_utf16().count();
-                    editor.replace_text_in_range(Some(0..length), text, window, cx);
+                    editor.replace_text_in_range(Some(length..length), text, window, cx);
                 });
             })
             .unwrap();
     };
     let partial = format!("{initial}f");
-    replace(&partial, cx);
+    append("f", cx);
     window
         .update(cx, |browser, _, cx| {
             assert_eq!(browser.kv.value.read(cx).text(), partial);
@@ -1195,12 +1198,12 @@ fn partial_hex_edit_keeps_the_viewport_and_size_until_a_complete_value_can_save(
             .unwrap(),
         baseline
     );
-    // Other malformed values are still rejected rather than treated as an unfinished byte.
-    for invalid in ["zz".to_owned(), "aa".repeat(MAX_BYTES + 1)] {
-        replace(&invalid, cx);
+    // Rejected input preserves the unfinished byte and cannot become a draft.
+    for invalid in ["zz".to_owned(), "aaf".to_owned(), "aa".repeat(MAX_BYTES + 1)] {
+        append(&invalid, cx);
         window
             .update(cx, |browser, _, cx| {
-                assert_eq!(browser.kv.value.read(cx).text(), invalid);
+                assert_eq!(browser.kv.value.read(cx).text(), partial);
                 assert!(!browser.kv_can_save(cx));
                 browser.save_kv(cx);
                 assert!(browser.kv.pending.is_none());
@@ -1209,7 +1212,7 @@ fn partial_hex_edit_keeps_the_viewport_and_size_until_a_complete_value_can_save(
             .unwrap();
     }
     let complete = format!("{partial}0");
-    replace(&complete, cx);
+    append("0", cx);
     gpui::AnyWindowHandle::from(window)
         .update(cx, |_, window, cx| {
             let _ = window.draw(cx);
@@ -2487,6 +2490,160 @@ fn draw_kv_focus_frame(visual: &mut gpui::VisualTestContext) {
         let _ = window.draw(cx);
     });
     visual.run_until_parked();
+}
+
+#[gpui::test]
+fn binary_value_wheel_and_caret_pan_the_lower_browser_viewport(cx: &mut gpui::TestAppContext) {
+    use gpui::{EntityInputHandler, Focusable, ScrollDelta, ScrollWheelEvent, point, size};
+    cx.update(text_editor::install_keybindings);
+    let (send, requests, _) = worker_queue::channel();
+    let window = cx.add_window(|window, cx| {
+        let mut browser = Browser::new(volume(1), send, cx);
+        let read = open_value(&mut browser, &requests, cx);
+        browser.receive_kv(
+            reply(
+                read,
+                Ok(R::KvRead(Chunk {
+                    root: Root { level: 0, digest: [3; 32] },
+                    offset: 0,
+                    total_bytes: 512,
+                    bytes: vec![0xff; 512],
+                })),
+            ),
+            cx,
+        );
+        window.activate_window();
+        browser
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.simulate_resize(size(px(500.), px(600.)));
+    draw_kv_focus_frame(&mut visual);
+    let (lower, value) = window
+        .update(&mut visual, |browser, _, cx| {
+            (browser.scrolling.content_columns.read(cx).handle(), browser.kv.value.clone())
+        })
+        .unwrap();
+    let field = visual.debug_bounds("kv-value-field").unwrap();
+    let end = value.read_with(&visual, |editor, _| editor.text().len());
+    let caret = |visual: &mut gpui::VisualTestContext, offset| {
+        visual.update(|window, cx| {
+            value
+                .update(cx, |editor, cx| editor.bounds_for_range(offset..offset, field, window, cx))
+                .unwrap()
+        })
+    };
+    let start = caret(&mut visual, 0);
+    let last = caret(&mut visual, end);
+    assert!(last.right() <= field.right() - px(28.), "all 16 bytes fit in the field");
+    assert!(last.right() > lower.bounds().right(), "the browser clips the far end");
+    let wheel_position = point(lower.bounds().right() - px(20.), field.center().y);
+    visual.simulate_event(ScrollWheelEvent {
+        position: wheel_position,
+        delta: ScrollDelta::Pixels(point(px(-30.), px(0.))),
+        ..Default::default()
+    });
+    draw_kv_focus_frame(&mut visual);
+    assert_eq!(lower.offset().x, px(-30.));
+    assert_eq!(caret(&mut visual, 0).left(), start.left() - px(30.));
+    visual.simulate_event(ScrollWheelEvent {
+        position: wheel_position,
+        delta: ScrollDelta::Pixels(point(px(0.), px(-24.))),
+        ..Default::default()
+    });
+    draw_kv_focus_frame(&mut visual);
+    assert_eq!(lower.offset().x, px(-30.));
+    assert_eq!(caret(&mut visual, 0).top(), start.top() - px(24.));
+
+    visual.update(|window, cx| value.read(cx).focus_handle(cx).focus(window));
+    draw_kv_focus_frame(&mut visual);
+    lower.set_offset(point(px(0.), px(0.)));
+    draw_kv_focus_frame(&mut visual);
+    visual.simulate_keystrokes("cmd-down");
+    draw_kv_focus_frame(&mut visual);
+    assert!(lower.offset().x < px(0.));
+    let end_caret = caret(&mut visual, end);
+    assert!(end_caret.right() <= lower.bounds().right() + px(1.));
+    assert!(end_caret.bottom() <= field.bottom());
+}
+
+#[gpui::test]
+fn insert_bytes_control_preserves_the_existing_value_across_a_row_boundary(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::{EntityInputHandler, point};
+    let (send, requests, _) = worker_queue::channel();
+    let mut original: Vec<u8> = (0..33).collect();
+    original[0] = 0xff;
+    let window = cx.add_window(|window, cx| {
+        let mut browser = Browser::new(volume(1), send, cx);
+        let read = open_value(&mut browser, &requests, cx);
+        browser.receive_kv(
+            reply(
+                read,
+                Ok(R::KvRead(Chunk {
+                    root: Root { level: 0, digest: [3; 32] },
+                    offset: 0,
+                    total_bytes: original.len() as u64,
+                    bytes: original.clone(),
+                })),
+            ),
+            cx,
+        );
+        window.activate_window();
+        browser
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    draw_kv_focus_frame(&mut visual);
+    let value = window.update(&mut visual, |browser, _, _| browser.kv.value.clone()).unwrap();
+    let toggle = |visual: &mut gpui::VisualTestContext| {
+        let field = visual.debug_bounds("kv-value-field").unwrap();
+        let bounds = visual.update(|window, _| {
+            window
+                .accessibility_nodes_for_test()
+                .find(|(_, node)| node.label() == Some("Insert bytes"))
+                .unwrap()
+                .1
+                .bounds()
+                .unwrap()
+        });
+        assert!(px(bounds.y0 as f32) >= field.bottom());
+        visual.simulate_click(
+            point(px((bounds.x0 + bounds.x1) as f32 / 2.), px((bounds.y0 + bounds.y1) as f32 / 2.)),
+            Default::default(),
+        );
+        draw_kv_focus_frame(visual);
+    };
+    assert!(!value.read_with(&visual, |editor, _| editor.inserts_hex_bytes()));
+    toggle(&mut visual);
+    assert!(value.read_with(&visual, |editor, _| editor.inserts_hex_bytes()));
+    window.update(&mut visual, |browser, _, _| assert!(!browser.kv.dirty)).unwrap();
+
+    visual.update(|window, cx| {
+        value.update(cx, |editor, cx| {
+            // Start on the low digit of the first byte on row two.
+            editor.replace_text_in_range(Some(37..37), "A", window, cx);
+            for digit in ["B", "C", "D"] {
+                editor.replace_text_in_range(None, digit, window, cx);
+            }
+        });
+    });
+    let mut expected = original;
+    expected.splice(16..16, [0xab, 0xcd]);
+    assert_eq!(
+        value.read_with(&visual, |editor, _| editor.text().to_owned()),
+        hex_value(&expected)
+    );
+    let revision = window.update(&mut visual, |browser, _, _| browser.kv.revision).unwrap();
+    toggle(&mut visual);
+    assert!(!value.read_with(&visual, |editor, _| editor.inserts_hex_bytes()));
+    window
+        .update(&mut visual, |browser, _, cx| {
+            assert_eq!(browser.kv.revision, revision);
+            browser.save_kv(cx);
+            assert!(matches!(data(&requests).call.operation, O::KvPut { value, .. }
+                if value == expected));
+        })
+        .unwrap();
 }
 
 fn assert_full_kv_inspector(visual: &mut gpui::VisualTestContext, columns: &gpui::ScrollHandle) {
