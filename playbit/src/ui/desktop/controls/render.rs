@@ -80,6 +80,22 @@ impl Render for Control {
 }
 
 impl Control {
+    /// AppKit draws and exposes the titlebar button to accessibility. Keep its
+    /// place in GPUI's Tab order and reuse its ordinary press/release handling.
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    pub(crate) fn titlebar_keyboard_target(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        self.observe_focus(window, cx);
+        self.clear_native_tooltip(window);
+        self.cancel_pointer_press(cx);
+        let target =
+            div().id("titlebar-button-keyboard").absolute().size_0().track_focus(&self.focus);
+        if self.disabled { target } else { self.keyboard_handlers(target, cx) }
+    }
+
     pub(super) fn color(&self, role: Role) -> gpui::Hsla {
         rgba(self.theme.color(role).0).into()
     }

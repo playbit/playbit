@@ -20,6 +20,10 @@ pub(crate) struct TestWindowState {
     pub(crate) handle: AnyWindowHandle,
     display: Rc<dyn PlatformDisplay>,
     pub(crate) title: Option<String>,
+    #[cfg(target_os = "macos")]
+    titlebar_button: Option<crate::MacTitlebarButton>,
+    #[cfg(target_os = "macos")]
+    titlebar_action: Option<Box<dyn FnMut(&'static str)>>,
     pub(crate) edited: bool,
     platform: Weak<TestPlatform>,
     sprite_atlas: Arc<dyn PlatformAtlas>,
@@ -63,6 +67,20 @@ impl HasDisplayHandle for TestWindow {
 
 impl TestWindow {
     #[cfg(target_os = "macos")]
+    pub(crate) fn click_titlebar_button(&self) -> bool {
+        let mut state = self.0.lock();
+        let Some(spec) = state.titlebar_button.filter(|button| button.enabled) else {
+            return false;
+        };
+        let mut dispatch =
+            state.titlebar_action.take().expect("window registered an action handler");
+        drop(state);
+        dispatch(spec.action);
+        self.0.lock().titlebar_action = Some(dispatch);
+        true
+    }
+
+    #[cfg(target_os = "macos")]
     pub(crate) fn window_can_drag_at(&self, position: Point<Pixels>) -> bool {
         !self.0.lock().non_draggable_regions.iter().any(|rect| rect.contains(&position))
     }
@@ -95,6 +113,10 @@ impl TestWindow {
             handle,
             sprite_atlas: Arc::new(TestAtlas::new()),
             title: Default::default(),
+            #[cfg(target_os = "macos")]
+            titlebar_button: None,
+            #[cfg(target_os = "macos")]
+            titlebar_action: None,
             edited: false,
             should_close_handler: None,
             #[cfg(target_os = "macos")]
@@ -255,11 +277,23 @@ impl PlatformWindow for TestWindow {
     fn set_background_appearance(&self, _background: WindowBackgroundAppearance) {}
 
     #[cfg(target_os = "macos")]
-    fn set_macos_window_style(&self, _style: crate::MacWindowStyle) {}
+    fn set_macos_window_style(&self, style: crate::MacWindowStyle) {
+        self.0.lock().titlebar_button = style.titlebar_button;
+    }
+
+    #[cfg(target_os = "macos")]
+    fn on_titlebar_action(&self, callback: Box<dyn FnMut(&'static str)>) {
+        self.0.lock().titlebar_action = Some(callback);
+    }
 
     #[cfg(target_os = "macos")]
     fn titlebar_height(&self) -> Pixels {
         crate::px(28.)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn traffic_light_right(&self) -> Pixels {
+        crate::px(69.)
     }
 
     fn set_edited(&mut self, edited: bool) {

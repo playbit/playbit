@@ -1,6 +1,7 @@
 mod accessibility;
 mod input_policy;
 mod text_checking;
+mod titlebar_button;
 mod window_drag;
 mod window_style;
 
@@ -396,6 +397,10 @@ unsafe fn build_window_class(
         );
 
         decl.add_method(sel!(close), close_window as extern "C" fn(&Object, Sel));
+        decl.add_method(
+            sel!(gpuiTitlebarAction:),
+            titlebar_button::clicked as extern "C" fn(&Object, Sel, id),
+        );
 
         decl.add_method(
             sel!(draggingEntered:),
@@ -474,6 +479,9 @@ struct MacWindowState {
     synthetic_drag_counter: usize,
     traffic_light_position: Option<Point<Pixels>>,
     native_button_origins: Option<[CGPoint; 3]>,
+    traffic_light_right: Pixels,
+    titlebar_accessory: Option<titlebar_button::Accessory>,
+    titlebar_action: Option<Box<dyn FnMut(&'static str)>>,
     transparent_titlebar: bool,
     applied_style: Option<crate::MacWindowStyle>,
     pending_style: Option<crate::MacWindowStyle>,
@@ -545,6 +553,13 @@ impl MacWindowState {
     }
 
     fn move_traffic_light(&mut self) {
+        self.position_traffic_lights();
+        if self.applied_style.is_some() {
+            self.traffic_light_right = self.measure_traffic_light_right();
+        }
+    }
+
+    fn position_traffic_lights(&mut self) {
         if (self.traffic_light_position.is_none() && self.native_button_origins.is_none())
             || self.is_fullscreen()
         {
@@ -681,6 +696,29 @@ impl MacWindowState {
             let content_layout_rect: CGRect = msg_send![self.native_window, contentLayoutRect];
             px((frame.size.height - content_layout_rect.size.height) as f32)
         }
+    }
+
+    fn measure_traffic_light_right(&self) -> Pixels {
+        let mut right = 0.0_f64;
+        unsafe {
+            for kind in [
+                NSWindowButton::NSWindowCloseButton,
+                NSWindowButton::NSWindowMiniaturizeButton,
+                NSWindowButton::NSWindowZoomButton,
+            ] {
+                let button = self.native_window.standardWindowButton_(kind);
+                if !button.is_null() {
+                    let hidden: BOOL = msg_send![button, isHiddenOrHasHiddenAncestor];
+                    let owner: id = msg_send![button, window];
+                    if hidden == NO && owner == self.native_window {
+                        let frame: NSRect =
+                            msg_send![button, convertRect: NSView::bounds(button) toView: nil];
+                        right = right.max(frame.origin.x + frame.size.width);
+                    }
+                }
+            }
+        }
+        px(right as f32)
     }
 
     fn window_bounds(&self) -> WindowBounds {
@@ -854,6 +892,9 @@ impl MacWindow {
                     last_key_equivalent: None,
                     synthetic_drag_counter: 0,
                     native_button_origins: None,
+                    traffic_light_right: px(0.),
+                    titlebar_accessory: None,
+                    titlebar_action: None,
                     traffic_light_position: titlebar
                         .as_ref()
                         .and_then(|titlebar| titlebar.traffic_light_position),
@@ -1443,8 +1484,16 @@ impl PlatformWindow for MacWindow {
         window_style::schedule(&self.0, style);
     }
 
+    fn on_titlebar_action(&self, callback: Box<dyn FnMut(&'static str)>) {
+        self.0.lock().titlebar_action = Some(callback);
+    }
+
     fn titlebar_height(&self) -> Pixels {
         self.0.lock().titlebar_height()
+    }
+
+    fn traffic_light_right(&self) -> Pixels {
+        self.0.lock().traffic_light_right
     }
 
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {

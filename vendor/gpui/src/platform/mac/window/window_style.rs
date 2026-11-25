@@ -118,6 +118,7 @@ fn apply(state: &Arc<Mutex<MacWindowState>>) {
     let native = window.native_window;
     let view = window.native_view.as_ptr();
     let old_titlebar_height = window.titlebar_height();
+    let old_controls_right = window.traffic_light_right;
     let stop_custom_drag = previous.map_or(window.transparent_titlebar, |old| {
         old.transparent_titlebar && old.full_size_content
     }) && !(style.transparent_titlebar && style.full_size_content);
@@ -146,6 +147,14 @@ fn apply(state: &Arc<Mutex<MacWindowState>>) {
             observe_screen_parameters(native, constrained);
         }
         set_mask(native, view, style);
+        if previous.is_none_or(|old| old.titlebar_button != style.titlebar_button) {
+            titlebar_button::update(
+                state,
+                native,
+                style.titlebar_button,
+                previous.and_then(|s| s.titlebar_button),
+            );
+        }
         if let Some(display) = display {
             apply_size_constraints(state, native, style.size_constraints, display);
         }
@@ -190,9 +199,10 @@ fn apply(state: &Arc<Mutex<MacWindowState>>) {
     }
     let mut window = state.lock();
     window.move_traffic_light();
-    // Borderless and full-size titled windows can have identical view bounds.
-    // Republish the drag region when only the system titlebar inset changed.
-    if old_titlebar_height != window.titlebar_height()
+    // A chrome-only change can move the drag region or the system controls
+    // without resizing the content view.
+    if (old_titlebar_height != window.titlebar_height()
+        || old_controls_right != window.traffic_light_right)
         && let Some(mut resize) = window.resize_callback.take()
     {
         let size = window.content_size();

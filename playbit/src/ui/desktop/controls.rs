@@ -11,6 +11,8 @@ use gpui::{
 };
 use playbit_api::ui::{ButtonStyle, CheckState, Theme, ThemeColor as Role};
 use std::{borrow::Cow, rc::Rc};
+pub(super) const SESSION_ICON: &[u8] = include_bytes!("../../../assets/session-icon.svg");
+pub(super) const CHECKMARK_ICON: &[u8] = include_bytes!("../../../assets/checkmark.svg");
 mod navigation;
 mod rename;
 mod render;
@@ -138,10 +140,8 @@ impl AssetSource for Assets {
                 Some(Cow::Borrowed(include_bytes!("../../../assets/session-share.svg")))
             }
             "add" => Some(Cow::Borrowed(include_bytes!("../../../assets/add.svg"))),
-            "session-icon" => {
-                Some(Cow::Borrowed(include_bytes!("../../../assets/session-icon.svg")))
-            }
-            "checkmark" => Some(Cow::Borrowed(include_bytes!("../../../assets/checkmark.svg"))),
+            "session-icon" => Some(Cow::Borrowed(SESSION_ICON)),
+            "checkmark" => Some(Cow::Borrowed(CHECKMARK_ICON)),
             "menu-avatar" => Some(Cow::Borrowed(include_bytes!("../../../assets/menu-avatar.svg"))),
             "menu-signature" => {
                 Some(Cow::Borrowed(include_bytes!("../../../assets/menu-signature.svg")))
@@ -762,6 +762,10 @@ impl Control {
     }
     pub(super) fn has_pointer_press(&self) -> bool {
         self.press.pointer
+    }
+    #[cfg(all(target_os = "macos", feature = "desktop"))]
+    pub(super) fn has_key_press(&self) -> bool {
+        self.press.key.is_some()
     }
     pub(super) fn register_tab_stop(&self, window: &mut Window) {
         window.register_tab_stop(&self.focus);

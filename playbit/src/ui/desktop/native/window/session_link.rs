@@ -7,6 +7,17 @@ use std::{os::unix::net::UnixStream, sync::Mutex};
 mod tests;
 
 const COPY_FEEDBACK_DURATION: std::time::Duration = std::time::Duration::from_secs(2);
+const COPY_LABEL: &str = "Copy session link";
+// Let the guest color show through while keeping dark artwork legible on black.
+const BUTTON_BACKING: u32 = 0xecececbf;
+
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum Placement {
+    Hidden,
+    Native,
+    Titlebar,
+    Overlay(gpui::Pixels),
+}
 
 pub(super) struct SessionLink {
     control: Entity<controls::Control>,
@@ -74,7 +85,7 @@ fn properties(disabled: bool) -> controls::Properties<'static> {
     const THEME: Theme = Theme::light();
     controls::Properties {
         kind: controls::Kind::Button(playbit_api::ui::ButtonStyle::Default),
-        label: "Copy session link",
+        label: COPY_LABEL,
         disabled,
         theme: &THEME,
     }
@@ -217,58 +228,127 @@ impl AppWindow {
         });
     }
 
+    pub(super) fn session_button_placement(
+        &self,
+        style: Option<WindowStyle>,
+        chrome: gpui::MacWindowStyle,
+        session_bar: bool,
+        window: &Window,
+    ) -> Placement {
+        if self.session_link.is_none()
+            || style.is_some_and(|s| s.contains(WindowStyle::HIDE_SESSION_BUTTON))
+        {
+            return Placement::Hidden;
+        }
+        let inset = crate::ui::desktop::zoom::pixels(window, 4.);
+        // In fullscreen the system titlebar can retract.
+        if !chrome.titled || window.is_fullscreen() {
+            return if session_bar { Placement::Titlebar } else { Placement::Overlay(inset) };
+        }
+        let native = !(chrome.full_size_content && chrome.transparent_titlebar);
+        let width = if native { px(38.) } else { crate::ui::desktop::zoom::pixels(window, 38.) };
+        let controls_right = window.macos_traffic_light_right();
+        if controls_right > px(0.) && window.viewport_size().width - width < controls_right {
+            // Keep both controls clickable when the guest fixes a very small width.
+            let top =
+                if chrome.full_size_content { window.macos_titlebar_height() } else { px(0.) };
+            return Placement::Overlay(top + inset);
+        }
+        if native {
+            Placement::Native
+        } else if session_bar {
+            Placement::Titlebar
+        } else {
+            Placement::Overlay(inset)
+        }
+    }
+
+    pub(super) fn native_session_button(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(gpui::MacTitlebarButton, gpui::Stateful<gpui::Div>)> {
+        let link = self.session_link.as_ref()?;
+        let disabled = self.closing || self.stopped || link.copying.is_some();
+        let keyboard_target = link.control.update(cx, |control, cx| {
+            control.set(properties(disabled), cx);
+            control.titlebar_keyboard_target(window, cx)
+        });
+        let button = gpui::MacTitlebarButton {
+            label: COPY_LABEL,
+            image: if link.copied.is_some() {
+                controls::CHECKMARK_ICON
+            } else {
+                controls::SESSION_ICON
+            },
+            action: <CopySessionLink as gpui::Action>::name_for_type(),
+            enabled: !disabled,
+            keyboard_pressed: !disabled && link.control.read(cx).has_key_press(),
+            background: rgba(BUTTON_BACKING),
+            focus_ring: (window.is_window_active()
+                && link.control.read(cx).keyboard_focus_visible(window))
+            .then(|| rgba(Theme::light().color(ThemeColor::FocusRing).0)),
+        };
+        Some((button, keyboard_target))
+    }
+
     pub(super) fn session_button(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let link = self.session_link.as_ref()?;
+        let icon = if link.copied.is_some() { "checkmark" } else { "session-icon" };
         link.control.update(cx, |control, cx| {
             control.set(properties(self.closing || self.stopped || link.copying.is_some()), cx);
-            control.set_toolbar_icon(
-                if link.copied.is_some() { "checkmark" } else { "session-icon" },
-                cx,
-            );
+            control.set_toolbar_icon(icon, cx);
         });
         Some(
             div()
                 .absolute()
                 .right(ui(4.))
                 .top(ui(4.))
-                // Keep the host glyph legible over any guest titlebar or canvas color.
                 .rounded(ui(12.))
-                .bg(rgba(Theme::light().color(ThemeColor::WindowBackground).0))
+                .bg(rgba(BUTTON_BACKING))
                 .debug_selector(|| "copy-session-link".into())
+                // A one-point highlight beneath the toolbar glyph gives it a recessed edge.
+                .child(
+                    gpui::svg()
+                        .absolute()
+                        .left(ui(9.))
+                        .top(ui(5.))
+                        .size(ui(16.))
+                        .path(icon)
+                        .text_color(rgba(0xffffff66)),
+                )
                 .child(link.control.clone()),
         )
     }
 
     pub(super) fn session_titlebar(
         &self,
+        show_button: bool,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::Stateful<gpui::Div>> {
-        let button = self.session_button(cx)?;
-        Some(
-            div()
-                .id("app-titlebar")
-                .debug_selector(|| "app-titlebar".into())
-                .relative()
-                .flex_none()
-                .h(ui(32.))
-                .opacity(if window.is_window_active() { 1. } else { 0.5 })
-                .window_control_area(gpui::WindowControlArea::Drag)
-                .child(
-                    div()
-                        .absolute()
-                        .left(ui(80.))
-                        .right(ui(80.))
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .overflow_hidden()
-                        .text_size(ui(14.))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(window.window_title()),
-                )
-                .child(button),
-        )
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id("app-titlebar")
+            .debug_selector(|| "app-titlebar".into())
+            .relative()
+            .flex_none()
+            .h(ui(32.))
+            .opacity(if window.is_window_active() { 1. } else { 0.5 })
+            .window_control_area(gpui::WindowControlArea::Drag)
+            .child(
+                div()
+                    .absolute()
+                    .left(ui(80.))
+                    .right(ui(80.))
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .text_size(ui(14.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(window.window_title()),
+            )
+            .when(show_button, |bar| bar.children(self.session_button(cx)))
     }
 }

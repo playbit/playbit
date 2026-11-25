@@ -494,6 +494,10 @@ pub(crate) trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn set_macos_window_style(&self, style: MacWindowStyle);
     #[cfg(target_os = "macos")]
     fn titlebar_height(&self) -> Pixels;
+    #[cfg(target_os = "macos")]
+    fn traffic_light_right(&self) -> Pixels;
+    #[cfg(target_os = "macos")]
+    fn on_titlebar_action(&self, callback: Box<dyn FnMut(&'static str)>);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);
     fn minimize(&self);
     fn zoom(&self);
@@ -1420,10 +1424,32 @@ pub struct MacWindowSizeConstraints {
     pub aspect_ratio: f32,
 }
 
+/// A right-hand AppKit titlebar button that dispatches a registered GPUI action.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MacTitlebarButton {
+    /// Encoded monochrome artwork, drawn at toolbar opacity.
+    pub image: &'static [u8],
+    /// The tooltip and accessibility label.
+    pub label: &'static str,
+    /// The name of the action in the owning window.
+    pub action: &'static str,
+    /// Whether the action is available.
+    pub enabled: bool,
+    /// GPUI's keyboard target is holding the activation key.
+    pub keyboard_pressed: bool,
+    /// Translucent backing over the titlebar.
+    pub background: crate::Rgba,
+    /// Outline color while the corresponding GPUI tab stop has keyboard focus.
+    pub focus_ring: Option<crate::Rgba>,
+}
+
 /// Mutable appearance and decorations of a normal AppKit window.
 #[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MacWindowStyle {
+    /// An optional control in the system titlebar.
+    pub titlebar_button: Option<MacTitlebarButton>,
     /// Constraints on the size of the drawable content.
     pub size_constraints: MacWindowSizeConstraints,
     /// Draw the system titlebar.

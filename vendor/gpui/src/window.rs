@@ -1342,6 +1342,19 @@ impl Window {
                     .log_err();
             })
         });
+        #[cfg(target_os = "macos")]
+        platform_window.on_titlebar_action({
+            let mut cx = cx.to_async();
+            Box::new(move |name| {
+                handle
+                    .update(&mut cx, |_, window, cx| {
+                        if let Some(action) = cx.build_action(name, None).log_err() {
+                            window.dispatch_action(action, cx);
+                        }
+                    })
+                    .log_err();
+            })
+        });
         platform_window.on_hit_test_window_control({
             let mut cx = cx.to_async();
             Box::new(move |position| {
@@ -2065,6 +2078,12 @@ impl Window {
     #[cfg(target_os = "macos")]
     pub fn macos_titlebar_height(&self) -> Pixels {
         self.platform_window.titlebar_height()
+    }
+
+    /// Right edge of the visible system window controls, in window coordinates.
+    #[cfg(target_os = "macos")]
+    pub fn macos_traffic_light_right(&self) -> Pixels {
+        self.platform_window.traffic_light_right()
     }
 
     /// Sets the application identifier.

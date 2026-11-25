@@ -191,6 +191,113 @@ fn titlebar_pointer_and_keyboard_copy_current_session_without_guest_input(
 }
 
 #[gpui::test]
+fn standard_window_copies_from_the_system_titlebar(cx: &mut gpui::TestAppContext) {
+    add_font(cx);
+    let profile = tempfile::tempdir().unwrap();
+    let session = [8; 32];
+    let (_, server) = invitation_server(profile.path(), vec![session, session, session]);
+    let (handle, inputs) = retained_handle(profile.path(), 1, session);
+    let scene = |style| ViewNode::Theme {
+        window_style: Some(style),
+        window_size_constraints: None,
+        window_background_specified: true,
+        theme: Theme::light(),
+        child: Box::new(ViewNode::Button {
+            id: 1,
+            label: "Guest action".into(),
+            style: playbit_api::ui::ButtonStyle::Default,
+            disabled: false,
+        }),
+    };
+    let style = WindowStyle::STANDARD | WindowStyle::THEME_DARK;
+    let window =
+        cx.update(|cx| open("Guest".into(), Some(handle), Some(scene(style)), true, cx).unwrap());
+    cx.run_until_parked();
+    while inputs.try_recv().is_ok() {}
+    assert!(window.update(cx, |_, window, _| copy_button_bounds(window).is_none()).unwrap());
+    assert!(cx.click_titlebar_button(window.into()));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard().unwrap().text().unwrap(),
+        "https://playbit.app/join/invitation-0"
+    );
+    assert!(inputs.is_empty());
+    // Tab from the guest button into the native accessory, then return to
+    // the guest button with Shift-Tab. Only the latter activation reaches it.
+    cx.simulate_keystrokes(window.into(), "tab tab space");
+    cx.dispatch_key_up(window.into(), gpui::Keystroke::parse("space").unwrap());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard().unwrap().text().unwrap(),
+        "https://playbit.app/join/invitation-1"
+    );
+    assert!(inputs.is_empty());
+    cx.simulate_keystrokes(window.into(), "shift-tab space");
+    cx.dispatch_key_up(window.into(), gpui::Keystroke::parse("space").unwrap());
+    cx.run_until_parked();
+    let input = inputs.try_recv().unwrap().input;
+    assert_eq!((input.kind, input.target), (EventKind::Click, 1));
+    for (flags, native, floating) in [
+        (WindowStyle::FULLSIZE_CONTENT, true, false),
+        (WindowStyle::HIDE_SESSION_BUTTON, false, false),
+        (WindowStyle::TRANSPARENT_TITLEBAR, false, true),
+    ] {
+        window
+            .update(cx, |this, _, cx| {
+                assert!(this.apply(scene(style | flags), InputAck::default(), cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.click_titlebar_button(window.into()), native);
+        assert_eq!(
+            window.update(cx, |_, window, _| copy_button_bounds(window).is_some()).unwrap(),
+            floating
+        );
+    }
+    assert_eq!(
+        cx.read_from_clipboard().unwrap().text().unwrap(),
+        "https://playbit.app/join/invitation-2"
+    );
+    server.join().unwrap();
+
+    // At 80 points wide the system zoom button occupies the upper-right
+    // corner. Keep Copy reachable on the content side of the titlebar.
+    let visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.simulate_resize(size(px(80.), px(400.)));
+    for (flags, top) in [(WindowStyle::NONE, 4.), (WindowStyle::FULLSIZE_CONTENT, 32.)] {
+        window
+            .update(cx, |this, _, cx| {
+                assert!(this.apply(scene(style | flags), InputAck::default(), cx));
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert!(!cx.click_titlebar_button(window.into()));
+        assert_eq!(
+            window.update(cx, |_, window, _| copy_button_bounds(window).unwrap().top()).unwrap(),
+            px(top)
+        );
+    }
+    visual.simulate_resize(size(px(640.), px(400.)));
+
+    // A retracting fullscreen titlebar must not take the button with it.
+    window
+        .update(cx, |this, window, cx| {
+            window.toggle_fullscreen();
+            assert!(this.apply(scene(style), InputAck::default(), cx));
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert!(!cx.click_titlebar_button(window.into()));
+    window
+        .update(cx, |_, window, _| {
+            let button = copy_button_bounds(window).unwrap();
+            assert_eq!(button.top(), px(4.));
+            assert_eq!(window.viewport_size().width - button.right(), px(4.));
+        })
+        .unwrap();
+}
+
+#[gpui::test]
 fn floating_session_button_preserves_guest_pointer_and_titlebar_drag_outside_its_bounds(
     cx: &mut gpui::TestAppContext,
 ) {

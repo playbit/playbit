@@ -477,6 +477,12 @@ impl TestAppContext {
         self.test_window(window).window_can_drag_at(position)
     }
 
+    /// Activate the enabled AppKit titlebar accessory on a test window.
+    #[cfg(target_os = "macos")]
+    pub fn click_titlebar_button(&self, window: AnyWindowHandle) -> bool {
+        self.test_window(window).click_titlebar_button()
+    }
+
     /// Returns the `TestWindow` backing the given handle.
     pub(crate) fn test_window(&self, window: AnyWindowHandle) -> TestWindow {
         self.app

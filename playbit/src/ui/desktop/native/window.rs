@@ -629,6 +629,18 @@ impl Render for AppWindow {
         let session_bar = false;
         let chrome =
             native_style(presentation, whole_window, session_bar, super::super::zoom::factor(cx));
+        #[cfg(feature = "desktop")]
+        let placement = self.session_button_placement(style, chrome, session_bar, window);
+        #[cfg(feature = "desktop")]
+        let native_button = match placement {
+            session_link::Placement::Native => self.native_session_button(window, cx),
+            _ => None,
+        };
+        #[cfg(feature = "desktop")]
+        let chrome = gpui::MacWindowStyle {
+            titlebar_button: native_button.as_ref().map(|(button, _)| *button),
+            ..chrome
+        };
         let background = chrome.background;
         window.set_macos_window_style(chrome);
         #[cfg(target_os = "macos")]
@@ -731,8 +743,12 @@ impl Render for AppWindow {
             }));
         #[cfg(all(target_os = "macos", feature = "desktop"))]
         {
-            if session_bar && let Some(titlebar) = self.session_titlebar(window, cx) {
-                root = root.child(titlebar);
+            if session_bar {
+                root = root.child(self.session_titlebar(
+                    placement == session_link::Placement::Titlebar,
+                    window,
+                    cx,
+                ));
             }
             if self.session_link.is_some() && !self.closing && !self.stopped {
                 root = root.on_action(cx.listener(|this, _: &CopySessionLink, _, cx| {
@@ -783,14 +799,15 @@ impl Render for AppWindow {
         };
         root = root.children(self.accessories(whole_window));
         #[cfg(feature = "desktop")]
-        if style.is_some_and(|style| style.contains(WindowStyle::HIDE_SESSION_BUTTON)) {
-            self.hide_session_button(window, cx);
-        } else if !session_bar && let Some(button) = self.session_button(cx) {
-            let mut top = super::super::zoom::pixels(window, 4.);
-            if chrome.full_size_content && !chrome.transparent_titlebar {
-                top += window.macos_titlebar_height();
+        match placement {
+            session_link::Placement::Native => {
+                root = root.children(native_button.map(|(_, keyboard_target)| keyboard_target));
             }
-            root = root.child(button.top(top));
+            session_link::Placement::Hidden => self.hide_session_button(window, cx),
+            session_link::Placement::Overlay(top) => {
+                root = root.children(self.session_button(cx).map(|button| button.top(top)));
+            }
+            session_link::Placement::Titlebar => {}
         }
         if let Some((body, _)) = &self.feedback {
             root = root.child(visual_bell::render(
@@ -880,6 +897,7 @@ fn native_style(
     // extending the guest's coordinates into it.
     let tinted_titlebar = !full_size_content && background.is_some();
     gpui::MacWindowStyle {
+        titlebar_button: None,
         titled,
         size_constraints: gpui::MacWindowSizeConstraints {
             min: size(scaled(size_constraints.min_width), scaled(size_constraints.min_height)),
