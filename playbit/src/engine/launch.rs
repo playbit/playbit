@@ -703,12 +703,15 @@ mod tests {
     #[test]
     fn switching_a_borrowed_engine_leaves_the_recorded_and_legacy_owners_running() {
         const SOCKET: &str = "PLAYBIT_BORROWED_ENGINE_TEST_SOCKET";
+        const RELEASE: &[u8; 1] = b"R";
         if let Some(socket) = std::env::var_os(SOCKET) {
             let mut stream = UnixStream::connect(socket).unwrap();
             // Even a legacy engine with an incompatible IPC protocol can
             // remain running when a borrowed profile's client goes away.
             assert_eq!(stream.read(&mut [0]).unwrap(), 0);
-            assert_eq!(std::io::stdin().read(&mut [0]).unwrap(), 0);
+            let mut release = [0];
+            std::io::stdin().read_exact(&mut release).unwrap();
+            assert_eq!(&release, RELEASE);
             return;
         }
 
@@ -745,13 +748,18 @@ mod tests {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null());
             let mut child = command.spawn().unwrap();
-            assert!(
-                super::super::readiness::wait_readable(
-                    &listener,
-                    Instant::now() + Duration::from_secs(5)
-                )
-                .unwrap()
-            );
+            // The first launch of the copied macOS test binary can spend
+            // several seconds in the loader before the child can connect.
+            let timeout = Duration::from_secs(30);
+            if !super::super::readiness::wait_readable(&listener, Instant::now() + timeout).unwrap()
+            {
+                let status = child.try_wait().unwrap();
+                if status.is_none() {
+                    let _ = child.kill();
+                    child.wait().unwrap();
+                }
+                panic!("Borrowed engine fixture did not connect within {timeout:?}: {status:?}");
+            }
             let (stream, _) = listener.accept().unwrap();
             let result = retire_owned_engine(stream, originating_engine, owner);
             if allowed {
@@ -759,8 +767,8 @@ mod tests {
             } else {
                 assert!(result.is_err());
             }
-            assert!(child.try_wait().unwrap().is_none());
-            drop(child.stdin.take());
+            assert!(child.try_wait().unwrap().is_none(), "Borrowed engine exited: {owner:?}");
+            child.stdin.take().unwrap().write_all(RELEASE).unwrap();
             assert!(child.wait().unwrap().success());
         }
         let (client_stream, _server) = UnixStream::pair().unwrap();
