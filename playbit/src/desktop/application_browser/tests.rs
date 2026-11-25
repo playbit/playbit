@@ -645,6 +645,60 @@ fn scoped_browser_fills_its_column_across_window_widths(cx: &mut gpui::TestAppCo
 }
 
 #[gpui::test]
+fn root_override_preview_fills_the_volume_browser(cx: &mut gpui::TestAppContext) {
+    let (host, window, _requests) = scope(cx);
+    let columns = host.update(cx, |host, cx| {
+        let session = host.applications.catalog[0].clone();
+        let volume = session.root_volume;
+        host.scoped_volumes.push(crate::store::Volume {
+            id: volume,
+            name: "Fixture root".into(),
+            owner: session.creator,
+            personal: false,
+            share_key_with_service: false,
+        });
+        let session = session.id;
+        host.applications.slots_session = Some(session.clone());
+        host.applications.session_slots = vec![AutomaticVolumeSlot {
+            role: Role::Root,
+            volume,
+            overridden: true,
+            state: AutomaticVolumeState::Ready,
+        }];
+        assert!(host.select_application_target(Target::Session(session), cx));
+        assert!(host.select_application_target(
+            Target::Scope { role: Role::Root, volume, session: true },
+            cx,
+        ));
+        host.application_scrollbars(cx).read(cx).handle()
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    for auto_hide in [true, false] {
+        cx.set_auto_hide_scrollbars(auto_hide);
+        for width in [1400., 1024., 900., 1400.] {
+            visual.simulate_resize(gpui::size(px(width), px(560.)));
+            draw(&mut visual);
+            let expected = px((width - 720.).max(browser::MIN_WIDTH));
+            let overflow = columns.max_offset().width;
+            for offset in [px(0.), -overflow] {
+                columns.set_offset(gpui::point(offset, px(0.)));
+                draw(&mut visual);
+                let upper = visual.debug_bounds("browser-upper").expect("volume navigator");
+                let lower = visual.debug_bounds("browser-lower").expect("volume preview");
+                let content = visual.debug_bounds("browser-content").expect("No preview panel");
+                assert!((lower.size.width - expected).abs() <= px(1.));
+                let right = columns.bounds().right() + overflow + offset;
+                assert!((upper.right() - right).abs() <= px(1.));
+                assert_eq!(lower.left(), upper.left());
+                assert_eq!(lower.right(), upper.right());
+                assert_eq!(content.left(), lower.left());
+                assert_eq!(content.right(), lower.right());
+            }
+        }
+    }
+}
+
+#[gpui::test]
 fn session_and_instance_inspectors_share_the_log_and_align_metadata(cx: &mut gpui::TestAppContext) {
     // Check the actual header button and selectable metadata fields in the full shell.
     cx.set_auto_hide_scrollbars(true);
