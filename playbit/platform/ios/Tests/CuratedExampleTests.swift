@@ -4,7 +4,7 @@ import Foundation
     static func entry(_ id: String = "shared-todo") -> [String: Any] {
         ["id": id, "name": "Shared TODO", "description": "Everyone with the example can read and edit these tasks.",
          "invitation": "https://playbit.app/s#RDJVpDon9tg5g3s4dkADuL",
-         "source": "https://github.com/playbit/playbit/tree/v0.3.0-beta.1/guests/todo"]
+         "source": "https://github.com/playbit/playbit/tree/v0.1.3/guests/todo"]
     }
     static func reject(_ value: Any?) {
         do { _ = try CuratedExample.parse(value); preconditionFailure("accepted invalid examples") }
@@ -16,7 +16,7 @@ import Foundation
         let examples = try CuratedExample.parse([entry()])
         precondition(examples[0].name == "Shared TODO")
         precondition(examples[0].description.contains("read and edit"))
-        precondition(examples[0].source.scheme == "https")
+        precondition(examples[0].source.absoluteString == entry()["source"] as? String)
         reject(nil); reject([entry(), entry()])
         reject((0..<5).map { entry("example-\($0)") })
         for (field, value) in [("name", ""), ("description", String(repeating: "é", count: 257)),

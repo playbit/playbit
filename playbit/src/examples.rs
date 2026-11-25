@@ -16,7 +16,7 @@ pub const SHARED_TODO: Example = Example {
     name: "Shared TODO",
     description: "Try adding and completing a task. You and other beta testers share this list; everyone can see and edit its tasks. Keep personal information out of it.",
     invitation: "https://playbit.app/s#RDJVpDon9tg5g3s4dkADuL",
-    source: "https://github.com/playbit/playbit/tree/v0.3.0-beta.1/guests/todo",
+    source: "https://github.com/playbit/playbit/tree/v0.1.3/guests/todo",
 };
 
 pub const EXAMPLES: &[Example] = &[SHARED_TODO];
@@ -39,7 +39,10 @@ mod tests {
             )
             .unwrap();
             assert!(example.source.starts_with("https://github.com/"));
-            assert!(example.source.contains("/tree/v0.3.0-beta.1/"));
         }
+        assert_eq!(
+            SHARED_TODO.source,
+            "https://github.com/playbit/playbit/tree/v0.1.3/guests/todo"
+        );
     }
 }
