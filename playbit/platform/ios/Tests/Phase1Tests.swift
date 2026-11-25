@@ -507,6 +507,34 @@ final class Phase1Tests: XCTestCase {
 
     // Explicit live qualification only. The operator supplies an isolated
     // account and the code actually delivered to its mailbox; no auth fixtures.
+    private func selectTestingBeforeSignIn(_ app: XCUIApplication) throws {
+        func openSelector() throws {
+            if !app.buttons["environment-menu"].exists {
+                guard app.buttons["Sign in"].firstMatch.waitForExistence(timeout: 20) else {
+                    throw NSError(domain: "LiveQualification", code: 6, userInfo: [NSLocalizedDescriptionKey: "No ordinary environment selector before sign-in"])
+                }
+                app.buttons["Sign in"].firstMatch.tap()
+            }
+            guard app.buttons["environment-menu"].waitForExistence(timeout: 20) else {
+                throw NSError(domain: "LiveQualification", code: 7, userInfo: [NSLocalizedDescriptionKey: "Environment selector did not open"])
+            }
+        }
+        try openSelector()
+        if app.buttons["environment-menu"].label != "Environment: Testing" {
+            app.buttons["environment-menu"].tap()
+            guard app.buttons["Testing"].firstMatch.waitForExistence(timeout: 5) else {
+                throw NSError(domain: "LiveQualification", code: 8, userInfo: [NSLocalizedDescriptionKey: "Testing environment is unavailable"])
+            }
+            app.buttons["Testing"].firstMatch.tap()
+            try openSelector()
+        }
+        let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND label == %@", "Environment: Testing"), object: app.buttons["environment-menu"])
+        guard XCTWaiter.wait(for: [selected], timeout: 20) == .completed,
+              app.staticTexts["testing-channel"].exists else {
+            throw NSError(domain: "LiveQualification", code: 9, userInfo: [NSLocalizedDescriptionKey: "Testing must be confirmed before any enrollment request"])
+        }
+    }
+
     private func signInLive() throws -> XCUIApplication {
         guard let address = ProcessInfo.processInfo.environment["PLAYBIT_LIVE_EMAIL"] else {
             throw XCTSkip("Requires an isolated live account")
@@ -555,31 +583,7 @@ final class Phase1Tests: XCTestCase {
                     throw NSError(domain: "LiveQualification", code: 14, userInfo: [NSLocalizedDescriptionKey: "Ordinary Testing sign-out did not complete"])
                 }
             }
-            func openSelector() throws {
-                if !app.buttons["environment-menu"].exists {
-                    guard app.buttons["Sign in"].firstMatch.waitForExistence(timeout: 20) else {
-                        throw NSError(domain: "LiveQualification", code: 6, userInfo: [NSLocalizedDescriptionKey: "No ordinary environment selector before sign-in"])
-                    }
-                    app.buttons["Sign in"].firstMatch.tap()
-                }
-                guard app.buttons["environment-menu"].waitForExistence(timeout: 20) else {
-                    throw NSError(domain: "LiveQualification", code: 7, userInfo: [NSLocalizedDescriptionKey: "Environment selector did not open"])
-                }
-            }
-            try openSelector()
-            if app.buttons["environment-menu"].label != "Environment: Testing" {
-                app.buttons["environment-menu"].tap()
-                guard app.buttons["Testing"].firstMatch.waitForExistence(timeout: 5) else {
-                    throw NSError(domain: "LiveQualification", code: 8, userInfo: [NSLocalizedDescriptionKey: "Testing environment is unavailable"])
-                }
-                app.buttons["Testing"].firstMatch.tap()
-                try openSelector()
-            }
-            let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND label == %@", "Environment: Testing"), object: app.buttons["environment-menu"])
-            guard XCTWaiter.wait(for: [selected], timeout: 20) == .completed,
-                  app.staticTexts["testing-channel"].exists else {
-                throw NSError(domain: "LiveQualification", code: 9, userInfo: [NSLocalizedDescriptionKey: "Testing must be confirmed before any enrollment request"])
-            }
+            try selectTestingBeforeSignIn(app)
         }
         let email = app.textFields["sign-in-email"]
         XCTAssertTrue(email.waitForExistence(timeout: 30))
@@ -654,6 +658,18 @@ final class Phase1Tests: XCTestCase {
             throw XCTSkip("Requires an isolated published app")
         }
         let app = try signInLive()
+        checkLiveCatalog(app, appIdentity)
+        if ProcessInfo.processInfo.environment["PLAYBIT_TESTFLIGHT_ACCEPTANCE"] == "1" {
+            let account = try testFlightAccount(app)
+            let evidence = try JSONSerialization.data(withJSONObject: ["method": "ios-testflight-shared-native-v2",
+                "case": "testLiveSignInListsApps",
+                "channel": "testing", "account": account, "steps": ["launch", "sign_in"]], options: .sortedKeys)
+            let result = XCTAttachment(data: evidence, uniformTypeIdentifier: "public.json")
+            result.name = "TestFlight sign-in evidence.json"; result.lifetime = .keepAlways; self.add(result)
+        }
+    }
+
+    private func checkLiveCatalog(_ app: XCUIApplication, _ appIdentity: String) {
         let recovery = app.navigationBars["Private data recovery"]
         if recovery.exists { recovery.buttons.element(boundBy: 0).tap() }
         let add = app.buttons["new-session"]
@@ -667,14 +683,6 @@ final class Phase1Tests: XCTestCase {
         capture.lifetime = .keepAlways; self.add(capture)
         app.buttons["new-session-close"].tap()
         XCTAssertTrue(add.waitForExistence(timeout: 5))
-        if ProcessInfo.processInfo.environment["PLAYBIT_TESTFLIGHT_ACCEPTANCE"] == "1" {
-            let account = try testFlightAccount(app)
-            let evidence = try JSONSerialization.data(withJSONObject: ["method": "ios-testflight-shared-native-v2",
-                "case": "testLiveSignInListsApps",
-                "channel": "testing", "account": account, "steps": ["launch", "sign_in"]], options: .sortedKeys)
-            let result = XCTAttachment(data: evidence, uniformTypeIdentifier: "public.json")
-            result.name = "TestFlight sign-in evidence.json"; result.lifetime = .keepAlways; self.add(result)
-        }
     }
 
     private func testFlightAccount(_ app: XCUIApplication) throws -> String {
@@ -706,6 +714,59 @@ final class Phase1Tests: XCTestCase {
               !peerTask.unicodeScalars.contains(where: { $0.value < 32 }) else {
             throw XCTSkip("Requires the exact installed TestFlight build, isolated account/session and distinct peer task")
         }
+        try liveSharedJourney(XCUIApplication(), reference: reference, task: task, peerTask: peerTask,
+                              simulator: false)
+        #endif
+    }
+
+    func testLiveSimulatorSharedAcceptance() throws {
+        #if targetEnvironment(simulator)
+        guard ProcessInfo.processInfo.environment["PLAYBIT_SIMULATOR_ACCEPTANCE"] == "1" else {
+            throw XCTSkip("Requires a fresh release Simulator and its isolated Testing fixture")
+        }
+        continueAfterFailure = false
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let fixtureFile = directory.appendingPathComponent("playbit-simulator-fixture.json")
+        let ready = directory.appendingPathComponent("playbit-simulator-fixture-requested")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixtureFile.path))
+        try Data("ready".utf8).write(to: ready, options: .atomic)
+        let fixtureArrived = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            FileManager.default.fileExists(atPath: fixtureFile.path)
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [fixtureArrived], timeout: 90), .completed)
+        struct Fixture: Decodable {
+            let email, account, catalog, reference, task, peerTask: String
+        }
+        let fixture = try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: fixtureFile))
+        try FileManager.default.removeItem(at: fixtureFile)
+        let app = XCUIApplication()
+        app.launch()
+        try selectTestingBeforeSignIn(app)
+        let email = app.textFields["sign-in-email"]
+        XCTAssertTrue(email.waitForExistence(timeout: 30))
+        email.tap(); email.typeText(fixture.email)
+        let field = app.secureTextFields["sign-in-account-key"]
+        XCTAssertTrue(field.exists)
+        // The owner staged this fresh Simulator's pasteboard via simctl.
+        // XCTest logs typed text even in secure fields.
+        field.tap(); field.press(forDuration: 1)
+        let paste = app.buttons["Paste"].exists ? app.buttons["Paste"] : app.menuItems["Paste"]
+        XCTAssertTrue(paste.waitForExistence(timeout: 5)); paste.tap()
+        let allow = app.alerts.buttons["Allow Paste"]
+        if allow.waitForExistence(timeout: 3) { allow.tap() }
+        app.buttons["sign-in-submit"].tap()
+        XCTAssertTrue(app.buttons["new-session"].waitForExistence(timeout: 60))
+        XCTAssertEqual(try testFlightAccount(app), fixture.account)
+        checkLiveCatalog(app, fixture.catalog)
+        try liveSharedJourney(app, reference: fixture.reference, task: fixture.task, peerTask: fixture.peerTask,
+                              simulator: true)
+        #else
+        throw XCTSkip("Requires an iPhone Simulator")
+        #endif
+    }
+
+    private func liveSharedJourney(_ app: XCUIApplication, reference: String, task: String, peerTask: String,
+                                   simulator: Bool) throws {
         continueAfterFailure = false
         // The app resolves this secret code. Observe its internal ID below.
         XCTAssertTrue(reference.utf8.count == 22 && reference.allSatisfy {
@@ -722,7 +783,6 @@ final class Phase1Tests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: file.path), "Retain and inspect the original attempt before another run")
         }
         try Data((reference + "\n" + task + "\n" + peerTask).utf8).write(to: intent, options: .atomic)
-        let app = XCUIApplication()
         defer { app.terminate() }
         app.launch()
         let account = try testFlightAccount(app)
@@ -822,17 +882,19 @@ final class Phase1Tests: XCTestCase {
         }
         XCTAssertTrue((1...65536).contains(peerBytes.count) && peerBytes.count == evidenceSize)
         let peerResult = XCTAttachment(data: peerBytes, uniformTypeIdentifier: "public.json")
-        peerResult.name = "TestFlight Shared peer evidence.json"; peerResult.lifetime = .keepAlways; add(peerResult)
+        let label = simulator ? "Simulator" : "TestFlight"
+        peerResult.name = label + " Shared peer evidence.json"; peerResult.lifetime = .keepAlways; add(peerResult)
         let capture = XCTAttachment(screenshot: app.screenshot())
-        capture.name = "TestFlight native edit and peer reconnect"; capture.lifetime = .keepAlways; add(capture)
-        let evidence = try JSONSerialization.data(withJSONObject: ["method": "ios-testflight-shared-native-v2",
-            "case": "testLiveTestFlightAcceptance",
+        capture.name = label + " native edit and peer reconnect"; capture.lifetime = .keepAlways; add(capture)
+        let evidence = try JSONSerialization.data(withJSONObject: [
+            "method": simulator ? "ios-simulator-shared-v1" : "ios-testflight-shared-native-v2",
+            "case": simulator ? "testLiveSimulatorSharedAcceptance" : "testLiveTestFlightAcceptance",
             "channel": "testing", "account": account, "session": session,
             "session_reference": reference, "local_task": task, "peer_task": peerTask, "entry_action": entryAction,
-            "steps": ["edit", "reopen", "reconnect"], "peer": "observed-inbound-and-outbound"], options: .sortedKeys)
+            "steps": simulator ? ["launch", "sign_in", "catalog", "edit", "reopen", "reconnect"] : ["edit", "reopen", "reconnect"],
+            "peer": "observed-inbound-and-outbound"], options: .sortedKeys)
         let result = XCTAttachment(data: evidence, uniformTypeIdentifier: "public.json")
-        result.name = "TestFlight journey evidence.json"; result.lifetime = .keepAlways; add(result)
-        #endif
+        result.name = label + " journey evidence.json"; result.lifetime = .keepAlways; add(result)
     }
 
     // Ordinary two-client qualification. Operator edits the peer after the
