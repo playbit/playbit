@@ -177,10 +177,17 @@ impl Form {
     }
 
     fn start_button(&mut self, cx: &mut Context<Self>) -> Entity<controls::Control> {
+        let label = if self.join.is_some() {
+            "Join Session"
+        } else if matches!(self.target, Target::Session(_)) {
+            "Open Session"
+        } else {
+            "Start Session"
+        };
         self.control(
             (0, 2),
             controls::Kind::Button(playbit_api::ui::ButtonStyle::Primary),
-            "Start Session",
+            label,
             !self.can_start(),
             |_, form, cx| form.submit(cx),
             cx,
@@ -432,7 +439,14 @@ impl Form {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let title = session_dialog::title(self.text((0, 0), "New Session".into(), true, false, cx));
+        let heading = if self.join.is_some() {
+            "Join Session"
+        } else if matches!(self.target, Target::Session(_)) {
+            "Open Session"
+        } else {
+            "New Session"
+        };
+        let title = session_dialog::title(self.text((0, 0), heading.into(), true, false, cx));
         let scrollbars = self.scrollbars(cx);
         let handle = scrollbars.read(cx).handle();
         let mut content = div()

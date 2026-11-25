@@ -2048,7 +2048,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn permission_popup_preserves_editor_width_and_submits_only_on_start(
+    fn permission_popup_preserves_editor_width_and_submits_only_on_open(
         cx: &mut gpui::TestAppContext,
     ) {
         // Selecting a permission updates the draft and preserves the label editor's width.
@@ -2135,7 +2135,7 @@ mod tests {
                     window
                         .accessibility_nodes_for_test()
                         .any(|(_, node)| node.role() == gpui::accesskit::Role::Button
-                            && node.label() == Some("Start Session"))
+                            && node.label() == Some("Open Session"))
                 );
                 assert!(
                     window
@@ -2265,7 +2265,7 @@ mod tests {
                 let nodes =
                     window.accessibility_nodes_for_test().map(|(_, node)| node).collect::<Vec<_>>();
                 assert!(nodes.iter().any(
-                    |node| node.role() == Role::Heading && node.label() == Some("New Session")
+                    |node| node.role() == Role::Heading && node.label() == Some("Open Session")
                 ));
                 assert!(nodes.iter().any(|node| node.value() == Some("/tmp/Café")));
                 assert!(nodes.iter().any(|node| node.label() == Some("Remove folder")));

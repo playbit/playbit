@@ -66,7 +66,7 @@ impl Shell {
     }
 
     /// A typed invitation grants no access while its authenticated envelope and
-    /// availability arrive independently. Only an explicit Start begins the transfer.
+    /// availability arrive independently. Only an explicit Join Session begins the transfer.
     pub(super) fn review_ready_invitation(&mut self, cx: &mut Context<Self>) {
         if self.join_dialog.is_some() {
             self.show_invitation_review(cx);
@@ -718,7 +718,17 @@ mod tests {
                 Some("shared-session")
             )
         });
-        assert!(requests.is_empty(), "review waits for Start Session");
+        window
+            .update(cx, |_, window, _| {
+                use gpui::accesskit::Role;
+                for role in [Role::Heading, Role::Button] {
+                    assert!(window.accessibility_nodes_for_test().any(|(_, node)| {
+                        node.role() == role && node.label() == Some("Join Session")
+                    }));
+                }
+            })
+            .unwrap();
+        assert!(requests.is_empty(), "review waits for Join Session");
         press(window, "enter", cx);
         let queued = requests.try_recv().unwrap();
         assert!(matches!(queued, Message::Request(QueuedRequest {
