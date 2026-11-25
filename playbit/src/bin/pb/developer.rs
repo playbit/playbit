@@ -94,23 +94,12 @@ pub(super) fn init(
         let (manifest, declaration) = project.validate()?;
         playbit::package::metadata::generate(&directory, &manifest)?;
         let root = initialize_app(&manifest, declaration, call)?;
-        let mut options = git2::RepositoryInitOptions::new();
-        options.initial_head("main").external_template(false).no_reinit(true);
-        let repository = match git2::Repository::init_opts(&directory, &options) {
-            Ok(repository) => repository,
-            Err(error) if error.code() == git2::ErrorCode::Exists => {
-                git2::Repository::open(&directory)?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if repository.workdir() != Some(directory.as_path()) {
-            return Err("initialization repository belongs to another directory".into());
-        }
+        project.initialize_git()?;
         Ok(root)
     })()
     .map_err(|error| project.recovery_error(error))?;
     project.finish()?;
-    playbit::diagnostic!("Created .git, src, playbit.toml, the app icon and README.md");
+    playbit::diagnostic!("Created src, playbit.toml, the app icon and README.md");
     playbit::diagnostic!(
         "Run the app with `pb run` and use `pb schema-gen src/schema.json` if you change the schema"
     );

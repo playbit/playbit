@@ -498,6 +498,39 @@ fn init_creates_destination_directories() {
 }
 
 #[test]
+fn init_preserves_preexisting_git_directory_on_retry() {
+    let parent = tempfile::tempdir().unwrap();
+    let source = parent.path().join("project");
+    let git = source.join(".git");
+    fs::create_dir_all(&git).unwrap();
+
+    let error = init(&[], &source, &|_| Err("pause initialization".into())).unwrap_err();
+    assert!(error.to_string().contains("pause initialization"));
+    assert!(source.join(".pb-init.json").is_file());
+
+    init(&[], &source, &initialize_fixture).unwrap();
+    assert!(source.join("playbit.toml").is_file());
+    assert!(fs::read_dir(git).unwrap().next().is_none());
+    assert!(!source.join(".pb-init.json").exists());
+}
+
+#[test]
+fn init_honors_a_git_file_at_the_destination_or_an_ancestor() {
+    let parent = tempfile::tempdir().unwrap();
+    let source = parent.path().join("project");
+    fs::create_dir(&source).unwrap();
+    let git = source.join(".git");
+    fs::write(&git, "gitdir: ../external.git\n").unwrap();
+
+    init(&[], &source, &initialize_fixture).unwrap();
+    init(&["apps/nested".into()], &source, &initialize_fixture).unwrap();
+    assert!(source.join("playbit.toml").is_file());
+    assert!(source.join("apps/nested/playbit.toml").is_file());
+    assert!(!source.join("apps/nested/.git").exists());
+    assert_eq!(fs::read_to_string(git).unwrap(), "gitdir: ../external.git\n");
+}
+
+#[test]
 fn init_defaults_to_the_resolved_directory_name() {
     // Exercise the four CLI forms against the real scaffold and store;
     // both the manifest and volume must receive the resolved basename.

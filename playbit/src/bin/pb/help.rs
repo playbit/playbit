@@ -83,7 +83,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         usage: "pb init [PATH] [--name NAME] [--app-id ID] [--lang rust|ocaml]",
-        description: "Create a Rust or OCaml project in an empty directory, or initialize an existing Playbit source project for the signed-in publisher. Existing source files and data are retained. App IDs default from the directory name; --app-id chooses an exact ID. Interrupted scaffolding resumes from .pb-init.json using its original profile. The default World root derives from the publisher and app ID, with no root identity saved in source.",
+        description: "Create a Rust or OCaml project in a directory empty apart from an optional .git entry, or initialize an existing Playbit source project for the signed-in publisher. Git setup uses an existing repository in the project or a parent directory. Existing source files and data are retained. App IDs default from the directory name; --app-id chooses an exact ID. Interrupted scaffolding resumes from .pb-init.json using its original profile. The default World root derives from the publisher and app ID, with no root identity saved in source.",
         command: &["init"],
         core: true,
     },

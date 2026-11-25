@@ -118,6 +118,12 @@ try:
         protected = pb("init", "--name", "Offline initialization")
         assert protected.returncode != 0 and "existing source identity differs" in protected.stderr
         assert json.loads(pb("volume", "list").stdout) == volumes
+        nested = pb("init", "apps/nested")
+        assert nested.returncode == 0, nested.stderr
+        nested_source = source / "apps/nested"
+        assert (nested_source / "playbit.toml").is_file()
+        assert not (nested_source / ".git").exists()
+        assert (source / ".git/HEAD").read_text() == "ref: refs/heads/main\n"
         source = work / "ocaml"
         source.mkdir()
         initialized_ocaml = pb("init", "--name", "Offline OCaml", "--app-id=custom.ocaml", "--lang", "ocaml")

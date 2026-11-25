@@ -121,7 +121,7 @@ fn source_links_and_intent_paths_cannot_write_outside_the_project() {
     let install = fixture();
     let executable = install.path().join("Playbit.app/Contents/MacOS/pb");
     let outside = tempfile::tempdir().unwrap();
-    for relative in ["src", "Cargo.toml", "target", ".git"] {
+    for relative in ["src", "Cargo.toml", "target"] {
         let source = tempfile::tempdir().unwrap();
         let mut attempt =
             Initialization::begin(source.path(), None, &executable, source.path()).unwrap();
@@ -132,6 +132,12 @@ fn source_links_and_intent_paths_cannot_write_outside_the_project() {
         );
         assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
     }
+    let source = tempfile::tempdir().unwrap();
+    let attempt = Initialization::begin(source.path(), None, &executable, source.path()).unwrap();
+    std::os::unix::fs::symlink(outside.path(), source.path().join(".git")).unwrap();
+    attempt.initialize_git().unwrap();
+    assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+
     for relative in ["../outside", "/absolute", "target/file", ".git/config", INTENT] {
         let source = tempfile::tempdir().unwrap();
         let mut attempt =

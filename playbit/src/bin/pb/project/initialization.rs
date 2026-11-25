@@ -1,4 +1,4 @@
-//! One source-side intent, retained until Git succeeds. The store remains the
+//! One source-side intent, retained until project setup succeeds. The store remains the
 //! sole owner of automatic-volume transactions and receipt validation. No source file is
 //! replaced during recovery; only missing, planned files may be published.
 use super::*;
@@ -15,6 +15,9 @@ const MAX_PATH_BYTES: usize = 4096;
 struct Intent {
     profile: PathBuf,
     prepared: bool,
+    // Distinguish an existing .git directory from one left by an interrupted setup.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    preserve_git: bool,
     files: BTreeMap<PathBuf, Vec<u8>>,
 }
 
@@ -71,12 +74,15 @@ impl<'a> Initialization<'a> {
                 )
             })?
         } else {
-            if fs::read_dir(directory)?.next().is_some() {
-                return Err("pb init requires an empty source directory or its retained \
-                    .pb-init.json; this directory was not changed. \
-                    Use the completed project with pb build/run, \
-                    or choose an empty directory for a new project."
-                    .into());
+            let mut preserve_git = false;
+            for entry in fs::read_dir(directory)? {
+                if entry?.file_name() != ".git" {
+                    return Err("pb init requires a source directory containing only .git, \
+                        an empty directory, or a retained .pb-init.json. Use the completed \
+                        project with pb build/run or choose a directory for a new project."
+                        .into());
+                }
+                preserve_git = true;
             }
             let resolved = directory.canonicalize()?;
             let directory_name = resolved.file_name().and_then(|name| name.to_str());
@@ -95,7 +101,7 @@ impl<'a> Initialization<'a> {
                 executable,
                 language.unwrap_or(playbit::package::Language::Rust),
             )?;
-            Intent { profile: profile.clone(), prepared: false, files }
+            Intent { profile: profile.clone(), prepared: false, preserve_git, files }
         };
         let value = Self { directory, intent, _lock: lock };
         value.check_intent().map_err(|error| {
@@ -276,16 +282,33 @@ impl<'a> Initialization<'a> {
         // Generated metadata is disposable, but must never traverse user links.
         check_parents(self.directory, Path::new("target/playbit/metadata.rs"))?;
         regular_file(&self.directory.join("target/playbit/metadata.rs"))?;
-        let git = self.directory.join(".git");
-        if let Ok(info) = fs::symlink_metadata(&git)
-            && !info.is_dir()
-        {
-            return Err(
-                ".git must be a directory, not a link or file; move it aside before retrying"
-                    .into(),
-            );
-        }
         Ok((manifest, current.for_role(playbit::package::AutomaticVolumeRole::Root)))
+    }
+
+    pub(crate) fn initialize_git(&self) -> Result<()> {
+        for directory in self.directory.ancestors() {
+            let may_recover = directory == self.directory && !self.intent.preserve_git;
+            match fs::symlink_metadata(directory.join(".git")) {
+                // An earlier attempt may have left a partially initialized directory here.
+                Ok(info) if may_recover && info.is_dir() => {}
+                Ok(_) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let mut options = git2::RepositoryInitOptions::new();
+        options.initial_head("main").external_template(false).no_reinit(true);
+        let repository = match git2::Repository::init_opts(self.directory, &options) {
+            Ok(repository) => repository,
+            Err(error) if error.code() == git2::ErrorCode::Exists => {
+                git2::Repository::open(self.directory)?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if repository.workdir() != Some(self.directory) {
+            return Err("initialization repository belongs to another directory".into());
+        }
+        Ok(())
     }
 
     pub(crate) fn finish(&self) -> Result<()> {
@@ -295,7 +318,7 @@ impl<'a> Initialization<'a> {
         })()
         .map_err(|error| {
             format!(
-                "Root and Git initialization succeeded, but finalizing {INTENT} failed: \
+                "Project setup succeeded. Finalizing {INTENT} failed: \
                  {error}. If the record remains, retry pb init here with the original \
                  profile; otherwise the project is complete, use pb build/run."
             )
