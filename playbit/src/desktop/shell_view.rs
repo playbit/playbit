@@ -20,6 +20,7 @@ pub(super) struct Shell {
     pub(super) sign_in: Option<Entity<crate::ui::desktop::sign_in::SignIn>>,
     pub(super) sign_in_opening: bool,
     pub(super) channel_switching: bool,
+    pub(super) show_environment_selector: bool,
     pub(super) channel: crate::release_channel::ReleaseChannel,
     pub(super) focus: gpui::FocusHandle,
     pub(super) focus_window: bool,

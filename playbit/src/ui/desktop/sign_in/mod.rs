@@ -34,7 +34,7 @@ pub struct SignIn {
     back: Entity<controls::Control>,
     help: Entity<controls::Control>,
     privacy: Entity<controls::Control>,
-    channel_control: Entity<controls::Control>,
+    channel_control: Option<Entity<controls::Control>>,
     channel: crate::release_channel::ReleaseChannel,
     channel_busy: bool,
     select_channel: Option<SelectChannel>,
@@ -254,32 +254,6 @@ impl SignIn {
         let help = control(3, "Help", ButtonStyle::Default, cx);
         let privacy = control(9, "Privacy policy", ButtonStyle::Default, cx);
         privacy.update(cx, |button, cx| button.set_button_size(96., 24., cx));
-        let channel_control = {
-            let weak = weak.clone();
-            cx.new(|cx| {
-                controls::Control::new(
-                    8,
-                    controls::Properties {
-                        kind: controls::Kind::Popup,
-                        label: "Public",
-                        disabled: true,
-                        theme: &theme(),
-                    },
-                    Rc::new(move |id, cx| {
-                        let _ = weak.update(cx, |this: &mut SignIn, cx| {
-                            let channel = match id {
-                                1 => crate::release_channel::ReleaseChannel::Public,
-                                2 => crate::release_channel::ReleaseChannel::Testing,
-                                _ => return,
-                            };
-                            this.change_channel(channel, cx);
-                        });
-                    }),
-                    cx,
-                )
-                .accessibility_label(format!("Environment: {}", channel.label()))
-            })
-        };
         let agreement_save = control(6, "Save as…", ButtonStyle::Default, cx);
         let agreement_decline = control(7, "Decline & Quit", ButtonStyle::Default, cx);
         let account_id = cx.new(|cx| {
@@ -311,7 +285,7 @@ impl SignIn {
             back,
             help,
             privacy,
-            channel_control,
+            channel_control: None,
             channel,
             channel_busy: false,
             select_channel: None,
@@ -398,8 +372,35 @@ impl SignIn {
             cx.notify();
         }
     }
-    pub fn channel_selection(&mut self, select: SelectChannel, cx: &mut Context<Self>) {
-        self.select_channel = Some(select);
+    pub fn show_environment_selector(
+        &mut self,
+        select: Option<SelectChannel>,
+        cx: &mut Context<Self>,
+    ) {
+        let weak = cx.weak_entity();
+        let label = self.channel.label();
+        self.channel_control = Some(cx.new(|cx| {
+            controls::Control::new(
+                8,
+                controls::Properties {
+                    kind: controls::Kind::Popup,
+                    label,
+                    disabled: true,
+                    theme: &theme(),
+                },
+                Rc::new(move |id, cx| {
+                    let channel = match id {
+                        1 => ReleaseChannel::Public,
+                        2 => ReleaseChannel::Testing,
+                        _ => return,
+                    };
+                    let _ = weak.update(cx, |this, cx| this.change_channel(channel, cx));
+                }),
+                cx,
+            )
+            .accessibility_label(format!("Environment: {label}"))
+        }));
+        self.select_channel = select;
         cx.notify();
     }
 
@@ -434,7 +435,8 @@ impl SignIn {
 
     fn render_channel(&mut self, busy: bool, cx: &mut Context<Self>) {
         let channel = self.channel;
-        self.channel_control.update(cx, |control, cx| {
+        let Some(control) = &self.channel_control else { return };
+        control.update(cx, |control, cx| {
             control.set(
                 controls::Properties {
                     kind: controls::Kind::Popup,
@@ -882,8 +884,10 @@ impl Render for SignIn {
                         &this.help,
                         &this.privacy,
                         &this.account_id,
-                        &this.channel_control,
-                    ] {
+                    ]
+                    .into_iter()
+                    .chain(this.channel_control.as_ref())
+                    {
                         control.update(cx, |control, cx| {
                             control.show_keyboard_focus_if_focused(window, cx);
                         });
@@ -957,15 +961,12 @@ impl Render for SignIn {
                         },
                     )
                     .child(form)
-                    .when(!failure, |canvas| {
-                        canvas.child(
-                            div()
-                                .absolute()
-                                .left(sp(24.))
-                                .top(sp(16.))
-                                .child(self.channel_control.clone()),
-                        )
-                    }),
+                    .when_some(
+                        self.channel_control.clone().filter(|_| !failure),
+                        |canvas, control| {
+                            canvas.child(div().absolute().left(sp(24.)).top(sp(16.)).child(control))
+                        },
+                    ),
             )
             .child(
                 div()

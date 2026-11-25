@@ -249,16 +249,19 @@ impl Shell {
                         let channel_host = cx.weak_entity();
                         view.update(cx, |view, cx| {
                             view.profile(&host.account_profile, cx);
-                            view.channel_selection(
-                                Rc::new(move |channel, cx| {
-                                    channel_host
-                                        .update(cx, |host, cx| host.switch_channel(channel, cx))
-                                        .map_err(|_| {
-                                            "Playbit closed before switching channels".to_owned()
-                                        })?
-                                }),
-                                cx,
-                            );
+                            if host.show_environment_selector {
+                                view.show_environment_selector(
+                                    Some(Rc::new(move |channel, cx| {
+                                        channel_host
+                                            .update(cx, |host, cx| host.switch_channel(channel, cx))
+                                            .map_err(|_| {
+                                                "Playbit closed before switching channels"
+                                                    .to_owned()
+                                            })?
+                                    })),
+                                    cx,
+                                );
+                            }
                         });
                         host.sign_in = Some(view);
                         maybe_send_crash_reports(cx, host);

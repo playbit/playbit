@@ -1124,6 +1124,7 @@ impl Shell {
             sign_in: None,
             sign_in_opening: false,
             channel_switching: false,
+            show_environment_selector: crate::engine::profile::testing_profile_directory_exists(),
             channel: crate::release_channel::ReleaseChannel::Public,
             account_key_backup: Default::default(),
             account_profile: AccountProfile { agreement_required: false, replacement_required: false, display_name: None, unlocked: false, initialized: false },

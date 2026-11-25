@@ -1429,7 +1429,14 @@ fn deliver(
                 cx,
             ) {
                 Ok((_, view)) => {
-                    view.update(cx, |view, cx| view.profile(&profile, cx));
+                    let show_environment_selector =
+                        crate::engine::profile::testing_profile_directory_exists();
+                    view.update(cx, |view, cx| {
+                        view.profile(&profile, cx);
+                        if show_environment_selector {
+                            view.show_environment_selector(None, cx);
+                        }
+                    });
                     cx.spawn(async move |cx| {
                         while let Ok((ticket, result)) = replies.recv().await {
                             if view.update(cx, |view, cx| view.receive(ticket, result, cx)).is_err()

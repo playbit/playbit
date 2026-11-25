@@ -100,7 +100,9 @@ impl Shell {
                 destructive: false,
             },
             MenuEntry::Separator,
-            MenuEntry::Submenu {
+        ];
+        if self.show_environment_selector {
+            items.push(MenuEntry::Submenu {
                 label: "Environment".into(),
                 icon: None,
                 disabled: self.channel_switching || self.channel.is_personal(),
@@ -119,11 +121,13 @@ impl Shell {
                     destructive: false,
                 })
                 .collect(),
-            },
-            MenuEntry::Separator,
+            });
+            items.push(MenuEntry::Separator);
+        }
+        items.extend([
             item(4, "Documentation", MenuIcon::OpenBook, false),
             item(5, "Feedback in Discord", MenuIcon::Talk, false),
-        ];
+        ]);
         if update_ready {
             items.push(MenuEntry::Action {
                 icon: None,
@@ -417,6 +421,34 @@ pub(super) fn dialog_action(action: &dyn gpui::Action) -> bool {
 #[allow(clippy::unwrap_used, reason = "Tests inspect rendered modal input routes.")]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn account_menu_includes_environment_only_when_enabled(cx: &mut gpui::TestAppContext) {
+        // Hiding the submenu leaves a single separator above the help links.
+        let (host, _, _) = test_support::host(cx);
+        for visible in [false, true] {
+            host.update(cx, |host, cx| {
+                host.show_environment_selector = visible;
+                let control = host.account_button(cx);
+                let (items, _, _) = control.read(cx).popup_for_test();
+                let menu = &items[5..];
+                let help = if visible {
+                    assert!(matches!(&menu[..3], [
+                        MenuEntry::Separator,
+                        MenuEntry::Submenu { label, items, .. },
+                        MenuEntry::Separator,
+                    ] if label == "Environment" && items.len() == 2));
+                    &menu[3]
+                } else {
+                    assert!(matches!(&menu[0], MenuEntry::Separator));
+                    &menu[1]
+                };
+                assert!(
+                    matches!(help, MenuEntry::Action { label, .. } if label == "Documentation")
+                );
+            });
+        }
+    }
 
     #[gpui::test]
     fn work_offline_menu_reflects_engine_intent_and_submits_the_opposite_mode(

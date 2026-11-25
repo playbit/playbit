@@ -25,6 +25,11 @@ pub(super) fn default_path(home: &Path, channel: ReleaseChannel) -> PathBuf {
     })
 }
 
+#[cfg(feature = "desktop-ui")]
+pub(crate) fn testing_profile_directory_exists() -> bool {
+    dirs::home_dir().is_some_and(|home| default_path(&home, ReleaseChannel::Testing).is_dir())
+}
+
 pub(crate) struct Selection {
     pub(crate) channel: ReleaseChannel,
     pub(crate) path: PathBuf,

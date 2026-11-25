@@ -27,11 +27,11 @@ fn channel_selection_precedes_authentication_and_admits_only_one_switch(
     });
     let received = selected.clone();
     view.update(cx, |view, cx| {
-        view.channel_selection(
-            Rc::new(move |channel, _| {
+        view.show_environment_selector(
+            Some(Rc::new(move |channel, _| {
                 received.borrow_mut().push(channel);
                 Ok(())
-            }),
+            })),
             cx,
         );
         view.change_channel(ReleaseChannel::Testing, cx);
@@ -61,7 +61,10 @@ fn rejected_channel_selection_keeps_the_original_environment_and_error(
         open(ReleaseChannel::Public, false, Rc::new(|_, _| Ok(())), Rc::new(|_| {}), cx).unwrap()
     });
     view.update(cx, |view, cx| {
-        view.channel_selection(Rc::new(|_, _| Err("Another app is still using Public".into())), cx);
+        view.show_environment_selector(
+            Some(Rc::new(|_, _| Err("Another app is still using Public".into()))),
+            cx,
+        );
         view.change_channel(ReleaseChannel::Testing, cx);
         assert_eq!(view.channel, ReleaseChannel::Public);
         assert!(!view.channel_busy);
@@ -104,11 +107,11 @@ fn channel_failures_keep_the_current_setup_form_and_can_retry_the_switch(
             view.flow.step = step;
             view.flow.saved_key = crate::store::account_key::format(&[3; 16]);
             view.saved.update(cx, |field, cx| field.acknowledge(None, &view.flow.saved_key, cx));
-            view.channel_selection(
-                Rc::new(move |_, _| {
+            view.show_environment_selector(
+                Some(Rc::new(move |_, _| {
                     selected.set(selected.get() + 1);
                     if deferred { Ok(()) } else { Err("Another app is still using Public".into()) }
-                }),
+                })),
                 cx,
             );
             view.change_channel(ReleaseChannel::Testing, cx);
@@ -186,11 +189,11 @@ fn locked_public_account_can_select_testing_without_providing_its_key(
     });
     let chosen = selected.clone();
     view.update(cx, |view, cx| {
-        view.channel_selection(
-            Rc::new(move |channel, _| {
+        view.show_environment_selector(
+            Some(Rc::new(move |channel, _| {
                 chosen.set(Some(channel));
                 Ok(())
-            }),
+            })),
             cx,
         );
         view.flow = Flow::new(true);
@@ -900,6 +903,15 @@ fn tab_cycles_fields_and_enabled_button_in_both_directions(cx: &mut gpui::TestAp
         open(ReleaseChannel::Public, false, Rc::new(|_, _| Ok(())), Rc::new(|_| {}), cx).unwrap()
     });
     cx.run_until_parked();
+    window
+        .update(cx, |_, window, _| {
+            assert!(
+                !window
+                    .accessibility_nodes_for_test()
+                    .any(|(_, node)| { node.role() == gpui::accesskit::Role::ComboBox })
+            );
+        })
+        .unwrap();
     cx.simulate_keystrokes(window.into(), "tab");
     window
         .update(cx, |view, window, cx| {
@@ -947,13 +959,14 @@ fn tab_cycles_fields_and_enabled_button_in_both_directions(cx: &mut gpui::TestAp
             });
         })
         .unwrap();
-    view.update(cx, |view, cx| view.channel_selection(Rc::new(|_, _| Ok(())), cx));
+    view.update(cx, |view, cx| view.show_environment_selector(Some(Rc::new(|_, _| Ok(()))), cx));
     cx.run_until_parked();
     cx.simulate_keystrokes(window.into(), "shift-tab");
     window
         .update(cx, |view, window, cx| {
-            assert!(view.channel_control.read(cx).focused(window));
-            assert!(view.channel_control.read(cx).keyboard_focus_visible(window));
+            let selector = view.channel_control.as_ref().unwrap().read(cx);
+            assert!(selector.focused(window));
+            assert!(selector.keyboard_focus_visible(window));
         })
         .unwrap();
 }
