@@ -62,7 +62,7 @@ pub(super) struct State {
     instance_error: Option<String>,
     action_busy: bool,
     pending_scope: Option<(Role, Id, bool)>,
-    uncertain_app: Option<AppIdentity>,
+    uncertain_creation: Option<(AppIdentity, BTreeSet<String>)>,
     pub(super) root_open: bool,
     selected_role: Option<Role>,
     scope_in_session: bool,
@@ -86,6 +86,13 @@ pub(super) struct State {
 }
 
 impl State {
+    fn creation_uncertain(&self, app: &Application) -> bool {
+        self.uncertain_creation.as_ref().is_some_and(|(identity, previous_sessions)| {
+            identity == &app.identity
+                && app.sessions.iter().all(|id| previous_sessions.contains(id))
+        })
+    }
+
     pub(super) fn highlighted_instance(&self) -> Option<&LaunchOwner> {
         match self.instance {
             Some(id) => self.owners.iter().find(|owner| owner.instance.id == id),
@@ -206,10 +213,10 @@ impl State {
                 .then_with(|| a.identity.app_id.cmp(&b.identity.app_id))
         });
         self.apps = apps;
-        if self.uncertain_app.as_ref().is_some_and(|identity| {
-            self.apps.iter().any(|app| &app.identity == identity && !app.sessions.is_empty())
-        }) {
-            self.uncertain_app = None;
+        if self.uncertain_creation.is_some()
+            && !self.apps.iter().any(|app| self.creation_uncertain(app))
+        {
+            self.uncertain_creation = None;
         }
         if self
             .selected

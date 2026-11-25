@@ -316,17 +316,14 @@ impl Shell {
             .find(|app| Some(&app.identity) == self.applications.selected.as_ref())
             .cloned();
         if let Some(app) = app.filter(|app| app.can_open) {
-            if let Some(session) = app.sessions.first() {
-                self.open_retained_session(session.clone(), cx);
-            } else {
-                self.start_imported_application(app, cx);
-            }
+            self.start_application_session(app, cx);
         }
     }
 
-    pub(super) fn start_imported_application(&mut self, app: Application, cx: &mut Context<Self>) {
+    fn start_application_session(&mut self, app: Application, cx: &mut Context<Self>) {
         if self.applications.action_busy
-            || self.applications.uncertain_app.as_ref() == Some(&app.identity)
+            || self.applications.creation_uncertain(&app)
+            || !self.prepare_browser_navigation(cx)
         {
             return;
         }
@@ -441,7 +438,8 @@ impl Shell {
                     Ok(_) => {}
                     Err(error) => {
                         host.error = if uncertain {
-                            host.applications.uncertain_app = Some(app.identity);
+                            host.applications.uncertain_creation =
+                                Some((app.identity, app.sessions.into_iter().collect()));
                             format!(
                                 "The session may have been created. \
                                  Check retained sessions before opening again. {error}"

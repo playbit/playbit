@@ -618,9 +618,15 @@ impl Engine {
         Ok(reply)
     }
     fn begin_network_work(&mut self, work: NetworkWork) -> Result<Reply> {
-        // This lane also serves local file/copy/recovery operations. Those
-        // remain admitted; their remote fallbacks enforce connection intent.
-        if self.network.connection_status.offline() && !matches!(work, NetworkWork::Diagnostic(_)) {
+        // Cached builds and local file/copy/recovery operations can complete
+        // offline. Their remote fallbacks enforce connection intent.
+        if self.network.connection_status.offline()
+            && !matches!(
+                work,
+                NetworkWork::Diagnostic(_)
+                    | NetworkWork::Developer(Request::CreateBuildSession { .. })
+            )
+        {
             return Err("Work Offline is enabled. Turn it off to connect.".into());
         }
         let continue_sync = matches!(

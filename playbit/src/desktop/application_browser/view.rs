@@ -247,8 +247,7 @@ impl Shell {
         }
         let selected = self.selected_session_id().map(str::to_owned);
         let busy = self.applications.action_busy
-            || self.applications.uncertain_app.as_ref() == Some(&app.identity)
-                && app.sessions.is_empty()
+            || selected.is_none() && self.applications.creation_uncertain(&app)
             || selected.as_ref().is_some_and(|id| self.launches.contains_key(id));
         let header = self
             .application_heading(
@@ -519,9 +518,16 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Entity<controls::Control> {
         let target = self.application_stop_target();
+        let label = if target.is_some() {
+            "Stop instance"
+        } else if self.selected_session_id().is_some() {
+            "Resume session"
+        } else {
+            "Start new session"
+        };
         let toggle = self.host_callback(
             if target.is_some() { "application-stop" } else { "application-play" },
-            if target.is_some() { "Stop instance" } else { "Open app" },
+            label,
             busy,
             |host, cx| host.toggle_application(cx),
             cx,

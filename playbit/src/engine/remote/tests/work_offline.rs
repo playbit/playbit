@@ -69,6 +69,41 @@ fn offline_startup_retains_enrollment_and_local_work_without_connection_attempts
 }
 
 #[test]
+fn offline_session_creation_uses_a_cached_build() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open(directory.path()).unwrap();
+    engine.dispatch_reply(Request::WorkOffline { enabled: true }).unwrap();
+    let store = &engine.services.store;
+    let package =
+        crate::package::signature::testing::signed(store, crate::engine::tests::button_package())
+            .unwrap();
+    let root = store.create_volume("Existing root", false).unwrap();
+    let retained = engine.create_session(package, root.id).unwrap();
+    let mut create = |build| {
+        let ticket = engine
+            .begin_network_request(Request::CreateBuildSession { build, root: None, user: None })
+            .unwrap();
+        collect_until(&mut engine, |engine| engine.network_request_complete(&ticket));
+        engine.take_network_request(ticket)
+    };
+    let Reply::Developer(crate::engine::reply::DeveloperReply::Session(created)) =
+        create(retained.resolved_build_id.clone()).unwrap()
+    else {
+        panic!("expected a new session");
+    };
+    assert_ne!(created.id, retained.id);
+    assert_eq!(created.resolved_build_id, retained.resolved_build_id);
+    assert!(
+        create(crate::identifier::encode(&[9; 32]))
+            .unwrap_err()
+            .to_string()
+            .contains("Work Offline")
+    );
+    assert_eq!(engine.services.store.retained_sessions().unwrap().len(), 2);
+    assert!(engine.remote.as_ref().unwrap().address_lookup.is_none());
+}
+
+#[test]
 fn offline_blocks_transport_and_enrollment_without_changing_identity() {
     let directory = tempfile::tempdir().unwrap();
     let mut engine = Engine::open(directory.path()).unwrap();

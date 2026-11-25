@@ -63,6 +63,42 @@ fn draw(visual: &mut gpui::VisualTestContext) {
 }
 
 #[gpui::test]
+fn play_starts_a_session_for_an_app_and_resumes_the_selected_session(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (host, window, requests) = scope(cx);
+    let session = host.update(cx, |host, cx| {
+        let session = host.applications.catalog[0].clone();
+        assert!(host.select_application_target(Target::Application(session.app.clone()), cx));
+        session
+    });
+    cx.run_until_parked();
+    while requests.try_recv().is_ok() {}
+    test_support::focus_button(window, "application-play", cx);
+    test_support::press(window, "enter", cx);
+    host.update(cx, |host, cx| {
+        // The disconnected engine leaves the creation unconfirmed. The existing
+        // session must still be available to resume, even after a catalog refresh.
+        host.apply_application_catalog(vec![session.clone()], cx);
+        assert!(host.applications.creation_uncertain(&host.applications.apps[0]));
+        assert!(host.selected_session_id().is_none());
+        assert!(host.select_application_target(Target::Session(session.id.clone()), cx));
+    });
+    cx.run_until_parked();
+    test_support::focus_button(window, "application-play", cx);
+    test_support::press(window, "enter", cx);
+    assert!(matches!(requests.try_recv(), Ok(Message::Request(QueuedRequest {
+        request: Request::PrepareSession { session: id }, ..
+    })) if id == session.id));
+    host.update(cx, |host, cx| {
+        let mut created = session.clone();
+        created.id = crate::identifier::encode(&[9; 32]);
+        host.apply_application_catalog(vec![session, created], cx);
+        assert!(host.applications.uncertain_creation.is_none());
+    });
+}
+
+#[gpui::test]
 fn loaded_invitation_row_opens_consent_and_becomes_a_retained_session(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -498,7 +534,7 @@ fn volumes_lists_apps_by_name_and_browses_session_data(cx: &mut gpui::TestAppCon
     visual.update(|window, _| {
         assert!(window.accessibility_nodes_for_test().all(|(_, node)| !matches!(
             node.label(),
-            Some("Open app" | "New instance" | "Share session" | "Log")
+            Some("Start new session" | "Resume session" | "New instance" | "Share session" | "Log")
         )));
     });
     click("Apps", &mut visual);
