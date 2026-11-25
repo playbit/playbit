@@ -128,8 +128,7 @@ impl Render for Inspector {
 fn inspector_scroll_appends_one_page_and_reuses_only_visible_row_identities(
     cx: &mut gpui::TestAppContext,
 ) {
-    // Exercise the actual inspector while paging, then check its window-corner rail
-    // clearance at both UI zooms without adding rounding to the tracked content.
+    // Exercise the actual inspector while paging, then check its permanent gutter at both zooms.
     cx.update(zoom::install);
     cx.set_auto_hide_scrollbars(false);
     cx.text_system()
@@ -196,7 +195,6 @@ fn inspector_scroll_appends_one_page_and_reuses_only_visible_row_identities(
                     .unwrap();
                 assert_eq!(handle.corner_radius(), px(0.));
                 assert!(handle.max_offset().height > px(0.));
-                assert_eq!(fixture.0.read(cx).scrolling.inspector_clearance(cx), 16.);
                 let time = history_time(revision(0).origin_clock);
                 let dates: Vec<_> = window
                     .accessibility_nodes_for_test()
@@ -205,17 +203,16 @@ fn inspector_scroll_appends_one_page_and_reuses_only_visible_row_identities(
                     .collect();
                 assert!(!dates.is_empty());
                 for date in dates {
-                    assert!(date.x1 <= f64::from(bounds.right() - px(24. * zoom::factor(cx))));
+                    assert!(date.x1 <= f64::from(bounds.right() - px(12. * zoom::factor(cx))));
                 }
-                assert_eq!(rail.x0, f64::from(bounds.right() - px(16. * zoom::factor(cx))));
-                assert_eq!(rail.x1, f64::from(bounds.right()));
+                assert_eq!(rail.x0, f64::from(bounds.right()));
+                assert_eq!(rail.x1, f64::from(bounds.right() + px(16. * zoom::factor(cx))));
                 assert_eq!(rail.y0, f64::from(bounds.top()));
                 assert_eq!(rail.y1, f64::from(bounds.bottom()));
             })
             .unwrap();
     }
-    // Shrinking the real history and growing its viewport retires both the rail
-    // and its content gutter through layout, without resetting the scroll handle.
+    // Shrinking the real history retires the rail and clamps the existing scroll handle.
     window
         .update(cx, |fixture, _, cx| {
             fixture.1 = 600.;
@@ -233,7 +230,6 @@ fn inspector_scroll_appends_one_page_and_reuses_only_visible_row_identities(
             let handle = browser.scrolling.permissions.read(cx).handle();
             assert_eq!(handle.max_offset().height, px(0.));
             assert_eq!(handle.offset().y, px(0.));
-            assert_eq!(browser.scrolling.inspector_clearance(cx), 0.);
             assert!(
                 window
                     .accessibility_nodes_for_test()

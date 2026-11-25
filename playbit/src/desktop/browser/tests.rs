@@ -3056,7 +3056,7 @@ fn browser_scrollbars_share_virtual_list_state_and_keep_columns_independent(
     visual.run_until_parked();
     let content = visual.debug_bounds("browser-content").unwrap();
     assert!(content.size.width >= px(480.));
-    assert!(handles[2].bounds().size.width >= px(259.));
+    assert!(handles[2].bounds().size.width >= px(243.));
     let (lower, upper, upper_offset) = window
         .update(&mut visual, |browser, window, cx| {
             let lower = browser.scrolling.content_columns.read(cx).handle();

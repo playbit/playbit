@@ -267,6 +267,8 @@ pub(crate) trait Platform: 'static {
 
     fn set_cursor_style(&self, style: CursorStyle);
     fn should_auto_hide_scrollbars(&self) -> bool;
+    #[cfg(target_os = "macos")]
+    fn on_scrollbar_style_change(&self, _callback: Box<dyn FnMut()>) {}
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     fn write_to_primary(&self, item: ClipboardItem);

@@ -220,6 +220,7 @@ fn owner_row_uses_the_single_configured_grant_and_allows_explicit_upgrade(
     cx: &mut gpui::TestAppContext,
 ) {
     // A nonpreset owner grant stays editable without a duplicate row or a rendering-time authority change.
+    cx.set_auto_hide_scrollbars(true);
     let (send, requests, _) = worker_queue::channel();
     let window = cx.add_window(|_, cx| Browser::new(volume(1), send, cx));
     let browser = window.root(cx).unwrap();

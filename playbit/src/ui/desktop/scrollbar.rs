@@ -1,7 +1,7 @@
-//! Overlay scrollbars sharing the viewport's existing GPUI scroll state.
+//! Desktop scrollbars sharing the viewport's existing GPUI scroll state.
 use super::zoom;
 use gpui::{
-    AnyWindowHandle, Bounds, Context, Entity, HitboxBehavior, MouseButton, MouseDownEvent,
+    AnyWindowHandle, App, Bounds, Context, Entity, HitboxBehavior, MouseButton, MouseDownEvent,
     MouseExitEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Size, Subscription,
     Task, Timer, Window, accesskit, canvas, fill, point, prelude::*, px, rgba, size,
 };
@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 const VISIBLE_FOR: Duration = Duration::from_secs(2);
 const FADE_FOR: Duration = Duration::from_millis(200);
+const RAIL_CLEARANCE: f32 = 8.;
+const RAIL_MIN_CENTER: f32 = 8.;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Geometry {
@@ -20,6 +22,7 @@ struct Geometry {
 }
 impl Geometry {
     fn new(
+        extent: f32,
         viewport: f32,
         maximum: f32,
         offset: f32,
@@ -27,10 +30,10 @@ impl Geometry {
         end: f32,
         minimum: f32,
     ) -> Option<Self> {
-        if maximum <= 0. || viewport <= inset + end {
+        if maximum <= 0. || viewport <= 0. || extent <= inset + end {
             return None;
         }
-        let length = viewport - inset - end;
+        let length = extent - inset - end;
         let stretch = offset - offset.clamp(-maximum, 0.);
         let thumb_length =
             (length * viewport / (viewport + maximum) - stretch.abs()).max(minimum).min(length);
@@ -59,6 +62,7 @@ pub struct Scrollbars {
     drag: Option<Drag>,
     hide: Option<Task<()>>,
     complex: bool,
+    parent_corner_radius: f32,
     owner: Option<AnyWindowHandle>,
     activation: Option<Subscription>,
     identities: Option<[Entity<()>; 2]>,
@@ -66,9 +70,20 @@ pub struct Scrollbars {
 }
 impl Scrollbars {
     pub fn new(complex_background: bool) -> Self {
+        Self::with_corner_radius(complex_background, 0.)
+    }
+
+    /// Include a rounded parent whose clipping is outside the tracked viewport.
+    pub fn with_corner_radius(complex_background: bool, parent_corner_radius: f32) -> Self {
         let handle = ScrollHandle::new();
         #[cfg(target_os = "macos")]
-        handle.enable_elastic_scroll();
+        {
+            handle.enable_elastic_scroll();
+            handle.reserve_permanent_scrollbar_gutter(
+                zoom::length(parent_corner_radius.max(RAIL_MIN_CENTER)),
+                zoom::length(RAIL_CLEARANCE),
+            );
+        }
         Self {
             handle,
             snapshot: None,
@@ -77,6 +92,7 @@ impl Scrollbars {
             drag: None,
             hide: None,
             complex: complex_background,
+            parent_corner_radius,
             owner: None,
             activation: None,
             identities: None,
@@ -88,6 +104,21 @@ impl Scrollbars {
     }
     pub fn handle(&self) -> ScrollHandle {
         self.handle.clone()
+    }
+
+    fn rail_center(&self, window: &Window) -> Pixels {
+        self.handle
+            .corner_radius()
+            .max(zoom::pixels(window, self.parent_corner_radius.max(RAIL_MIN_CENTER)))
+    }
+
+    /// Gutter width for a viewport with square corners whose content is measured manually.
+    pub(crate) fn gutter_width(&self, window: &Window, cx: &App) -> Pixels {
+        if cfg!(target_os = "macos") && !cx.should_auto_hide_scrollbars() {
+            self.rail_center(window) + zoom::pixels(window, RAIL_CLEARANCE)
+        } else {
+            px(0.)
+        }
     }
     fn opacity(&self, now: Instant, always: bool) -> f32 {
         if always || self.hovered || self.drag.is_some() {
@@ -123,13 +154,6 @@ impl Scrollbars {
     }
     /// Add after the scrollable child, outside its content mask and offset.
     pub fn overlay(entity: &Entity<Self>) -> impl IntoElement {
-        Self::overlay_with_corner_radius(entity, 0.)
-    }
-    /// Include a rounded parent whose clipping is outside the tracked viewport.
-    pub fn overlay_with_corner_radius(
-        entity: &Entity<Self>,
-        corner_radius: f32,
-    ) -> impl IntoElement {
         let before = entity.downgrade();
         let paint = entity.downgrade();
         canvas(
@@ -158,22 +182,21 @@ impl Scrollbars {
                     let always = !cx.should_auto_hide_scrollbars();
                     let expanded = always || this.hovered || this.drag.is_some();
                     let mut rails = Vec::with_capacity(2);
+                    let viewport = this.handle.bounds().size;
                     for axis in 0..2 {
-                        let (view, maximum, offset, other) = if axis == 0 {
-                            (bounds.size.width, max.width, offsets.x, max.height)
+                        let (extent, view, maximum, offset, other) = if axis == 0 {
+                            (bounds.size.width, viewport.width, max.width, offsets.x, max.height)
                         } else {
-                            (bounds.size.height, max.height, offsets.y, max.width)
+                            (bounds.size.height, viewport.height, max.height, offsets.y, max.width)
                         };
-                        let center = this
-                            .handle
-                            .corner_radius()
-                            .max(zoom::pixels(window, corner_radius.max(8.)));
+                        let center = this.rail_center(window);
                         let half = zoom::pixels(window, if expanded { 7. } else { 4. });
                         let inset = center - half;
                         let end =
                             if other > px(0.) { center + zoom::pixels(window, 7.) } else { inset };
                         let Some(geometry) = Geometry::new(
-                            view.into(),
+                            extent.into(),
+                            if always && cfg!(target_os = "macos") { view } else { extent }.into(),
                             maximum.into(),
                             offset.into(),
                             inset.into(),
@@ -182,7 +205,7 @@ impl Scrollbars {
                         ) else {
                             continue;
                         };
-                        let thickness = center + zoom::pixels(window, 8.);
+                        let thickness = center + zoom::pixels(window, RAIL_CLEARANCE);
                         let hit_bounds = if axis == 0 {
                             Bounds::new(
                                 point(bounds.left(), bounds.bottom() - thickness),
@@ -305,10 +328,7 @@ impl Scrollbars {
                     if opacity > 0. {
                         for (axis, geometry, _) in &rails {
                             let thickness = zoom::pixels(window, if expanded { 14. } else { 8. });
-                            let center = this
-                                .handle
-                                .corner_radius()
-                                .max(zoom::pixels(window, corner_radius.max(8.)));
+                            let center = this.rail_center(window);
                             let cross = center + thickness / 2.;
                             let display = window.scale_factor();
                             let rect = |start: f32, length: f32| {
@@ -535,7 +555,13 @@ mod tests {
                         .size_full()
                         .overflow_scroll()
                         .track_scroll(&self.0.read(cx).handle())
-                        .child(gpui::div().w(px(280.)).h(px(800.)).flex_none()),
+                        .child(
+                            gpui::div()
+                                .debug_selector(|| "scroll-content".into())
+                                .w_full()
+                                .h(px(800.))
+                                .flex_none(),
+                        ),
                 )
                 .child(Scrollbars::overlay(&self.0))
         }
@@ -544,7 +570,6 @@ mod tests {
     struct RoundedFixture {
         bars: Entity<Scrollbars>,
         local_radius: f32,
-        parent_radius: f32,
         horizontal: bool,
     }
     impl gpui::Render for RoundedFixture {
@@ -558,7 +583,8 @@ mod tests {
                         .id("rounded-viewport")
                         .size_full()
                         .rounded(zoom::pixels(window, self.local_radius))
-                        .overflow_scroll()
+                        .overflow_y_scroll()
+                        .when(self.horizontal, |viewport| viewport.overflow_x_scroll())
                         .track_scroll(&self.bars.read(cx).handle())
                         .child(
                             gpui::div()
@@ -567,7 +593,7 @@ mod tests {
                                 .flex_none(),
                         ),
                 )
-                .child(Scrollbars::overlay_with_corner_radius(&self.bars, self.parent_radius))
+                .child(Scrollbars::overlay(&self.bars))
         }
     }
     #[gpui::test]
@@ -579,7 +605,6 @@ mod tests {
         let window = cx.add_window(|_, cx| RoundedFixture {
             bars: cx.new(|_| Scrollbars::new(false)),
             local_radius: 0.,
-            parent_radius: 0.,
             horizontal: true,
         });
         for scale in [10_000, 20_000] {
@@ -596,7 +621,7 @@ mod tests {
                 window
                     .update(cx, |fixture, window, cx| {
                         fixture.local_radius = local;
-                        fixture.parent_radius = parent;
+                        fixture.bars = cx.new(|_| Scrollbars::with_corner_radius(false, parent));
                         fixture.horizontal = horizontal;
                         window.refresh();
                         cx.notify();
@@ -623,12 +648,16 @@ mod tests {
                         };
                         let vertical = rail("Vertical scroll");
                         assert_eq!(vertical.x0, f64::from(300. - thickness));
+                        let viewport = fixture.bars.read(cx).handle.bounds();
+                        assert_eq!(f64::from(viewport.right()), vertical.x0);
                         if horizontal {
                             let horizontal = rail("Horizontal scroll");
                             assert_eq!(horizontal.y0, f64::from(180. - thickness));
+                            assert_eq!(f64::from(viewport.bottom()), horizontal.y0);
                             assert_eq!(horizontal.x1, f64::from(300. - thickness));
                             assert_eq!(vertical.y1, f64::from(180. - thickness));
                         } else {
+                            assert_eq!(viewport.bottom(), px(180.));
                             assert_eq!(vertical.y1, 180.);
                             assert!(
                                 window
@@ -657,6 +686,7 @@ mod tests {
         cx.run_until_parked();
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         let rail = point(px(285.), px(140.));
+        assert_eq!(visual.debug_bounds("scroll-content").unwrap().size.width, px(300.));
         visual.simulate_mouse_move(rail, None, Default::default());
         visual.simulate_click(rail, Default::default());
         bars.read_with(cx, |bars, _| {
@@ -681,13 +711,25 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
+        assert_eq!(visual.debug_bounds("scroll-content").unwrap().size.width, px(284.));
         visual.simulate_mouse_move(rail, None, Default::default());
         assert!(
             bars.read_with(cx, |bars, _| bars.hovered),
             "Always bars remain interactive after expiry"
         );
         visual.simulate_click(rail, Default::default());
-        assert!(bars.read_with(cx, |bars, _| bars.handle.offset().y < px(0.)));
+        let offset = bars.read_with(cx, |bars, _| bars.handle.offset().y);
+        assert!(offset < px(-40.));
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: rail,
+            delta: gpui::ScrollDelta::Pixels(point(px(0.), px(40.))),
+            ..Default::default()
+        });
+        assert_eq!(bars.read_with(cx, |bars, _| bars.handle.offset().y), offset + px(40.));
+        cx.set_auto_hide_scrollbars(true);
+        cx.update(App::refresh_windows);
+        cx.run_until_parked();
+        assert_eq!(visual.debug_bounds("scroll-content").unwrap().size.width, px(300.));
     }
     #[gpui::test]
     fn dragging_survives_leaving_viewport_and_unpressed_layout_moves(
@@ -1103,20 +1145,20 @@ mod tests {
 
     #[test]
     fn overscroll_compresses_thumb_at_the_corresponding_edge() {
-        let ordinary = Geometry::new(200., 600., 0., 4., 4., 24.).unwrap();
-        let top = Geometry::new(200., 600., 10., 4., 4., 24.).unwrap();
-        let bottom = Geometry::new(200., 600., -610., 4., 4., 24.).unwrap();
+        let ordinary = Geometry::new(200., 200., 600., 0., 4., 4., 24.).unwrap();
+        let top = Geometry::new(200., 200., 600., 10., 4., 4., 24.).unwrap();
+        let bottom = Geometry::new(200., 200., 600., -610., 4., 4., 24.).unwrap();
         assert_eq!(top.thumb_length, ordinary.thumb_length - 10.);
         assert_eq!(top.thumb_start, 4.);
         assert_eq!(bottom.thumb_start + bottom.thumb_length, 196.);
     }
     #[test]
     fn thumb_tracks_content_and_both_endpoints() {
-        let first = Geometry::new(336., 672., 0., 12., 12., 24.).unwrap();
+        let first = Geometry::new(336., 336., 672., 0., 12., 12., 24.).unwrap();
         assert_eq!(first.thumb_length, 104.);
         assert_eq!(first.thumb_start, 12.);
         assert_eq!(first.offset(12., 0.), 0.);
-        let last = Geometry::new(336., 672., -672., 12., 12., 24.).unwrap();
+        let last = Geometry::new(336., 336., 672., -672., 12., 12., 24.).unwrap();
         assert_eq!(last.thumb_start + last.thumb_length, 324.);
         assert_eq!(last.offset(last.thumb_start, 0.), -672.);
         assert_eq!(last.offset(10000., 0.), -672.);
@@ -1124,9 +1166,9 @@ mod tests {
     }
     #[test]
     fn no_overflow_and_tiny_viewports_are_safe() {
-        assert!(Geometry::new(300., 0., 0., 12., 12., 24.).is_none());
-        assert!(Geometry::new(20., 400., 0., 12., 12., 24.).is_none());
-        let tiny = Geometry::new(30., 10000., 0., 12., 12., 24.).unwrap();
+        assert!(Geometry::new(300., 300., 0., 0., 12., 12., 24.).is_none());
+        assert!(Geometry::new(20., 20., 400., 0., 12., 12., 24.).is_none());
+        let tiny = Geometry::new(30., 30., 10000., 0., 12., 12., 24.).unwrap();
         assert_eq!(tiny.thumb_length, 6.);
         assert_eq!(tiny.offset(20., 3.), 0.);
     }

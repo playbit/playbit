@@ -1,5 +1,6 @@
 //! Navigation and metadata stay above the independently scrolling preview or editor.
 use super::*;
+use crate::ui::desktop::scrollbar::Scrollbars;
 use crate::ui::desktop::zoom::length as ui;
 
 // Fits a full 16-byte row, offset gutter, field padding and representation control.
@@ -42,7 +43,7 @@ impl Browser {
                     .child(metadata)
                     .children(self.entry_reveal(cx)),
             )
-            .child(scrolling::viewport_overlay(&self.scrolling.columns));
+            .child(Scrollbars::overlay(&self.scrolling.columns));
         let content = self.lower_content(window, cx);
         let lower = div()
             .debug_selector(|| "browser-lower".into())
@@ -63,7 +64,7 @@ impl Browser {
                     .track_scroll(&self.scrolling.content_columns.read(cx).handle())
                     .child(content),
             )
-            .child(scrolling::columns_overlay(&self.scrolling.content_columns));
+            .child(Scrollbars::overlay(&self.scrolling.content_columns));
         div()
             .size_full()
             .min_w_0()

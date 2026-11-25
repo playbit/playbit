@@ -1395,7 +1395,11 @@ impl Element for Div {
             *handle.last_origin.borrow_mut() = bounds.origin - window.element_offset();
         }
         let content_size = if request_layout.child_layout_ids.is_empty() {
-            bounds.size
+            if self.interactivity.base_style.scrollbar_width.is_some_and(|width| !width.is_zero()) {
+                Size::default()
+            } else {
+                bounds.size
+            }
         } else if let Some(scroll_handle) = self.interactivity.tracked_scroll_handle.as_ref() {
             let mut state = scroll_handle.0.borrow_mut();
             state.child_bounds = Vec::with_capacity(request_layout.child_layout_ids.len());
@@ -1459,16 +1463,11 @@ impl Element for Div {
                     request.bounds.size.width = bounds.size.width;
                 }
                 if let (Some(position), Some(request)) = (&scroll_position, requested.as_mut()) {
-                    let padding = style.padding.to_pixels(bounds.size.into(), window.rem_size());
-                    let maximum = (content_size
-                        + size(padding.left + padding.right, padding.top + padding.bottom)
-                        - bounds.size)
-                        .map(|v| (v * 100.).round() / 100.)
-                        .max(&Size::default());
+                    let viewport = style.scroll_viewport(bounds, window.rem_size());
                     let next = autoscroll_offset(
                         &mut request.bounds,
-                        bounds,
-                        maximum,
+                        viewport,
+                        max_scroll_offset(style, content_size, viewport, window.rem_size()),
                         style.overflow,
                         scroll_offset,
                     );
@@ -1694,7 +1693,27 @@ impl Interactivity {
                         Some(element_state.scroll_offset.get_or_insert_with(Rc::default).clone());
                 }
 
-                let style = self.compute_style_internal(None, element_state.as_mut(), window, cx);
+                let mut style =
+                    self.compute_style_internal(None, element_state.as_mut(), window, cx);
+                if let Some((minimum_radius, clearance)) = self
+                    .tracked_scroll_handle
+                    .as_ref()
+                    .and_then(|handle| handle.0.borrow().permanent_scrollbar_gutter)
+                {
+                    let width = if cx.should_auto_hide_scrollbars() {
+                        Pixels::ZERO
+                    } else {
+                        let rem = window.rem_size();
+                        let scale = window.scale_factor();
+                        let snap = |v: Pixels| (v * scale).round() / scale;
+                        let radius = style.corner_radii.to_pixels(rem).max();
+                        let width = snap(minimum_radius.to_pixels(rem)).max(radius)
+                            + snap(clearance.to_pixels(rem));
+                        (width * scale).ceil() / scale
+                    };
+                    style.scrollbar_width = width.into();
+                    self.base_style.scrollbar_width = Some(style.scrollbar_width);
+                }
                 let layout_id = f(style, window, cx);
                 (layout_id, element_state)
             },
@@ -1773,7 +1792,16 @@ impl Interactivity {
 
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
-                            let result = f(&style, scroll_offset, hitbox, window, cx);
+                            // Wheel input still reaches the viewport over the reserved gutter.
+                            let viewport = style.scroll_viewport(bounds, window.rem_size());
+                            let gutter_mask = if viewport != bounds {
+                                style.overflow_mask(viewport, window.rem_size())
+                            } else {
+                                None
+                            };
+                            let result = window.with_content_mask(gutter_mask, |window| {
+                                f(&style, scroll_offset, hitbox, window, cx)
+                            });
                             (result, element_state)
                         },
                     )
@@ -1810,11 +1838,6 @@ impl Interactivity {
         window: &mut Window,
         _cx: &mut App,
     ) -> Point<Pixels> {
-        fn round_to_two_decimals(pixels: Pixels) -> Pixels {
-            const ROUNDING_FACTOR: f32 = 100.0;
-            (pixels * ROUNDING_FACTOR).round() / ROUNDING_FACTOR
-        }
-
         if let Some(scroll_offset) = self.scroll_offset.as_ref() {
             let mut scroll_to_bottom = false;
             let mut tracked_scroll_handle =
@@ -1825,18 +1848,8 @@ impl Interactivity {
             }
 
             let rem_size = window.rem_size();
-            let padding = style.padding.to_pixels(bounds.size.into(), rem_size);
-            let padding_size = size(padding.left + padding.right, padding.top + padding.bottom);
-            // The floating point values produced by Taffy and ours often vary
-            // slightly after ~5 decimal places. This can lead to cases where after
-            // subtracting these, the container becomes scrollable for less than
-            // 0.00000x pixels. As we generally don't benefit from a precision that
-            // high for the maximum scroll, we round the scroll max to 2 decimal
-            // places here.
-            let padded_content_size = self.content_size + padding_size;
-            let scroll_max = (padded_content_size - bounds.size)
-                .map(round_to_two_decimals)
-                .max(&Default::default());
+            let viewport = style.scroll_viewport(bounds, rem_size);
+            let scroll_max = max_scroll_offset(style, self.content_size, viewport, rem_size);
             // Clamp scroll offset in case scroll max is smaller now (e.g., if children
             // were removed or the bounds became larger).
             let mut scroll_offset = scroll_offset.borrow_mut();
@@ -1851,14 +1864,14 @@ impl Interactivity {
             if let Some(mut scroll_handle_state) = tracked_scroll_handle {
                 #[cfg(target_os = "macos")]
                 if scroll_handle_state.max_offset != scroll_max
-                    || scroll_handle_state.bounds.size != bounds.size
+                    || scroll_handle_state.bounds.size != viewport.size
                 {
                     if let Some(e) = scroll_handle_state.elastic.as_mut() {
                         e.reset();
                     }
                 }
                 scroll_handle_state.max_offset = scroll_max;
-                scroll_handle_state.bounds = bounds;
+                scroll_handle_state.bounds = viewport;
                 scroll_handle_state.corner_radius = style
                     .corner_radii
                     .to_pixels(rem_size)
@@ -1928,8 +1941,12 @@ impl Interactivity {
                 window.with_element_opacity(style.opacity, |window| {
                     style.paint(bounds, window, cx, |window: &mut Window, cx: &mut App| {
                         window.with_text_style(style.text_style().cloned(), |window| {
+                            let rem_size = window.rem_size();
                             window.with_content_mask(
-                                style.overflow_mask(bounds, window.rem_size()),
+                                style.overflow_mask(
+                                    style.scroll_viewport(bounds, rem_size),
+                                    rem_size,
+                                ),
                                 |window| {
                                     window.with_tab_group(tab_group, |window| {
                                         if let Some(hitbox) = hitbox {
@@ -2498,12 +2515,9 @@ impl Interactivity {
     ) {
         if let Some(scroll_offset) = self.scroll_offset.clone() {
             let overflow = style.overflow;
-            let padding = style.padding.to_pixels(hitbox.bounds.size.into(), window.rem_size());
-            let scroll_max = (self.content_size
-                + size(padding.left + padding.right, padding.top + padding.bottom)
-                - hitbox.bounds.size)
-                .map(|v| (v * 100.).round() / 100.)
-                .max(&Size::default());
+            let rem_size = window.rem_size();
+            let viewport = style.scroll_viewport(hitbox.bounds, rem_size);
+            let scroll_max = max_scroll_offset(style, self.content_size, viewport, rem_size);
             let allow_concurrent_scroll = style.allow_concurrent_scroll;
             let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
             let line_height = window.line_height();
@@ -3143,9 +3157,33 @@ impl ScrollAnchor {
     }
 }
 
+fn max_scroll_offset(
+    style: &Style,
+    content: Size<Pixels>,
+    viewport: Bounds<Pixels>,
+    rem_size: Pixels,
+) -> Size<Pixels> {
+    let padding = style.padding.to_pixels(viewport.size.into(), rem_size);
+    // Round away insignificant differences between Taffy and GPUI's arithmetic.
+    let mut maximum = (content + size(padding.left + padding.right, padding.top + padding.bottom)
+        - viewport.size)
+        .map(|v| (v * 100.).round() / 100.)
+        .max(&Size::default());
+    if !style.scrollbar_width.is_zero() {
+        if style.overflow.x != Overflow::Scroll {
+            maximum.width = Pixels::ZERO;
+        }
+        if style.overflow.y != Overflow::Scroll {
+            maximum.height = Pixels::ZERO;
+        }
+    }
+    maximum
+}
+
 #[derive(Default, Debug)]
 struct ScrollHandleState {
     corner_radius: Pixels,
+    permanent_scrollbar_gutter: Option<(AbsoluteLength, AbsoluteLength)>,
     #[cfg(target_os = "macos")]
     elastic: Option<elastic::ElasticScroll>,
     offset: Rc<RefCell<Point<Pixels>>>,
@@ -3186,6 +3224,17 @@ impl ScrollHandle {
     /// Construct a new scroll handle.
     pub fn new() -> Self {
         Self(Rc::default())
+    }
+
+    /// Reserve a trailing gutter on each scrollable axis when the platform uses permanent bars.
+    /// The width clears the larger of the viewport's corners and the supplied minimum radius.
+    pub fn reserve_permanent_scrollbar_gutter(
+        &self,
+        minimum_radius: impl Into<AbsoluteLength>,
+        clearance: impl Into<AbsoluteLength>,
+    ) {
+        self.0.borrow_mut().permanent_scrollbar_gutter =
+            Some((minimum_radius.into(), clearance.into()));
     }
 
     /// Get the current scroll offset.

@@ -407,7 +407,8 @@ impl LogView {
     }
 
     fn viewport(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) -> gpui::Div {
-        let width = bounds.size.width;
+        let width =
+            (bounds.size.width - self.scrollbars.read(cx).gutter_width(window, cx)).max(px(0.));
         let key = (width, window.rem_size(), window.scale_factor());
         let resized = self.layout_key != Some(key);
         if resized {
@@ -445,7 +446,7 @@ impl LogView {
         let maximum = (height - bounds.size.height).max(px(0.));
         let at_bottom = self.scroll.offset().y + self.scroll.max_offset().height <= px(0.5);
         if self.follow_pending
-            || (at_bottom && (resized || bounds.size != self.scroll.bounds().size))
+            || (at_bottom && (resized || bounds.size.height != self.scroll.bounds().size.height))
         {
             self.scroll.set_offset(gpui::point(px(0.), -maximum));
             self.follow_pending = false;

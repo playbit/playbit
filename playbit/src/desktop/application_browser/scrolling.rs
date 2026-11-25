@@ -5,7 +5,7 @@ impl Shell {
     pub(super) fn application_scrollbars(&mut self, cx: &mut Context<Self>) -> Entity<Scrollbars> {
         self.applications
             .scrolling
-            .get_or_insert_with(|| cx.new(|_| Scrollbars::new(false)))
+            .get_or_insert_with(|| cx.new(|_| Scrollbars::with_corner_radius(false, 16.)))
             .clone()
     }
 
@@ -22,7 +22,7 @@ impl Shell {
             .h_full()
             .relative()
             .child(content.id("application-columns").overflow_x_scroll().track_scroll(&handle))
-            .child(Scrollbars::overlay_with_corner_radius(&bars, 16.))
+            .child(Scrollbars::overlay(&bars))
     }
 }
 

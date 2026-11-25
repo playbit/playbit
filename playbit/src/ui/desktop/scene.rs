@@ -1095,6 +1095,7 @@ mod rendering_tests {
     #[gpui::test]
     fn scroll_viewports_follow_container_space_and_resize(cx: &mut gpui::TestAppContext) {
         // Check real layout and scroll extents through roots, both axes and nested containers.
+        cx.set_auto_hide_scrollbars(true);
         let canvas = |width, height| ViewNode::Canvas {
             id: 0,
             width,
@@ -1221,7 +1222,8 @@ mod rendering_tests {
         let (handle, target, retired) = window
             .update(&mut visual, |owner, window, cx| {
                 let handle = owner.scene.scrolls[&1].read(cx).handle();
-                assert_eq!(handle.max_offset().height, px(192. * 36. - 12. - 140.));
+                assert_eq!(handle.bounds().size.height, px(124.));
+                assert_eq!(handle.max_offset().height, px(192. * 36. - 12. - 124.));
                 let nodes: Vec<_> = window
                     .accessibility_nodes_for_test()
                     .filter(|(_, node)| node.role() == Role::CheckBox)

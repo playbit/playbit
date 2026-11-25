@@ -1960,8 +1960,8 @@ mod tests {
             visual.run_until_parked();
             assert!(handle.max_offset().height > px(0.));
             let bounds = handle.bounds();
-            assert_eq!(bounds.right(), px(240.));
-            let rail = gpui::point(bounds.right() - px(8.), bounds.center().y);
+            assert_eq!(bounds.right(), px(224.));
+            let rail = gpui::point(bounds.right() + px(8.), bounds.center().y);
             visual.simulate_mouse_move(rail, None, Default::default());
             visual.simulate_click(rail, Default::default());
             assert!(handle.offset().y < px(0.), "the shared rail must scroll the list");

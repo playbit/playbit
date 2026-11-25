@@ -297,10 +297,11 @@ impl Element for UniformList {
         let style = self.interactivity.compute_style(global_id, None, window, cx);
         let border = style.border_widths.to_pixels(window.rem_size());
         let padding = style.padding.to_pixels(bounds.size.into(), window.rem_size());
+        let viewport = style.scroll_viewport(bounds, window.rem_size());
 
         let padded_bounds = Bounds::from_corners(
             bounds.origin + point(border.left + padding.left, border.top + padding.top),
-            bounds.bottom_right()
+            viewport.bottom_right()
                 - point(border.right + padding.right, border.bottom + padding.bottom),
         );
 

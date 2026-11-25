@@ -2001,7 +2001,7 @@ mod tests {
             let window =
                 cx.add_window(|_, cx| AppWindow::new(None, Some(with_menu(canvas(extent))), cx));
             let visual = gpui::VisualTestContext::from_window(window.into(), cx);
-            visual.simulate_resize(gpui::size(px(640.), px(540.)));
+            visual.simulate_resize(gpui::size(px(640.), px(565.)));
             cx.run_until_parked();
             let handle =
                 window.update(cx, |owner, _, cx| owner.scrollbars.read(cx).handle()).unwrap();

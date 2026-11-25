@@ -155,6 +155,10 @@ unsafe fn build_classes() {
                 sel!(onKeyboardLayoutChange:),
                 on_keyboard_layout_change as extern "C" fn(&mut Object, Sel, id),
             );
+            decl.add_method(
+                sel!(onScrollbarStyleChange:),
+                on_scrollbar_style_change as extern "C" fn(&mut Object, Sel, id),
+            );
 
             decl.register()
         }
@@ -175,6 +179,7 @@ pub(crate) struct MacPlatformState {
     metadata_pasteboard_type: id,
     reopen: Option<Box<dyn FnMut()>>,
     on_keyboard_layout_change: Option<Box<dyn FnMut()>>,
+    on_scrollbar_style_change: Option<Box<dyn FnMut()>>,
     quit: Option<Box<dyn FnMut()>>,
     quit_requested: Option<Box<dyn FnMut()>>,
     quit_pending: bool,
@@ -237,6 +242,7 @@ impl MacPlatform {
             finish_launching: None,
             dock_menu: None,
             on_keyboard_layout_change: None,
+            on_scrollbar_style_change: None,
             menus: None,
             keyboard_mapper,
         }))
@@ -1059,6 +1065,10 @@ impl Platform for MacPlatform {
         }
     }
 
+    fn on_scrollbar_style_change(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().on_scrollbar_style_change = Some(callback);
+    }
+
     fn write_to_clipboard(&self, item: ClipboardItem) {
         use crate::ClipboardEntry;
 
@@ -1440,6 +1450,12 @@ extern "C" fn did_finish_launching(this: &mut Object, _: Sel, _: id) {
             name: name
             object: nil
         ];
+        let name = ns_string("NSPreferredScrollerStyleDidChangeNotification");
+        let _: () = msg_send![notification_center, addObserver: this as id
+            selector: sel!(onScrollbarStyleChange:)
+            name: name
+            object: nil
+        ];
 
         let platform = get_mac_platform(this);
         let callback = platform.0.lock().finish_launching.take();
@@ -1523,6 +1539,15 @@ extern "C" fn on_keyboard_layout_change(this: &mut Object, _: Sel, _: id) {
         drop(lock);
         callback();
         platform.0.lock().on_keyboard_layout_change.get_or_insert(callback);
+    }
+}
+
+extern "C" fn on_scrollbar_style_change(this: &mut Object, _: Sel, _: id) {
+    let platform = unsafe { get_mac_platform(this) };
+    let callback = platform.0.lock().on_scrollbar_style_change.take();
+    if let Some(mut callback) = callback {
+        callback();
+        platform.0.lock().on_scrollbar_style_change.get_or_insert(callback);
     }
 }
 

@@ -992,8 +992,7 @@ fn assert_key_list_scroll(handle: &gpui::ScrollHandle, window: &Window, count: u
         node.role() == gpui::accesskit::Role::ScrollBar
             && node.label() == Some("Vertical scroll")
             && node.bounds().is_some_and(|rail| {
-                rail.x0 >= bounds.left().to_f64()
-                    && rail.x1 <= bounds.right().to_f64()
+                rail.x0 == bounds.right().to_f64()
                     && rail.y0 >= bounds.top().to_f64()
                     && rail.y1 <= bounds.bottom().to_f64()
             })
@@ -3725,6 +3724,7 @@ fn browser_panes_keep_metadata_above_content_and_editors_reachable_when_resized(
 ) {
     // Render canonical and minimum heights around a live draft, preserving editor identity/focus.
     use gpui::Focusable;
+    cx.set_auto_hide_scrollbars(true);
     let (send, _requests, _) = worker_queue::channel();
     let window = cx.add_window(|window, cx| {
         let mut browser = Browser::new(volume(1), send, cx);

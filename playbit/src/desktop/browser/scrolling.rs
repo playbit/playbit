@@ -27,7 +27,7 @@ impl Scrolling {
         list.0.borrow_mut().base_handle = records.read(cx).handle();
         let columns = cx.new(|_| Scrollbars::new(false));
         Self {
-            content_columns: cx.new(|_| Scrollbars::new(false)),
+            content_columns: cx.new(|_| Scrollbars::with_corner_radius(false, 16.)),
             columns,
             reveal_entry: None,
             entries,
@@ -59,7 +59,13 @@ impl Scrolling {
     }
 
     pub fn inspector_clearance(&self, cx: &App) -> f32 {
-        if self.permissions.read(cx).handle().max_offset().height > px(0.) { 16. } else { 0. }
+        if cx.should_auto_hide_scrollbars()
+            && self.permissions.read(cx).handle().max_offset().height > px(0.)
+        {
+            16.
+        } else {
+            0.
+        }
     }
 }
 
@@ -152,19 +158,16 @@ fn entry_reveal_offset(
     Some(gpui::point((previous.x + delta).clamp(-columns.max_offset().width, px(0.)), previous.y))
 }
 
-/// The upper strip does not touch the window's bottom corners.
-pub(super) fn viewport_overlay(bars: &Entity<Scrollbars>) -> impl IntoElement {
-    Scrollbars::overlay_with_corner_radius(bars, 0.)
-}
-
-/// The lower viewport shares the native window's rounded bottom corners.
-pub(super) fn columns_overlay(bars: &Entity<Scrollbars>) -> impl IntoElement {
-    Scrollbars::overlay_with_corner_radius(bars, 16.)
-}
-
 /// Keep the overlay outside the content's clipping and scroll offset.
 pub(super) fn viewport(content: impl IntoElement, bars: &Entity<Scrollbars>) -> gpui::Div {
-    viewport_with_corner_radius(content, bars, 0.)
+    div()
+        .relative()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .h_full()
+        .child(content)
+        .child(Scrollbars::overlay(bars))
 }
 
 /// Reserve a trailing gutter only while the outer inspector actually overflows.
@@ -173,10 +176,13 @@ pub(super) fn inspector_viewport(
     bars: &Entity<Scrollbars>,
     cx: &mut Context<Browser>,
 ) -> gpui::Div {
+    if !cx.should_auto_hide_scrollbars() {
+        return viewport(content, bars);
+    }
     let handle = bars.read(cx).handle();
     let overflow = handle.max_offset().height > px(0.);
     let weak = cx.weak_entity();
-    viewport_with_corner_radius(content, bars, 0.).child(
+    viewport(content, bars).child(
         gpui::canvas(
             move |_, window, cx| {
                 if (handle.max_offset().height > px(0.)) != overflow {
@@ -191,22 +197,6 @@ pub(super) fn inspector_viewport(
         .absolute()
         .size_full(),
     )
-}
-
-/// Include a rounded parent whose clipping is outside the tracked content.
-pub(super) fn viewport_with_corner_radius(
-    content: impl IntoElement,
-    bars: &Entity<Scrollbars>,
-    corner_radius: f32,
-) -> gpui::Div {
-    div()
-        .relative()
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-        .h_full()
-        .child(content)
-        .child(Scrollbars::overlay_with_corner_radius(bars, corner_radius))
 }
 
 type DirectoryBounds = Option<(Bounds<gpui::Pixels>, gpui::Pixels)>;

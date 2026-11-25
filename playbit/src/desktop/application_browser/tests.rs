@@ -552,6 +552,7 @@ fn app_column_scrolls_with_data_and_sidebar_stays_fixed(cx: &mut gpui::TestAppCo
 fn scoped_browser_fills_its_column_across_window_widths(cx: &mut gpui::TestAppContext) {
     // Exercise both embedding depths around their minimum total widths. The preview
     // and navigator must share the browser width even while the outer columns scroll.
+    cx.set_auto_hide_scrollbars(true);
     let (host, window, requests) = scope(cx);
     let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
     for session_scope in [false, true] {
@@ -610,6 +611,7 @@ fn scoped_browser_fills_its_column_across_window_widths(cx: &mut gpui::TestAppCo
 #[gpui::test]
 fn session_and_instance_inspectors_share_the_log_and_align_metadata(cx: &mut gpui::TestAppContext) {
     // Check the actual header button and selectable metadata fields in the full shell.
+    cx.set_auto_hide_scrollbars(true);
     let (host, window, _requests) = scope(cx);
     host.update(cx, |host, cx| {
         let session = host.applications.catalog[0].clone();
@@ -820,7 +822,7 @@ fn vertical_column_rails_scroll_their_own_viewports(cx: &mut gpui::TestAppContex
     for (index, handle) in handles.iter().enumerate() {
         assert!(handle.max_offset().height > px(0.), "column {index} must overflow");
         let bounds = handle.bounds();
-        let rail = gpui::point(bounds.right() - px(8.), bounds.bottom() - px(8.));
+        let rail = gpui::point(bounds.right() + px(8.), bounds.bottom() - px(8.));
         visual.simulate_mouse_move(rail, None, Default::default());
         visual.simulate_click(rail, Default::default());
         draw(&mut visual);

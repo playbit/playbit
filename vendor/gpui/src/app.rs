@@ -644,6 +644,22 @@ impl App {
             }
         }));
 
+        #[cfg(target_os = "macos")]
+        platform.on_scrollbar_style_change(Box::new({
+            let app = Rc::downgrade(&app);
+            let executor = platform.foreground_executor();
+            move || {
+                let app = app.clone();
+                executor
+                    .spawn(async move {
+                        if let Some(app) = app.upgrade() {
+                            app.borrow_mut().update(App::refresh_windows);
+                        }
+                    })
+                    .detach();
+            }
+        }));
+
         app
     }
 

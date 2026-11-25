@@ -7,9 +7,9 @@ use std::{
 use crate::{
     AbsoluteLength, App, Background, BackgroundTag, BorderStyle, Bounds, ContentMask, Corners,
     CornersRefinement, CursorStyle, DefiniteLength, DevicePixels, Edges, EdgesRefinement, Font,
-    FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, Length, Pixels, Point,
-    PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Window, black, phi,
-    point, quad, rems, size,
+    FontFallbacks, FontFeatures, FontStyle, FontWeight, GridLocation, Hsla, IsZero, Length, Pixels,
+    Point, PointRefinement, Rgba, SharedString, Size, SizeRefinement, Styled, TextRun, Window,
+    black, phi, point, quad, rems, size,
 };
 use collections::HashSet;
 use refineable::Refineable;
@@ -535,6 +535,24 @@ impl Hash for HighlightStyle {
 }
 
 impl Style {
+    pub(crate) fn scroll_viewport(
+        &self,
+        mut bounds: Bounds<Pixels>,
+        rem_size: Pixels,
+    ) -> Bounds<Pixels> {
+        let gutter = self.scrollbar_width.to_pixels(rem_size);
+        if gutter.is_zero() {
+            return bounds;
+        }
+        if self.overflow.y == Overflow::Scroll {
+            bounds.size.width = (bounds.size.width - gutter).max(Pixels::ZERO);
+        }
+        if self.overflow.x == Overflow::Scroll {
+            bounds.size.height = (bounds.size.height - gutter).max(Pixels::ZERO);
+        }
+        bounds
+    }
+
     /// Returns true if the style is visible and the background is opaque.
     pub fn has_opaque_background(&self) -> bool {
         self.background
