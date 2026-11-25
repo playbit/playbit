@@ -346,6 +346,18 @@ unsafe fn build_window_class(
             window_did_resize as extern "C" fn(&Object, Sel, id),
         );
         decl.add_method(
+            sel!(windowWillStartLiveResize:),
+            window_style::window_will_start_live_resize as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
+            sel!(windowWillResize:toSize:),
+            window_style::window_will_resize as extern "C" fn(&Object, Sel, id, NSSize) -> NSSize,
+        );
+        decl.add_method(
+            sel!(windowDidEndLiveResize:),
+            window_style::window_did_end_live_resize as extern "C" fn(&Object, Sel, id),
+        );
+        decl.add_method(
             sel!(windowDidChangeOcclusionState:),
             window_did_change_occlusion_state as extern "C" fn(&Object, Sel, id),
         );
@@ -467,6 +479,7 @@ struct MacWindowState {
     pending_style: Option<crate::MacWindowStyle>,
     // The requested style can change during fullscreen while AppKit owns geometry.
     guest_constraint_display: Option<window_style::ConstraintDisplay>,
+    corner_resize: window_style::CornerResize,
     previous_modifiers_changed_event: Option<PlatformInput>,
     keystroke_for_do_command: Option<Keystroke>,
     do_command_handled: Option<bool>,
@@ -850,6 +863,7 @@ impl MacWindow {
                     applied_style: None,
                     pending_style: None,
                     guest_constraint_display: None,
+                    corner_resize: window_style::CornerResize::default(),
                     previous_modifiers_changed_event: None,
                     keystroke_for_do_command: None,
                     do_command_handled: None,

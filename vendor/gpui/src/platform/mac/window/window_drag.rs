@@ -75,8 +75,12 @@ impl WindowDrag {
 pub(super) extern "C" fn send_window_event(this: &Object, _: Sel, event: id) {
     unsafe {
         let state = get_window_state(this);
-        let lock = state.lock();
-        if event.eventType() == cocoa::appkit::NSEventType::NSLeftMouseDown
+        let mut lock = state.lock();
+        let left_mouse_down = event.eventType() == cocoa::appkit::NSEventType::NSLeftMouseDown;
+        if left_mouse_down {
+            lock.corner_resize = window_style::CornerResize::mouse_down(&lock, event);
+        }
+        if left_mouse_down
             && event.clickCount() == 2
             && !event.modifierFlags().contains(NSEventModifierFlags::NSControlKeyMask)
             && lock.has_custom_titlebar()

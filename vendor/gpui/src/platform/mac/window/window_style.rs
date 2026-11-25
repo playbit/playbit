@@ -147,7 +147,7 @@ fn apply(state: &Arc<Mutex<MacWindowState>>) {
         }
         set_mask(native, view, style);
         if let Some(display) = display {
-            apply_size_constraints(native, style.size_constraints, display);
+            apply_size_constraints(state, native, style.size_constraints, display);
         }
         if previous.is_none_or(|old| {
             old.transparent_titlebar != style.transparent_titlebar || old.titled != style.titled
@@ -234,9 +234,93 @@ unsafe fn set_mask(native: id, view: id, style: MacWindowStyle) {
     }
 }
 
-/// AppKit enforces the properties during live resize, but changing a property
-/// does not resize a window that already violates the new constraints.
+#[derive(Default)]
+pub(super) enum CornerResize {
+    #[default]
+    Idle,
+    Armed,
+    Live(f64),
+}
+
+impl CornerResize {
+    pub(super) fn mouse_down(window: &MacWindowState, event: id) -> Self {
+        if window.applied_style.is_none_or(|style| style.size_constraints.aspect_ratio == 0.) {
+            return Self::Idle;
+        }
+        let frame = unsafe { NSWindow::frame(window.native_window) };
+        let point = unsafe { event.locationInWindow() };
+        // AppKit confirms the resize in windowWillStartLiveResize. Use its
+        // 16-point corner reach to keep ordinary edge drags on the native path.
+        const CORNER_REACH: f64 = 16.;
+        if (frame.size.width - point.x).abs() <= CORNER_REACH && point.y.abs() <= CORNER_REACH {
+            Self::Armed
+        } else {
+            Self::Idle
+        }
+    }
+}
+
+pub(super) extern "C" fn window_will_start_live_resize(this: &Object, _: Sel, _: id) {
+    let state = unsafe { get_window_state(this) };
+    let mut window = state.lock();
+    if !matches!(window.corner_resize, CornerResize::Armed) || window.is_fullscreen() {
+        return;
+    }
+    let native = window.native_window;
+    let aspect = unsafe { native.contentAspectRatio() };
+    if aspect.width <= 0. || aspect.height <= 0. {
+        return;
+    }
+    window.corner_resize = CornerResize::Live(aspect.width / aspect.height);
+    drop(window);
+    // AppKit's aspect lock can suppress a drag that only changes one dimension.
+    // Suspend it while AppKit tracks this corner and supplies both dimensions.
+    unsafe { native.setContentResizeIncrements_(NSSize::new(1., 1.)) };
+}
+
+pub(super) extern "C" fn window_will_resize(
+    this: &Object,
+    _: Sel,
+    native: id,
+    proposed: NSSize,
+) -> NSSize {
+    if unsafe { native.inLiveResize() } == NO {
+        return proposed;
+    }
+    let state = unsafe { get_window_state(this) };
+    let CornerResize::Live(ratio) = state.lock().corner_resize else { return proposed };
+    if ratio == 0. {
+        return proposed;
+    }
+    let origin = NSPoint::new(0., 0.);
+    let content = unsafe { native.contentRectForFrameRect_(NSRect::new(origin, proposed)) };
+    let size = corner_resize_size(content.size, ratio);
+    unsafe { native.frameRectForContentRect_(NSRect::new(origin, size)) }.size
+}
+
+pub(super) extern "C" fn window_did_end_live_resize(this: &Object, _: Sel, _: id) {
+    let state = unsafe { get_window_state(this) };
+    let mut window = state.lock();
+    let resize = mem::take(&mut window.corner_resize);
+    let native = window.native_window;
+    drop(window);
+    if let CornerResize::Live(ratio) = resize
+        && ratio > 0.
+    {
+        unsafe { native.setContentAspectRatio_(NSSize::new(ratio, 1.)) };
+    }
+}
+
+fn corner_resize_size(proposed: NSSize, ratio: f64) -> NSSize {
+    // Extend the frame to the pointer on the axis that needs more space at this ratio.
+    let width = proposed.width.max(proposed.height * ratio);
+    NSSize::new(width, width / ratio)
+}
+
+/// Changing AppKit's properties does not resize a window that already violates
+/// the new constraints.
 unsafe fn apply_size_constraints(
+    state: &Arc<Mutex<MacWindowState>>,
     native: id,
     requested: MacWindowSizeConstraints,
     display: ConstraintDisplay,
@@ -248,10 +332,16 @@ unsafe fn apply_size_constraints(
         visible.map_or(current, |visible| unsafe { native.contentRectForFrameRect_(visible) }.size);
     let pixel = 1. / f64::from(display.scale);
     let (minimum, maximum, ratio, target) = content_sizes(requested, current, available, pixel);
+    let use_native_ratio = if let CornerResize::Live(live_ratio) = &mut state.lock().corner_resize {
+        *live_ratio = ratio;
+        false
+    } else {
+        true
+    };
     unsafe {
         native.setContentMinSize_(minimum);
         native.setContentMaxSize_(maximum);
-        if ratio > 0. {
+        if ratio > 0. && use_native_ratio {
             native.setContentAspectRatio_(NSSize::new(ratio, 1.));
         } else {
             // AppKit's resize increments and aspect ratio are mutually exclusive.
@@ -328,6 +418,21 @@ fn content_sizes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corner_drag_follows_the_pointer_on_the_dominant_axis() {
+        // Start at 600 by 400 and check outward and inward drags on both sides of the aspect line.
+        for (width, height, expected) in [
+            (690., 410., (690., 460.)),
+            (610., 460., (690., 460.)),
+            (570., 350., (570., 380.)),
+            (510., 380., (570., 380.)),
+            (600., 400., (600., 400.)),
+        ] {
+            let size = corner_resize_size(NSSize::new(width, height), 1.5);
+            assert_eq!((size.width, size.height), expected);
+        }
+    }
 
     #[test]
     fn resized_frame_moves_only_as_far_as_the_visible_screen_requires() {
