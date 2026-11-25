@@ -277,7 +277,10 @@ pub(crate) trait Platform: 'static {
     fn read_from_primary(&self) -> Option<ClipboardItem>;
     fn read_from_clipboard(&self) -> Option<ClipboardItem>;
     #[cfg(target_os = "macos")]
-    fn read_text_from_clipboard(&self, max_bytes: usize) -> Option<String>;
+    fn read_text_from_clipboard(
+        &self,
+        max_bytes: usize,
+    ) -> Result<Option<String>, ClipboardTextTooLong>;
 
     fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>>;
     fn read_credentials(&self, url: &str) -> Task<Result<Option<(String, Vec<u8>)>>>;
@@ -1676,6 +1679,11 @@ pub enum CursorStyle {
     /// Hide the cursor
     None,
 }
+
+/// Plain clipboard text exceeded the requested byte limit.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClipboardTextTooLong;
 
 /// A clipboard item that should be copied to the clipboard
 #[derive(Clone, Debug, Eq, PartialEq)]

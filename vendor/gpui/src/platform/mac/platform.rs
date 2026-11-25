@@ -1138,23 +1138,30 @@ impl Platform for MacPlatform {
         }
     }
 
-    fn read_text_from_clipboard(&self, max_bytes: usize) -> Option<String> {
+    fn read_text_from_clipboard(
+        &self,
+        max_bytes: usize,
+    ) -> Result<Option<String>, crate::ClipboardTextTooLong> {
         let state = self.0.lock();
         unsafe {
             let types = state.pasteboard.types();
             let has_text: bool = msg_send![types, containsObject: NSPasteboardTypeString];
             if !has_text {
-                return None;
+                return Ok(None);
             }
             let data = state.pasteboard.dataForType(NSPasteboardTypeString);
-            if data == nil || data.length() as usize > max_bytes {
-                return None;
+            if data == nil {
+                return Ok(None);
             }
-            if data.length() == 0 {
-                return Some(String::new());
+            let len = data.length() as usize;
+            if len > max_bytes {
+                return Err(crate::ClipboardTextTooLong);
             }
-            let bytes = slice::from_raw_parts(data.bytes() as *const u8, data.length() as usize);
-            str::from_utf8(bytes).ok().map(str::to_owned)
+            if len == 0 {
+                return Ok(Some(String::new()));
+            }
+            let bytes = slice::from_raw_parts(data.bytes() as *const u8, len);
+            Ok(str::from_utf8(bytes).ok().map(str::to_owned))
         }
     }
 
@@ -1916,14 +1923,14 @@ mod tests {
     fn test_text_clipboard_bounds_and_image_only_contents() {
         // Use a private pasteboard; never change the user's clipboard.
         let platform = build_platform();
-        assert_eq!(platform.read_text_from_clipboard(8), None);
+        assert_eq!(platform.read_text_from_clipboard(8), Ok(None));
         platform.write_to_clipboard(ClipboardItem::new_string("🚀🚀".into()));
-        assert_eq!(platform.read_text_from_clipboard(7), None);
-        assert_eq!(platform.read_text_from_clipboard(8).as_deref(), Some("🚀🚀"));
+        assert_eq!(platform.read_text_from_clipboard(7), Err(crate::ClipboardTextTooLong));
+        assert_eq!(platform.read_text_from_clipboard(8), Ok(Some("🚀🚀".into())));
         platform.write_to_clipboard(ClipboardItem::new_string(String::new()));
-        assert_eq!(platform.read_text_from_clipboard(0), Some(String::new()));
+        assert_eq!(platform.read_text_from_clipboard(0), Ok(Some(String::new())));
         platform.write_to_clipboard(ClipboardItem::new_image(&Image::empty()));
-        assert_eq!(platform.read_text_from_clipboard(8), None);
+        assert_eq!(platform.read_text_from_clipboard(8), Ok(None));
     }
 
     fn build_platform() -> MacPlatform {

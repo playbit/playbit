@@ -14,32 +14,6 @@ pub(super) struct StateCache {
 }
 
 impl TextEditor {
-    pub(super) fn permits_platform_edit(&self, range: Option<&Range<usize>>, text: &str) -> bool {
-        let Some(limit) = self
-            .max_bytes
-            .or_else(|| self.on_edit.as_ref().map(|_| playbit_api::abi::text::MAX_TEXT_BYTES))
-        else {
-            return true;
-        };
-        let (removed, copies) = match (range, self.buffer.marked_range()) {
-            (Some(range), None) if *range != self.buffer.primary_selection().range() => {
-                (range.len(), 1)
-            }
-            (Some(range), Some(_)) => (range.len(), 1),
-            (None, Some(marked)) => (marked.len(), 1),
-            _ => (
-                self.buffer.selections().iter().map(|selection| selection.range().len()).sum(),
-                self.buffer.selections().len(),
-            ),
-        };
-        self.buffer
-            .as_str()
-            .len()
-            .checked_sub(removed)
-            .and_then(|len| text.len().checked_mul(copies).and_then(|added| len.checked_add(added)))
-            .is_some_and(|len| len <= limit)
-    }
-
     pub(super) fn permits_text_checking(&self) -> bool {
         self.enabled && !self.read_only && !self.masked && !self.email_code && !self.literal
     }

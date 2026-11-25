@@ -165,7 +165,14 @@ impl TextEditor {
 
     pub(super) fn paste_hex(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
         let Some(format) = self.hex_format() else { return };
-        let Some(digits) = self.hex_paste_digits(text) else { return };
+        let digits = match self.hex_paste_digits(text) {
+            Ok(digits) => digits,
+            Err(EditRejection::Invalid) => return,
+            Err(EditRejection::TooLong) => {
+                self.reject_length(cx);
+                return;
+            }
+        };
         let mut selected = format.selected_digits(range.clone(), self.text().len());
         if range.is_empty() && range.start < self.text().len() {
             selected.end = selected.start;
@@ -173,20 +180,27 @@ impl TextEditor {
         self.replace_hex_digits(format, selected, &digits, digits.len(), cx);
     }
 
-    pub(super) fn hex_paste_digits(&self, text: &str) -> Option<Vec<u8>> {
-        let format = self.hex_format()?;
+    pub(super) fn hex_paste_digits(&self, text: &str) -> Result<Vec<u8>, EditRejection> {
+        let format = self.hex_format().ok_or(EditRejection::Invalid)?;
         if text.len() > self.hex_clipboard_limit(format) {
-            return None;
+            return Err(EditRejection::TooLong);
         }
         let digit_limit = format.digit(self.max_bytes.unwrap_or(64 * 1024));
         let mut digits = Vec::with_capacity(text.len().min(digit_limit));
         for byte in text.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
-            if digits.len() == digit_limit || !byte.is_ascii_hexdigit() {
-                return None;
+            if !byte.is_ascii_hexdigit() {
+                return Err(EditRejection::Invalid);
+            }
+            if digits.len() == digit_limit {
+                return Err(EditRejection::TooLong);
             }
             digits.push(byte.to_ascii_lowercase());
         }
-        (!digits.is_empty() && digits.len().is_multiple_of(2)).then_some(digits)
+        if !digits.is_empty() && digits.len().is_multiple_of(2) {
+            Ok(digits)
+        } else {
+            Err(EditRejection::Invalid)
+        }
     }
 
     pub(super) fn hex_clipboard_limit(&self, format: Format) -> usize {
@@ -296,6 +310,7 @@ impl TextEditor {
         let next_count = count - digits.len() + replacement.len();
         let next_len = format.display_len(next_count);
         if self.max_bytes.is_some_and(|limit| next_len > limit) {
+            self.reject_length(cx);
             return false;
         }
         let start = format.display_len(digits.start);

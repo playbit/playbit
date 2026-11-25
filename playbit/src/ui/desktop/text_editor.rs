@@ -35,6 +35,19 @@ mod text_checking;
 const CARET_BLINK_DELAY: Duration = Duration::from_millis(500);
 const CARET_BLINK_INTERVAL: Duration = Duration::from_millis(500);
 const TYPING_UNDO_PAUSE: Duration = Duration::from_millis(350);
+const LENGTH_LIMIT_FEEDBACK_DURATION: Duration = Duration::from_millis(240);
+const LENGTH_LIMIT_SHAKE_POINTS: f32 = 4.0;
+
+#[derive(Debug)]
+enum EditRejection {
+    TooLong,
+    Invalid,
+}
+
+struct LengthLimitFeedback {
+    started: Instant,
+    reduce_motion: bool,
+}
 
 fn control_font() -> gpui::Font {
     gpui::Font { weight: gpui::FontWeight::MEDIUM, ..font(crate::ui::desktop::UI_FONT_FAMILY) }
@@ -117,6 +130,7 @@ pub struct TextEditorStyle {
     pub background: Hsla,
     pub border: Hsla,
     pub border_focused: Hsla,
+    pub border_error: Hsla,
     pub text: Hsla,
     pub placeholder: Hsla,
     pub selection: Hsla,
@@ -163,6 +177,7 @@ impl TextEditorStyle {
             background: color(Role::ControlBackground),
             border: color(Role::Border),
             border_focused: color(Role::FocusRing),
+            border_error: color(Role::DestructiveBackground),
             text: color(Role::Text),
             placeholder: color(Role::Text).alpha(0.4),
             selection: color(Role::TextSelection),
@@ -585,6 +600,7 @@ pub struct TextEditor {
     caret_blink_active: bool,
     caret_clock: Option<CaretClock>,
     last_typing: Option<LastTyping>,
+    length_limit_feedback: Option<LengthLimitFeedback>,
     placeholder: Option<SharedString>,
     on_commit: Option<CommitCallback>,
     on_blur: Option<CommitCallback>,
@@ -647,6 +663,7 @@ impl TextEditor {
             caret_blink_active: false,
             caret_clock: None,
             last_typing: None,
+            length_limit_feedback: None,
             placeholder: None,
             on_commit: None,
             on_blur: None,
@@ -1075,7 +1092,11 @@ impl TextEditor {
                     }
                     return;
                 }
-                let Some(text) = self.input_text(value) else { return };
+                let Some(text) = self.prepare_input(value, cx) else { return };
+                if !permits_platform_replacement(&self.buffer, Some(&(0..len)), &text) {
+                    self.reject_length(cx);
+                    return;
+                }
                 replace_platform_text(&mut self.buffer, Some(0..len), &text);
                 self.did_change(cx);
             }
@@ -1208,30 +1229,67 @@ impl TextEditor {
         }
     }
 
-    fn input_text(&self, text: &str) -> Option<String> {
+    fn reject_length(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        if self.length_limit_feedback.as_ref().is_some_and(|feedback| {
+            now.saturating_duration_since(feedback.started) < LENGTH_LIMIT_FEEDBACK_DURATION
+        }) {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        let reduce_motion = super::appearance::reduce_motion();
+        #[cfg(not(target_os = "macos"))]
+        let reduce_motion = false;
+        self.length_limit_feedback = Some(LengthLimitFeedback { started: now, reduce_motion });
+        cx.notify();
+    }
+
+    fn input_text(&self, text: &str) -> Result<String, EditRejection> {
         if self.masked && !text.is_ascii() {
-            return None;
+            return Err(EditRejection::Invalid);
         }
         if self.email_code {
             if text.len() > 32 {
-                return None;
+                return Err(EditRejection::TooLong);
             }
             let text: String = text.chars().filter(|c| !matches!(c, ' ' | '-' | '–')).collect();
-            return (text.len() <= 6 && text.bytes().all(|c| c.is_ascii_digit())).then_some(text);
+            if !text.bytes().all(|c| c.is_ascii_digit()) {
+                return Err(EditRejection::Invalid);
+            }
+            return if text.len() <= 6 { Ok(text) } else { Err(EditRejection::TooLong) };
         }
         if self.max_bytes.is_some_and(|limit| text.len() > limit) {
-            return None;
+            return Err(EditRejection::TooLong);
         }
-        Some(if self.text_area { text.to_owned() } else { text.replace(['\r', '\n'], "") })
+        Ok(if self.text_area { text.to_owned() } else { text.replace(['\r', '\n'], "") })
+    }
+
+    fn prepare_input(&mut self, text: &str, cx: &mut Context<Self>) -> Option<String> {
+        match self.input_text(text) {
+            Ok(text) => Some(text),
+            Err(EditRejection::Invalid) => None,
+            Err(EditRejection::TooLong) => {
+                self.reject_length(cx);
+                None
+            }
+        }
+    }
+
+    fn replace_selections(&mut self, text: &str, cx: &mut Context<Self>) {
+        if !self.buffer.permits_selection_replacement(text) {
+            self.reject_length(cx);
+            return;
+        }
+        self.buffer.commit_edit_group();
+        self.buffer.replace_selections(text);
+        self.did_change(cx);
     }
 
     fn insert_newline(&mut self, cx: &mut Context<Self>) {
         if self.hex.is_some() || !self.text_area {
             self.commit(cx);
         } else if self.enabled && !self.read_only && self.buffer.marked_range().is_none() {
-            self.buffer.commit_edit_group();
-            self.buffer.replace_selections("\n");
-            self.did_change(cx);
+            self.replace_selections("\n", cx);
         }
     }
 
@@ -1437,7 +1495,7 @@ impl TextEditor {
         }
     }
 
-    fn clipboard_text(&self, cx: &App) -> Option<String> {
+    fn clipboard_text(&self, cx: &App) -> Result<Option<String>, EditRejection> {
         #[cfg(target_os = "macos")]
         {
             // Bound text copying/validation on the local input path. Short fields
@@ -1452,27 +1510,30 @@ impl TextEditor {
             } else {
                 self.max_bytes.unwrap_or(MAX_CLIPBOARD_TEXT_BYTES).min(MAX_CLIPBOARD_TEXT_BYTES)
             };
-            cx.read_text_from_clipboard(limit)
+            cx.read_text_from_clipboard(limit).map_err(|_| EditRejection::TooLong)
         }
         #[cfg(not(target_os = "macos"))]
-        cx.read_from_clipboard().and_then(|item| item.text())
+        Ok(cx.read_from_clipboard().and_then(|item| item.text()))
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
         if !self.enabled || self.read_only {
             return;
         }
-        let Some(text) = self.clipboard_text(cx) else {
-            return;
+        let text = match self.clipboard_text(cx) {
+            Ok(Some(text)) => text,
+            Ok(None) => return,
+            Err(_) => {
+                self.reject_length(cx);
+                return;
+            }
         };
         if self.hex_format().is_some() {
             self.paste_hex(self.buffer.primary_selection().range(), &text, cx);
             return;
         }
-        let Some(text) = self.input_text(&text) else { return };
-        self.buffer.commit_edit_group();
-        self.buffer.replace_selections(&text);
-        self.did_change(cx);
+        let Some(text) = self.prepare_input(&text, cx) else { return };
+        self.replace_selections(&text, cx);
     }
 
     fn click(&mut self, event: &MouseDownEvent, layout: &LayoutSnapshot) {
@@ -1625,9 +1686,35 @@ impl Render for TextEditor {
             && self.enabled
             && window.is_window_active()
             && self.focus_handle.is_focused(window);
-        let outlined = focused || keyboard_focus;
+        let mut shake_x = Pixels::ZERO;
+        let mut flash_outline = false;
+        if let Some(feedback) = &self.length_limit_feedback {
+            let elapsed =
+                cx.background_executor().now().saturating_duration_since(feedback.started);
+            if elapsed < LENGTH_LIMIT_FEEDBACK_DURATION && self.enabled && !self.read_only {
+                if feedback.reduce_motion {
+                    flash_outline = true;
+                } else {
+                    let progress =
+                        elapsed.as_secs_f32() / LENGTH_LIMIT_FEEDBACK_DURATION.as_secs_f32();
+                    let wave = (progress * 2.0 * std::f32::consts::TAU).sin();
+                    shake_x =
+                        zoom::scaled(window, LENGTH_LIMIT_SHAKE_POINTS * wave * (1.0 - progress));
+                }
+                window.request_animation_frame();
+            } else {
+                self.length_limit_feedback = None;
+            }
+        }
+        let outlined = focused || keyboard_focus || flash_outline;
         let outline_width = outline_width(&self.style, outlined);
-        let outline_color = if outlined { self.style.border_focused } else { self.style.border };
+        let outline_color = if flash_outline {
+            self.style.border_error
+        } else if outlined {
+            self.style.border_focused
+        } else {
+            self.style.border
+        };
         let outline = gpui::div()
             .when(keyboard_focus, |outline| {
                 outline.debug_selector(|| format!("text-editor-keyboard-focus-{}", cx.entity_id()))
@@ -1688,6 +1775,7 @@ impl Render for TextEditor {
             .cursor(CursorStyle::IBeam)
             .opacity(if self.enabled { 1. } else { 0.5 })
             .relative()
+            .when(shake_x != Pixels::ZERO, |field| field.left(shake_x))
             .flex()
             .flex_col()
             .when(self.message_scroll.is_some(), |field| field.min_h_0())
@@ -1712,13 +1800,13 @@ impl Render for TextEditor {
                             .h(zoom::pixels(window, 24.))
                             .rounded(zoom::pixels(window, 2.))
                             .bg(self.style.background)
-                            .border(if active {
+                            .border(if active || flash_outline {
                                 self.style.border_width_focused
                             } else {
                                 self.style.border_width
                             })
-                            .border_color(if active {
-                                self.style.border_focused
+                            .border_color(if active || flash_outline {
+                                outline_color
                             } else {
                                 self.style.border
                             })
@@ -2617,7 +2705,7 @@ impl EntityInputHandler for TextEditor {
         let Some(range) = text_checking::exact_utf16_range(self.buffer.as_str(), range) else {
             return false;
         };
-        let Some(validated) = self.input_text(text) else { return false };
+        let Ok(validated) = self.input_text(text) else { return false };
         if validated != text || text.encode_utf16().count() > text_checking::CONTEXT_UNITS_MAX {
             return false;
         }
@@ -2732,9 +2820,10 @@ impl EntityInputHandler for TextEditor {
             self.type_hex(format, range, text, cx);
             return;
         }
-        let Some(text) = self.input_text(text) else { return };
+        let Some(text) = self.prepare_input(text, cx) else { return };
         let range = range.map(|range| utf16_range_to_utf8(self.buffer.as_str(), range));
-        if !self.permits_platform_edit(range.as_ref(), &text) {
+        if !permits_platform_replacement(&self.buffer, range.as_ref(), &text) {
+            self.reject_length(cx);
             return;
         }
         let marked = self.buffer.marked_range();
@@ -2773,21 +2862,22 @@ impl EntityInputHandler for TextEditor {
             return;
         }
         let _timing = crate::trace::Span::new("ui.text.composition");
-        self.last_typing = None;
-        let Some(text) = self.input_text(text) else { return };
-        if let Some(range) = range {
+        let Some(text) = self.prepare_input(text, cx) else { return };
+        let fits = if let Some(range) = range {
             let range = utf16_range_to_utf8(self.buffer.as_str(), range);
-            let old_primary = self.buffer.primary_selection();
-            let additional = self
+            self.buffer.select_composition_range(range, text.len())
+        } else {
+            let replaced = self
                 .buffer
-                .selections()
-                .iter()
-                .copied()
-                .filter(|selection| *selection != old_primary)
-                .collect::<Vec<_>>();
-            self.buffer
-                .set_selections_with_primary(Selection::new(range.start, range.end), additional);
+                .marked_range()
+                .unwrap_or_else(|| self.buffer.primary_selection().range());
+            self.buffer.permits_replacement(replaced.len(), text.len())
+        };
+        if !fits {
+            self.reject_length(cx);
+            return;
         }
+        self.last_typing = None;
         let relative_selection = selected_range
             .map(|range| utf16_range_to_utf8(&text, range))
             .map(|range| Selection::new(range.start, range.end))
@@ -2853,6 +2943,17 @@ fn utf8_offset_to_utf16(text: &str, offset: usize) -> usize {
 fn insert_typing(buffer: &mut Buffer, text: &str) {
     buffer.begin_edit_group();
     buffer.replace_selections(text);
+}
+
+fn permits_platform_replacement(buffer: &Buffer, range: Option<&Range<usize>>, text: &str) -> bool {
+    match (range, buffer.marked_range()) {
+        (Some(range), None) if *range == buffer.primary_selection().range() => {
+            buffer.permits_selection_replacement(text)
+        }
+        (Some(range), _) => buffer.permits_replacement(range.len(), text.len()),
+        (None, Some(marked)) => buffer.permits_replacement(marked.len(), text.len()),
+        (None, None) => buffer.permits_selection_replacement(text),
+    }
 }
 
 fn replace_platform_text(buffer: &mut Buffer, range: Option<Range<usize>>, text: &str) {
@@ -3838,6 +3939,92 @@ mod accessibility_tests {
             });
         });
     }
+
+    #[gpui::test]
+    fn length_limit_shakes_without_changing_the_draft(cx: &mut gpui::TestAppContext) {
+        struct Field(Entity<TextEditor>);
+        impl Render for Field {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                gpui::div().p(px(12.)).child(self.0.clone())
+            }
+        }
+
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let changes = Arc::new(AtomicUsize::new(0));
+        let observed = changes.clone();
+        let editor = cx.new(|cx| {
+            TextEditor::new("café", cx).bound_edits(6).on_change(Arc::new(move |_, _, _| {
+                observed.fetch_add(1, Ordering::Relaxed);
+                true
+            }))
+        });
+        let window = cx.add_window(|_, _| Field(editor.clone()));
+        cx.run_until_parked();
+        let origin = window
+            .update(cx, |field, window, cx| {
+                field.0.update(cx, |editor, cx| {
+                    let origin = editor.layout.as_ref().expect("field is laid out").bounds.origin;
+                    editor.buffer.set_selection(Selection::caret(5));
+                    editor.replace_text_in_range(None, "é", window, cx);
+                    let feedback =
+                        editor.length_limit_feedback.as_mut().expect("typing was rejected");
+                    feedback.reduce_motion = false;
+                    origin
+                })
+            })
+            .unwrap();
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(30));
+        cx.simulate_window_frame(window.into());
+        cx.run_until_parked();
+        editor.read_with(cx, |editor, _| {
+            let bounds = editor.layout.as_ref().expect("field is laid out").bounds;
+            assert!(bounds.origin.x > origin.x);
+            assert_eq!(bounds.origin.y, origin.y);
+            assert_eq!(editor.text(), "café");
+            assert_eq!(editor.revision.current, 0);
+        });
+        cx.executor().advance_clock(LENGTH_LIMIT_FEEDBACK_DURATION);
+        cx.simulate_window_frame(window.into());
+        cx.run_until_parked();
+        window
+            .update(cx, |field, window, cx| {
+                field.0.update(cx, |editor, cx| {
+                    assert_eq!(editor.layout.as_ref().unwrap().bounds.origin, origin);
+                    assert!(editor.length_limit_feedback.is_none());
+                    editor.replace_and_mark_text_in_range(None, "é", None, window, cx);
+                    assert!(editor.length_limit_feedback.take().is_some());
+                    assert!(editor.buffer.marked_range().is_none());
+                    for paste in ["é", "oversized clipboard"] {
+                        cx.write_to_clipboard(ClipboardItem::new_string(paste.into()));
+                        editor.paste(cx);
+                        assert!(editor.length_limit_feedback.take().is_some());
+                    }
+                    assert_eq!(editor.buffer.primary_selection(), Selection::caret(5));
+                    assert_eq!(editor.text(), "café");
+                    assert_eq!(editor.revision.current, 0);
+                    assert_eq!(changes.load(Ordering::Relaxed), 0);
+                    editor.buffer.set_selection(Selection::new(3, 5));
+                    cx.write_to_clipboard(ClipboardItem::new_string("x".into()));
+                    editor.paste(cx);
+                    assert_eq!(editor.text(), "cafx");
+                    assert_eq!(changes.load(Ordering::Relaxed), 1);
+                    assert!(editor.length_limit_feedback.is_none());
+
+                    editor
+                        .buffer
+                        .set_selections_with_primary(Selection::caret(4), [Selection::new(0, 3)]);
+                    editor.replace_and_mark_text_in_range(Some(3..4), "日本", None, window, cx);
+                    assert_eq!(editor.text(), "日本");
+                    editor.replace_and_mark_text_in_range(Some(2..2), "x", None, window, cx);
+                    assert!(editor.length_limit_feedback.is_some());
+                    assert_eq!(editor.text(), "日本");
+                    assert_eq!(editor.buffer.marked_range(), Some(0..6));
+                });
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn grouped_code_paste_preserves_zeroes_selection_and_rejects_overflow(
         cx: &mut gpui::TestAppContext,

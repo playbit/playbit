@@ -19,12 +19,12 @@ impl TextEditor {
             COPY => !self.masked && selected,
             PASTE => {
                 !self.read_only
-                    && self.clipboard_text(cx).is_some_and(|text| {
+                    && self.clipboard_text(cx).ok().flatten().is_some_and(|text| {
                         if self.hex_format().is_some() {
-                            self.hex_paste_digits(&text).is_some()
+                            self.hex_paste_digits(&text).is_ok()
                         } else {
                             !text.is_empty()
-                                && self.input_text(&text).is_some_and(|text| !text.is_empty())
+                                && self.input_text(&text).is_ok_and(|text| !text.is_empty())
                         }
                     })
             }
@@ -352,8 +352,8 @@ mod tests {
             editor.paste(cx);
             assert_eq!(editor.text(), "");
             cx.write_to_clipboard(ClipboardItem::new_string("🚀🚀".into()));
-            assert_eq!(cx.read_text_from_clipboard(7), None);
-            assert_eq!(cx.read_text_from_clipboard(8).as_deref(), Some("🚀🚀"));
+            assert_eq!(cx.read_text_from_clipboard(7), Err(gpui::ClipboardTextTooLong));
+            assert_eq!(cx.read_text_from_clipboard(8), Ok(Some("🚀🚀".into())));
             assert!(editor.context_action_enabled(PASTE, cx));
             editor.paste(cx);
             assert_eq!(editor.text(), "🚀🚀");

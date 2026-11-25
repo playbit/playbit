@@ -194,7 +194,7 @@ impl Buffer {
         self
     }
 
-    fn permits_replacement(&self, removed: usize, added: usize) -> bool {
+    pub(super) fn permits_replacement(&self, removed: usize, added: usize) -> bool {
         let limit = self.max_bytes.or_else(|| self.pending_edits.as_ref().map(|_| MAX_TEXT_BYTES));
         limit.is_none_or(|limit| {
             self.text
@@ -203,6 +203,14 @@ impl Buffer {
                 .and_then(|len| len.checked_add(added))
                 .is_some_and(|len| len <= limit)
         })
+    }
+
+    pub(super) fn permits_selection_replacement(&self, replacement: &str) -> bool {
+        let removed = self.selections.iter().map(|selection| selection.range().len()).sum();
+        replacement
+            .len()
+            .checked_mul(self.selections.len())
+            .is_some_and(|added| self.permits_replacement(removed, added))
     }
 
     fn bound_history(&mut self) {
@@ -235,12 +243,7 @@ impl Buffer {
     pub fn set_selections(&mut self, selections: impl IntoIterator<Item = Selection>) {
         self.commit_edit_group();
         self.commit_composition();
-        let count =
-            if self.max_bytes.is_some() || self.pending_edits.is_some() { 32 } else { usize::MAX };
-        let (selections, primary) =
-            normalize_selections(&self.text, selections.into_iter().take(count), 0);
-        self.selections = selections;
-        self.primary = primary;
+        (self.selections, self.primary) = self.normalize_selections(selections);
     }
 
     /// Sets one explicit primary selection plus any additional selections.
@@ -252,24 +255,47 @@ impl Buffer {
     ) {
         self.commit_edit_group();
         self.commit_composition();
+        (self.selections, self.primary) =
+            self.normalize_selections(std::iter::once(primary).chain(additional));
+    }
+
+    fn normalize_selections(
+        &self,
+        selections: impl IntoIterator<Item = Selection>,
+    ) -> (Vec<Selection>, usize) {
         let count =
             if self.max_bytes.is_some() || self.pending_edits.is_some() { 32 } else { usize::MAX };
-        let selections = std::iter::once(primary).chain(additional).take(count);
-        let (selections, primary) = normalize_selections(&self.text, selections, 0);
+        normalize_selections(&self.text, selections.into_iter().take(count), 0)
+    }
+
+    /// Admit the IME's explicit replacement before any selection or composition changes.
+    #[cfg(feature = "desktop-ui")]
+    pub(super) fn select_composition_range(&mut self, range: Range<usize>, added: usize) -> bool {
+        let replacement = Selection::new(range.start, range.end);
+        let additional = self
+            .selections
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != self.primary)
+            .map(|(_, selection)| *selection);
+        let (selections, primary) =
+            self.normalize_selections(std::iter::once(replacement).chain(additional));
+        if !self.permits_replacement(selections[primary].range().len(), added) {
+            return false;
+        }
+        self.commit_edit_group();
+        self.commit_composition();
         self.selections = selections;
         self.primary = primary;
+        true
     }
 
     /// Replaces every selection with the same string and leaves a caret after
     /// each inserted copy.
     pub fn replace_selections(&mut self, replacement: &str) {
         self.commit_composition();
-        let removed: usize = self.selections.iter().map(|selection| selection.range().len()).sum();
         if !self.permits_edits(self.selections.len())
-            || !replacement
-                .len()
-                .checked_mul(self.selections.len())
-                .is_some_and(|added| self.permits_replacement(removed, added))
+            || !self.permits_selection_replacement(replacement)
         {
             return;
         }

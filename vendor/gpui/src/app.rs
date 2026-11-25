@@ -1045,7 +1045,10 @@ impl App {
     /// Reads only plain text, rejecting payloads over the byte limit before
     /// copying or decoding them. Never requests image data or clipboard metadata.
     #[cfg(target_os = "macos")]
-    pub fn read_text_from_clipboard(&self, max_bytes: usize) -> Option<String> {
+    pub fn read_text_from_clipboard(
+        &self,
+        max_bytes: usize,
+    ) -> Result<Option<String>, crate::ClipboardTextTooLong> {
         self.platform.read_text_from_clipboard(max_bytes)
     }
 

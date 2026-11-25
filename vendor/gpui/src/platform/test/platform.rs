@@ -392,20 +392,24 @@ impl Platform for TestPlatform {
     }
 
     #[cfg(target_os = "macos")]
-    fn read_text_from_clipboard(&self, max_bytes: usize) -> Option<String> {
+    fn read_text_from_clipboard(
+        &self,
+        max_bytes: usize,
+    ) -> Result<Option<String>, crate::ClipboardTextTooLong> {
         let clipboard = self.current_clipboard_item.lock();
+        let Some(item) = clipboard.as_ref() else { return Ok(None) };
         let mut text = String::new();
         let mut found = false;
-        for entry in clipboard.as_ref()?.entries() {
+        for entry in item.entries() {
             if let crate::ClipboardEntry::String(value) = entry {
                 if value.text().len() > max_bytes - text.len() {
-                    return None;
+                    return Err(crate::ClipboardTextTooLong);
                 }
                 text.push_str(value.text());
                 found = true;
             }
         }
-        found.then_some(text)
+        Ok(found.then_some(text))
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
