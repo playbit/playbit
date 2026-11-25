@@ -43,7 +43,8 @@ fn main() {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             ..Default::default()
         };
-        let target = cx.open_window(options(), |_, cx| cx.new(|_| Fixture { changed: false })).unwrap();
+        let target =
+            cx.open_window(options(), |_, cx| cx.new(|_| Fixture { changed: false })).unwrap();
         let target_native = native(target, cx);
         // The cover uses AppKit's opaque backing, independent of the GPUI
         // presentation path being tested (which may not have presented yet).
@@ -71,30 +72,44 @@ fn main() {
             Timer::after(Duration::from_millis(300)).await;
             let (active, occluded) = state(target_native);
             if active || !occluded {
-                println!("{{\"complete\":false,\"setup_failed\":true,\"app_active\":{active},\"occluded\":{occluded}}}");
+                println!(
+                    "{{\"complete\":false,\"setup_failed\":true,\"app_active\":{active},\
+                     \"occluded\":{occluded}}}"
+                );
                 std::process::exit(78);
             }
             let observed = callbacks.clone();
-            target.update(cx, |fixture, window, cx| {
-                fixture.changed = true;
-                cx.notify();
-                window.on_next_frame(move |window, _| {
-                    observed.set(observed.get() + 1);
-                    window.on_next_frame(move |_, _| observed.set(observed.get() + 1));
-                });
-            }).unwrap();
+            target
+                .update(cx, |fixture, window, cx| {
+                    fixture.changed = true;
+                    cx.notify();
+                    window.on_next_frame(move |window, _| {
+                        observed.set(observed.get() + 1);
+                        window.on_next_frame(move |_, _| observed.set(observed.get() + 1));
+                    });
+                })
+                .unwrap();
             // A functional deadline, never startup or interaction latency evidence.
             Timer::after(Duration::from_secs(3)).await;
-            let expected = if cfg!(any(debug_assertions, feature = "dev_always_render")) { 2 } else { 0 };
+            let expected =
+                if cfg!(any(debug_assertions, feature = "dev_always_render")) { 2 } else { 0 };
             let received = callbacks.get();
             let (active, occluded) = state(target_native);
             let complete = received == expected && !active && occluded;
-            println!("{{\"complete\":{complete},\"expected_callbacks\":{expected},\"callbacks\":{received},\"app_active\":{active},\"occluded\":{occluded}}}");
-            if !complete { std::process::exit(1); }
+            println!(
+                "{{\"complete\":{complete},\"expected_callbacks\":{expected},\
+                 \"callbacks\":{received},\"app_active\":{active},\"occluded\":{occluded}}}"
+            );
+            if !complete {
+                std::process::exit(1);
+            }
             Timer::after(Duration::from_millis(300)).await;
             assert_eq!(callbacks.get(), expected, "completed callback demand remains idle");
-            unsafe { let _: () = msg_send![*cover, close]; }
+            unsafe {
+                let _: () = msg_send![*cover, close];
+            }
             cx.update(|cx| cx.quit()).unwrap();
-        }).detach();
+        })
+        .detach();
     });
 }

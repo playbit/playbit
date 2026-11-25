@@ -61,7 +61,9 @@ fn template_commands_ignore_profile_discovery_and_require_no_engine() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(
         directory.path().join("playbit.toml"),
-        "app_id='template'\nname='Template'\nbuild_cmd='sh build.sh'\nbuild_artifact='app.wasm'\n[release]\nbuild_cmd='sh build.sh'\nbuild_artifact='app.wasm'\n",
+        "app_id='template'\nname='Template'\nbuild_cmd='sh build.sh'\n\
+         build_artifact='app.wasm'\n[release]\nbuild_cmd='sh build.sh'\n\
+         build_artifact='app.wasm'\n",
     )
     .unwrap();
     fs::write(

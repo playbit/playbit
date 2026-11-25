@@ -793,7 +793,12 @@ impl AdmissionQueue {
                     Ok(true) => {}
                 }
                 if self.pending[index].deadline <= Instant::now() {
-                    self.error_reply(index, "Local request timed out waiting for publisher trust; this request did not start".into())?;
+                    self.error_reply(
+                        index,
+                        "Local request timed out waiting for publisher trust; \
+                         this request did not start"
+                            .into(),
+                    )?;
                     continue;
                 }
                 let state = std::mem::replace(
@@ -828,7 +833,15 @@ impl AdmissionQueue {
                 ) else {
                     unreachable!()
                 };
-                let mut response = engine.service_executor.take(ticket).map(Reply::Syscall).unwrap_or_else(|error| Reply::Error { error: format!("Storage completion failed: {error:?}; accepted mutations must not be replayed") });
+                let mut response =
+                    engine.service_executor.take(ticket).map(Reply::Syscall).unwrap_or_else(
+                        |error| Reply::Error {
+                            error: format!(
+                                "Storage completion failed: {error:?}; \
+                                 accepted mutations must not be replayed"
+                            ),
+                        },
+                    );
                 if let Reply::Syscall(outcome) = &mut response {
                     engine.fence_service(outcome);
                 }

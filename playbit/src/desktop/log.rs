@@ -98,60 +98,95 @@ impl Watch {
         let state = Arc::new(Mutex::new(State::default()));
         let shared = state.clone();
         let (send, receive) = async_channel::bounded(1);
-        std::thread::Builder::new().name("playbit-session-logs".into()).stack_size(128 * 1024).spawn(move || {
-            let _credit = credit;
-            let result = (|| -> Result<(), String> {
-                let mut after = None;
-                let mut retained_cursor = retained_cursor;
-                loop {
-                    let wait = ipc::ChangeWait::connect(&profile, after).map_err(|e| e.to_string())?;
-                    register(&shared, wait.cancellation_handle().map_err(|e| e.to_string())?)?;
-                    after = Some(wait.receive().map_err(|e| e.to_string())?.token);
-                    if shared.lock().expect("log observer lock poisoned").stopped { return Ok(()); }
-                    let response = ipc::call_archive(&profile, &Request::InstanceList { session: session.clone() }).and_then(ipc::Response::into_owned).map_err(|e| e.to_string())?;
-                    let Reply::InstanceOwners(owners) = response else { return Err("Invalid app owner response".into()); };
-                    let selected = match instance {
-                        Some(id) => owners.iter().find(|owner| owner.instance.id == id),
-                        None => owners.first(),
-                    };
-                    let owner = selected.filter(|owner| {
-                        owner.process.is_some()
-                            && owner.instance.state == crate::engine::session_instance::State::Owned
-                    });
-                    let Some(owner) = owner else {
-                        send.send_blocking(Update::Stopped).map_err(|e| e.to_string())?;
-                        continue;
-                    };
-                    send.send_blocking(Update::Running(owner.instance.id)).map_err(|e| e.to_string())?;
-                    let mut cursor = retained_cursor.take().filter(|cursor| cursor.instance == owner.instance.id);
+        std::thread::Builder::new()
+            .name("playbit-session-logs".into())
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let _credit = credit;
+                let result = (|| -> Result<(), String> {
+                    let mut after = None;
+                    let mut retained_cursor = retained_cursor;
                     loop {
-                        let reply = (|| -> Result<_, String> {
-                            let exchange = app_control::Exchange::connect(&profile, owner, app_control::Operation::Logs { after: cursor }).map_err(|e| e.to_string())?;
-                            register(&shared, exchange.cancellation_handle().map_err(|e| e.to_string())?)?;
-                            exchange.receive().map_err(|e| e.to_string())
-                        })();
-                        if shared.lock().expect("log observer lock poisoned").stopped { return Ok(()); }
-                        match reply {
-                            Ok(app_control::Reply::Logs(batch)) => {
-                                cursor = Some(batch.cursor);
-                                send.send_blocking(Update::Batch(batch)).map_err(|e| e.to_string())?;
-                            }
-                            Err(_) => {
-                                send.send_blocking(Update::Notice("App logs are unavailable. Earlier log messages may be missing.")).map_err(|e| e.to_string())?;
-                                // Resolve again only after an actual engine change.
-                                // A retired or rejected owner never causes polling.
-                                break;
-                            }
-                            _ => return Err("Invalid app log response".into()),
+                        let wait =
+                            ipc::ChangeWait::connect(&profile, after).map_err(|e| e.to_string())?;
+                        register(&shared, wait.cancellation_handle().map_err(|e| e.to_string())?)?;
+                        after = Some(wait.receive().map_err(|e| e.to_string())?.token);
+                        if shared.lock().expect("log observer lock poisoned").stopped {
+                            return Ok(());
                         }
+                        let response = ipc::call_archive(
+                            &profile,
+                            &Request::InstanceList { session: session.clone() },
+                        )
+                        .and_then(ipc::Response::into_owned)
+                        .map_err(|e| e.to_string())?;
+                        let Reply::InstanceOwners(owners) = response else {
+                            return Err("Invalid app owner response".into());
+                        };
+                        let selected = match instance {
+                            Some(id) => owners.iter().find(|owner| owner.instance.id == id),
+                            None => owners.first(),
+                        };
+                        let owner = selected.filter(|owner| {
+                            owner.process.is_some()
+                                && owner.instance.state
+                                    == crate::engine::session_instance::State::Owned
+                        });
+                        let Some(owner) = owner else {
+                            send.send_blocking(Update::Stopped).map_err(|e| e.to_string())?;
+                            continue;
+                        };
+                        send.send_blocking(Update::Running(owner.instance.id))
+                            .map_err(|e| e.to_string())?;
+                        let mut cursor = retained_cursor
+                            .take()
+                            .filter(|cursor| cursor.instance == owner.instance.id);
+                        loop {
+                            let reply = (|| -> Result<_, String> {
+                                let exchange = app_control::Exchange::connect(
+                                    &profile,
+                                    owner,
+                                    app_control::Operation::Logs { after: cursor },
+                                )
+                                .map_err(|e| e.to_string())?;
+                                register(
+                                    &shared,
+                                    exchange.cancellation_handle().map_err(|e| e.to_string())?,
+                                )?;
+                                exchange.receive().map_err(|e| e.to_string())
+                            })();
+                            if shared.lock().expect("log observer lock poisoned").stopped {
+                                return Ok(());
+                            }
+                            match reply {
+                                Ok(app_control::Reply::Logs(batch)) => {
+                                    cursor = Some(batch.cursor);
+                                    send.send_blocking(Update::Batch(batch))
+                                        .map_err(|e| e.to_string())?;
+                                }
+                                Err(_) => {
+                                    send.send_blocking(Update::Notice(
+                                        "App logs are unavailable. Earlier log messages may be \
+                                         missing.",
+                                    ))
+                                    .map_err(|e| e.to_string())?;
+                                    // Resolve again only after an actual engine change.
+                                    // A retired or rejected owner never causes polling.
+                                    break;
+                                }
+                                _ => return Err("Invalid app log response".into()),
+                            }
+                        }
+                        retained_cursor = cursor;
                     }
-                    retained_cursor = cursor;
+                })();
+                if result.is_err() && !shared.lock().expect("log observer lock poisoned").stopped {
+                    let _ = send.send_blocking(Update::Notice(
+                        "Log observation stopped. Select the session again to attach.",
+                    ));
                 }
-            })();
-            if result.is_err() && !shared.lock().expect("log observer lock poisoned").stopped {
-                let _ = send.send_blocking(Update::Notice("Log observation stopped. Select the session again to attach."));
-            }
-        }).map_err(|e| e.to_string())?;
+            })
+            .map_err(|e| e.to_string())?;
         Ok((Self(state), receive))
     }
 }

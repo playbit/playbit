@@ -370,8 +370,16 @@ sys.exit(int(sys.argv[2]))
         let path = directory.path().join("owner.sock");
         let listener = UnixListener::bind(&path).unwrap();
         let child = Command::new("/usr/bin/python3")
-            .args(["-c", "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(b'R'); s.recv(1); s.close(); sys.stdin.buffer.read(1)"])
-            .arg(&path).stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
+            .args([
+                "-c",
+                "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); \
+                 s.sendall(b'R'); s.recv(1); s.close(); sys.stdin.buffer.read(1)",
+            ])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
         let mut fixture = Fixture(child);
         let (mut stream, _) = listener.accept().unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();

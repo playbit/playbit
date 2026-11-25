@@ -131,63 +131,251 @@ fn capture_directory() -> String {
 }
 fn main() {
     std::fs::create_dir_all(capture_directory()).unwrap();
-    Application::new().with_assets(controls::Assets).run(|cx|{
-  println!("auto_hide_scrollbars={}", cx.should_auto_hide_scrollbars());
-  zoom::install(cx);cx.text_system().add_fonts(vec![Cow::Borrowed(include_bytes!("../assets/InterVariable.ttf"))]).unwrap();
-  let window=cx.open_window(WindowOptions{window_bounds:Some(WindowBounds::Windowed(Bounds::new(point(px(100.),px(100.)),size(px(660.),px(336.))))),titlebar:None,focus:false,..Default::default()},|w,cx|cx.new(|cx|{let focus=cx.focus_handle();focus.focus(w);Fixture{bars:[cx.new(|_|Scrollbars::new(false)),cx.new(|_|Scrollbars::new(true))],focus,extent:size(px(620.),px(1000.))}})).unwrap();
-  cx.spawn(async move|cx|{
-   Timer::after(Duration::from_millis(200)).await;
-   cx.update(|cx|capture(window,"scrollbars-idle-2x",cx)).unwrap();
-   cx.update(|cx|event(window,PlatformInput::ScrollWheel(ScrollWheelEvent{position:point(px(647.),px(150.)),delta:ScrollDelta::Pixels(point(px(0.),px(-40.))),..Default::default()}),cx)).unwrap();
-   window.update(cx,|root,_,cx|assert_eq!(root.bars[1].read(cx).handle().offset().y,px(-40.),"wheel passes through rail to its viewport")).unwrap();
-   cx.update(|cx|{movement(window,317.,200.,false,cx);}).unwrap();
-   Timer::after(Duration::from_millis(50)).await;
-   cx.update(|cx|capture(window,"scrollbars-hover-2x",cx)).unwrap();
-   cx.update(|cx|button(window,317.,210.,true,cx)).unwrap();
-   Timer::after(Duration::from_millis(50)).await;
-   cx.update(|cx|capture(window,"scrollbars-pressed-2x",cx)).unwrap();
-   window.update(cx,|root,_,cx|{let h=root.bars[0].read(cx).handle();assert!(h.offset().y<px(-300.),"track jumps to click");}).unwrap();
-   cx.update(|cx|{movement(window,200.,450.,true,cx);capture(window,"scrollbars-drag-outside-2x",cx);button(window,200.,450.,false,cx);}).unwrap();
-   window.update(cx,|root,w,cx|{let h=root.bars[0].read(cx).handle();assert_eq!(h.offset().y,-h.max_offset().height,"drag outside reaches endpoint");assert!(root.focus.is_focused(w),"scrollbar preserves focus");}).unwrap();
-   cx.update(|cx|{movement(window,100.,317.,false,cx);button(window,100.,317.,true,cx);button(window,100.,317.,false,cx);}).unwrap();
-   window.update(cx,|root,_,cx|assert!(root.bars[0].read(cx).handle().offset().x<px(0.),"horizontal track scrolls")).unwrap();
-   window.update(cx,|root,w,cx|{root.bars[1].read(cx).handle().set_offset(point(px(0.),px(0.)));w.refresh();}).unwrap();
-   for (delta,phase) in [(200.,TouchPhase::Started),(200.,TouchPhase::Moved)] {
-    cx.update(|cx|event(window,PlatformInput::ScrollWheel(ScrollWheelEvent{position:point(px(500.),px(150.)),delta:ScrollDelta::Pixels(point(px(0.),px(delta))),touch_phase:phase,is_gesture:true,..Default::default()}),cx)).unwrap();
-    Timer::after(Duration::from_millis(16)).await;
-   }
-   window.update(cx,|root,_,cx|{let h=root.bars[1].read(cx).handle();assert_eq!(h.offset().y,px(0.));assert!(h.visual_offset().y>px(0.));println!("native elastic pull={}dp",f32::from(h.visual_offset().y));}).unwrap();
-   cx.update(|cx|capture(window,"scrollbars-elastic-pull-2x",cx)).unwrap();
-   cx.update(|cx|event(window,PlatformInput::ScrollWheel(ScrollWheelEvent{position:point(px(500.),px(150.)),touch_phase:TouchPhase::Ended,is_gesture:true,..Default::default()}),cx)).unwrap();
-   Timer::after(Duration::from_millis(1200)).await;
-   window.update(cx,|root,_,cx|{let h=root.bars[1].read(cx).handle();assert_eq!(h.visual_offset(),h.offset(),"native rebound settles completely");}).unwrap();
-   cx.update(|cx|capture(window,"scrollbars-elastic-settled-2x",cx)).unwrap();
-   let mut wheel_samples=Vec::new();
-   window.update(cx,|root,w,cx|{root.bars[1].read(cx).handle().set_offset(point(px(0.),px(-300.)));w.refresh();}).unwrap();
-   for i in 0..1000 {
-    let start=Instant::now();
-    cx.update(|cx|event(window,PlatformInput::ScrollWheel(ScrollWheelEvent{position:point(px(500.),px(150.)),delta:ScrollDelta::Pixels(point(px(0.),px(if i%2==0{10.}else{-10.}))),touch_phase:TouchPhase::Started,is_gesture:true,..Default::default()}),cx)).unwrap();
-    wheel_samples.push(start.elapsed().as_secs_f64()*1000.);
-   }
-   wheel_samples.sort_by(f64::total_cmp);println!("1000 trackpad events + synchronous CPU draw ms: p50={} p95={} p99={} max={}",wheel_samples[500],wheel_samples[950],wheel_samples[990],wheel_samples[999]);
-   let mut samples=Vec::new();
-   for i in 0..1000{let start=Instant::now();cx.update(|cx|{let y=if i%2==0{50.}else{270.};movement(window,317.,y,false,cx);button(window,317.,y,true,cx);button(window,317.,y,false,cx);}).unwrap();samples.push(start.elapsed().as_secs_f64()*1000.);}
-   samples.sort_by(f64::total_cmp);println!("1000 track click + synchronous CPU draw ms: p50={} p95={} p99={} max={}",samples[500],samples[950],samples[990],samples[999]);
-   cx.update(|cx|movement(window,150.,150.,false,cx)).unwrap();
-   Timer::after(Duration::from_millis(2050)).await;
-   cx.update(|cx|capture(window,"scrollbars-fading-2x",cx)).unwrap();
-   Timer::after(Duration::from_millis(350)).await;
-   cx.update(|cx|capture(window,"scrollbars-hidden-2x",cx)).unwrap();
-   window.update(cx,|root,_,cx|{root.extent=size(px(200.),px(150.));cx.notify();}).unwrap();
-   Timer::after(Duration::from_millis(80)).await;
-   window.update(cx,|root,_,cx|{for bar in &root.bars {assert_eq!(bar.read(cx).handle().max_offset(),size(px(0.),px(0.)),"fitting content removes both rails");}}).unwrap();
-   cx.update(|cx|capture(window,"scrollbars-no-overflow-2x",cx)).unwrap();
-   window.update(cx,|root,_,cx|{root.extent=size(px(620.),px(1400.));cx.notify();}).unwrap();
-   cx.update(|cx|zoom::change(cx,1)).unwrap();
-   Timer::after(Duration::from_millis(80)).await;
-   cx.update(|cx|capture(window,"scrollbars-resized-zoom125-2x",cx)).unwrap();
-   println!("PASS: track jump, pointer capture, both axes, focus preservation, expiry, content shrink/resize, zoom");
-   cx.update(|cx|cx.quit()).unwrap();
-  }).detach();
- });
+    Application::new().with_assets(controls::Assets).run(|cx| {
+        println!("auto_hide_scrollbars={}", cx.should_auto_hide_scrollbars());
+        zoom::install(cx);
+        cx.text_system()
+            .add_fonts(vec![Cow::Borrowed(include_bytes!("../assets/InterVariable.ttf"))])
+            .unwrap();
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(100.), px(100.)),
+                        size(px(660.), px(336.)),
+                    ))),
+                    titlebar: None,
+                    focus: false,
+                    ..Default::default()
+                },
+                |w, cx| {
+                    cx.new(|cx| {
+                        let focus = cx.focus_handle();
+                        focus.focus(w);
+                        Fixture {
+                            bars: [
+                                cx.new(|_| Scrollbars::new(false)),
+                                cx.new(|_| Scrollbars::new(true)),
+                            ],
+                            focus,
+                            extent: size(px(620.), px(1000.)),
+                        }
+                    })
+                },
+            )
+            .unwrap();
+        cx.spawn(async move |cx| {
+            Timer::after(Duration::from_millis(200)).await;
+            cx.update(|cx| capture(window, "scrollbars-idle-2x", cx)).unwrap();
+            cx.update(|cx| {
+                event(
+                    window,
+                    PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        position: point(px(647.), px(150.)),
+                        delta: ScrollDelta::Pixels(point(px(0.), px(-40.))),
+                        ..Default::default()
+                    }),
+                    cx,
+                )
+            })
+            .unwrap();
+            window
+                .update(cx, |root, _, cx| {
+                    assert_eq!(
+                        root.bars[1].read(cx).handle().offset().y,
+                        px(-40.),
+                        "wheel passes through rail to its viewport"
+                    )
+                })
+                .unwrap();
+            cx.update(|cx| {
+                movement(window, 317., 200., false, cx);
+            })
+            .unwrap();
+            Timer::after(Duration::from_millis(50)).await;
+            cx.update(|cx| capture(window, "scrollbars-hover-2x", cx)).unwrap();
+            cx.update(|cx| button(window, 317., 210., true, cx)).unwrap();
+            Timer::after(Duration::from_millis(50)).await;
+            cx.update(|cx| capture(window, "scrollbars-pressed-2x", cx)).unwrap();
+            window
+                .update(cx, |root, _, cx| {
+                    let h = root.bars[0].read(cx).handle();
+                    assert!(h.offset().y < px(-300.), "track jumps to click");
+                })
+                .unwrap();
+            cx.update(|cx| {
+                movement(window, 200., 450., true, cx);
+                capture(window, "scrollbars-drag-outside-2x", cx);
+                button(window, 200., 450., false, cx);
+            })
+            .unwrap();
+            window
+                .update(cx, |root, w, cx| {
+                    let h = root.bars[0].read(cx).handle();
+                    assert_eq!(
+                        h.offset().y,
+                        -h.max_offset().height,
+                        "drag outside reaches endpoint"
+                    );
+                    assert!(root.focus.is_focused(w), "scrollbar preserves focus");
+                })
+                .unwrap();
+            cx.update(|cx| {
+                movement(window, 100., 317., false, cx);
+                button(window, 100., 317., true, cx);
+                button(window, 100., 317., false, cx);
+            })
+            .unwrap();
+            window
+                .update(cx, |root, _, cx| {
+                    assert!(
+                        root.bars[0].read(cx).handle().offset().x < px(0.),
+                        "horizontal track scrolls"
+                    )
+                })
+                .unwrap();
+            window
+                .update(cx, |root, w, cx| {
+                    root.bars[1].read(cx).handle().set_offset(point(px(0.), px(0.)));
+                    w.refresh();
+                })
+                .unwrap();
+            for (delta, phase) in [(200., TouchPhase::Started), (200., TouchPhase::Moved)] {
+                cx.update(|cx| {
+                    event(
+                        window,
+                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position: point(px(500.), px(150.)),
+                            delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
+                            touch_phase: phase,
+                            is_gesture: true,
+                            ..Default::default()
+                        }),
+                        cx,
+                    )
+                })
+                .unwrap();
+                Timer::after(Duration::from_millis(16)).await;
+            }
+            window
+                .update(cx, |root, _, cx| {
+                    let h = root.bars[1].read(cx).handle();
+                    assert_eq!(h.offset().y, px(0.));
+                    assert!(h.visual_offset().y > px(0.));
+                    println!("native elastic pull={}dp", f32::from(h.visual_offset().y));
+                })
+                .unwrap();
+            cx.update(|cx| capture(window, "scrollbars-elastic-pull-2x", cx)).unwrap();
+            cx.update(|cx| {
+                event(
+                    window,
+                    PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        position: point(px(500.), px(150.)),
+                        touch_phase: TouchPhase::Ended,
+                        is_gesture: true,
+                        ..Default::default()
+                    }),
+                    cx,
+                )
+            })
+            .unwrap();
+            Timer::after(Duration::from_millis(1200)).await;
+            window
+                .update(cx, |root, _, cx| {
+                    let h = root.bars[1].read(cx).handle();
+                    assert_eq!(h.visual_offset(), h.offset(), "native rebound settles completely");
+                })
+                .unwrap();
+            cx.update(|cx| capture(window, "scrollbars-elastic-settled-2x", cx)).unwrap();
+            let mut wheel_samples = Vec::new();
+            window
+                .update(cx, |root, w, cx| {
+                    root.bars[1].read(cx).handle().set_offset(point(px(0.), px(-300.)));
+                    w.refresh();
+                })
+                .unwrap();
+            for i in 0..1000 {
+                let start = Instant::now();
+                cx.update(|cx| {
+                    event(
+                        window,
+                        PlatformInput::ScrollWheel(ScrollWheelEvent {
+                            position: point(px(500.), px(150.)),
+                            delta: ScrollDelta::Pixels(point(
+                                px(0.),
+                                px(if i % 2 == 0 { 10. } else { -10. }),
+                            )),
+                            touch_phase: TouchPhase::Started,
+                            is_gesture: true,
+                            ..Default::default()
+                        }),
+                        cx,
+                    )
+                })
+                .unwrap();
+                wheel_samples.push(start.elapsed().as_secs_f64() * 1000.);
+            }
+            wheel_samples.sort_by(f64::total_cmp);
+            println!(
+                "1000 trackpad events + synchronous CPU draw ms: p50={} p95={} p99={} max={}",
+                wheel_samples[500], wheel_samples[950], wheel_samples[990], wheel_samples[999]
+            );
+            let mut samples = Vec::new();
+            for i in 0..1000 {
+                let start = Instant::now();
+                cx.update(|cx| {
+                    let y = if i % 2 == 0 { 50. } else { 270. };
+                    movement(window, 317., y, false, cx);
+                    button(window, 317., y, true, cx);
+                    button(window, 317., y, false, cx);
+                })
+                .unwrap();
+                samples.push(start.elapsed().as_secs_f64() * 1000.);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "1000 track click + synchronous CPU draw ms: p50={} p95={} p99={} max={}",
+                samples[500], samples[950], samples[990], samples[999]
+            );
+            cx.update(|cx| movement(window, 150., 150., false, cx)).unwrap();
+            Timer::after(Duration::from_millis(2050)).await;
+            cx.update(|cx| capture(window, "scrollbars-fading-2x", cx)).unwrap();
+            Timer::after(Duration::from_millis(350)).await;
+            cx.update(|cx| capture(window, "scrollbars-hidden-2x", cx)).unwrap();
+            window
+                .update(cx, |root, _, cx| {
+                    root.extent = size(px(200.), px(150.));
+                    cx.notify();
+                })
+                .unwrap();
+            Timer::after(Duration::from_millis(80)).await;
+            window
+                .update(cx, |root, _, cx| {
+                    for bar in &root.bars {
+                        assert_eq!(
+                            bar.read(cx).handle().max_offset(),
+                            size(px(0.), px(0.)),
+                            "fitting content removes both rails"
+                        );
+                    }
+                })
+                .unwrap();
+            cx.update(|cx| capture(window, "scrollbars-no-overflow-2x", cx)).unwrap();
+            window
+                .update(cx, |root, _, cx| {
+                    root.extent = size(px(620.), px(1400.));
+                    cx.notify();
+                })
+                .unwrap();
+            cx.update(|cx| zoom::change(cx, 1)).unwrap();
+            Timer::after(Duration::from_millis(80)).await;
+            cx.update(|cx| capture(window, "scrollbars-resized-zoom125-2x", cx)).unwrap();
+            println!(
+                "PASS: track jump, pointer capture, both axes, focus preservation, expiry, \
+                 content shrink/resize, zoom"
+            );
+            cx.update(|cx| cx.quit()).unwrap();
+        })
+        .detach();
+    });
 }

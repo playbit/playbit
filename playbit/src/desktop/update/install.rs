@@ -3,6 +3,7 @@ use super::{copy, package};
 use crate::engine::{
     Result,
     installation::{self, Installation, ReleaseIdentity},
+    launch_agent::{ServiceAction, control},
 };
 use crate::release_channel::ReleaseChannel;
 use serde::{Deserialize, Serialize};
@@ -269,7 +270,14 @@ fn replace(installation: &Installation) -> Result<()> {
     let _exclusive = installation.exclusive()?;
     let _operation = installation.operation()?;
     for profile in installation.profiles()? {
-        crate::engine::launch::stop_for_reconfiguration(&profile, &installation.engine())?;
+        let channel = crate::engine::profile::for_profile(&profile)?;
+        if crate::engine::profile::is_default_profile(&profile, channel)?
+            && crate::engine::launch_agent::owner(&profile)?
+                .is_some_and(|owner| owner != installation.app)
+        {
+            continue;
+        }
+        crate::engine::launch::retire_profile_engine(&profile, &installation.engine(), channel)?;
     }
     let _engines = installation.drained_engines()?;
     let Some(mut journal) = Journal::read(installation, crate::engine::profile::current().1)?
@@ -287,7 +295,9 @@ fn replace(installation: &Installation) -> Result<()> {
     // ServiceManagement retains the executable identity across launches. Retire
     // the stopped job before replacing its signed bundle; the next client
     // registers the new helper after cutover, while normal admission is held.
-    crate::engine::launch_agent::control(false)?;
+    for channel in [ReleaseChannel::Public, ReleaseChannel::Testing] {
+        control(ServiceAction::RetireOwned, channel)?;
+    }
     let previous = installation.state.join("previous.app");
     if previous.exists() {
         fs::remove_dir_all(&previous)?;
@@ -353,7 +363,12 @@ fn refresh_guest_apps(installation: &Installation) -> Result<()> {
             .stdin(Stdio::null())
             .status()?;
         if !status.success() {
-            return Err(format!("The update is installed, but its app wrappers could not be re-signed for {}. Reopen Playbit to refresh them", profile.display()).into());
+            return Err(format!(
+                "The update is installed, but its app wrappers could not be re-signed for {}. \
+                 Reopen Playbit to refresh them",
+                profile.display()
+            )
+            .into());
         }
     }
     Ok(())

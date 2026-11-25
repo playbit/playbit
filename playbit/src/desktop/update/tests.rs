@@ -136,9 +136,14 @@ fn unsigned_bundles_are_disabled_even_outside_applications() {
     let executable = app.join("Contents/MacOS/Playbit");
     std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
     std::fs::copy("/bin/echo", &executable).unwrap();
-    std::fs::write(app.join("Contents/Info.plist"),
-        br#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>playbit.engine</string><key>CFBundleExecutable</key><string>Playbit</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>"#
-    ).unwrap();
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>\
+          CFBundleIdentifier</key><string>playbit.engine</string><key>\
+          CFBundleExecutable</key><string>Playbit</string><key>\
+          CFBundlePackageType</key><string>APPL</string></dict></plist>",
+    )
+    .unwrap();
     assert!(!package::enabled(&executable, None).unwrap());
     assert!(
         std::process::Command::new("/usr/bin/codesign")
@@ -423,20 +428,39 @@ fn developer_id_signature_identity_resources_and_recovery() {
         fs::create_dir_all(app.join("Contents/Resources")).unwrap();
         fs::copy("/bin/echo", app.join("Contents/MacOS/Playbit")).unwrap();
         fs::write(app.join("Contents/Resources/data"), b"signed resource").unwrap();
-        fs::write(app.join("Contents/Info.plist"), format!(
-            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>{id}</string><key>CFBundleExecutable</key><string>Playbit</string><key>CFBundlePackageType</key><string>APPL</string><key>PlaybitVersion</key><string>{version}</string><key>PlaybitReleaseSequence</key><string>{sequence}</string><key>LSMinimumSystemVersion</key><string>{minimum}</string></dict></plist>"
-        )).unwrap();
+        fs::write(
+            app.join("Contents/Info.plist"),
+            format!(
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>\
+                 CFBundleIdentifier</key><string>{id}</string><key>CFBundleExecutable</key>\
+                 <string>Playbit</string><key>CFBundlePackageType</key><string>APPL</string>\
+                 <key>PlaybitVersion</key><string>{version}</string><key>\
+                 PlaybitReleaseSequence</key><string>{sequence}</string><key>\
+                 LSMinimumSystemVersion</key><string>{minimum}</string></dict></plist>"
+            ),
+        )
+        .unwrap();
         let extension = app.join("Contents/PlugIns/PlaybitThumbnail.appex");
         fs::create_dir_all(extension.join("Contents/MacOS")).unwrap();
         fs::copy("/bin/echo", extension.join("Contents/MacOS/PlaybitThumbnail")).unwrap();
         let extension_id = format!("{id}.thumbnail");
-        fs::write(extension.join("Contents/Info.plist"), format!(
-            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>{extension_id}</string><key>CFBundleExecutable</key><string>PlaybitThumbnail</string><key>CFBundlePackageType</key><string>XPC!</string></dict></plist>"
-        )).unwrap();
+        fs::write(
+            extension.join("Contents/Info.plist"),
+            format!(
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>\
+                 CFBundleIdentifier</key><string>{extension_id}</string><key>\
+                 CFBundleExecutable</key><string>PlaybitThumbnail</string><key>\
+                 CFBundlePackageType</key><string>XPC!</string></dict></plist>"
+            ),
+        )
+        .unwrap();
         let mut entitlements = tempfile::NamedTempFile::new().unwrap();
-        std::io::Write::write_all(&mut entitlements,
-            b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>com.apple.security.app-sandbox</key><true/></dict></plist>"
-        ).unwrap();
+        std::io::Write::write_all(
+            &mut entitlements,
+            b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>\
+              com.apple.security.app-sandbox</key><true/></dict></plist>",
+        )
+        .unwrap();
         assert!(
             Command::new("/usr/bin/codesign")
                 .args(["--force", "--timestamp=none", "--sign"])

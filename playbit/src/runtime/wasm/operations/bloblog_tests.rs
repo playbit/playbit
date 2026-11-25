@@ -51,12 +51,20 @@ fn wasm_bloblog_admits_owned_batches_and_retains_completions_across_memory_growt
         let runtime =
             Runtime::with_backend_and_fuel_limit(*backend, std::num::NonZeroU64::new(TEST_FUEL))
                 .unwrap();
-        let module = runtime.compile_app(&wat::parse_str(r#"(module
-            (import "playbit" "pb_syscall" (func $call (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        let module = runtime
+            .compile_app(
+                &wat::parse_str(
+                    r#"(module
+            (import "playbit" "pb_syscall" (func $call (param i32 i64 i64 i64 i64 i64 i64)
+                (result i64)))
             (memory (export "memory") 2 4)
             (func (export "invoke") (param i32 i64 i64 i64 i64 i64 i64) (result i64)
                 (call $call (local.get 0) (local.get 1) (local.get 2) (local.get 3)
-                    (local.get 4) (local.get 5) (local.get 6))))"#).unwrap()).unwrap();
+                    (local.get 4) (local.get 5) (local.get 6))))"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let records = Arc::new(Mutex::new(Records::default()));
         let state =
             WasmState::new(context(), Box::new(BloblogHost(records.clone())), runtime.fuel_limit)

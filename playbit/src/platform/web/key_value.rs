@@ -13,7 +13,7 @@ use crate::{
 use playbit_api::abi::kv as abi;
 
 impl Host {
-    fn kv_backing(
+    pub(super) fn kv_backing(
         &self,
         volume: &Volume,
         entry: EntryId,
@@ -28,6 +28,22 @@ impl Host {
             return Err(Error::InvalidArgument);
         }
         if !snapshot.backing_ready(entry).map_err(map_error)? {
+            if self.is_projected_world(volume) && permission != Permission::Read {
+                // Mutation rights alone cannot initialize a remote backing.
+                // A later qualified Read capture can make it locally ready.
+                match self.authorize(volume, Some(entry), Permission::Read) {
+                    Err(Error::AccessDenied) => {
+                        return Err(if snapshot.backing_quarantined(entry).map_err(store_error)? {
+                            Error::Unavailable
+                        } else {
+                            Error::NotFound
+                        });
+                    }
+                    other => {
+                        other?;
+                    }
+                }
+            }
             self.need_entry(volume, entry)?;
             return Err(Error::WouldBlock);
         }
@@ -146,8 +162,14 @@ pub extern "C" fn pb_web_kv_put(
             .begin_write_with_delta(unsafe { now() } as u64, crate::store::MAX_REPLICA_DELTA_BYTES)
             .map_err(map_error)?;
         tx.put(key, value).map_err(map_error)?;
+        if append && host.is_projected_world(&volume) {
+            let marker = key_value::kv_append_key(tx.clock());
+            tx.local_indexes()
+                .put(&marker, &key_value::kv_append_record(key, value))
+                .map_err(map_error)?;
+        }
         let delta = tx.commit_with_delta().map_err(map_error)?;
-        host.changes.borrow_mut().push(volume.id, DatabaseId::Entry(entry), delta);
+        host.committed_change(volume.id, DatabaseId::Entry(entry), delta);
         Ok(())
     })
 }
@@ -168,7 +190,7 @@ pub extern "C" fn pb_web_kv_delete(entry: u32, key: u32, length: u32) -> i32 {
             .map_err(map_error)?;
         tx.del(key).map_err(map_error)?;
         let delta = tx.commit_with_delta().map_err(map_error)?;
-        host.changes.borrow_mut().push(volume.id, DatabaseId::Entry(entry), delta);
+        host.committed_change(volume.id, DatabaseId::Entry(entry), delta);
         Ok(())
     })
 }

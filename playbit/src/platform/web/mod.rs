@@ -12,6 +12,7 @@
 
 mod account;
 mod authority;
+mod automatic;
 mod backing;
 mod blob;
 mod blob_cache;
@@ -31,6 +32,7 @@ mod publication;
 mod storage;
 mod transfers;
 mod work;
+mod world_appends;
 use crate::store::{
     DataActor, MetadataPolicy, PersonalVolumeGrant, PersonalVolumeSelection, Session,
     Volume as VolumeRecord,
@@ -85,6 +87,8 @@ unsafe extern "C" {
 struct Bootstrap {
     installation: Id,
     account: Id,
+    user_volume: Option<Id>,
+    creation_build: Option<String>,
     root: VolumeRecord,
 
     session: Session,
@@ -105,6 +109,11 @@ struct Host {
     account: Id,
     session: RefCell<Session>,
     previous_session: RefCell<Option<Session>>,
+    user_volume: Option<Id>,
+    user_volume_deleted: Cell<bool>,
+    creation_build: Option<String>,
+    automatic: RefCell<automatic::Scopes>,
+    secondary_bases: RefCell<BTreeMap<Id, u32>>,
     volumes: RefCell<[Rc<Volume>; 1]>,
     personal: RefCell<Vec<Rc<Volume>>>,
     volume_objects: RefCell<BTreeMap<Id, Rc<Volume>>>,
@@ -115,10 +124,11 @@ struct Host {
     named_failures: RefCell<Vec<(databases::Address, Error)>>,
     files: RefCell<files::Files>,
     blob_cache: Rc<RefCell<blob_cache::Cache>>,
-    initializer: Option<crate::store::initialization::RootInitialization>,
+    initializer: Option<Rc<crate::store::initialization::RootInitialization>>,
 }
 #[derive(Deserialize)]
 struct PersonalVolume {
+    base: Option<u32>,
     volume: VolumeRecord,
     key: [u8; 32],
     replica_ids: [u64; 2],
@@ -192,6 +202,11 @@ impl Host {
             account: bootstrap.account,
             session: RefCell::new(bootstrap.session),
             previous_session: RefCell::new(None),
+            automatic: RefCell::default(),
+            user_volume: bootstrap.user_volume,
+            user_volume_deleted: Cell::new(false),
+            creation_build: bootstrap.creation_build,
+            secondary_bases: RefCell::default(),
             volumes: RefCell::new([root]),
             volume_objects: RefCell::new(volume_objects),
             personal: RefCell::new(Vec::new()),
@@ -202,7 +217,7 @@ impl Host {
             named_failures: RefCell::new(Vec::new()),
             files: RefCell::new(files::Files::new(&blob_cache)),
             blob_cache,
-            initializer: bootstrap.local,
+            initializer: bootstrap.local.map(Rc::new),
         })
     }
 
@@ -263,8 +278,15 @@ impl Host {
         Ok(policy)
     }
 
+    fn deleted_user_volume(&self, id: Id) -> bool {
+        self.user_volume_deleted.get() && self.user_volume == Some(id)
+    }
+
     /// Participant/session admission is separate from catalog or entry Read.
     fn admit_volume(&self, volume: &Volume, permission: Permission) -> Result<MetadataPolicy> {
+        if self.deleted_user_volume(volume.id) {
+            return Err(Error::AccessDenied);
+        }
         authority::check_session(self)?;
         let volumes = self.volumes.borrow();
         let root = MetadataPolicy::read(&volumes[0].index).map_err(map_error)?;
@@ -273,7 +295,10 @@ impl Host {
         }
         let session = self.session.borrow();
         root.admit(self.account, &session, session.replica_volume()).map_err(map_error)?;
-        if volume.id != session.replica_volume() {
+        // A newly adopted package can withdraw its automatic guest slots. The
+        // physical registrations remain for replication and a later re-open.
+        let role = if self.has_automatic() { self.automatic_role(volume.id) } else { None };
+        if volume.id != session.replica_volume() && role.is_none() {
             let selected = self.selections.borrow();
             let grant = selected
                 .get(&session.id)
@@ -295,8 +320,15 @@ impl Host {
         if !policy.volume().same_identity(&volume.record) {
             return Err(Error::AccessDenied);
         }
-        if volume.id != session.replica_volume() && policy.volume().owner != self.account {
-            return Err(Error::AccessDenied);
+        if volume.id != session.replica_volume() {
+            if role == Some(crate::package::AutomaticVolumeRole::Root) {
+                policy.admit_world(self.account, &session).map_err(store_error)?;
+            } else if policy.volume().owner != self.account
+                && !(role == Some(crate::package::AutomaticVolumeRole::User)
+                    && self.user_volume == Some(volume.id))
+            {
+                return Err(Error::AccessDenied);
+            }
         }
         Ok(policy)
     }
@@ -406,17 +438,49 @@ impl Host {
         if personal.len() >= 30 {
             return Err(Error::LimitExceeded);
         }
+        if self.deleted_user_volume(entry.volume.id) {
+            return Err(Error::AccessDenied);
+        }
         if entry.volume.owner != self.account
+            || (self.automatic_role(entry.volume.id).is_some()
+                && self.user_volume != Some(entry.volume.id))
             || self.volumes.borrow().iter().any(|v| v.id == entry.volume.id)
             || personal.iter().any(|v| v.id == entry.volume.id)
         {
             return Err(Error::InvalidArgument);
         }
-        let base = 3 + personal.len() as u32 * 2;
-        let volume = Rc::new(Volume::open(entry.volume, entry.key, base, &entry.replica_ids)?);
+        let base = entry.base.unwrap_or(2 + personal.len() as u32 * 2);
+        let volume = self.open_secondary(entry.volume, entry.key, base, entry.replica_ids)?;
         self.volume_objects.borrow_mut().insert(volume.id, volume.clone());
+        self.secondary_bases.borrow_mut().insert(volume.id, base);
         personal.push(volume);
         Ok(())
+    }
+
+    fn open_secondary(
+        &self,
+        record: VolumeRecord,
+        key: [u8; 32],
+        base: u32,
+        replica_ids: [u64; 2],
+    ) -> Result<Rc<Volume>> {
+        if !(2..=60).contains(&base) || !base.is_multiple_of(2) {
+            return Err(Error::InvalidArgument);
+        }
+        let bases = self.secondary_bases.borrow();
+        if let Some(old) = self.volume_objects.borrow().get(&record.id) {
+            if bases.get(&record.id) != Some(&base)
+                || !old.record.same_identity(&record)
+                || old.key != key
+            {
+                return Err(Error::Conflict);
+            }
+            return Ok(old.clone());
+        }
+        if bases.values().any(|other| *other == base) {
+            return Err(Error::Conflict);
+        }
+        Ok(Rc::new(Volume::open(record, key, base + 1, &replica_ids)?))
     }
 
     fn validate_grants(&self, grants: &[PersonalVolumeGrant]) -> Result<()> {
@@ -467,7 +531,7 @@ impl Host {
                     .id,
             ))
         })?;
-        self.volume_objects.borrow().get(&id).cloned().ok_or(Error::Unsupported)
+        self.guest_volume(id)
     }
 }
 
@@ -582,7 +646,9 @@ fn sync_begin(slot: usize, direction: u32, prepared_volume: bool) -> i32 {
                 let host = host.borrow().clone().ok_or(Error::Unavailable)?;
                 let address = host.database_address(slot)?;
                 let volume = host.replica_volume(address.volume)?;
-                host.replica_policy(&volume, address.database, direction == 0)?;
+                if direction != transfers::BLIND_WORLD_PUSH {
+                    host.replica_policy(&volume, address.database, direction == 0)?;
+                }
                 (host.database(slot)?, Some(address))
             };
             *INPUT.lock().expect("mutex is not poisoned") = Vec::with_capacity(SYNC_FRAGMENT);

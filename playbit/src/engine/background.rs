@@ -381,6 +381,13 @@ impl Engine {
             NetworkWork::Synchronize
         };
         self.begin_network_work(work)?;
+        if self.background.as_ref().is_some_and(|transfer| {
+            !transfer.diagnostic
+                && !transfer.diagnostic_read
+                && transfer.recovery_control != Some(recovery::control::Kind::Status)
+        }) {
+            self.joined_for_open = None;
+        }
         Ok(self.network_request_ticket(control))
     }
 
@@ -444,6 +451,7 @@ impl Engine {
             .or_else(|| self.background.as_ref().and_then(|b| b.email.clone()))
     }
     pub(super) fn cancel_session_open(&mut self, id: &str) -> Result<()> {
+        self.finish_join_open(id);
         if self.pending_join.as_deref() == Some(id) {
             self.pending_join = None;
         }
@@ -469,6 +477,7 @@ impl Engine {
         Ok(())
     }
     pub(super) fn prepare_session(&mut self, id: &str) -> Result<Reply> {
+        self.finish_join_open(id);
         self.services.store.retain_session(id)?;
         self.prepare_existing_session(self.services.store.session(id)?, false)
     }
@@ -576,6 +585,7 @@ impl Engine {
                         .into(),
                 );
             }
+            self.joined_for_open = None;
             self.pending_join = session;
             self.transfer_result = TransferStatus {
                 kind: TransferKind::Running,
@@ -586,7 +596,10 @@ impl Engine {
             self.state_changed();
             return Ok(Reply::Transfer { transfer: self.transfer_status() });
         }
-        self.begin_network_work(session.map_or(NetworkWork::Synchronize, NetworkWork::Join))
+        let reply =
+            self.begin_network_work(session.map_or(NetworkWork::Synchronize, NetworkWork::Join))?;
+        self.joined_for_open = None;
+        Ok(reply)
     }
     pub(super) fn start_update_check(&mut self, session: String) -> Result<Reply> {
         let _timing = crate::trace::Span::new("engine.update.request");
@@ -600,7 +613,9 @@ impl Engine {
         }
         // The same one-session continuation used by a multi-session transfer:
         // resolve/prepare this selection and report completion, without sync.
-        self.begin_network_work(NetworkWork::CheckUpdate(session))
+        let reply = self.begin_network_work(NetworkWork::CheckUpdate(session))?;
+        self.joined_for_open = None;
+        Ok(reply)
     }
     fn begin_network_work(&mut self, work: NetworkWork) -> Result<Reply> {
         // This lane also serves local file/copy/recovery operations. Those
@@ -795,6 +810,7 @@ impl Engine {
         Ok(Reply::Transfer { transfer: self.transfer_status() })
     }
     pub(crate) fn cancel_invitation_transfer(&mut self, session: &str) -> Result<()> {
+        self.finish_join_open(session);
         if self.pending_join.as_deref() == Some(session) {
             self.pending_join = None;
             self.services.store.pause_invitation(session, true)?;
@@ -825,6 +841,7 @@ impl Engine {
         Ok(())
     }
     pub(super) fn disconnect_network(&mut self) -> Result<()> {
+        self.joined_for_open = None;
         if let Some(session) = self.pending_join.take() {
             self.services.store.pause_invitation(&session, true)?;
         }
@@ -980,6 +997,27 @@ impl Engine {
         }
         Ok(false)
     }
+    // Opening clients follow StartJoin with TransferStatus, then PrepareSession.
+    // Keep that handoff available while World initialization reports its own
+    // progress and failures through the account status and explicit Sync ticket.
+    pub(super) fn opening_transfer_status(&self) -> TransferStatus {
+        if let Some(session) = &self.joined_for_open {
+            return TransferStatus {
+                kind: TransferKind::Complete,
+                session: Some(session.clone()),
+                ..Default::default()
+            };
+        }
+        self.transfer_status()
+    }
+
+    fn finish_join_open(&mut self, session: &str) {
+        if self.joined_for_open.as_deref() == Some(session) {
+            self.joined_for_open = None;
+            self.state_changed();
+        }
+    }
+
     pub(super) fn transfer_status(&self) -> TransferStatus {
         if self.network.connection_status.offline() {
             return TransferStatus {
@@ -1007,6 +1045,7 @@ impl Engine {
         transfer
     }
     pub(super) fn cancel_transfer(&mut self) -> Result<()> {
+        self.joined_for_open = None;
         if let Some(session) = self.pending_join.clone() {
             return self.cancel_invitation_transfer(&session);
         }
@@ -1476,6 +1515,9 @@ impl Engine {
             if complete_invitation {
                 self.services.store.complete_invitation(session)?;
                 self.stop_invitation_watch(session);
+                if self.pending_join.is_none() {
+                    self.joined_for_open = Some(session.clone());
+                }
             }
         }
         Ok(())

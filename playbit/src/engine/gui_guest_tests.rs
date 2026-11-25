@@ -1463,8 +1463,10 @@ fn package_loading_rejects_different_content_and_symlinks() {
 
 #[test]
 fn consumed_readiness_without_consuming_result_reports_failed_drain() {
-    let wasm = wat::parse_str(r#"(module
-        (import "playbit" "pb_syscall" (func $sys (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+    let wasm = wat::parse_str(
+        r#"(module
+        (import "playbit" "pb_syscall" (func $sys (param i32 i64 i64 i64 i64 i64 i64)
+            (result i64)))
         (memory (export "memory") 1)
         (global $began (mut i32) (i32.const 0))
         (global $pending (mut i64) (i64.const 0))
@@ -1473,7 +1475,9 @@ fn consumed_readiness_without_consuming_result_reports_failed_drain() {
             (i32.store (i32.const 1024) (i32.const 24))
             (i32.store (i32.const 1028) (i32.const 0))
             (loop $events
-                (if (i64.ne (call $sys (i32.const 4) (i64.const 1024) (i64.const 1056) (i64.const 1024) (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const -6)) (then (br $events))))
+                (if (i64.ne (call $sys (i32.const 4) (i64.const 1024) (i64.const 1056)
+                    (i64.const 1024) (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const
+                    -6)) (then (br $events))))
             (if (i32.eqz (global.get $began)) (then
                 ;; Enumerate the fixture's root and bundle volumes, including root tags.
                 (i32.store (i32.const 64) (i32.const 64))
@@ -1498,7 +1502,9 @@ fn consumed_readiness_without_consuming_result_reports_failed_drain() {
                 (global.set $pending (call $sys (i32.const 258) (i64.const 512)
                     (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
                 (if (i64.le_s (global.get $pending) (i64.const 0)) (then unreachable))
-                (global.set $began (i32.const 1))))))"#).unwrap();
+                (global.set $began (i32.const 1))))))"#,
+    )
+    .unwrap();
     let package =
         Package::new("test".into(), "Unconsumed completion".into(), wasm, BTreeMap::new()).unwrap();
     let (directory, mut engine, admission, package) = fixture_package(package);
@@ -1975,8 +1981,15 @@ fn stopped_owner_probe_checks_exact_context_peer_and_reply_binding() {
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let mut child = Command::new("/usr/bin/python3")
-        .args(["-c", "import socket, sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); sys.stdin.buffer.read(1)"])
-        .arg(&socket).stdin(Stdio::piped()).spawn().unwrap();
+        .args([
+            "-c",
+            "import socket, sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); \
+             sys.stdin.buffer.read(1)",
+        ])
+        .arg(&socket)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     let stranger = loop {
         match listener.accept() {

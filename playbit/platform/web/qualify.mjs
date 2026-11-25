@@ -137,7 +137,8 @@ function profileRuntimeWorker(source) {
         const measured = completeInputQualification();
         if (measured) self.postMessage({ qualification: measured });
     `);
-    source = replaceBoundary(source, 'await enterGuest(); result = presentation();', `
+    source = replaceBoundary(source, 'guestWork.queueAccepted(accepted.root, accepted.event); queued = true;\n            await enterGuest(); result = presentation();', `
+        guestWork.queueAccepted(accepted.root, accepted.event); queued = true;
         beginInputQualification(); const began=performance.now();
         await enterGuest(); qualification.admissionMs+=performance.now()-began;
         result = presentation();

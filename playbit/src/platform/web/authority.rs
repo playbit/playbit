@@ -209,12 +209,18 @@ pub(super) fn terminal(
     }
     match cause {
         value if value == TerminalCause::ServiceUnavailable as u8 => Ok(()),
-        value if value == TerminalCause::ParticipantDenied as u8 => {
+        value
+            if value == TerminalCause::ParticipantDenied as u8
+                && !session.is_distinct_world(changed) =>
+        {
             let root = host.volumes.borrow()[0].clone();
             let key = denial_key(host.account, &session);
             write(&root, &key, marker(&root, &key)?.invalidate())
         }
-        value if value == TerminalCause::AuthorityChanged as u8 => {
+        value
+            if value == TerminalCause::AuthorityChanged as u8
+                || value == TerminalCause::ParticipantDenied as u8 =>
+        {
             let volume = host.replica_volume(changed)?;
             let key = barrier_key(host.account);
             write(&volume, &key, marker(&volume, &key)?.invalidate())

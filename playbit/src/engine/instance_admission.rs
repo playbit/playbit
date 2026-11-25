@@ -388,7 +388,9 @@ impl Engine {
         build: &str,
     ) -> Result<()> {
         if session.resolved_build_id != build {
-            return Err("This session instance belongs to an earlier build; reconstruct it explicitly before running more turns".into());
+            return Err("This session instance belongs to an earlier build; \
+                reconstruct it explicitly before running more turns"
+                .into());
         }
         if let Some(reason) = self.services.store.session_denial(&session.id)? {
             return Err(reason.into());

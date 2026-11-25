@@ -93,10 +93,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if !cfg!(target_os = "macos") || args.len() != 3 {
-        return Err(
-            "macOS only: keychain-fixture prepare|complete|probe|create-key|delete-key|probe-key PROFILE"
-                .into(),
-        );
+        return Err("macOS only: keychain-fixture prepare|complete|probe|create-key|delete-\
+            key|probe-key PROFILE"
+            .into());
     }
     match args[1].to_str() {
         #[cfg(target_os = "macos")]

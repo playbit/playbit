@@ -2605,18 +2605,41 @@ mod checkpoint_tests {
         runtime().block_on(async {
             let timer = tokio::time::sleep_until(tokio::time::Instant::now());
             tokio::pin!(timer);
-            let checkpoints = Checkpoints::new(Duration::from_secs(60), Arc::new(Semaphore::new(8)));
-            let wait = checkpoint_deadline(std::future::pending::<()>(), &checkpoints.mailbox, timer.as_mut());
+            let checkpoints =
+                Checkpoints::new(Duration::from_secs(60), Arc::new(Semaphore::new(8)));
+            let wait = checkpoint_deadline(
+                std::future::pending::<()>(),
+                &checkpoints.mailbox,
+                timer.as_mut(),
+            );
             let bytes = std::mem::size_of_val(&wait);
             // This is only the new helper, not proof of the entire account's
             // 64KiB framing/address allowance. Measure the concrete receive
             // coroutine too: coroutine layouts can overlap suspended awaits.
             assert!(bytes <= 512, "deadline supervisor uses {bytes} bytes");
-            fn run_size<F: Future>(_: impl FnOnce(PreparedSubscription, Arc<LocalStore>,
-                Arc<Semaphore>, RunNotice, Checkpoints) -> F) -> usize { std::mem::size_of::<F>() }
+            fn run_size<F: Future>(
+                _: impl FnOnce(
+                    PreparedSubscription,
+                    Arc<LocalStore>,
+                    Arc<Semaphore>,
+                    RunNotice,
+                    Checkpoints,
+                ) -> F,
+            ) -> usize {
+                std::mem::size_of::<F>()
+            }
             let run_bytes = run_size(PreparedSubscription::run);
-            assert!(32 * run_bytes <= 64 * 1024, "receive coroutines alone use {} bytes/account", 32 * run_bytes);
-            crate::diagnostic!("deadline supervisor: {bytes} bytes/site; actual receive coroutine: {run_bytes} bytes; 32 coroutines: {} bytes; full framing/address proof is separate", 32 * run_bytes);
+            assert!(
+                32 * run_bytes <= 64 * 1024,
+                "receive coroutines alone use {} bytes/account",
+                32 * run_bytes
+            );
+            crate::diagnostic!(
+                "deadline supervisor: {bytes} bytes/site; actual receive coroutine: \
+                 {run_bytes} bytes; 32 coroutines: {} bytes; \
+                 full framing/address proof is separate",
+                32 * run_bytes
+            );
         });
     }
 

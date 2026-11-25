@@ -357,6 +357,8 @@ fn run(updates: bool, sidebar: Option<Option<std::path::PathBuf>>, session: Opti
                             LogEntry::recorded(
                                 if i == 3 {
                                     "Example owner failure".into()
+                                } else if i == 6 && mode == "instance" {
+                                    "Notification sent to user regarding updates with a really long message that causes it to wrap".into()
                                 } else {
                                     format!("Example log message {i}")
                                 },
@@ -499,44 +501,79 @@ fn measure_sessions(host: Entity<Shell>, cx: &mut App) {
         for i in 0..1020 {
             let start = std::time::Instant::now();
             host.update(cx, |host, cx| {
-                let state = [crate::engine::reply::ApConnectionState::Live,
+                let state = [
+                    crate::engine::reply::ApConnectionState::Live,
                     crate::engine::reply::ApConnectionState::Connecting,
-                    crate::engine::reply::ApConnectionState::Offline][i % 3];
-                host.ap_status.update(cx, |indicator, cx| indicator.set(Some(
-                    crate::engine::reply::ApConnectionStatus { state, hostname: "ap.playbit.app".into() }
-                ), cx));
-            }).expect("fixture AP status");
-            gpui::AnyWindowHandle::from(handle).update(cx, |_, window, cx| {
-                let _ = window.draw(cx);
-            }).expect("fixture AP status draw");
-            if i >= 20 { status_samples.push(start.elapsed().as_secs_f64() * 1000.); }
+                    crate::engine::reply::ApConnectionState::Offline,
+                ][i % 3];
+                host.ap_status.update(cx, |indicator, cx| {
+                    indicator.set(
+                        Some(crate::engine::reply::ApConnectionStatus {
+                            state,
+                            hostname: "ap.playbit.app".into(),
+                        }),
+                        cx,
+                    )
+                });
+            })
+            .expect("fixture AP status");
+            gpui::AnyWindowHandle::from(handle)
+                .update(cx, |_, window, cx| {
+                    let _ = window.draw(cx);
+                })
+                .expect("fixture AP status draw");
+            if i >= 20 {
+                status_samples.push(start.elapsed().as_secs_f64() * 1000.);
+            }
         }
         status_samples.sort_by(f64::total_cmp);
-        println!("AP status + CPU scene: n=1000 p50={:.3} p95={:.3} p99={:.3} max={:.3} ms",
-            status_samples[499], status_samples[949], status_samples[989], status_samples[999]);
-        host.update(cx, |host, cx| host.ap_status.update(cx, |indicator, cx| indicator.set(Some(
-            crate::engine::reply::ApConnectionStatus {
-                state: crate::engine::reply::ApConnectionState::Connecting,
-                hostname: "ap.playbit.app".into(),
-            }
-        ), cx))).expect("fixture concurrent spinner");
+        println!(
+            "AP status + CPU scene: n=1000 p50={:.3} p95={:.3} p99={:.3} max={:.3} ms",
+            status_samples[499], status_samples[949], status_samples[989], status_samples[999]
+        );
+        host.update(cx, |host, cx| {
+            host.ap_status.update(cx, |indicator, cx| {
+                indicator.set(
+                    Some(crate::engine::reply::ApConnectionStatus {
+                        state: crate::engine::reply::ApConnectionState::Connecting,
+                        hostname: "ap.playbit.app".into(),
+                    }),
+                    cx,
+                )
+            })
+        })
+        .expect("fixture concurrent spinner");
         for count in [0, 4, 128, 256] {
             host.update(cx, |host, cx| {
-                host.sessions = (0..count).map(|i| SessionRow { reference: String::new(),
-                    build_state: crate::engine::builds::BuildState::Ready,
-                    id: format!("fixture-{i}"), app_name: Some(format!("Example {i}")),
-                    resolved_build_id: crate::identifier::encode(&{ let mut bytes = [0; 32]; bytes[16..].copy_from_slice(&(i as u128).to_be_bytes()); bytes }),
-                }).collect();
+                host.sessions = (0..count)
+                    .map(|i| SessionRow {
+                        reference: String::new(),
+                        build_state: crate::engine::builds::BuildState::Ready,
+                        id: format!("fixture-{i}"),
+                        app_name: Some(format!("Example {i}")),
+                        resolved_build_id: crate::identifier::encode(&{
+                            let mut bytes = [0; 32];
+                            bytes[16..].copy_from_slice(&(i as u128).to_be_bytes());
+                            bytes
+                        }),
+                    })
+                    .collect();
                 host.logs.update(cx, |logs, cx| {
-                    let lines = vec![crate::ui::app_control::LogEntry::recorded(
-                        "x".repeat(256), crate::ui::app_control::LogSeverity::Info); 256];
+                    let lines = vec![
+                        crate::ui::app_control::LogEntry::recorded(
+                            "x".repeat(256),
+                            crate::ui::app_control::LogSeverity::Info
+                        );
+                        256
+                    ];
                     logs.select("fixture-0", None, cx);
                     logs.set("fixture-0", &lines, cx);
                     logs.select("fixture-1", None, cx);
                     logs.set("fixture-1", &lines, cx);
                 });
                 cx.notify();
-            }).expect("fixture host");
+            })
+            .expect("fixture host");
             let mut callbacks = Vec::with_capacity(1000);
             let mut scenes = Vec::with_capacity(1000);
             for i in 0..1020 {
@@ -546,53 +583,81 @@ fn measure_sessions(host: Entity<Shell>, cx: &mut App) {
                     host.sidebar_session = Some(id.clone());
                     host.logs.update(cx, |logs, cx| logs.select(&id, None, cx));
                     cx.notify();
-                }).expect("fixture selection");
+                })
+                .expect("fixture selection");
                 let callback = start.elapsed().as_secs_f64() * 1000.;
-                gpui::AnyWindowHandle::from(handle).update(cx, |_, window, cx| {
-                    let _ = window.draw(cx);
-                }).expect("fixture draw");
+                gpui::AnyWindowHandle::from(handle)
+                    .update(cx, |_, window, cx| {
+                        let _ = window.draw(cx);
+                    })
+                    .expect("fixture draw");
                 if i >= 20 {
                     callbacks.push(callback);
                     scenes.push(start.elapsed().as_secs_f64() * 1000.);
                 }
             }
-            for (name, mut samples) in [("selection callback", callbacks), ("selection + CPU scene", scenes)] {
+            for (name, mut samples) in
+                [("selection callback", callbacks), ("selection + CPU scene", scenes)]
+            {
                 samples.sort_by(f64::total_cmp);
-                println!("{name}: sessions={count} rows=256 bytes=65536 n=1000 p50={:.3} p99={:.3} max={:.3} ms",
-                    samples[499], samples[989], samples[999]);
+                println!(
+                    "{name}: sessions={count} rows=256 bytes=65536 n=1000 p50={:.3} p99={:.3} \
+                     max={:.3} ms",
+                    samples[499], samples[989], samples[999]
+                );
             }
             let mut samples = Vec::with_capacity(1000);
             for i in 0..1000 {
                 let start = std::time::Instant::now();
-                gpui::AnyWindowHandle::from(handle).update(cx, |_, window, cx| {
-                    window.dispatch_event(gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
-                        position: gpui::point(px(500.), px(200.)),
-                        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(if i % 2 == 0 { -10. } else { 10. }))),
-                        ..Default::default()
-                    }), cx);
-                    let _ = window.draw(cx);
-                }).expect("fixture wheel and draw");
+                gpui::AnyWindowHandle::from(handle)
+                    .update(cx, |_, window, cx| {
+                        window.dispatch_event(
+                            gpui::PlatformInput::ScrollWheel(gpui::ScrollWheelEvent {
+                                position: gpui::point(px(500.), px(200.)),
+                                delta: gpui::ScrollDelta::Pixels(gpui::point(
+                                    px(0.),
+                                    px(if i % 2 == 0 { -10. } else { 10. }),
+                                )),
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        let _ = window.draw(cx);
+                    })
+                    .expect("fixture wheel and draw");
                 samples.push(start.elapsed().as_secs_f64() * 1000.);
             }
             samples.sort_by(f64::total_cmp);
-            println!("wheel + CPU scene: sessions={count} n=1000 p50={:.3} p99={:.3} max={:.3} ms",
-                samples[499], samples[989], samples[999]);
+            println!(
+                "wheel + CPU scene: sessions={count} n=1000 p50={:.3} p99={:.3} max={:.3} ms",
+                samples[499], samples[989], samples[999]
+            );
             host.update(cx, |host, _| {
                 for (index, row) in host.sessions.iter_mut().enumerate() {
-                    row.id = crate::identifier::encode(blake3::hash(&index.to_le_bytes()).as_bytes());
+                    row.id =
+                        crate::identifier::encode(blake3::hash(&index.to_le_bytes()).as_bytes());
                     row.app_name = None;
                     row.build_state = crate::engine::builds::BuildState::Downloading;
                 }
-            }).expect("loading fixture");
+            })
+            .expect("loading fixture");
             let mut samples = Vec::with_capacity(1000);
             for index in 0..1020 {
                 let start = std::time::Instant::now();
-                host.update(cx, |host, cx| { let _ = host.sidebar_view(true, cx); }).expect("loading rows");
-                if index >= 20 { samples.push(start.elapsed().as_secs_f64() * 1000.); }
+                host.update(cx, |host, cx| {
+                    let _ = host.sidebar_view(true, cx);
+                })
+                .expect("loading rows");
+                if index >= 20 {
+                    samples.push(start.elapsed().as_secs_f64() * 1000.);
+                }
             }
             samples.sort_by(f64::total_cmp);
-            println!("loading sidebar construction: sessions={count} n=1000 p50={:.3} p99={:.3} max={:.3} ms",
-                samples[499], samples[989], samples[999]);
+            println!(
+                "loading sidebar construction: sessions={count} n=1000 p50={:.3} p99={:.3} \
+                 max={:.3} ms",
+                samples[499], samples[989], samples[999]
+            );
         }
         host.update(cx, |host, cx| host.logs.update(cx, |logs, cx| logs.clear(cx)))
             .expect("fixture clear");
@@ -603,41 +668,63 @@ fn measure_sessions(host: Entity<Shell>, cx: &mut App) {
                 host.logs.update(cx, |logs, cx| {
                     use crate::ui::app_control::{LogBatch, LogCursor, LogEntry, LogSeverity};
                     let id = logs.session.clone().expect("fixture session");
-                    logs.receive(&id, log::Update::Batch(LogBatch {
-                        cursor: LogCursor { instance: crate::store::Id::from_bytes([1; 16]),
-                            generation: 1, next },
-                        lines: vec![LogEntry::recorded("x".repeat(256), LogSeverity::Info)],
-                        dropped: 0, reset: false,
-                    }), cx);
+                    logs.receive(
+                        &id,
+                        log::Update::Batch(LogBatch {
+                            cursor: LogCursor {
+                                instance: crate::store::Id::from_bytes([1; 16]),
+                                generation: 1,
+                                next,
+                            },
+                            lines: vec![LogEntry::recorded("x".repeat(256), LogSeverity::Info)],
+                            dropped: 0,
+                            reset: false,
+                        }),
+                        cx,
+                    );
                     // Maximum marker occupancy: one completed run per retained message.
                     logs.receive(&id, log::Update::Stopped, cx);
                 });
-            }).expect("fixture log update");
-            gpui::AnyWindowHandle::from(handle).update(cx, |_, window, cx| {
-                let _ = window.draw(cx);
-            }).expect("fixture log draw");
-            if next >= 280 { samples.push(start.elapsed().as_secs_f64() * 1000.); }
+            })
+            .expect("fixture log update");
+            gpui::AnyWindowHandle::from(handle)
+                .update(cx, |_, window, cx| {
+                    let _ = window.draw(cx);
+                })
+                .expect("fixture log draw");
+            if next >= 280 {
+                samples.push(start.elapsed().as_secs_f64() * 1000.);
+            }
         }
         samples.sort_by(f64::total_cmp);
-        println!("log append/stop + CPU scene: rows<=512 bytes=65536 n=1000 p50={:.3} p99={:.3} max={:.3} ms",
-            samples[499], samples[989], samples[999]);
+        println!(
+            "log append/stop + CPU scene: rows<=512 bytes=65536 n=1000 p50={:.3} \
+             p99={:.3} max={:.3} ms",
+            samples[499], samples[989], samples[999]
+        );
         let mut samples = Vec::with_capacity(1000);
         for _ in 0..1000 {
             let start = std::time::Instant::now();
-            host.update(cx, |host, cx| host.show_visual_bell(
-                "Account info copied to clipboard",
-                "session-share", cx,
-            )).expect("fixture feedback");
-            gpui::AnyWindowHandle::from(handle).update(cx, |_, window, cx| {
-                let _ = window.draw(cx);
-            }).expect("fixture feedback draw");
+            host.update(cx, |host, cx| {
+                host.show_visual_bell("Account info copied to clipboard", "session-share", cx)
+            })
+            .expect("fixture feedback");
+            gpui::AnyWindowHandle::from(handle)
+                .update(cx, |_, window, cx| {
+                    let _ = window.draw(cx);
+                })
+                .expect("fixture feedback draw");
             samples.push(start.elapsed().as_secs_f64() * 1000.);
         }
         samples.sort_by(f64::total_cmp);
-        println!("Visual Bell + CPU scene: sessions=256 log_rows<=512 n=1000 p50={:.3} p99={:.3} max={:.3} ms",
-            samples[499], samples[989], samples[999]);
+        println!(
+            "Visual Bell + CPU scene: sessions=256 log_rows<=512 n=1000 p50={:.3} \
+             p99={:.3} max={:.3} ms",
+            samples[499], samples[989], samples[999]
+        );
         cx.update(|cx| cx.quit()).expect("fixture quit");
-    }).detach();
+    })
+    .detach();
 }
 
 #[cfg(test)]

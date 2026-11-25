@@ -46,6 +46,15 @@ function fileGuest({ name = "pb_syscall", parameters = [0x7f, ...Array(6).fill(0
         ...section(10,[1,body.length,...body])]);
 }
 
+test("only a required pixel capability selects the larger prepared guest memory", async () => {
+    const original = fileGuest();
+    const plain = await prepareGuest(original, {}, ['ui.canvas.window.v1']);
+    const pixels = await prepareGuest(original, {}, ['ui.canvas.pixels.v1']);
+    assert.throws(() => plain.exports.memory.grow(256), RangeError);
+    assert.equal(pixels.exports.memory.grow(256), 1);
+    assert.throws(() => pixels.exports.memory.grow(256), RangeError);
+});
+
 test("file begin uses the bounded scalar binding without suspension", async () => {
     let calls = 0;
     const guest = await prepareGuest(fileGuest(), { pb_file_read_begin: (...args) => {

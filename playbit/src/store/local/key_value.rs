@@ -139,8 +139,9 @@ impl LocalStore {
         {
             // Persist the key, value digest and original clock in the backing's
             // private index, atomically with the KV birth. Values stay in place.
-            let marker = super::world::kv_append_key(tx.clock());
-            tx.local_indexes().put(&marker, &super::world::kv_append_record(key, value))?;
+            let marker = crate::store::key_value::kv_append_key(tx.clock());
+            tx.local_indexes()
+                .put(&marker, &crate::store::key_value::kv_append_record(key, value))?;
         }
 
         let delta = {

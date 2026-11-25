@@ -390,14 +390,24 @@ fn run() -> Result<()> {
     {
         return Err("Event layout changed; review marshalling".into());
     }
-    ml.push_str("let event_bytes = 24\nlet event_size_offset = 0\nlet event_written_offset = 4\nlet event_generation_offset = 8\nlet event_kind_offset = 16\nlet event_target_offset = 20\n");
+    ml.push_str(
+        "let event_bytes = 24\nlet event_size_offset = 0\n\
+         let event_written_offset = 4\nlet event_generation_offset = 8\n\
+         let event_kind_offset = 16\nlet event_target_offset = 20\n",
+    );
     let mut wat = String::from(
         ";; Generated scalar lowering from Rust. Buffer ownership lives in playbit_ffi.wat.\n(module\n    (import \"playbit\" \"pb_syscall\" (func $syscall (param i32 i64 i64 i64 i64 i64 i64) (result i64)))\n",
     );
     // Structured adapters own pointer layouts and bounded buffer copies. Their
     // scalar transport retains complete 64-bit handles and uses generated
     // Opcode values, without a second operation table in the compiler fork.
-    wat.push_str("    (func (export \"pb_call_slots\") (param $opcode i32) (param $a i64) (param $b i64) (param $c i64) (param $d i64) (param $e i64) (param $f i64) (result i64)\n        (call $syscall (local.get $opcode) (local.get $a) (local.get $b) (local.get $c) (local.get $d) (local.get $e) (local.get $f)))\n");
+    wat.push_str(
+        "    (func (export \"pb_call_slots\") (param $opcode i32) (param $a i64) \
+         (param $b i64) (param $c i64) (param $d i64) (param $e i64) (param $f i64) \
+         (result i64)\n        (call $syscall (local.get $opcode) (local.get $a) \
+         (local.get $b) (local.get $c) (local.get $d) (local.get $e) (local.get \
+         $f)))\n",
+    );
     for &(name, annotation) in OPERATIONS {
         let function = ops
             .items

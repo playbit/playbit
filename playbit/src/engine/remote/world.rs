@@ -9,6 +9,11 @@ enum WorldAdmission {
 }
 
 impl Remote {
+    #[cfg(feature = "app-host")]
+    pub(crate) fn schedule_world_initialization(&mut self, shared: Id) -> bool {
+        self.initializations.schedule_world(shared, Instant::now())
+    }
+
     pub(super) fn sync_invited_world(
         &mut self,
         store: &Arc<LocalStore>,

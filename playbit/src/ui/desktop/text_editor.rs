@@ -3110,8 +3110,13 @@ mod tests {
                         std::hint::black_box(&editor.placeholder);
                     }
                     times.sort_unstable();
-                    crate::diagnostic!("placeholder: bytes={bytes} changed={changed} n=1000 p50={} p99={} max={} ns (property update only)",
-                        times[499], times[989], times[999]);
+                    crate::diagnostic!(
+                        "placeholder: bytes={bytes} changed={changed} n=1000 p50={} p99={} \
+                         max={} ns (property update only)",
+                        times[499],
+                        times[989],
+                        times[999]
+                    );
                     assert!(times[989] < 20_000);
                     assert_eq!(editor.text(), "retained draft");
                 });

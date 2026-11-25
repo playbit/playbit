@@ -205,6 +205,54 @@ fn web_authority_rows(
 }
 
 #[test]
+fn native_world_mutation_grants_match_the_compiled_web_fixture() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use kvdb::storage::{Storage, StorageTxn, mem::MemStorage};
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("platform/web/tests/automatic-world-index.json");
+    let mut vectors: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&fixture).unwrap()).unwrap();
+    let rows: Vec<(String, String)> = serde_json::from_value(vectors["rows"].clone()).unwrap();
+    let storage = MemStorage::new();
+    let mut write = storage.begin(true).unwrap();
+    for (key, value) in rows {
+        write.put(&STANDARD.decode(key).unwrap(), &STANDARD.decode(value).unwrap()).unwrap();
+    }
+    write.commit().unwrap();
+    let database = kvdb::Db::open(storage, &Default::default()).unwrap();
+    let mut edit = database.begin_write_with_delta(1000, 4096).unwrap();
+    for (entry, permission, service_read) in [
+        (81, Permission::Write, true),
+        (82, Permission::Write, false),
+        (83, Permission::Append, true),
+    ] {
+        let mut grants = vec![Grant { subject: Subject::Public, permissions: vec![permission] }];
+        if service_read {
+            grants.push(Grant {
+                subject: Subject::Principal(playbit::store::PLAYBIT_REPLICA_PRINCIPAL),
+                permissions: vec![Permission::Read],
+            });
+        }
+        playbit::store::volume_index::set_permissions(
+            &mut edit,
+            EntryId::from_bytes([entry; 15]).unwrap(),
+            &EntryAcl::Replace(Acl { grants }),
+        )
+        .unwrap();
+    }
+    let kvdb::CommittedDelta::Bytes(delta) = edit.commit_with_delta().unwrap() else {
+        panic!("world mutation fixture must fit the live delta limit");
+    };
+    let expected = STANDARD.encode(delta);
+    if std::env::var_os("PLAYBIT_REGENERATE_BACKING_AUTHORITY_FIXTURE").is_some() {
+        vectors["blind_mutation"] = serde_json::Value::String(expected.clone());
+        std::fs::write(&fixture, format!("{}\n", serde_json::to_string_pretty(&vectors).unwrap()))
+            .unwrap();
+    }
+    assert_eq!(vectors["blind_mutation"], expected);
+}
+
+#[test]
 fn native_blob_authority_vectors_match_the_compiled_web_fixture() {
     use playbit::store::{
         EntryId, MetadataPolicy, Volume,

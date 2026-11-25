@@ -1,26 +1,19 @@
 //! Declaration-bound independent blob initialization, before guest execution.
 use super::blob::FileReference;
 use super::*;
-use crate::store::{
-    InitialBlob,
-    volume_index::{self, BlobVersion, EntryAddress, EntryInfo, EntryKind, IndexSnapshot},
+use crate::store::volume_index::{
+    self, BlobVersion, EntryAddress, EntryInfo, EntryKind, IndexSnapshot,
 };
 
 impl Host {
-    fn initial_blob(&self, entry: EntryId) -> Result<&InitialBlob> {
-        if self.account != self.volumes.borrow()[0].record.owner {
+    fn initial_blob_reference(&self, volume: Id, entry: EntryId) -> Result<Option<FileReference>> {
+        let volume = self.replica_volume(volume)?;
+        if self.account != volume.record.owner {
             return Err(Error::AccessDenied);
         }
-        self.initializer
-            .as_ref()
-            .and_then(|root| root.blobs.iter().find(|seed| seed.id == entry))
-            .ok_or(Error::AccessDenied)
-    }
-
-    fn initial_blob_reference(&self, entry: EntryId) -> Result<Option<FileReference>> {
-        let seed = self.initial_blob(entry)?;
-        let volumes = self.volumes.borrow();
-        let volume = &volumes[0];
+        let initializer = self.initializer_for(volume.id).ok_or(Error::AccessDenied)?;
+        let seed =
+            initializer.blobs.iter().find(|seed| seed.id == entry).ok_or(Error::AccessDenied)?;
         match IndexSnapshot::new(volume.index.begin_read().map_err(map_error)?).entry(entry) {
             Ok(_) => return Ok(None),
             Err(crate::store::Error::NotFound(_)) => {}
@@ -37,9 +30,16 @@ impl Host {
     }
 
     fn publish_initial_blob(&self, reference: &FileReference) -> Result<()> {
-        let seed = self.initial_blob(reference.entry)?;
-        let volumes = self.volumes.borrow();
-        let volume = &volumes[0];
+        let volume = self.replica_volume(reference.volume)?;
+        if self.account != volume.record.owner {
+            return Err(Error::AccessDenied);
+        }
+        let initializer = self.initializer_for(volume.id).ok_or(Error::AccessDenied)?;
+        let seed = initializer
+            .blobs
+            .iter()
+            .find(|seed| seed.id == reference.entry)
+            .ok_or(Error::AccessDenied)?;
         let version = reference.version()?;
         if reference.volume != volume.id
             || reference.offset != 0
@@ -80,11 +80,9 @@ impl Host {
         )
         .map_err(store_error)?;
         volume_index::mark_backing_ready(&mut tx, seed.id).map_err(store_error)?;
-        tx.local_indexes()
-            .put(&blob::pending_key(&version), &serde_json::to_vec(&version).map_err(map_error)?)
-            .map_err(map_error)?;
+        self.record_blob_upload(&mut tx, &version)?;
         let delta = tx.commit_with_delta().map_err(map_error)?;
-        self.changes.borrow_mut().push(volume.id, DatabaseId::Index, delta);
+        self.committed_change(volume.id, DatabaseId::Index, delta);
         Ok(())
     }
 }
@@ -99,8 +97,17 @@ pub extern "C" fn pb_seed_blob_reference(length: usize) -> i32 {
     let result = HOST.with(|cell| {
         let host = cell.borrow();
         let host = host.as_ref().ok_or(Error::Unavailable)?;
-        let entry: EntryId = serde_json::from_slice(&input[..length]).map_err(map_error)?;
-        serde_json::to_vec(&host.initial_blob_reference(entry)?).map_err(map_error)
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Request {
+            Scoped { volume: Id, entry: EntryId },
+            Primary(EntryId),
+        }
+        let (volume, entry) = match serde_json::from_slice(&input[..length]).map_err(map_error)? {
+            Request::Scoped { volume, entry } => (volume, entry),
+            Request::Primary(entry) => (host.volumes.borrow()[0].id, entry),
+        };
+        serde_json::to_vec(&host.initial_blob_reference(volume, entry)?).map_err(map_error)
     });
     result.map_or_else(|error| error as i32, publish_output)
 }

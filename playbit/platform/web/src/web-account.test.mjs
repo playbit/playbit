@@ -99,8 +99,12 @@ test('fresh sign-in forces document reload with its invitation, while other tabs
         reloadWebAccount({ tab: 'initiator' }, 'initiator');
         assert.equal(path, '/s', 'reset sign-in does not reuse an invitation from the corrupt profile');
         assert.equal(sessionStorage.getItem(SIGN_IN_AFTER_RESET), '1');
+        path = '/s#invitation';
+        sessionStorage.setItem(SIGN_IN_AFTER_RESET, 'invitation');
+        reloadWebAccount({ tab: 'initiator' }, 'initiator');
+        assert.equal(path, '/s#invitation', 'explicit account recovery carries the invitation into fresh sign-in');
         reloadWebAccount({ tab: 'initiator' }, 'other-tab');
-        assert.equal(reloads, 3); assert.equal(path, '/s');
+        assert.equal(reloads, 4); assert.equal(path, '/s');
         assert.equal(sessionStorage.getItem(SIGN_IN_HANDOFF), null);
         assert.equal(sessionStorage.getItem(SIGN_IN_AFTER_RESET), null);
     } finally {

@@ -90,6 +90,7 @@ impl Files {
         let retained = |root: &Root| {
             root.metadata.backing == abi::VOLUME_BUNDLE
                 || root.slot == 0
+                || root.metadata.role != 0
                 || selections.iter().any(|grant| {
                     grant.volume == root.volume
                         && grant.write == root.admitted.writable
@@ -130,7 +131,19 @@ impl Files {
         result
     }
     fn refresh_inner(&mut self, host: &Host) -> Result<()> {
-        let selected = host.selected_volumes();
+        let mut selected = Vec::new();
+        for metadata in host.automatic_metadata() {
+            selected.push((0, metadata));
+        }
+        for (slot, volume) in host.selected_volumes() {
+            if host.has_automatic() && host.automatic_role(volume.id).is_some() {
+                if slot == 0 || host.user_volume == Some(volume.id) {
+                    continue;
+                }
+                return Err(Error::Conflict);
+            }
+            selected.push((slot, root_metadata(host, slot, &volume)?));
+        }
         if selected.len() + usize::from(self.bundle.is_some())
             > playbit_api::abi::syscall::MAX_VOLUMES
         {
@@ -138,10 +151,10 @@ impl Files {
         }
         let mut roots = Vec::with_capacity(selected.len());
         let mut changed = selected.len() + usize::from(self.bundle.is_some()) != self.roots.len();
-        for (slot, volume) in selected {
-            let metadata = root_metadata(host, slot, &volume)?;
+        for (slot, metadata) in selected {
+            let id = Id::from_bytes(metadata.id);
             let writable = metadata.rights.contains(VolumeRights::WRITE);
-            let prior = self.roots.iter().find(|root| root.volume == volume.id);
+            let prior = self.roots.iter().find(|root| root.volume == id);
             let handle = prior.map_or(Handle::default(), |root| root.handle);
             let unchanged = prior.filter(|root| {
                 root.admitted.writable == writable
@@ -154,9 +167,9 @@ impl Files {
                 changed = true;
                 let replaces = prior.map(|root| root.admitted.engine);
                 let credit = prior.map(|root| root.admitted.credit.clone());
-                self.admit_root(volume.id, &metadata, replaces, credit)?
+                self.admit_root(id, &metadata, replaces, credit)?
             };
-            roots.push(Root { volume: volume.id, admitted, metadata, slot, handle });
+            roots.push(Root { volume: id, admitted, metadata, slot, handle });
         }
         if let Some((_, id)) = &self.bundle {
             let bundle_id = *id;

@@ -193,7 +193,9 @@ impl App {
         if let Some((_, draft)) = self.creation.take_if(|(pending, _)| *pending == handle) {
             match context.poll_create_object(handle) {
                 Err(Error::LimitExceeded) => {
-                    self.error = "This volume has reached its resource limit. Existing tasks can still be edited.".into();
+                    self.error = "This volume has reached its resource limit. \
+                        Existing tasks can still be edited."
+                        .into();
                     context.log(&self.error);
                     return Ok(());
                 }

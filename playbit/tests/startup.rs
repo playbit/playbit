@@ -543,9 +543,15 @@ fn flat_packaged_clients_share_the_only_engine_helper() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    client.stdin.take().unwrap().write_all(
-        b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"playbit\",\"arguments\":{\"op\":\"status\"}}}\n"
-    ).unwrap();
+    client
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\
+              \"params\":{\"name\":\"playbit\",\"arguments\":{\"op\":\"status\"}}}\n",
+        )
+        .unwrap();
     let result = client.wait_with_output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     let reply: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();

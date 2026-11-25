@@ -302,7 +302,10 @@ impl Render for PaintingViewer {
                     .gap_2()
                     .justify_between()
                     .items_center()
-                    .child("Mouse down any point and drag to draw lines (Hold on shift key to draw straight lines)")
+                    .child(
+                        "Mouse down any point and drag to draw lines (Hold on shift key to \
+                         draw straight lines)",
+                    )
                     .child(
                         div()
                             .flex()

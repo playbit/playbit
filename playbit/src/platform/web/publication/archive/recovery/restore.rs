@@ -327,19 +327,14 @@ pub extern "C" fn pb_recovery_publish(length: usize) -> i32 {
                 .map_err(store_error)?;
             volume_index::mark_backing_ready(&mut tx, restore.id).map_err(store_error)?;
             if let Some(version) = version {
-                tx.local_indexes()
-                    .put(
-                        &blob::pending_key(&version),
-                        &serde_json::to_vec(&version).map_err(map_error)?,
-                    )
-                    .map_err(map_error)?;
+                host.record_blob_upload(&mut tx, &version)?;
             } else if restore.info.protocol.is_some() {
                 tx.local_indexes()
                     .put(&backing::key(restore.id), request.generation.as_bytes())
                     .map_err(map_error)?;
             }
             let delta = tx.commit_with_delta().map_err(map_error)?;
-            host.changes.borrow_mut().push(restore.volume.id, DatabaseId::Index, delta);
+            host.committed_change(restore.volume.id, DatabaseId::Index, delta);
             state.take();
             Ok(output)
         })

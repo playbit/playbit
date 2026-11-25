@@ -59,7 +59,7 @@ enum Task {
 }
 impl Directory {
     pub(super) fn check(&self, host: &Host, retained: bool) -> Result<Rc<Volume>> {
-        let volume = host.replica_volume(self.volume)?;
+        let volume = host.guest_volume(self.volume)?;
         let policy = host.admit_volume(&volume, Permission::Read)?;
         policy.authorize(host.actor(&volume), Permission::Read).map_err(store_error)?;
         authority::check(host, &volume, self.parent)?;

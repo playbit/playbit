@@ -2,7 +2,7 @@
 use super::*;
 use crate::store::{
     InitialDatabase,
-    volume_index::{self, EntryInfo, IndexSnapshot},
+    volume_index::{self, DatabaseProtocol, EntryInfo, IndexSnapshot},
 };
 
 pub(super) const NAMED_LIMIT: usize = 27;
@@ -68,25 +68,40 @@ impl Volume {
     }
 }
 impl Host {
-    pub(super) fn replica_volume(&self, id: Id) -> Result<Rc<Volume>> {
-        self.volumes
-            .borrow()
-            .iter()
-            .find(|v| v.id == id)
-            .cloned()
-            .or_else(|| self.personal.borrow().iter().find(|v| v.id == id).cloned())
-            .ok_or(Error::AccessDenied)
+    pub(super) fn discard_named_backings(&self, id: Id) {
+        self.named.borrow_mut().retain(|named| named.address.volume != id);
+        self.named_failures.borrow_mut().retain(|(address, _)| address.volume != id);
+        NEEDED.with(|needed| needed.borrow_mut().retain(|address| address.volume != id));
     }
+
+    pub(super) fn replica_volume(&self, id: Id) -> Result<Rc<Volume>> {
+        self.volume_objects.borrow().get(&id).cloned().ok_or(Error::AccessDenied)
+    }
+
+    fn control(&self, slot: usize) -> Result<Option<(Rc<Volume>, DatabaseId)>> {
+        if slot == 0 || slot > 62 {
+            return Ok(None);
+        }
+        let base = ((slot - 1) & !1) as u32;
+        let volume = if base == 0 {
+            self.volumes.borrow()[0].clone()
+        } else {
+            let bases = self.secondary_bases.borrow();
+            let Some((id, _)) = bases.iter().find(|(_, offset)| **offset == base) else {
+                return Ok(None);
+            };
+            self.replica_volume(*id)?
+        };
+        Ok(Some((volume, if slot % 2 == 1 { DatabaseId::Index } else { DatabaseId::Revocations })))
+    }
+
     pub(super) fn database(&self, slot: usize) -> Result<Rc<Database>> {
-        for (index, volume) in
-            self.volumes.borrow().iter().chain(self.personal.borrow().iter()).enumerate()
-        {
-            if slot == index * 2 + 1 {
-                return Ok(volume.index.clone());
-            }
-            if slot == index * 2 + 2 {
-                return Ok(volume.revocations.clone());
-            }
+        if let Some((volume, db)) = self.control(slot)? {
+            return Ok(if db == DatabaseId::Index {
+                volume.index.clone()
+            } else {
+                volume.revocations.clone()
+            });
         }
         self.named
             .borrow()
@@ -96,15 +111,8 @@ impl Host {
             .ok_or(Error::NotFound)
     }
     pub(super) fn database_address(&self, slot: usize) -> Result<Address> {
-        for (index, volume) in
-            self.volumes.borrow().iter().chain(self.personal.borrow().iter()).enumerate()
-        {
-            if slot == index * 2 + 1 {
-                return Ok(Address { volume: volume.id, database: DatabaseId::Index });
-            }
-            if slot == index * 2 + 2 {
-                return Ok(Address { volume: volume.id, database: DatabaseId::Revocations });
-            }
+        if let Some((volume, database)) = self.control(slot)? {
+            return Ok(Address { volume: volume.id, database });
         }
         self.named
             .borrow()
@@ -170,6 +178,30 @@ impl Host {
             return Err(Error::WouldBlock);
         }
         self.authorize(volume, Some(entry), Permission::Read)?;
+        Ok(())
+    }
+
+    fn authorize_local_world_mutation(
+        &self,
+        volume: &Volume,
+        snapshot: &IndexSnapshot<'_, OpfsStorage>,
+        entry: EntryId,
+    ) -> Result<()> {
+        if !self.is_projected_world(volume)
+            || !snapshot.backing_ready(entry).map_err(store_error)?
+        {
+            return Err(Error::AccessDenied);
+        }
+        let policy = snapshot.entry_policy(entry).map_err(store_error)?;
+        if policy.kind != crate::store::EntryType::KvDb
+            || policy.protocol != Some(DatabaseProtocol::Kvdb)
+        {
+            return Err(Error::AccessDenied);
+        }
+        match self.authorize(volume, Some(entry), Permission::Write) {
+            Err(Error::AccessDenied) => self.authorize(volume, Some(entry), Permission::Append)?,
+            other => other?,
+        };
         Ok(())
     }
 
@@ -247,32 +279,41 @@ impl Host {
             return Err(Error::InvalidArgument);
         };
         let allowed_seed = self.account == volume.record.owner
-            && volume.id == self.volumes.borrow()[0].id
             && self
-                .initializer
-                .as_ref()
+                .initializer_for(volume.id)
+                .as_deref()
                 .is_some_and(|init| init.databases.iter().any(|seed| seed.id == entry));
         if !allowed_seed && self.replica_policy(&volume, address.database, true).is_err() {
-            self.authorize(&volume, Some(entry), Permission::Read)
-                .or_else(|_| self.authorize(&volume, Some(entry), Permission::Write))?;
+            match self.authorize(&volume, Some(entry), Permission::Read) {
+                Err(Error::AccessDenied) => {
+                    match self.authorize(&volume, Some(entry), Permission::Write) {
+                        Err(Error::AccessDenied) => {
+                            let snapshot =
+                                IndexSnapshot::new(volume.index.begin_read().map_err(map_error)?);
+                            self.authorize_local_world_mutation(&volume, &snapshot, entry)?;
+                        }
+                        other => {
+                            other?;
+                        }
+                    }
+                }
+                other => {
+                    other?;
+                }
+            }
         }
         Ok(volume)
     }
-    fn seed(&self, seed: &InitialDatabase) -> Result<()> {
-        let volumes = self.volumes.borrow();
-        let volume = &volumes[0];
-        if self.account != volume.record.owner
-            || !self
-                .initializer
-                .as_ref()
-                .is_some_and(|init| init.databases.iter().any(|item| item.id == seed.id))
-        {
+    fn seed(&self, volume: Id, seed: &InitialDatabase) -> Result<()> {
+        let volume = self.replica_volume(volume)?;
+        if self.account != volume.record.owner {
             return Err(Error::AccessDenied);
         }
-        let expected = self
-            .initializer
-            .as_ref()
-            .and_then(|init| init.databases.iter().find(|item| item.id == seed.id))
+        let initializer = self.initializer_for(volume.id).ok_or(Error::AccessDenied)?;
+        let expected = initializer
+            .databases
+            .iter()
+            .find(|item| item.id == seed.id)
             .ok_or(Error::AccessDenied)?;
         if serde_json::to_vec(seed).map_err(map_error)?
             != serde_json::to_vec(expected).map_err(map_error)?
@@ -286,7 +327,7 @@ impl Host {
             Err(error) => return Err(map_error(error)),
         }
         drop(snapshot);
-        let backing = self.entry_database(volume, seed.id)?;
+        let backing = self.entry_database(&volume, seed.id)?;
         if !seed.prepared_objects(&backing, self.account).map_err(store_error)? {
             seed.write_objects(&backing, self.account, unsafe { now() } as u64)
                 .map_err(store_error)?;
@@ -349,7 +390,10 @@ pub extern "C" fn pb_database_retry() -> i32 {
         let host = host.borrow();
         host.as_ref()
             .ok_or(Error::Unavailable)
-            .map(|host| host.named_failures.borrow_mut().clear())
+            .map(|host| {
+                host.named_failures.borrow_mut().clear();
+                host.retry_automatic();
+            })
             .map_or_else(|error| error as i32, |()| 0)
     })
 }
@@ -387,7 +431,15 @@ pub extern "C" fn pb_database_preparation(length: usize) -> i32 {
         let snapshot = IndexSnapshot::new(volume.index.begin_read().map_err(map_error)?);
         let kind = match snapshot.live_entry(entry) {
             Ok(_) => {
-                host.authorize(&volume, Some(entry), Permission::Read)?;
+                match host.authorize(&volume, Some(entry), Permission::Read) {
+                    Err(Error::AccessDenied) => {
+                        host.authorize_local_world_mutation(&volume, &snapshot, entry)?;
+                        return serde_json::to_vec("local").map_err(map_error);
+                    }
+                    other => {
+                        other?;
+                    }
+                }
                 if snapshot.backing_ready(entry).map_err(store_error)? {
                     "local"
                 } else if host.authorize(&volume, None, Permission::Read).is_ok() {
@@ -504,7 +556,16 @@ pub extern "C" fn pb_seed_database(length: usize) -> i32 {
         host.as_ref()
             .ok_or(Error::Unavailable)
             .and_then(|host| {
-                host.seed(&serde_json::from_slice(&input[..length]).map_err(map_error)?)
+                #[derive(Deserialize)]
+                #[serde(untagged)]
+                enum Request {
+                    Scoped { volume: Id, seed: InitialDatabase },
+                    Primary(InitialDatabase),
+                }
+                match serde_json::from_slice(&input[..length]).map_err(map_error)? {
+                    Request::Scoped { volume, seed } => host.seed(volume, &seed),
+                    Request::Primary(seed) => host.seed(host.volumes.borrow()[0].id, &seed),
+                }
             })
             .map_or_else(|error| error as i32, |()| 0)
     })

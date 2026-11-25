@@ -1337,7 +1337,10 @@ fn qualified_ap_reconciliation_recovers_every_durable_boundary() {
                     Ok(crate::store::volume_index::IndexSnapshot::new(index.begin_read()?)
                         .entry(entry.id))
                 });
-                panic!("recovery at {checkpoint:?}, rename={rename}: {error:?}; source: {source:?}; staged: {staged:?}; retained: {retained:?}");
+                panic!(
+                    "recovery at {checkpoint:?}, rename={rename}: {error:?}; source: \
+                     {source:?}; staged: {staged:?}; retained: {retained:?}"
+                );
             });
         assert_eq!(restored.id, entry.id);
         assert!(bob.resolve_entry(&participant, volume.id, "offline").is_err());

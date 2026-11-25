@@ -46,15 +46,19 @@ class SigningTests(unittest.TestCase):
                 self.assertEqual(info["CFBundleVersion"], "42")
                 self.assertTrue(info["LSBackgroundOnly"])
                 if managed:
-                    agent = plistlib.loads((contents / "Library/LaunchAgents/playbit-engine.plist").read_bytes())
-                    self.assertEqual(agent["Label"], signing.APP_ID + ".agent")
-                    self.assertEqual(agent["BundleProgram"], "Contents/" + signing.ENGINE + "/MacOS/playbit-engine")
-                    self.assertEqual(agent["ProgramArguments"], ["playbit-engine", "--launch-agent"])
-                    self.assertEqual(agent["ProcessType"], "Interactive")
-                    self.assertIs(type(agent["ThrottleInterval"]), int)
-                    self.assertEqual(agent["ThrottleInterval"], 1)
-                    self.assertNotIn("RunAtLoad", agent)
-                    self.assertNotIn("KeepAlive", agent)
+                    for filename, label, arguments in (
+                        ("playbit-engine.plist", ".agent", ["playbit-engine", "--launch-agent"]),
+                        ("playbit-engine-testing.plist", ".testing.agent", ["playbit-engine", "--launch-agent", "testing"]),
+                    ):
+                        agent = plistlib.loads((contents / "Library/LaunchAgents" / filename).read_bytes())
+                        self.assertEqual(agent["Label"], signing.APP_ID + label)
+                        self.assertEqual(agent["BundleProgram"], "Contents/" + signing.ENGINE + "/MacOS/playbit-engine")
+                        self.assertEqual(agent["ProgramArguments"], arguments)
+                        self.assertEqual(agent["ProcessType"], "Interactive")
+                        self.assertIs(type(agent["ThrottleInterval"]), int)
+                        self.assertEqual(agent["ThrottleInterval"], 1)
+                        self.assertNotIn("RunAtLoad", agent)
+                        self.assertNotIn("KeepAlive", agent)
                 self.assertNotIn("PlaybitKeychainAccessGroup", info)
                 self.assertFalse((contents / "embedded.provisionprofile").exists())
                 self.assertEqual((helper / "embedded.provisionprofile").exists(), provisioned)

@@ -123,7 +123,9 @@ pub(crate) fn validate(profile: &Path, testing: Option<&TestingCredentials>) -> 
                 return Ok(false);
             }
             if profile.join(crate::paths::PROFILE_DB).try_exists()? {
-                return Err("Integration credentials require a fresh profile; ordinary profiles cannot be reused".into());
+                return Err("Integration credentials require a fresh profile; \
+                    ordinary profiles cannot be reused"
+                    .into());
             }
             Ok(true)
         }

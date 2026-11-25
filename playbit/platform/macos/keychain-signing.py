@@ -52,10 +52,8 @@ def prepare(app, profile_path, profile, entitlements_path, managed):
     if managed:
         agents = contents / "Library/LaunchAgents"
         agents.mkdir(parents=True, exist_ok=True)
-        (agents / "playbit-engine.plist").write_bytes(plistlib.dumps({
-            "Label": info["CFBundleIdentifier"] + ".helper.agent",
+        settings = {
             "BundleProgram": "Contents/" + ENGINE + "/MacOS/playbit-engine",
-            "ProgramArguments": ["playbit-engine", "--launch-agent"],
             # Activation is background-only, but the engine also serves local input.
             # Do not place its storage and IPC on launchd's throttled background lane.
             "ProcessType": "Interactive",
@@ -63,7 +61,15 @@ def prepare(app, profile_path, profile, entitlements_path, managed):
             # Keep explicit on-demand restarts below the readiness deadline.
             "ThrottleInterval": 1,
             "ExitTimeOut": 30,
-        }))
+        }
+        for filename, label, arguments in (
+            ("playbit-engine.plist", ".agent", ["playbit-engine", "--launch-agent"]),
+            ("playbit-engine-testing.plist", ".testing.agent", ["playbit-engine", "--launch-agent", "testing"]),
+        ):
+            (agents / filename).write_bytes(plistlib.dumps({
+                **settings, "Label": engine_info["CFBundleIdentifier"] + label,
+                "ProgramArguments": arguments,
+            }))
     if entitlements is not None:
         shutil.copyfile(profile_path, helper / "embedded.provisionprofile")
         entitlements_path.write_bytes(plistlib.dumps(entitlements))

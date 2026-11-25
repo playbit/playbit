@@ -222,10 +222,24 @@ mod tests {
         let app = root.path().join("Probe.app");
         fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         fs::create_dir_all(app.join("Contents/Resources")).unwrap();
-        fs::write(app.join("Contents/Info.plist"), b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>playbit.app.probe</string><key>CFBundleExecutable</key><string>Playbit</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>").unwrap();
+        fs::write(
+            app.join("Contents/Info.plist"),
+            b"<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>\
+              CFBundleIdentifier</key><string>playbit.app.probe</string><key>\
+              CFBundleExecutable</key><string>Playbit</string><key>\
+              CFBundlePackageType</key><string>APPL</string></dict></plist>",
+        )
+        .unwrap();
         for (name, message) in [("runtime", "EXPECTED"), ("other", "UNRELATED")] {
             let source = root.path().join(format!("{name}.c"));
-            fs::write(&source, format!("#include <stdio.h>\n__attribute__((constructor)) static void init(void) {{ puts(\"{message}\"); }}\nvoid playbit_main(void) {{}}\n")).unwrap();
+            fs::write(
+                &source,
+                format!(
+                    "#include <stdio.h>\n__attribute__((constructor)) static void init(void) {{ \
+                     puts(\"{message}\"); }}\nvoid playbit_main(void) {{}}\n"
+                ),
+            )
+            .unwrap();
             let library = root.path().join(format!("{name}.dylib"));
             assert!(
                 Command::new("clang")

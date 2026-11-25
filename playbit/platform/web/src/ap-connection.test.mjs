@@ -945,6 +945,8 @@ test('discovery is lazy, bounded, cached per connection and preserves optional m
     assert.equal(one,two);assert.equal(requests,1);
     assert.equal(connection.status().sessionDisplayNames, true);
     await assert.rejects(connection.begin({op:'upload_build',operation_id:operation.operation_id,required_features:['future.format.v1']}),/unavailable/);
+    await assert.rejects(connection.begin({op:'world_replica',operation_id:operation.operation_id,
+        request:{kind:'open'}}), error => error.serviceCode === 'unsupported_feature');
     assert.equal(requests,1,'unsupported features open no mutation stream');
     connection.disconnected(transport);assert.equal(connection.description,null);
     assert.equal(connection.status().sessionDisplayNames, undefined);
@@ -964,6 +966,22 @@ test('future failure codes and incompatible major never erase identity or grant 
     assert.equal(connection.identity,identity);
 });
 
+test('World revocation must name the authenticated account and the requested session, build and volume', () => {
+    const connection = connectedTo(silentTransport());
+    const id = (length, value) => encodeId(new Uint8Array(length).fill(value));
+    const world = { op: 'world_replica', operation_id: operation.operation_id, session_id: id(32, 1),
+        build_id: id(32, 2), volume_id: id(16, 3), request: { kind: 'open' } };
+    const denial = { cause: 'participant_revoked', account_id: connection.account, session_id: world.session_id,
+        build_id: world.build_id, volume_id: world.volume_id };
+    const check = change => connection.responseBody({ operation: world }, { flags: SERVICE_PROTOCOL,
+        body: utf8.encode(JSON.stringify({ timing: [], operation_id: world.operation_id, ok: false,
+            code: 'operation_failed', denial: { ...denial, ...change } })) });
+    assert.throws(() => check({}), { code: 'world-participant-revoked' });
+    for (const field of ['account_id', 'volume_id', 'session_id', 'build_id']) {
+        assert.throws(() => check({ [field]: id(field === 'session_id' || field === 'build_id' ? 32 : 16, 9) }), { code: 'ap-rejected' });
+    }
+});
+
 test('only a correlated capacity refusal without denial evidence admits retry', () => {
     const connection = connectedTo(silentTransport());
     const response = { timing: [], operation_id: operation.operation_id, ok: false,
@@ -975,6 +993,19 @@ test('only a correlated capacity refusal without denial evidence admits retry', 
     assert.throws(() => check({ denial: { cause: 'participant_revoked' } }), { code: 'ap-rejected' });
     assert.throws(() => check({ code: 'unsupported_operation' }), { code: 'ap-rejected' });
     assert.throws(() => check({ error: 'Permission removed' }), { code: 'ap-rejected' });
+});
+
+test('only a World publish with the per-entry AP rejection identifies a refused delta', () => {
+    const connection = connectedTo(silentTransport());
+    const world = { ...operation, op: 'world_replica', request: { kind: 'publish' } };
+    const response = { timing: [], operation_id: world.operation_id, ok: false, code: 'operation_failed',
+        error: 'unauthorized replica entry' };
+    const check = (request, changes = {}) => connection.responseBody({ operation: request }, { flags: SERVICE_PROTOCOL,
+        body: utf8.encode(JSON.stringify({ ...response, ...changes })) });
+    assert.throws(() => check(world), { code: 'world-entry-rejected' });
+    assert.throws(() => check(operation), { code: 'ap-rejected' });
+    assert.throws(() => check(world, { error: 'permission denied' }), { code: 'ap-rejected' });
+    assert.throws(() => check(world, { denial: {} }), /Invalid AP denial/);
 });
 
 test('web client authenticates and performs baseline operations with the independent public peer', async () => {

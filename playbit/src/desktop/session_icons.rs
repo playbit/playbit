@@ -293,7 +293,8 @@ fn decode(bytes: &[u8], side: u32) -> Result<Arc<RenderImage>, String> {
 mod tests {
     use super::*;
     use std::io::Cursor;
-    const SVG: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><rect width="24" height="24" fill="#ff0000"/></svg>"##;
+    const SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\">\
+        <rect width=\"24\" height=\"24\" fill=\"#ff0000\"/></svg>";
     fn png(width: u32, height: u32) -> Vec<u8> {
         let image = image::RgbaImage::from_pixel(width, height, image::Rgba([255, 0, 0, 255]));
         let mut output = Cursor::new(Vec::new());
@@ -310,7 +311,12 @@ mod tests {
             assert!(bytes.as_chunks::<4>().0.iter().all(|pixel| *pixel == [0, 0, 255, 255]));
         }
         assert_eq!(decode_review(SVG).unwrap().as_bytes(0).unwrap().len(), 96 * 96 * 4);
-        let transparent = decode(br#"<svg width="24" height="24"><rect width="24" height="24" fill="red" opacity="0.5"/></svg>"#, ROW_PIXELS).unwrap();
+        let transparent = decode(
+            b"<svg width=\"24\" height=\"24\"><rect width=\"24\" height=\"24\" \
+              fill=\"red\" opacity=\"0.5\"/></svg>",
+            ROW_PIXELS,
+        )
+        .unwrap();
         assert_eq!(&transparent.as_bytes(0).unwrap()[0..4], &[0, 0, 255, 128]);
         let wide = decode(&png(48, 24), ROW_PIXELS).unwrap();
         assert_eq!(&wide.as_bytes(0).unwrap()[0..4], &[0, 0, 0, 0]);
@@ -348,7 +354,14 @@ mod tests {
         let preview = decode(jpeg.get_ref(), ROW_PIXELS).unwrap();
         assert_eq!(preview.as_bytes(0).unwrap().len(), 48 * 48 * 4);
         assert!(preview.as_bytes(0).unwrap()[2] > 240);
-        let preview = decode(br##"<svg width="24" height="24"><defs><linearGradient id="color"><stop stop-color="red"/><stop offset="1" stop-color="blue"/></linearGradient></defs><rect width="24" height="24" fill="url(#color)"/></svg>"##, ROW_PIXELS).unwrap();
+        let preview = decode(
+            b"<svg width=\"24\" height=\"24\"><defs><linearGradient id=\"color\">\
+              <stop stop-color=\"red\"/><stop offset=\"1\" stop-color=\"blue\"/>\
+              </linearGradient></defs><rect width=\"24\" height=\"24\" \
+              fill=\"url(#color)\"/></svg>",
+            ROW_PIXELS,
+        )
+        .unwrap();
         let bytes = preview.as_bytes(0).unwrap();
         assert!(bytes[2] > bytes[0]);
         assert!(bytes[47 * 4] > bytes[47 * 4 + 2]);

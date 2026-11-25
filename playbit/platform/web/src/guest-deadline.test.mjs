@@ -27,7 +27,7 @@ async function fixture(enabled) {
         memory: () => guest.exports.memory, events, work,
         waitForEvent: deadline => guest.deadline.suspend(deadline, ready.resolve),
     });
-    guest = await prepareGuest(wasm, operations, enabled);
+    guest = await prepareGuest(wasm, operations, enabled ? ['event.poll.deadline'] : []);
     const memory = new DataView(guest.exports.memory.buffer);
     memory.setUint32(32,24,true);
     memory.setBigInt64(8,99n,true);
@@ -39,7 +39,7 @@ test('an undeclared guest gets Unsupported through the synchronous scalar entry'
     guest.exports.pb_main();
     assert.equal(guest.deadline, undefined);
     assert.equal(memory.getBigInt64(8,true), -7n);
-    await assert.rejects(prepareGuest(wasm,{},true), /event.poll.deadline/);
+    await assert.rejects(prepareGuest(wasm, {}, ['event.poll.deadline']), /event.poll.deadline/);
     if (!supportsDeadline()) await assert.rejects(fixture(true), /event.poll.deadline/);
 });
 

@@ -20,16 +20,17 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { stripTypeScriptTypes } from "node:module";
 import { AccountSignal } from "./account-notices.ts";
-import { corruptStoreOpenMessage, retryable } from "./errors.ts";
+import { corruptStoreOpenMessage, failure, retryable } from "./errors.ts";
 import { resolvedSession } from "./updates.ts";
 import { validateSelection, MAX_PERSONAL_VOLUMES } from "./personal.ts";
 import { replicaJSON } from "./replication.ts";
 import { VolumePublication, LocalVolumeChanged, PublicationUncertain } from './volume-publication.ts';
 import { OpfsStore, OpfsResources } from './opfs-store.ts';
-import { replicaAddress, replicaSource } from './live-replication.ts';
+import { LiveReplication, replicaAddress, replicaSource } from './live-replication.ts';
 import { validDatabase } from './database-id.ts';
 import { retainRejectedCut } from './volume-archive.ts';
 import { writePackage, MAX_PACKAGE_WASM_BYTES } from './package-stream.ts';
+import { surfaceBytes, validateInput, validateSurface } from './scene.ts';
 
 // These lifecycle fixtures provision no storage. Metadata snapshot I/O is
 // covered by the actual-host adapter tests; keep it outside these mock turns.
@@ -117,6 +118,7 @@ test('retiring live delivery does not fail shared guest preparation or Close', a
         hostOutput = value => ArrayBuffer.isView(value) ? value : new Uint8Array();
         host = {exports:{pb_database_make_room:()=>0,
             pb_database_backing:()=>encoder.encode(JSON.stringify({ready:true,generation})),pb_register_database:register,
+            pb_automatic_needed: () => encoder.encode('[]'),
             pb_database_needed:()=>{const result=needed?[address]:[];needed=false;return encoder.encode(JSON.stringify(result));},
             pb_database_preparation:()=>encoder.encode('"local"'),
             pb_database_failed:()=>{failure=JSON.parse(decoder.decode(input)).status;return 0;},pb_live_apply:apply}};
@@ -474,10 +476,10 @@ function installPipeline(context, { controls = false } = {}) {
     Object.assign(context, { LocalVolumeChanged, PublicationUncertain, replicaJSON, retainRejectedCut });
     vm.runInContext(`
         let preparedVolume, preparedSelection, preparedBase, namedSlot, sourceReceipt, pendingInput;
-        const receivedSlots = new Set(), syncBeforeReceipt = syncDatabase;
-        syncDatabase = async (...args) => {
+        const receivedSlots = new Set(), transferBeforeReceipt = transferDatabase;
+        transferDatabase = async (...args) => {
             receivedSlots.delete(args[6]);
-            return syncBeforeReceipt(...args);
+            return transferBeforeReceipt(...args);
         };
         publication = { prepare: volume => ({ volume, generation:'fresh', previous:'old', epoch:{} }),
             create: async () => {}, discard: async () => {}, check() {},
@@ -522,7 +524,7 @@ function installPipeline(context, { controls = false } = {}) {
         preparedCatalog = async function* (copyLocal, step) {
             if (copyLocal) return;
             const volume = [profile.root, ...personalCatalog.map(item => item.volume)].find(item => item?.id === preparedVolume);
-            for await (const database of databaseCatalog(volume, step, preparedSelection)) yield [database,'kvdb'];
+            for await (const { database } of databaseCatalog(volume, step, preparedSelection)) yield [database,'kvdb'];
         };
         ${controls ? `openVolumeControls = async (_volume, base) => {
             for (let offset = 1; offset <= 2; offset++) stores.set(base + offset, {});
@@ -550,6 +552,7 @@ retireFiles = async () => {};
         hostInput = bytes => { input = JSON.parse(decoder.decode(bytes)); };
         hostOutput = value => ArrayBuffer.isView(value) ? value : new Uint8Array();
         host = { exports: {
+            pb_automatic_needed: () => encoder.encode('[]'),
             pb_database_needed: () => { const bytes = encoder.encode(JSON.stringify(requested)); requested=[]; return bytes; },
             pb_database_preparation: () => encoder.encode(JSON.stringify(mode)),
             pb_database_failed: () => { record('failed',input.status); return 0; },
@@ -635,7 +638,7 @@ retireFiles = async () => {};
         globalThis.withdraw=() => { activeGrants=[]; };
         globalThis.fail=source => replicationState({kind:'failed',source,code:'corrupt-store'});
         globalThis.interests=() => Array.from(entrySubscriptions);
-        globalThis.recoveries=() => Array.from(entryRecoveries);
+        globalThis.recoveries=() => Array.from(scopeRecoveries);
         globalThis.report=replicationState;
     `, context);
     await context.reconnect();
@@ -686,9 +689,10 @@ retireFiles = async () => {};
             pb_authority_refresh_required:() => encoder.encode('false'), pb_database_retry:() => 0,
             pb_live_rebase:() => { reset(); return 0; }}};
         blobs={retry() {}}; ap=async () => {}; openSession=async () => {}; refreshScene=async () => {};
-        databaseCatalog=async function* (_volume,_step,_selection,protocol) { if (protocol !== 'blob_log') yield ${JSON.stringify(named)}; };
+        databaseCatalog=async function* (_volume,_step,_selection,protocol) { if (protocol !== 'blob_log') yield { database: ${JSON.stringify(named)} }; };
         syncDatabase=async (volume,database,direction) => record('sync',volume.id,database,direction);
         pullVolumeSnapshot=async (volume,_label,_step,_selection,entry) => record('capture',volume.id,entry);
+        const pendingBlobs = uploadBlobs;
         uploadBlobs=async () => {}; saveProfile=async () => {};
         globalThis.connect=connectReplication;
         globalThis.select=() => connectEntry(profile.root,${JSON.stringify(named)});
@@ -706,6 +710,121 @@ retireFiles = async () => {};
     context.retire(); await context.connect();
     assert.equal(calls.filter(call => call[0] === 'subscribe' && call[1] === selected).length, 2);
     assert.deepEqual(writes, rootReadable ? [] : ['retained local input']);
+    if (rootReadable) {
+        const world = encodeId(new Uint8Array(16).fill(0x22)), user = encodeId(new Uint8Array(16).fill(0x23));
+        vm.runInContext(`
+            const world = ${JSON.stringify(world)}, mount = {base:2, volume:{id:world}};
+            profile.session.root_volume = world;
+            automaticSlots.set(world, mount);
+            const user = ${JSON.stringify(user)};
+            creationScope = {user_volume:user}; boundUser = {volume:{id:user}};
+            automaticSlots.set(user, {base:4, volume:{id:user, personal:true, share_key_with_service:true}, credentials:{}});
+            host.exports.pb_replica_catalog_allowed = () => encoder.encode(JSON.stringify([profile.root.id,user].includes(input)));
+            blobs.upload = async volumes => record('blobs',...volumes);
+            globalThis.upload = pendingBlobs;
+            globalThis.captureUser = fresh => captureAutomaticCatalog(automaticSlots.get(user).volume, false, fresh);
+            let gap = true;
+            host.exports.pb_live_rebase = onlyGap => { record('rebase', onlyGap, gap); if (onlyGap) gap = false; return 0; };
+            publisherWorld = async () => mount.volume;
+            const appends = () => {};
+            host.exports.pb_world_append_catalog_page = appends;
+            databaseCatalog = async function* (volume,_step,_selection,protocol) {
+                if (volume.id === world) yield { database: protocol === appends ? 'birth' : 'writable', blind: false };
+                if (volume.id === user) yield { database: ${JSON.stringify(named)}, blind:false };
+            };
+            publishWorldAppends = async (volume,database) => record('append',volume.id,database);
+            replicas.run.active = true;
+            const oldStart = replicas.start.bind(replicas);
+            replicas.start = async scopes => {
+                record('scope', ...scopes.filter(scope => scope.volume_id === user).map(scope => [scope.session_id,scope.build_id]));
+                await oldStart(scopes);
+                record('activate'); replicas.run.active = true;
+            };
+            replicas.removeVolume = volume => record('remove',volume);
+            replicas.recoverVolumeCatalog = volume => record('recover',volume);
+            automaticCall = (method,input) => record(method,input.volume,input.revoked);
+            host.exports.pb_live_ack = ticket => {record('dequeue', ticket); return 0;};
+            const address = world + '/' + ${JSON.stringify(named)};
+            namedSlots.set(address,68); stores.set(68,{});
+            openNamed = async () => {
+                if (!namedSlots.has(address)) { stores.set(69,{}); namedSlots.set(address,69); }
+                return namedSlots.get(address);
+            };
+            globalThis.replaceBacking = gate => localStep(async () => {
+                await gate; stores.delete(68); namedSlots.delete(address);
+            });
+            globalThis.retireDuringReopen = () => {
+                stores.delete(69); namedSlots.delete(address);
+                openNamed = async () => 70; // Retired again before the local receipt turn.
+            };
+            host.exports.pb_world_append_published = slot => {
+                if (!stores.has(slot)) throw new Error('retired backing');
+                record('settle',slot,input); return 0;
+            };
+            const ticket = {sequence: 12n, world:mount};
+            globalThis.confirm = () => replicas.options.local.published({ticket, publication:{kind:'volume',volume_id:world},
+                database:${JSON.stringify(named)}, bytes:encoder.encode('42')}, () => true);
+            globalThis.refused = code => replicas.options.local.rejected({ticket, database:${JSON.stringify(named)}}, code, () => true);
+            globalThis.late = () => replicas.options.local.ack(ticket, () => true);
+        `, context);
+        for (const gap of [true, false]) {
+            const offset = calls.length;
+            context.retire(); await context.connect();
+            const next = calls.slice(offset);
+            const pos = name => next.findIndex(call => call[0] === name && call[1] === world);
+            assert(next.some(call => call[0] === 'rebase' && call[1] === 1 && call[2] === gap));
+            const userScope = next.find(call => call[0] === 'scope');
+            assert.equal(userScope.length, 2);
+            assert.deepEqual(Array.from(userScope[1]), [null,null]);
+            const push = next.findIndex(call => call.join('/') === ['sync',user,named,'push'].join('/'));
+            const capture = next.findIndex(call => call[0] === 'capture' && call[1] === user);
+            assert(push >= 0 && push < capture && capture < next.findIndex(call => call[0] === 'activate'));
+            assert.equal(next.filter(call => call[0] === 'capture' && call[1] === user).length, 1);
+            assert(pos('subscribe') >= 0 && pos('capture') > pos('subscribe'));
+            assert(next.some(call => call.join('/') === ['sync',world,'writable','push'].join('/')));
+            assert(next.some(call => call.join('/') === ['append',world,'birth'].join('/')));
+        }
+        await context.upload();
+        assert.deepEqual(calls.at(-1), ['blobs',encodeId(new Uint8Array(16).fill(0x10)),user]);
+        for (const fresh of [true,false]) {
+            const offset = calls.length;
+            await context.captureUser(fresh);
+            const next = calls.slice(offset);
+            assert.equal(next.some(call => call.join('/') === ['sync',user,named,'push'].join('/')), !fresh);
+            assert.equal(next.some(call => call.join('/') === ['blobs',user].join('/')), !fresh);
+            assert.equal(next.filter(call => call[0] === 'capture' && call[1] === user).length, 1);
+        }
+        // Open can hit capacity before subscribeReplica has a stream to report it on.
+        vm.runInContext(`
+            let attempts = 0, scheduled;
+            globalThis.setTimeout = callback => { scheduled = callback; return 1; };
+            publisherWorld = async () => {
+                if (++attempts === 1) throw Object.assign(new Error('AP busy'), {code:'ap-capacity'});
+                return mount.volume;
+            };
+            globalThis.retryTurn = () => { const turn = scheduled; scheduled = undefined; turn(); };
+            globalThis.retryState = () => [attempts, Boolean(scheduled), scopeRecoveries.get(world), replicas.run.active];
+        `, context);
+        const beforeRetry = calls.length;
+        context.retire(); await context.connect();
+        assert.deepEqual(Array.from(context.retryState()), [1,true,'retry',true]);
+        assert(!calls.slice(beforeRetry).some(call => call.join('/') === ['subscribe',world].join('/')));
+        context.retryTurn(); await new Promise(setImmediate);
+        assert.deepEqual(Array.from(context.retryState()), [2,false,undefined,true]);
+        assert(calls.slice(beforeRetry).some(call => call.join('/') === ['subscribe',world].join('/')));
+        const offset = calls.length;
+        const release = Promise.withResolvers();
+        const capture = context.replaceBacking(release.promise), receipt = context.confirm();
+        await new Promise(setImmediate);
+        release.resolve(); await capture; await receipt;
+        context.retireDuringReopen(); await context.confirm(); await context.late();
+        assert.equal(await context.refused('world-entry-rejected'), true);
+        assert.equal(await context.refused('world-participant-revoked'), true);
+        await context.confirm();
+        await context.late();
+        assert.deepEqual(calls.slice(offset), [['settle',69,42], ['recover',world], ['dequeue',12n],
+            ['dequeue',12n], ['recover',world], ['pb_automatic_world_denied',world,true], ['remove',world]]);
+    }
 });
 
 test('account staging and guest work release the actor before exclusive quarantine', { timeout: 5000 }, async t => {
@@ -840,6 +959,39 @@ retireFiles = async () => {};
     assert.deepEqual(JSON.parse(JSON.stringify(messages)), [{ id: 1, result: { closed: true } }]);
 });
 
+test("a worker rejects a menu click if an autonomous scene update changes the action before delivery", async () => {
+    const entered = gate(), release = gate(), messages = [], delivered = [];
+    const context = vm.createContext({ ...compatibleWorkerStorage(), workerChannel, encodeId, decodeId, validId,
+        guestOperations: lifecycleOperations, GuestWork: FixtureWork, AccountSignal, observeAccountMetadata() {},
+        TextEncoder, TextDecoder, crypto, clearTimeout, validateInput, record: id => delivered.push(id),
+        pause: async () => { entered.resolve(); await release.promise; },
+        self: { location: { href: "https://playbit.app/runtime-worker.js?channel=public" }, postMessage: m => messages.push(m) } });
+    vm.runInContext(source.replace(/^import .*;$/gm, "") + `
+        guest = { exports: { pb_main: () => { for (let event; (event = guestWork.poll());) record(event.target); } } };
+        refreshPersonal = pause;
+        globalThis.offer = (label, revision) => {
+            scene = { root: {}, controls: new Map([[42, { id: 42, kind: "menu-action", label, revision }]]) };
+        };
+        globalThis.click = (id, menuRevision) => self.onmessage({data: { id, method: "input", args: { kind: 2, target: 42, data: [], menuRevision } }});
+        globalThis.pending = () => guestWork.pending;
+    `, context);
+    context.offer("Join room A", 1);
+    context.click(1, 1);
+    await entered.promise;
+    context.offer("Leave room B", 2);
+    release.resolve();
+    await new Promise(setImmediate);
+    assert.match(messages.find(m => m.id === 1).error, /menu changed/);
+    assert.equal(context.pending(), false);
+    context.click(2, 1);
+    assert.match(messages.find(m => m.id === 2).error, /menu changed/);
+    assert.deepEqual(delivered, []);
+    context.click(3, 2);
+    await new Promise(setImmediate);
+    assert.equal(messages.find(m => m.id === 3).error, undefined);
+    assert.deepEqual(delivered, [42]);
+});
+
 test("Close fences an input accepted before its worker turn and rejects later input", async () => {
     const entered = gate(), release = gate(), messages = [], effects = [];
     const context = vm.createContext({ ...compatibleWorkerStorage(), workerChannel, encodeId, decodeId, validId, guestOperations: lifecycleOperations, GuestWork: FixtureWork,
@@ -870,6 +1022,33 @@ retireFiles = async () => {};
     assert.deepEqual(effects, ["accepted input", "storage closed"]);
     assert.equal(messages.find(message => message.id === 1).error, undefined);
     assert.equal(messages.find(message => message.id === 2).result.closed, true);
+});
+
+test('World admission and cleanup share the host with ordinary database transfers', async () => {
+    const shared = Promise.withResolvers(), world = Promise.withResolvers(), order = [];
+    const { context } = bootstrapWorker(async volume => {
+        if (volume === 'shared') { order.push('start Shared'); return shared.promise; }
+        if (volume === 'next') { order.push('start next transfer'); return; }
+        await world.promise;
+        return snapshotReceipt();
+    });
+    context.recordStep = name => order.push(name);
+    vm.runInContext(`
+        host.exports.pb_volume_admission = () => { recordStep('admit World'); return encoder.encode('{}'); };
+        host.exports.pb_volume_abort = () => { recordStep('release World stage'); return 0; };
+        globalThis.pull = id => syncDatabase({ id }, 'index', 'pull', 'build');
+        globalThis.openWorld = () => pullVolumeSnapshot(profile.root, 'World', callback => callback());
+    `, context);
+    const first = context.pull('shared'), capture = context.openWorld(), last = context.pull('next');
+    await new Promise(setImmediate);
+    assert.deepEqual(order, ['start Shared']);
+    shared.reject(new Error('Shared disconnected'));
+    await assert.rejects(first, /disconnected/);
+    await new Promise(setImmediate);
+    assert.deepEqual(order, ['start Shared', 'admit World']);
+    world.resolve();
+    await Promise.all([capture, last]);
+    assert.deepEqual(order, ['start Shared', 'admit World', 'release World stage', 'start next transfer']);
 });
 
 test("only local storage failures offer web browser data reset", () => {
@@ -955,8 +1134,8 @@ retireFiles = async () => {};
         managed = true;
         profile = ${JSON.stringify({ session, root: { id: "root", name: "Root", share_key_with_service: true, personal: false }})};
         ap = async () => ({});
-        databaseCatalog = async function* () { yield 'XxBgdhCcvNGirZzVQCPL'; };
-        syncDatabase = async (volume, database, direction) => { record(volume.id, database, direction); return receipt(); };
+        databaseCatalog = async function* () { yield { database: 'XxBgdhCcvNGirZzVQCPL' }; };
+        transferDatabase = async (volume, database, direction) => { record(volume.id, database, direction); return receipt(); };
         uploadBlobs = async () => record("files"); saveProfile = async () => record("save");
         globalThis.bootstrap = () => synchronize(true);
     `, context);
@@ -992,8 +1171,8 @@ retireFiles = async () => {};
         managed = true;
         profile = ${JSON.stringify({ session, root: { id: "root", share_key_with_service: true, personal: false }})};
         ap = async () => ({});
-        databaseCatalog = async function* () { yield '${named}'; yield '${encodeId(new Uint8Array(15).fill(0x14))}'; };
-        syncDatabase = async (volume, database, direction) => reply(volume.id, database, direction);
+        databaseCatalog = async function* () { yield { database: '${named}' }; yield { database: '${encodeId(new Uint8Array(15).fill(0x14))}' }; };
+        ${reply ? 'transferDatabase = async (volume, database, direction) => reply(volume.id, database, direction);' : ''}
         uploadBlobs = async () => record("files"); saveProfile = async () => record("save");
         globalThis.bootstrap = () => synchronize(true);
     `, context);
@@ -1005,6 +1184,124 @@ test('bootstrap records the final index receipt before qualifying the prepared c
     const worker = bootstrapWorker(() => snapshotReceipt());
     await worker.bootstrap();
     assert.deepEqual(worker.calls.slice(-2), [['files'], ['save']]);
+});
+
+test('retired ordinary bootstrap starts no queued AP stream and closes a newly allocated handle before reading', async () => {
+    for (const stage of ['queued','begin']) {
+        const { context } = bootstrapWorker(), gate = Promise.withResolvers(), calls = [];
+        context.failure = failure;
+        context.waitForRelease = () => gate.promise;
+        context.request = async method => {
+            calls.push(method);
+            if (method === 'begin') { await gate.promise; return 42; }
+            if (method === 'streamResponse') throw new Error('unexpected stale response wait');
+        };
+        vm.runInContext(`
+            let current = true;
+            ap = request; openSession = async () => {};
+            globalThis.hold = () => withDatabaseTransfer(waitForRelease);
+            globalThis.pending = () => pendingDatabaseTransfers;
+            globalThis.retire = () => { current = false; };
+            globalThis.reconnect = () => synchronize(false, callback => callback(), [profile.root.id], () => current);
+        `, context);
+        const held = stage === 'queued' ? context.hold() : Promise.resolve();
+        const run = context.reconnect();
+        await new Promise(setImmediate);
+        assert.equal(context.pending(), stage === 'queued' ? 2 : 1);
+        assert.deepEqual(calls, stage === 'queued' ? ['connect'] : ['connect','begin']);
+        context.retire(); gate.resolve();
+        await held;
+        await assert.rejects(run, { code: 'replica-gap' });
+        assert.deepEqual(calls, stage === 'queued' ? ['connect'] : ['connect','begin','streamClose']);
+        assert.equal(context.pending(), 0);
+    }
+});
+
+test('closing the app interrupts only its replica run’s AP transfer and releases the host before closing storage', async () => {
+    for (const stage of ['streamResponse', 'streamRead', 'independent']) {
+        const { context } = bootstrapWorker(), held = Promise.withResolvers(), calls = [], replies = [];
+        const id = encodeId(new Uint8Array(16).fill(27));
+        Object.assign(context, { LiveReplication, clearTimeout, retryable, failure, id });
+        context.self.postMessage = reply => replies.push(reply);
+        context.request = async (method, arg) => {
+            if (method === 'subscribeReplica') return { handle: 10, ack: { epoch: id, sequence: 0n, policy_revision: 1n } };
+            if (method === 'begin') return 42;
+            if (method === (stage === 'independent' ? 'streamRead' : stage)) { assert.equal(arg, 42); calls.push('hold'); return held.promise; }
+            if (method === 'streamClose') {
+                calls.push(`close ${arg}`);
+                if (arg === 42) held.reject(new Error('AP stream closed'));
+            }
+            return {};
+        };
+        context.observe = value => calls.push(value);
+        vm.runInContext(`
+            profile.root.id = id;
+            ap = request; openSession = async () => {};
+            host.exports.pb_database_retry = host.exports.pb_live_rebase = () => 0;
+            host.exports.pb_sync_begin = () => { observe('begin host'); return 0; };
+            host.exports.pb_sync_finish = commit => { observe(commit ? 'commit' : 'abort'); return 0; };
+            blobs = { retry() {} };
+            drainGuest = async () => {}; operations.data.dispose = () => {};
+            closeStorage = () => observe('close storage');
+            globalThis.start = connectReplication;
+            globalThis.detached = () => syncDatabase(profile.root,'index','pull');
+            globalThis.close = () => self.onmessage({ data: { id: 17, method: 'close' } });
+        `, context);
+        const detached = stage === 'independent' ? assert.rejects(context.detached(), /detached transfer released/) : undefined;
+        const setup = context.start();
+        await new Promise(setImmediate);
+        assert.equal(calls.at(-1), 'hold');
+        context.close();
+        await new Promise(setImmediate);
+        if (detached) {
+            assert.deepEqual(calls, ['begin host','hold','close 10']);
+            held.reject(new Error('detached transfer released'));
+            await detached; await new Promise(setImmediate);
+            assert.deepEqual(calls, ['begin host','hold','close 10','abort','close 42','close storage']);
+        } else {
+            assert.deepEqual(calls, stage === 'streamResponse'
+                ? ['hold','close 42','close 10','close storage']
+                : ['begin host','hold','close 42','close 10','abort','close storage']);
+        }
+        assert.equal(replies.find(reply => reply.id === 17)?.result?.closed, true);
+        await setup;
+    }
+});
+
+test('World append replay retains a conflicting birth, advances to other keys and stops on transport failure', async () => {
+    const { context } = bootstrapWorker(() => snapshotReceipt());
+    const births = new Set([1, 2, 3]), submissions = [];
+    let disconnect = true;
+    context.nextBirth = cursor => {
+        const batch = new Uint8Array(17);
+        const clock = [...births].find(id => id > (cursor.after?.[7] ?? 0));
+        if (!clock) return batch.subarray(0, 0);
+        batch[7] = 3; batch[15] = batch[16] = clock;
+        return batch;
+    };
+    context.settle = clock => births.delete(clock);
+    context.submit = async id => {
+        submissions.push(id);
+        if (id === 1) throw failure('world-entry-rejected', 'unauthorized replica entry');
+        if (id === 2 && disconnect) throw failure('ap-transport', 'disconnected');
+    };
+    vm.runInContext(`
+        let cursor;
+        hostInput = bytes => { cursor = JSON.parse(decoder.decode(bytes)); };
+        hostOutput = bytes => bytes;
+        host.exports.pb_world_append_next = () => nextBirth(cursor);
+        host.exports.pb_world_append_ack = () => settle(cursor.clock[7]);
+        openNamed = async () => 68;
+        ap = async (_method, _request, bytes) => submit(bytes[0]);
+        globalThis.retryBirths = () => publishWorldAppends(profile.root, 'database', callback => callback());
+    `, context);
+    await assert.rejects(context.retryBirths(), { code: 'ap-transport' });
+    assert.deepEqual(submissions, [1,2]);
+    assert.deepEqual([...births], [1,2,3]);
+    disconnect = false;
+    await context.retryBirths();
+    assert.deepEqual(submissions, [1,2,1,2,3]);
+    assert.deepEqual([...births], [1]);
 });
 
 test("bootstrap retries a backing-only edit between named database snapshots", async () => {
@@ -1042,10 +1339,10 @@ test('uncertain publication stops host admission, closes staged handles and pres
         publication.publish = () => { throw new PublicationUncertain(new Error('Pointer flush uncertainty')); };
         host.exports.pb_volume_abort = () => { throw new Error('A stopped host must not be reentered'); };
         globalThis.guardedBootstrap = () => synchronize(true,localStep);
-        globalThis.stoppedState = () => ({closed,stores:stores.size,preparing:preparingVolume});
+        globalThis.stoppedState = () => ({closed,stores:stores.size,transfers:pendingDatabaseTransfers});
     `, worker.context);
     await assert.rejects(worker.context.guardedBootstrap(), error => error instanceof PublicationUncertain);
-    assert.deepEqual(JSON.parse(JSON.stringify(worker.context.stoppedState())), {closed:true,stores:0,preparing:false});
+    assert.deepEqual(JSON.parse(JSON.stringify(worker.context.stoppedState())), {closed:true,stores:0,transfers:0});
     assert(!worker.calls.some(([operation]) => operation === 'save'));
 });
 
@@ -1069,8 +1366,8 @@ retireFiles = async () => {};
         hostInput = bytes => { const value = JSON.parse(decoder.decode(bytes)); if (value.grants) selected(value); };
         host = { exports: { pb_register_personal: () => 0 } };
         hostOutput = () => new Uint8Array();
-        databaseCatalog = async function* (volume, step, selection) { record("selection catalog", volume.id); selected(selection); if (volume.id === 'P4rMbpayn6a9JeaZgpVMMj') yield 'XxBgdhCcvNGirZzVQCPL'; };
-        syncDatabase = async (volume, database, direction) => { record(volume.id, database, direction); return receipt(); };
+        databaseCatalog = async function* (volume, step, selection) { record("selection catalog", volume.id); selected(selection); if (volume.id === 'P4rMbpayn6a9JeaZgpVMMj') yield { database: 'XxBgdhCcvNGirZzVQCPL' }; };
+        transferDatabase = async (volume, database, direction) => { record(volume.id, database, direction); return receipt(); };
         saveProfile = async () => record("save");
         globalThis.configure = grants => preparePersonal(${JSON.stringify(session)}, grants);
     `, context);
@@ -1175,12 +1472,17 @@ test("a failed update check never retries an independently failed replica", asyn
 
 function gate() { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; }
 function preparingWorker(stage, { changedConsent = false } = {}) {
-    const entered = gate(), release = gate(), messages = [], inputDelivered = gate();
+    const entered = gate(), release = gate(), messages = [], inputDelivered = gate(), surfaceIgnored = gate(), surfaceDelivered = gate();
     const context = vm.createContext({ ...compatibleWorkerStorage(), workerChannel, encodeId, decodeId, validId, guestOperations: lifecycleOperations, GuestWork: FixtureWork, MAX_PERSONAL_VOLUMES, AccountSignal, observeAccountMetadata() {}, TextEncoder, TextDecoder, Uint8Array, crypto, structuredClone, resolvedSession,
-        validateInput() {},
+        validateInput() {}, validateSurface,
         WebAssembly: { promising: callback => async () => callback() },
         pause: async name => { if (name === stage) { entered.resolve(); await release.promise; } },
-        self: { location: { href: "https://playbit.app/runtime-worker.js?channel=public" }, postMessage: message => { messages.push(message); if (message.id === 17) inputDelivered.resolve(message); } },
+        self: { location: { href: "https://playbit.app/runtime-worker.js?channel=public" }, postMessage: message => {
+            messages.push(message);
+            if (message.id === 17) inputDelivered.resolve(message);
+            if (message.id === 18) surfaceIgnored.resolve(message);
+            if (message.id === 19) surfaceDelivered.resolve(message);
+        } },
     });
     vm.runInContext(source.replace(/^import .*;$/gm, '') + `
 files = { cleanup: async () => {}, flushPublication() {} };
@@ -1198,13 +1500,16 @@ retireFiles = async () => {};
         hostOutput = () => new Uint8Array(); selectPersonal = () => {}; saveProfile = async () => {}; refreshPersonal = async () => {};
         guest = { exports: { pb_main: () => { while (guestWork.poll()) {} turns++; } } }; scene = { root: {}, controls: new Map() };
         adoptSession = candidate => { hostVersion = candidate.resolved_build_id; };
-        startGuest = async () => {};
+        const drain = drainGuest;
+        drainGuest = async accepted => { await pause('drain'); await drain(accepted); };
+        startGuest = async () => { if (${JSON.stringify(stage)} === 'drain') guestWork.reset(); };
         globalThis.runtime = { check: () => { checkUpdate(true); return updateTask; },
             version: () => hostVersion, turns: () => turns,
+            surface: (id, args) => self.onmessage({ data: { id, method: 'surface', args } }),
             input: () => self.onmessage({ data: { id: 17, method: 'input', args: { kind: 2, target: 1, data: [] } } }) };
     `, context);
     sessionAdmission(context);
-    return { runtime: context.runtime, entered, release, messages, inputDelivered };
+    return { runtime: context.runtime, entered, release, messages, inputDelivered, surfaceIgnored, surfaceDelivered };
 }
 
 test('actual worker input admission remains available during every update preparation wait', { timeout: 2000 }, async () => {
@@ -1218,6 +1523,26 @@ test('actual worker input admission remains available during every update prepar
         assert.equal(f.runtime.version(), next);
         assert(f.messages.some(message => message.adopted?.build_id === next));
     }
+});
+test('worker requests a deferred surface after the update reopens guest admission', { timeout: 2000 }, async () => {
+    const f = preparingWorker('drain'), update = f.runtime.check();
+    await f.entered.promise;
+    const geometry = surfaceBytes(800, 550, 2, 3);
+    f.runtime.surface(18, geometry);
+    const ignored = await f.surfaceIgnored.promise;
+    assert.deepEqual(Object.keys(ignored), ['id']);
+    assert.equal(f.runtime.turns(), 0);
+
+    f.release.resolve(); await update;
+    const adopted = f.messages.findIndex(message => message.adopted?.build_id === next);
+    const readiness = f.messages.findIndex(message => message.surfaceReady);
+    assert(adopted >= 0 && readiness > adopted);
+    assert.equal(f.messages.filter(message => message.surfaceReady).length, 1);
+
+    f.runtime.surface(19, geometry);
+    const delivered = await f.surfaceDelivered.promise;
+    assert(delivered.result?.scene);
+    assert.equal(f.runtime.turns(), 1);
 });
 test('consent changed while update preparation waits prevents the final swap', { timeout: 2000 }, async () => {
     const f = preparingWorker('personal', { changedConsent: true }), update = f.runtime.check();
@@ -1775,7 +2100,7 @@ test('each web guest generation registers a distinct nonzero app instance',async
             start(){return Promise.resolve(1);}
             close(){}
         },
-        guestOperations(value){services=value;return {data:{flushReady(){}},reset(){},refreshVolumes(){},pb_session(){void value.channels().start();}};},
+        guestOperations(value){services=value;return {data:{flushReady(){}},reset(){},refreshVolumes(){},queueWake(){},pb_session(){void value.channels().start();}};},
     });
     vm.runInContext(source.replace(/^import .*;$/gm,'')+`
         files={cleanup:async()=>{}};
@@ -1882,11 +2207,13 @@ test('bundle admission waits for the durable complete transfer and bounds execut
     const begin = source.indexOf('async function prepareBundle(');
     const end = source.indexOf('function updateState(', begin);
     assert(begin >= 0 && end > begin);
-    for (const outcome of ['accepted', 'oversized', 'unsupported']) {
-        const oversized = outcome === 'oversized', unsupported = outcome === 'unsupported';
+    for (const outcome of ['accepted', 'oversized', 'unsupported', 'unauthenticated']) {
+        const oversized = outcome === 'oversized', unsupported = outcome === 'unsupported', unauthenticated = outcome === 'unauthenticated';
         let finished = false, flushed = false, verified = 0, compiled = 0, reads = 0, closed = 0, discarded = 0, truncated = 0, release;
+        let authenticated = false;
         const held = new Promise(resolve => { release = resolve; });
         const metadata = { name: 'Streamed', build_id: next, length: oversized ? MAX_PACKAGE_WASM_BYTES + 1 : 8, offset: 0,
+            required_host_features: ['ui.canvas.pixels.v1'],
             unsupported_host_features: unsupported ? ['future.operation'] : [] };
         const file = {
             truncate() { truncated++; }, write(bytes) { return bytes.length; },
@@ -1894,12 +2221,16 @@ test('bundle admission waits for the durable complete transfer and bounds execut
             read(bytes) { reads++; assert.equal(bytes.length, 8); return bytes.length; },
             close() { closed++; },
         };
-        const context = vm.createContext({ ...compatibleWorkerStorage(), writePackage, MAX_PACKAGE_WASM_BYTES, TextDecoder, authenticateBundle: async () => ({}),
+        const context = vm.createContext({ ...compatibleWorkerStorage(), failure, writePackage, MAX_PACKAGE_WASM_BYTES, TextDecoder,
+            async authenticateBundle() { if (unauthenticated) throw Error('Signature rejected'); authenticated = true; return {}; },
             TextEncoder, Uint8Array, ArrayBuffer, Map, WeakMap,
             directory: { getFileHandle: async () => ({ createSyncAccessHandle: async () => file }) },
             host: { exports: { pb_package() { assert(finished && flushed); verified++; return 1; }, pb_package_discard() { discarded++; } } },
             hostOutput: () => new TextEncoder().encode(JSON.stringify(metadata)),
-            prepareGuest: async () => { compiled++; return {}; }, operations: {}, fileYield: async () => {},
+            prepareGuest: async (_wasm, _operations, features) => {
+                assert(authenticated); assert.deepEqual([...features], metadata.required_host_features);
+                compiled++; return {};
+            }, operations: {}, fileYield: async () => {},
         });
         vm.runInContext(`const bundleFiles = new Map(), bundleStorage = new Map(), guestBundles = new WeakMap();
             let nextBundle = 1; const decoder = new TextDecoder();
@@ -1911,8 +2242,10 @@ test('bundle admission waits for the durable complete transfer and bounds execut
         await new Promise(setImmediate); assert.equal(verified, 0);
         release(); const [settled] = await result;
         assert.equal(verified, 1);
-        if (oversized || unsupported) {
-            assert.equal(settled.status, 'rejected'); assert.match(settled.reason.message, unsupported ? /unsupported host feature: future.operation/ : /exceeds 64 MiB/);
+        if (oversized || unsupported || unauthenticated) {
+            assert.equal(settled.status, 'rejected');
+            assert.match(settled.reason.message, oversized ? /exceeds 64 MiB/ : unauthenticated ? /Signature rejected/ : /unsupported host feature: future.operation/);
+            if (unsupported) assert.equal(settled.reason.code, "unsupported");
             assert.equal(compiled, 0); assert.equal(reads, 0); assert.equal(closed, 1); assert.equal(discarded, 1);
             assert.equal(truncated, unsupported ? 1 : 2, 'unsupported package bytes survive failed execution admission');
         } else {
@@ -2022,7 +2355,7 @@ test('interrupted local root seeding resumes its original package and never rese
                 pb_recovery_abort() {}, pb_sync_finish() {},
             } };
             const context = vm.createContext({ ...compatibleWorkerStorage(), workerChannel, encodeId, decodeId, validId, validDatabase,
-                AccountSignal, observeAccountMetadata() {}, GuestWork: FixtureWork, guestOperations: () => ({}), VolumePublication, OpfsStore, OpfsResources,
+                AccountSignal, observeAccountMetadata() {}, GuestWork: FixtureWork, guestOperations: () => ({ cancelWake() {} }), VolumePublication, OpfsStore, OpfsResources,
                 TextEncoder, TextDecoder, Uint8Array, crypto, performance, clearTimeout, console: { info() {} },
                 self: { location: { href: 'https://playbit.app/runtime-worker.js?channel=public' }, postMessage() {} },
                 navigator: { storage: { getDirectory: async () => ({ getDirectoryHandle: async () => storage }) },
@@ -2087,5 +2420,214 @@ test('interrupted local root seeding resumes its original package and never rese
         assert.equal(locals.at(-1), undefined, 'code updates do not receive seed data');
         assert.deepEqual([...databases], [['first', 1], ['second', 1]], fault);
         assert.deepEqual([...blobs], [['file-a', 1], ['file-b', 1]], fault);
+    }
+});
+
+test('reconnecting a projected World distinguishes authenticated denial from a transient failure', async () => {
+    const world = 'world', shared = 'shared';
+    const revoked = Object.assign(new Error('World participant revoked'), { code: 'world-participant-revoked' });
+    const transient = Object.assign(new Error('Connection lost'), { code: 'ap-transport' });
+    const rejected = Object.assign(new Error('Subscription refused'), { code: 'ap-rejected' });
+    for (const response of [null, revoked, transient]) {
+        const denials = [], removed = [];
+        let opens = 0;
+        const context = vm.createContext({ ...compatibleWorkerStorage(), workerChannel, GuestWork: FixtureWork,
+            guestOperations: lifecycleOperations, AccountSignal, observeAccountMetadata() {}, AbiError,
+            TextEncoder, TextDecoder, crypto, self: { location: { href: 'https://playbit.app/runtime-worker.js?channel=public' } },
+            checkWorld: async () => { if (++opens === 1) return { id: world }; if (response instanceof Error) throw response; return response; },
+            subscribe: async () => { throw rejected; },
+            denied: (_method, value) => denials.push({ volume: value.volume, revoked: value.revoked }),
+            remove: id => removed.push(id),
+        });
+        vm.runInContext(source.replace(/^import .*;$/gm, '') + `
+            profile = {session: {root_volume: 'world'}, root: {id: 'shared'}};
+            automaticSlots.set('world', {volume: {id:'world'}, base:2});
+            namedSlots.set('world/a', 65); namedSlots.set('shared/b', 66);
+            entrySubscriptions.add('world/a'); entrySubscriptions.add('shared/b');
+            scopeRecoveries.set('world/a','retry'); scopeRecoveries.set('shared/b','retry');
+            stores.set(3, {}); // A detached staging reference still owns the old control slot.
+            localStep = async callback => callback();
+            automaticCall = denied; publisherWorld = checkWorld;
+            replicas = {run: {active:true}, add: subscribe, removeVolume:remove};
+            globalThis.capture = () => captureAutomaticCatalog({id:'world'});
+            globalThis.snapshot = () => [projectedWorld('world'), [...namedSlots.keys()], [...entrySubscriptions], [...scopeRecoveries.keys()], secondaryBase()];
+        `, context);
+        await assert.rejects(context.capture());
+        const retain = response === transient;
+        assert.equal(opens, 2, 'recheck when subscription refuses after Open');
+        assert.deepEqual(denials, retain ? [] : [{volume: world, revoked: response === revoked}]);
+        assert.deepEqual(removed, retain ? [] : [world]);
+        const interests = retain ? [world + '/a', shared + '/b'] : [shared + '/b'];
+        assert.deepEqual(JSON.parse(JSON.stringify(context.snapshot())), [retain, interests, interests, interests, 4]);
+    }
+});
+
+test('Shared reconnect admits ready mounts and attaches a concurrently opening User or World once', {timeout:5000}, async () => {
+    for (const role of ['user','root']) for (const order of ['ready','controls','bootstrap','detached','planned','transfer']) {
+        if (role !== 'user' && (order === 'planned' || order === 'transfer')) continue;
+        const shared = encodeId(new Uint8Array(16).fill(18)), volume = encodeId(new Uint8Array(16).fill(19));
+        const held = gate(), entered = gate(), records = [];
+        let paused = false, registered = false;
+        const pause = async phase => {
+            if (phase !== order || paused) return;
+            paused = true; entered.resolve(); await held.promise;
+        };
+        class Replicas {
+            constructor(options) { this.options = options; }
+            async start(scopes) {
+                this.run = {streams:[], active:false, stopped:false};
+                for (const scope of scopes) this.subscribe(scope);
+                await pause('bootstrap');
+                await this.options.bootstrap(() => true);
+                this.run.active = true;
+            }
+            subscribe(scope) {
+                records.push(['subscribe',scope.volume_id,scope.session_id]);
+                this.run.streams.push({ source:scope.volume_id, scope });
+            }
+            removeVolume(id) {
+                if (this.run) this.run.streams = this.run.streams.filter(stream => stream.source !== id);
+                records.push(['unsubscribe', id]);
+            }
+            async add(scope, capture) {
+                assert(this.run.active);
+                assert(!this.run.streams.some(stream => stream.source === scope.volume_id), 'each opening has one subscribed capture');
+                this.subscribe(scope); await capture(() => true);
+            }
+        }
+        const context = vm.createContext({ ...compatibleWorkerStorage(), workerChannel, encodeId, decodeId, validId,
+            guestOperations:lifecycleOperations, GuestWork:FixtureWork, AccountSignal, observeAccountMetadata() {}, AbiError,
+            TextEncoder, TextDecoder, crypto, clearTimeout, retryable, replicaAddress, LiveReplication:Replicas, shared, volume, role,
+            pause, self:{location:{href:'https://playbit.app/runtime-worker.js?channel=public'},postMessage(){}},
+            register:() => { registered = true; }, tombstone:() => { registered = false; }, admit:id => { assert(id === shared || registered); return true; },
+            captured:async id => { records.push(['capture',id]); if (id === volume) { assert(registered); await pause('detached'); } },
+        });
+        vm.runInContext(source.replace(/^import .*;$/gm, '') + `
+            managed=true; profile={account:'guest',root:{id:shared},session:{id:'session',root_volume:role==='root'?volume:'another-world'}};
+            if (role==='root') unmountedWorld=volume;
+            creationScope={user_volume:role==='user'?volume:undefined};
+            // The bound recovery capability can belong to another session and be absent from the chooser.
+            boundUser = role === 'user' ? {volume:{id:volume,personal:false},credentials:{database_key:[]}} : undefined;
+            directory={}; publication={}; replicaId=()=>1;
+            localStep=async callback=>{ if(startingReplicas?.volumes.length) await pause('planned'); return callback(); };
+            ap=async()=>({}); openSession=async()=>{}; refreshScene=async()=>{}; saveProfile=async()=>{};
+            publisherWorld=async()=>({id:volume}); openVolumeControls=async()=>{ await pause('controls'); };
+            finishInitialVolume=()=>{}; reclaimVolume=async()=>{};
+            automaticCall=(op)=>{ if(op==='pb_automatic_register')register(); if(op==='pb_automatic_user_deleted')tombstone(); return new Uint8Array(); };
+            let input;
+            hostInput=bytes=>{ input=JSON.parse(decoder.decode(bytes)); }; hostOutput=value=>value;
+            host={exports:{pb_database_retry:()=>0,pb_live_rebase:()=>0,pb_replica_catalog_allowed:()=>encoder.encode(JSON.stringify(admit(input)))}};
+            blobs={retry(){},upload:async()=>{}}; databaseCatalog=async function*(){};
+            synchronizeOrdinaryVolume=async (item,_label,_push,_step,current)=>{
+                await captured(item.id);
+                if(startingReplicas && item.id === volume) {
+                    await pause('transfer');
+                    if(!current()) throw Error('Deleted volume transfer');
+                }
+            };
+            pullVolumeSnapshot=async item=>captured(item.id);
+            globalThis.open=()=>prepareAutomatic({role,volume});
+            globalThis.connect=connectReplication;
+            scheduleRecovery=()=>{};
+            globalThis.recover=async()=>{scopeRecoveries.set(volume,'retry'); await recoverSubscriptions();};
+            globalThis.reconnect=()=>{ replicas.run.stopped=true; accountReplica=undefined; return connectReplication(); };
+            globalThis.deleteUser=async()=>{
+                // The chooser can independently hold this same User binding.
+                personalSlots.set(volume, automaticSlots.get(volume).base);
+                personalCatalog = [boundUser];
+                activeGrants = [{volume,write:true,incarnation:'grant'}];
+                selectPersonal = (_session, grants) => { activeGrants = grants; };
+                accountReplica={profile:async()=>({deletedVolumes:new Set([volume]),revision:1n,displayName:''})};
+                await refreshPersonal({session:activeGrants});
+                accountReplica=undefined;
+            };
+            globalThis.view=()=>({ids:replicatedVolumeIds(),world:projectedWorld(volume),personal:personalReplica(volume),
+                active:Boolean(replicas?.run?.active),blocked:replicationBlocked});
+        `, context);
+        if (order === 'planned' || order === 'transfer') {
+            await context.open(); records.length = 0;
+            const connecting = context.connect();
+            await entered.promise; await context.deleteUser(); held.resolve();
+            await connecting;
+            assert.equal(context.view().blocked, false);
+            assert.equal(context.view().active, true);
+            assert.deepEqual([...context.view().ids], [shared]);
+            assert(records.some(row => row[0] === 'capture' && row[1] === shared));
+            if (order === 'planned') assert(!records.some(row => row[0] === 'subscribe' && row[1] === volume));
+            continue;
+        }
+        if (order === 'ready') {
+            await context.open(); records.length=0;
+            await context.connect();
+        } else if (order === 'bootstrap') {
+            const connection = context.connect(); await entered.promise;
+            const opening = context.open(); await new Promise(setImmediate);
+            assert(registered); assert(!context.view().ids.includes(volume));
+            held.resolve(); await Promise.all([connection, opening]);
+        } else {
+            const opening = context.open(); await entered.promise;
+            if (order === 'controls') {
+                assert.deepEqual({...context.view(),ids:[...context.view().ids]}, {ids:[shared],world:false,personal:false,active:false,blocked:false});
+            }
+            await context.connect(); assert.equal(context.view().active, true);
+            if (role === 'root') await context.recover();
+            held.resolve(); await opening;
+        }
+        assert.equal(context.view().blocked,false);
+        assert.equal(context.view().active,true);
+        assert(context.view().ids.includes(volume));
+        assert.deepEqual(records.filter(row => row[1] === volume), [
+            ...(order === 'detached' ? [['capture',volume]] : []),
+            ['subscribe',volume,role === 'user' ? null : 'session'], ['capture',volume],
+        ], role + '/' + order);
+        if (role === 'user') {
+            await context.deleteUser();
+            assert.deepEqual([...context.view().ids], [shared]);
+            assert.equal(context.view().personal, false);
+            assert.deepEqual(records.at(-1), ['unsubscribe',volume]);
+            await assert.rejects(context.open(), error => error instanceof AbiError && error.status === -2);
+            assert.equal(context.view().active,true);
+            records.length = 0;
+            await context.reconnect();
+            assert.deepEqual(records.filter(row => row[0] === 'subscribe'), [['subscribe',shared,'session']]);
+        }
+    }
+});
+
+test('overlapping personal and automatic mounts share a pair only for the same volume', async () => {
+    for (const same of [false, true]) {
+        const opens = [], registrations = [];
+        let admit;
+        const held = new Promise(resolve => { admit = resolve; });
+        const context = vm.createContext({ ...compatibleWorkerStorage(), workerChannel, GuestWork: FixtureWork,
+            guestOperations: lifecycleOperations, AccountSignal, observeAccountMetadata() {}, AbiError,
+            TextEncoder, TextDecoder, crypto, self: {location: {href:'https://playbit.app/runtime-worker.js?channel=public'}},
+            validateSelection: grants => grants, MAX_PERSONAL_VOLUMES: 30, encodeId: () => 'incarnation',
+            capture: async () => {}, openControls: async (id, base) => {
+                opens.push([id, base]); if (id === 'private') await held;
+            },
+            note: (operation, request) => { if (request.base) registrations.push([operation, request.base]); },
+        });
+        vm.runInContext(source.replace(/^import .*;$/gm, '') + `
+            profile = {account: 'guest', session: {id:'session', root_volume:'world'}, root:{id:'shared'}};
+            creationScope = {user_volume:'private'};
+            personalCatalog = [{volume:{id:'private', personal:true}, credentials:{database_key:[]}}];
+            boundUser = personalCatalog[0];
+            publication = {}; directory = {}; replicaId = () => 1;
+            localStep = async callback => callback(); publisherWorld = async id => ({id});
+            let payload;
+            hostInput = bytes => { payload = JSON.parse(decoder.decode(bytes)); }; hostOutput = value => value;
+            host = {exports:{pb_register_personal:() => { note('personal', payload); return 0; }}};
+            automaticCall = (op, request) => { note(op, request); return 0; };
+            openVolumeControls = openControls; finishInitialVolume = () => {}; reclaimVolume = capture;
+            selectPersonal = () => {}; pullPersonal = capture; captureAutomaticCatalog = capture;
+            globalThis.personal = () => preparePersonal(profile.session, [{volume:'private',write:true}]);
+            globalThis.automatic = same => prepareAutomatic(same ? {role:'user',volume:'private'} : {role:'root',volume:'world'});
+        `, context);
+        const personal = context.personal(), automatic = context.automatic(same);
+        await new Promise(setImmediate);
+        assert.deepEqual(opens, same ? [['private',2]] : [['private',2], ['world',4]]);
+        admit(); await Promise.all([personal, automatic]);
+        assert.deepEqual(registrations.sort(), [['pb_automatic_register',same ? 2 : 4], ['personal',2]]);
     }
 });

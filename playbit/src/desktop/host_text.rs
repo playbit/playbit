@@ -60,7 +60,7 @@ pub(super) fn element(
             |_, _, _, _| {},
         )
         .absolute()
-        .size_full(),
+        .inset_0(),
     )
 }
 

@@ -40,7 +40,9 @@ fn raster_and_vector_artwork_preserve_alpha_and_orientation() {
     image::RgbaImage::from_pixel(1024, 1024, image::Rgba([255, 0, 0, 128]))
         .write_to(&mut large_png, image::ImageFormat::Png)
         .unwrap();
-    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><path fill="#f00" fill-opacity=".5" d="M0 0h2v2H0z"/></svg>"##.to_vec();
+    let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"2\" height=\"2\">\
+        <path fill=\"#f00\" fill-opacity=\".5\" d=\"M0 0h2v2H0z\"/></svg>"
+        .to_vec();
     for icon in [png.into_inner(), jpeg.into_inner(), large_png.into_inner(), svg] {
         for side in [128, 256, 512] {
             let expected = artwork::macos_icon(&icon, side, false).unwrap().into_raw();
@@ -103,7 +105,8 @@ fn display_reads_skip_large_assets_and_enforce_icon_limits() {
             self.file.seek(position)
         }
     }
-    let icon = br##"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><path fill="#f00" d="M0 0h1v1H0z"/></svg>"##;
+    let icon = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\">\
+        <path fill=\"#f00\" d=\"M0 0h1v1H0z\"/></svg>";
     for size in [60, 127] {
         let asset = tempfile::tempfile().unwrap();
         asset.set_len(size * 1024 * 1024).unwrap();

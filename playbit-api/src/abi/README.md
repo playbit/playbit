@@ -168,7 +168,7 @@ eight records / 8 KiB; this is not a total heap or physical latency qualificatio
 `ViewBytes` bounds the entire encoded `ViewSubmit` input, including framing.
 Embedders select `Host::view_bytes_limit()`; the runtime captures a positive bound
 at instantiation and rejects larger inputs before decoding or retaining a scene.
-Rejection leaves the last accepted scene and its bytes unchanged. Desktop uses 64 MiB; web retains its 1 MiB host limit. Embedding fixtures
+Rejection leaves the last accepted scene and its bytes unchanged. Desktop uses 64 MiB and web uses 4 MiB. Embedding fixtures
 also exercise an 8 KiB ceiling. Renderer
 node/text/feature limits and total memory remain separate constraints. C uses `PB_LIMIT_VIEW_BYTES` (kind 3).
 

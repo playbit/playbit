@@ -131,9 +131,18 @@ fn diagnostic(profile: &Path, error: &(dyn Error + 'static), opening_profile: bo
     }
     text.push_str(&format!("\nProfile: {profile:?}"));
     if (opening_profile || local) && super::is_corrupt_store_open_error(error) {
-        text.push_str("\nRecovery: quit Playbit and stop its engine, then back up this profile directory before moving it aside. Reopen Playbit and sign in again. Resetting removes local changes that have not synced; your online account is unchanged.");
+        text.push_str(
+            "\nRecovery: quit Playbit and stop its engine, \
+             then back up this profile directory before moving it aside. \
+             Reopen Playbit and sign in again. Resetting removes local changes that have \
+             not synced; your online account is unchanged.",
+        );
     } else if matches!(store, StoreError::Internal(_)) {
-        text.push_str("\nRecovery: restart Playbit and its engine. Check whether your last action was saved before repeating it. Keep the profile for diagnosis if this recurs.");
+        text.push_str(
+            "\nRecovery: restart Playbit and its engine. \
+             Check whether your last action was saved before repeating it. \
+             Keep the profile for diagnosis if this recurs.",
+        );
     } else if matches!(store, StoreError::Credentials(_)) {
         text.push_str(&format!("\n{}", super::ipc::PROFILE_OPEN_ERROR));
     }

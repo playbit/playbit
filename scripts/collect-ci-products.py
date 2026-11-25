@@ -32,9 +32,10 @@ def collect(public, output):
     # bundled tests/ probes and debug source maps are not products.
     source = public / 'target/web'
     expected = {'index.html', 'playbit.js', 'native-handoff.js', 'runtime-worker.js', 'ap-worker.js', 'controls.css',
-                'InterVariable.ttf', 'playbit.wasm',
+                'invitation.css', 'InterVariable.ttf', 'playbit.wasm',
                 'todo.pbapp', 'micro-kart.pbapp', 'shared-note.pbapp'}
     expected |= {p.name for p in (public / 'playbit/assets').glob('check-*.svg')}
+    expected |= {p.name for p in (public / 'playbit/platform/web/invitation').glob('*.svg')}
     web = output / 'web'
     web.mkdir()
     for name in sorted(expected):

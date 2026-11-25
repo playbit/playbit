@@ -39,8 +39,19 @@ fn unchanged_source_archive_is_fresh_and_source_edits_rebuild() {
         root.join("scripts/build-version.rs"),
     )
     .unwrap();
-    fs::write(root.join("Cargo.toml"), "[package]\nname = \"archive-fixture\"\nversion = \"1.2.3\"\nedition = \"2024\"\n[[bin]]\nname = \"archive-fixture\"\npath = \"main.rs\"\n").unwrap();
-    fs::write(root.join("build.rs"), "#[path = \"scripts/build-version.rs\"] mod version;\nfn main() { version::emit(std::path::Path::new(&std::env::var(\"CARGO_MANIFEST_DIR\").unwrap())).unwrap(); }\n").unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"archive-fixture\"\nversion = \"1.2.3\"\n\
+         edition = \"2024\"\n[[bin]]\nname = \"archive-fixture\"\npath = \"main.rs\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("build.rs"),
+        "#[path = \"scripts/build-version.rs\"] mod version;\n\
+         fn main() { version::emit(std::path::Path::new(&std::env::var(\"CARGO_\
+         MANIFEST_DIR\").unwrap())).unwrap(); }\n",
+    )
+    .unwrap();
     fs::write(
         root.join("main.rs"),
         "fn main() { println!(\"{}\", env!(\"PLAYBIT_BUILD_VERSION\")); }\n",
@@ -120,8 +131,19 @@ fn cargo_builds_unowned_checkout_and_tracks_revision_changes() {
         root.join("scripts/build-version.rs"),
     )
     .unwrap();
-    fs::write(root.join("Cargo.toml"), "[package]\nname = \"version-fixture\"\nversion = \"1.2.3-beta.4\"\nedition = \"2024\"\n[[bin]]\nname = \"version-fixture\"\npath = \"main.rs\"\n").unwrap();
-    fs::write(root.join("build.rs"), "#[path = \"scripts/build-version.rs\"] mod version;\nfn main() { version::emit(std::path::Path::new(&std::env::var(\"CARGO_MANIFEST_DIR\").unwrap())).unwrap(); }\n").unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"version-fixture\"\nversion = \"1.2.3-beta.4\"\n\
+         edition = \"2024\"\n[[bin]]\nname = \"version-fixture\"\npath = \"main.rs\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("build.rs"),
+        "#[path = \"scripts/build-version.rs\"] mod version;\n\
+         fn main() { version::emit(std::path::Path::new(&std::env::var(\"CARGO_\
+         MANIFEST_DIR\").unwrap())).unwrap(); }\n",
+    )
+    .unwrap();
     fs::write(
         root.join("main.rs"),
         "fn main() { println!(\"{}\", env!(\"PLAYBIT_BUILD_VERSION\")); }\n",

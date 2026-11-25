@@ -16,6 +16,9 @@ use std::{
 };
 
 pub const REQUEST_LIMIT: usize = playbit_api::abi::syscall::MAX_EVENT_BYTES + 1024;
+/// Allow a retiring guest to drain before the replacement opens its controls.
+#[cfg(feature = "process")]
+pub(crate) const BUILD_READY_TIMEOUT: Duration = Duration::from_secs(30);
 // Tool snapshots retain their existing IPC budget independently of rendering.
 pub const MAX_SCENE_BYTES: usize = 1024 * 1024;
 pub const REPLY_LIMIT: usize = MAX_SCENE_BYTES + 4096;
@@ -145,6 +148,7 @@ pub enum Operation {
     Quit,
     Show { presentation: u64 },
     Screenshot,
+    WaitForBuild { build: String },
 }
 #[derive(Debug, serde::Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum Reply {
@@ -206,23 +210,29 @@ impl Exchange {
             generation: owner.instance.owner_generation,
             operation,
         };
-        let mut stream = UnixStream::connect(socket_path(profile, request.instance)?).map_err(
-            |error| {
+        let mut stream =
+            UnixStream::connect(socket_path(profile, request.instance)?).map_err(|error| {
                 std::io::Error::new(
                     error.kind(),
                     format!(
-                        "The selected app's control endpoint is unavailable; no request was sent: {error}"
+                        "The selected app's control endpoint is unavailable; \
+                         no request was sent: {error}"
                     ),
                 )
-            },
-        )?;
+            })?;
         ipc::verify_peer(&stream)?;
         let actual = crate::engine::process_owner::Owner::capture(&stream)?;
         if owner.process.as_ref() != Some(&actual.identity) {
             return Err("The app endpoint has another process identity; no action was sent".into());
         }
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_read_timeout(Some(
+            if matches!(request.operation, Operation::WaitForBuild { .. }) {
+                BUILD_READY_TIMEOUT
+            } else {
+                Duration::from_secs(5)
+            },
+        ))?;
         let after = match &request.operation {
             Operation::Logs { after } => *after,
             _ => None,
@@ -234,6 +244,7 @@ impl Exchange {
             Operation::Quit => 3,
             Operation::Show { .. } => 4,
             Operation::Screenshot => 5,
+            Operation::WaitForBuild { .. } => 6,
         };
         ipc::codec::write(&mut stream, &ipc::codec::encode(&request, REQUEST_LIMIT)?)?;
         // No further requests can be sent on this exchange. EOF is normal and
@@ -294,7 +305,7 @@ impl Exchange {
                 if self.operation == 5
                     && png.len() <= MAX_SCREENSHOT_BYTES
                     && png.as_slice().starts_with(b"\x89PNG\r\n\x1a\n") => {}
-            ArchivedReply::Accepted { .. } if (2..=4).contains(&self.operation) => {}
+            ArchivedReply::Accepted { .. } if matches!(self.operation, 2..=4 | 6) => {}
             ArchivedReply::Error { error } if error.len() <= 4096 => {
                 return Err(error.as_str().into());
             }

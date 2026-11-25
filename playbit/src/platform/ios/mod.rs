@@ -412,7 +412,11 @@ fn owner_response(action: impl FnOnce() -> Result<ReplyData, String>) -> *mut Io
         data.status = None;
         data.sign_in = None;
         data.developer = None;
-        error = Some(bounded_error("The response exceeds 4 MiB. The action may have completed; do not repeat it automatically.".into()));
+        error = Some(bounded_error(
+            "The response exceeds 4 MiB. The action may have completed; \
+             do not repeat it automatically."
+                .into(),
+        ));
     }
     Box::into_raw(Box::new(IosReply {
         database: data.database,
@@ -2237,7 +2241,11 @@ mod tests {
         const CHILD: &str = "PLAYBIT_IOS_CHANNEL_TRACE_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", "platform::ios::tests::changing_profile_stops_process_tracing_before_new_account_work"])
+                .args([
+                    "--exact",
+                    "platform::ios::tests::changing_profile_stops_process_tracing_before_new_\
+                     account_work",
+                ])
                 .env(CHILD, "1")
                 .output()
                 .unwrap();

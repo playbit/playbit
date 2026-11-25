@@ -9,6 +9,62 @@ pub const PREVIEW_BYTES: usize = 128;
 pub const MAX_BYTES: usize = 60 * 1024;
 pub const MAX_STORED_BYTES: usize = 4 * 1024 * 1024;
 
+// World births are recorded in each KV backing's private indexes so reconnects
+// can replay only a locally authored append under its original clock.
+#[cfg(any(feature = "local-store", target_arch = "wasm32"))]
+pub(crate) const KV_APPEND: &[u8] = b"world-kv-append/";
+
+#[cfg(any(feature = "local-store", target_arch = "wasm32"))]
+pub(crate) fn kv_append_key(clock: kvdb::Clock) -> Vec<u8> {
+    [KV_APPEND, &clock.encode()].concat()
+}
+
+#[cfg(any(feature = "local-store", target_arch = "wasm32"))]
+pub(crate) fn kv_append_record(key: &[u8], value: &[u8]) -> Vec<u8> {
+    [kvdb::hash::entry_hash(&[0; 32], key, 0, value).as_slice(), key].concat()
+}
+
+#[cfg(any(feature = "connected-engine", target_arch = "wasm32"))]
+pub(crate) fn kv_append_parts(record: &[u8]) -> Result<(&[u8], &[u8])> {
+    let (digest, key) =
+        record.split_at_checked(32).ok_or(Error::corrupt("invalid World KV append digest"))?;
+    crate::store::key_value::validate_key(key)?;
+    Ok((digest, key))
+}
+
+/// Clear only local birth markers whose key, clock and value AP acknowledged.
+#[cfg(any(feature = "connected-engine", target_arch = "wasm32"))]
+pub(crate) fn acknowledge_appends<S: Storage>(
+    db: &kvdb::Db<S>,
+    bytes: &[u8],
+    now: u64,
+) -> Result<bool> {
+    let snapshot = db.begin_read()?;
+    if !snapshot.next_local_key(KV_APPEND, false)?.is_some_and(|key| key.starts_with(KV_APPEND)) {
+        return Ok(false);
+    }
+    let mut records = Vec::new();
+    kvdb::sync::visit_delta(bytes, crate::store::MAX_REPLICA_DELTA_BYTES, |key, state| {
+        if let kvdb::sync::EntState::Present { clock, value } = state {
+            records.push((kv_append_key(clock), key, value));
+        }
+    })?;
+    let mut tx = db.begin_write(now)?;
+    let mut changed = false;
+    for (marker, key, value) in records {
+        if snapshot
+            .local_get(&marker)?
+            .is_some_and(|stored| stored.as_ref() == kv_append_record(key, value))
+        {
+            changed |= tx.local_indexes().del(&marker)?;
+        }
+    }
+    if changed {
+        tx.commit()?;
+    }
+    Ok(changed)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "app-host", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
 pub struct Root {

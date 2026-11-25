@@ -129,14 +129,18 @@ test('capability discovery does not authenticate a structurally admitted package
     // The scalar dispatcher provides clock.read even without a host callback.
     const installed = new Set(Object.keys(target.operations).filter(name => name.startsWith('pb_')));
     installed.add('pb_clock_read');
-    const features = ['ui.canvas.clear.v1', 'display-names.v1'];
+    const features = ['ui.canvas.clear.v1', 'ui.canvas.pixels.v1', 'ui.canvas.viewport.v1', 'ui.canvas.window.v1',
+        'ui.window.size-constraints.v1', 'ui.window.style.v1', 'display-names.v1'];
     for (const feature of features) assert(names.includes(feature), feature);
     assert.equal(names.length, installed.size + features.length);
     for (const name of ['object.schema.read.begin', 'object.schema.read.take', 'object.schema.establish.begin',
-        'kv.keys.begin', 'kv.read.begin', 'kv.put.begin', 'kv.delete.begin', 'entry.resolve.begin', 'session.read', 'session.channel', 'clock.read']) {
+        'kv.keys.begin', 'kv.read.begin', 'kv.put.begin', 'kv.delete.begin', 'entry.resolve.begin', 'session.read', 'session.channel', 'clock.read', 'wake.after']) {
         assert(names.includes(name), name);
     }
-    bytes = bundle([['app/manifest.json', encoder.encode(JSON.stringify({ app_id: 'test', name: 'Callbacks', required_host_features: names.toSorted() }))]]);
+    // A package lists the capabilities it uses. The host advertises more names
+    // than a single manifest is allowed to declare.
+    const required = [...features, 'clock.read', 'ui.submit', 'wake.after'].toSorted();
+    bytes = bundle([['app/manifest.json', encoder.encode(JSON.stringify({ app_id: 'test', name: 'Callbacks', required_host_features: required }))]]);
     let length; do { length = host.pb_package(1); } while (length === 0);
     assert(length > 0, `package validation returned ${length}`);
     assert.deepEqual(JSON.parse(decoder.decode(new Uint8Array(host.memory.buffer, host.pb_output(), length))).unsupported_host_features, []);
@@ -182,7 +186,7 @@ for (const required of [null, 'future.operation', 'trace.record', 'file.copy.beg
     do { length = host.pb_package(1); } while (length === 0);
     assert(length > 0, 'structural admission accepts unknown required host features');
     const metadata = JSON.parse(decoder.decode(new Uint8Array(host.memory.buffer, host.pb_output(), length)));
-    assert.deepEqual(metadata.unsupported_host_features, required ? [required] : []);
+    assert.deepEqual(metadata.unsupported_host_features, required && required !== 'ui.canvas.pixels.v1' ? [required] : []);
     assert.equal(metadata.name, 'Future');
     assert.equal(host.pb_package_adopt(1), -7, 'unsigned packages cannot execute regardless of required features');
     assert.equal(closed, 1);

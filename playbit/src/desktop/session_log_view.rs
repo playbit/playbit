@@ -3,7 +3,8 @@ use super::*;
 use crate::store::Id;
 use crate::ui::desktop::scrollbar::Scrollbars;
 use crate::ui::desktop::typography::tabular_numerals;
-use crate::ui::desktop::zoom::length as ui;
+use crate::ui::desktop::zoom::{length as ui, scaled};
+use gpui::{AvailableSpace, Pixels};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MarkerKind {
@@ -21,11 +22,6 @@ struct RunMarker {
 enum RowContent {
     Message(usize),
     Marker(usize),
-}
-
-struct Row {
-    top: f32,
-    content: RowContent,
 }
 
 #[derive(Clone, Default)]
@@ -50,8 +46,12 @@ pub(super) struct LogView {
     scrollbars: Entity<Scrollbars>,
     text_ids: Arc<Vec<Entity<()>>>,
     timestamps: Arc<Vec<String>>,
-    rows: Arc<Vec<Row>>,
-    height: f32,
+    rows: Vec<RowContent>,
+    layout_key: Option<(Pixels, Pixels, f32)>,
+    message_heights: Vec<Pixels>,
+    // The final offset is the bottom of the last row.
+    offsets: Vec<Pixels>,
+    follow_pending: bool,
 }
 impl LogView {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
@@ -71,8 +71,11 @@ impl LogView {
             scrollbars,
             text_ids: Arc::new(Vec::new()),
             timestamps: Arc::new(Vec::new()),
-            rows: Arc::new(Vec::new()),
-            height: 0.,
+            rows: Vec::new(),
+            layout_key: None,
+            message_heights: Vec::new(),
+            offsets: Vec::new(),
+            follow_pending: false,
         }
     }
     pub(super) fn select(&mut self, session: &str, instance: Option<Id>, cx: &mut Context<Self>) {
@@ -104,7 +107,7 @@ impl LogView {
         self.markers = saved.markers;
         self.scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.set(session, &saved.lines, cx);
-        self.follow_bottom(cx);
+        self.follow_pending = true;
     }
     pub(super) fn set(
         &mut self,
@@ -112,14 +115,24 @@ impl LogView {
         lines: &[crate::ui::app_control::LogEntry],
         cx: &mut Context<Self>,
     ) {
+        self.message_heights.clear();
+        self.replace_lines(session, lines.to_vec(), cx);
+    }
+
+    fn replace_lines(
+        &mut self,
+        session: &str,
+        lines: Vec<crate::ui::app_control::LogEntry>,
+        cx: &mut Context<Self>,
+    ) {
         self.session = Some(session.into());
-        self.lines = Arc::new(lines.to_vec());
         self.timestamps = Arc::new(
             lines
                 .iter()
                 .map(|entry| entry.timestamp_micros.map(message_time).unwrap_or_default())
                 .collect(),
         );
+        self.lines = Arc::new(lines);
         self.rebuild_rows(cx);
         cx.notify();
     }
@@ -128,23 +141,20 @@ impl LogView {
         let count = self.lines.len() + self.markers.len();
         let mut rows = Vec::with_capacity(count);
         let mut markers = self.markers.iter().enumerate().peekable();
-        let mut top = 0.;
         for index in 0..=self.lines.len() {
             while let Some(&(marker_index, marker)) = markers.peek() {
                 if marker.before != index {
                     break;
                 }
-                rows.push(Row { top, content: RowContent::Marker(marker_index) });
-                top += if marker.kind == MarkerKind::Started { 32. } else { 20. };
+                rows.push(RowContent::Marker(marker_index));
                 markers.next();
             }
             if index < self.lines.len() {
-                rows.push(Row { top, content: RowContent::Message(index) });
-                top += 20.;
+                rows.push(RowContent::Message(index));
             }
         }
-        self.rows = Arc::new(rows);
-        self.height = top;
+        self.rows = rows;
+        self.offsets.clear();
         let ids = Arc::make_mut(&mut self.text_ids);
         ids.truncate(count);
         while ids.len() < count {
@@ -161,8 +171,10 @@ impl LogView {
         self.text_ids = Arc::new(Vec::new());
         self.timestamps = Arc::new(Vec::new());
         self.markers = Arc::new(Vec::new());
-        self.rows = Arc::new(Vec::new());
-        self.height = 0.;
+        self.rows.clear();
+        self.offsets.clear();
+        self.message_heights.clear();
+        self.follow_pending = false;
         self.notice = None;
         self.scroll.set_offset(gpui::Point::default());
         // Keep the source cursor so future batches cannot resurrect cleared lines.
@@ -238,45 +250,42 @@ impl LogView {
                     log::retain(&mut lines, &mut self.log_cursor, log::Update::Batch(batch));
                 if removed > 0 {
                     let markers = Arc::make_mut(&mut self.markers);
-                    let mut removed_height = 20. * removed as f32;
+                    let measured = removed.min(self.message_heights.len());
+                    let mut removed_height: Pixels =
+                        self.message_heights.drain(..measured).fold(px(0.), |sum, h| sum + h);
+                    let scale = self.layout_key.map_or(1., |(_, rem, _)| f32::from(rem) / 16.);
                     markers.retain_mut(|marker| {
                         if marker.before < removed
                             || (marker.before == removed && marker.kind == MarkerKind::Stopped)
                         {
-                            removed_height +=
-                                if marker.kind == MarkerKind::Started { 32. } else { 20. };
+                            removed_height += px(marker.height() * scale);
                             return false;
                         }
                         marker.before -= removed;
                         true
                     });
-                    if !follow {
+                    if !follow && !self.follow_pending {
                         // Keep the same visible text when the bounded prefix is evicted.
                         let offset = handle.offset();
                         handle.set_offset(gpui::point(
                             offset.x,
-                            (offset.y + px(removed_height * crate::ui::desktop::zoom::factor(cx)))
-                                .min(px(0.)),
+                            (offset.y + removed_height).min(px(0.)),
                         ));
                     }
                 }
-                self.set(session, &lines, cx);
+                self.replace_lines(session, lines, cx);
             }
         }
         if follow {
-            self.follow_bottom(cx);
+            self.follow_pending = true;
         }
         cx.notify();
     }
+}
 
-    fn follow_bottom(&self, cx: &App) {
-        // Layout clamps this to the new content height. Using the old maximum would
-        // leave the new rows below the viewport, especially for several batches/frame.
-        let handle = &self.scroll;
-        handle.set_offset(gpui::point(
-            handle.offset().x,
-            -px((self.height + 8.) * crate::ui::desktop::zoom::factor(cx)),
-        ));
+impl RunMarker {
+    fn height(&self) -> f32 {
+        if self.kind == MarkerKind::Started { 32. } else { 20. }
     }
 }
 
@@ -317,95 +326,138 @@ fn calendar_time(now: libc::time_t) -> String {
     formatted_time(now, c"%b %e, %H:%M:%S")
 }
 
-impl Render for LogView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let scale = crate::ui::desktop::zoom::factor(cx);
-        // The window is an upper bound on this viewport, including its first layout
-        // and resizes. Render only intersecting rows plus one row above the viewport.
-        let viewport = f32::from(window.viewport_size().height) / scale;
-        // A queued follow-bottom offset is clamped during layout. Cover that final
-        // viewport even before the scroll handle has received its new bounds.
-        let visible_top = (-f32::from(self.scroll.offset().y) / scale)
-            .clamp(0., (self.height + 8. - viewport).max(0.));
-        let visible_bottom = visible_top + viewport;
-        let start = self.rows.partition_point(|row| row.top + 32. + 4. < visible_top);
-        let end = self.rows.partition_point(|row| row.top + 4. <= visible_bottom);
-        let content = div().relative().w_full().h(ui(self.height + 8.)).flex_none().children(
-            (start..end).map(|index| {
-                let row = &self.rows[index];
-                let (id, time_id) =
-                    text_editor::accessibility_text_ids(self.text_ids[index].entity_id());
-                let container =
-                    div().absolute().top(ui(row.top + 4.)).left_0().right_0().px(ui(8.));
-                let (text, timestamp, error, stopped) = match row.content {
-                    RowContent::Marker(marker_index) => {
-                        let marker = &self.markers[marker_index];
-                        if marker.kind == MarkerKind::Started {
-                            let rule = || div().flex_1().h(ui(1.)).bg(rgba(0x0000001a));
-                            return container
-                                .h(ui(32.))
-                                .flex()
-                                .items_center()
-                                .gap(ui(8.))
-                                .font_family(UI_FONT_FAMILY)
-                                .font_weight(gpui::FontWeight::MEDIUM)
-                                .text_size(ui(11.))
-                                .line_height(ui(16.))
-                                .letter_spacing(crate::ui::desktop::zoom::scaled(window, 0.11))
-                                .text_color(rgba(0x0000004d))
-                                .child(rule())
-                                .child(
-                                    tabular_numerals(host_text::element(
-                                        format!("Started {}", marker.timestamp).into(),
-                                        id,
-                                        false,
-                                        false,
-                                    ))
-                                    .flex_none()
-                                    .whitespace_nowrap(),
-                                )
-                                .child(rule());
-                        }
-                        ("Stopped".to_owned(), marker.timestamp.clone(), false, true)
-                    }
-                    RowContent::Message(line_index) => {
-                        let entry = &self.lines[line_index];
-                        (
-                            entry.message.clone(),
-                            self.timestamps[line_index].clone(),
-                            entry.severity == crate::ui::app_control::LogSeverity::Error,
-                            false,
+impl LogView {
+    fn row(&self, index: usize, window: &Window) -> gpui::Div {
+        let (id, time_id) = text_editor::accessibility_text_ids(self.text_ids[index].entity_id());
+        let container = div().w_full().px(ui(8.));
+        let (text, timestamp, error, stopped) = match self.rows[index] {
+            RowContent::Marker(marker_index) => {
+                let marker = &self.markers[marker_index];
+                if marker.kind == MarkerKind::Started {
+                    let rule = || div().flex_1().h(ui(1.)).bg(rgba(0x0000001a));
+                    return container
+                        .h(ui(32.))
+                        .flex()
+                        .items_center()
+                        .gap(ui(8.))
+                        .font_family(UI_FONT_FAMILY)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_size(ui(11.))
+                        .line_height(ui(16.))
+                        .letter_spacing(scaled(window, 0.11))
+                        .text_color(rgba(0x0000004d))
+                        .child(rule())
+                        .child(
+                            tabular_numerals(host_text::element(
+                                format!("Started {}", marker.timestamp).into(),
+                                id,
+                                false,
+                                false,
+                            ))
+                            .flex_none()
+                            .whitespace_nowrap(),
                         )
+                        .child(rule());
+                }
+                ("Stopped".to_owned(), marker.timestamp.clone(), false, true)
+            }
+            RowContent::Message(line_index) => {
+                let entry = &self.lines[line_index];
+                (
+                    entry.message.clone(),
+                    self.timestamps[line_index].clone(),
+                    entry.severity == crate::ui::app_control::LogSeverity::Error,
+                    false,
+                )
+            }
+        };
+        container
+            .min_h(ui(20.))
+            .items_start()
+            .overflow_hidden()
+            .flex()
+            .gap(ui(8.))
+            .font_family("JetBrains Mono NL")
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_size(ui(13.))
+            .line_height(ui(20.))
+            .letter_spacing(scaled(window, 0.13))
+            .text_color(rgba(if stopped {
+                0x0042c7b3
+            } else if error {
+                0xcc3333b3
+            } else {
+                0x000000b3
+            }))
+            .when(!timestamp.is_empty(), |row| {
+                row.child(
+                    host_text::element(timestamp.into(), time_id, false, false)
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_color(rgba(if error { 0xcc333380 } else { 0x00000059 })),
+                )
+            })
+            .child(
+                host_text::element(text.into(), id, false, false)
+                    .flex_1()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .when(stopped, |label| label.whitespace_nowrap()),
+            )
+    }
+
+    fn viewport(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) -> gpui::Div {
+        let width = bounds.size.width;
+        let key = (width, window.rem_size(), window.scale_factor());
+        let resized = self.layout_key != Some(key);
+        if resized {
+            self.layout_key = Some(key);
+            self.message_heights.clear();
+            self.offsets.clear();
+        }
+        if self.offsets.is_empty() {
+            self.offsets.push(px(0.));
+            for (index, row) in self.rows.iter().enumerate() {
+                let height = match *row {
+                    RowContent::Marker(i) => scaled(window, self.markers[i].height()),
+                    RowContent::Message(i) => {
+                        if i == self.message_heights.len() {
+                            let height = self
+                                .row(index, window)
+                                .w(width)
+                                .into_any_element()
+                                .layout_as_root(
+                                    size(width.into(), AvailableSpace::MaxContent),
+                                    window,
+                                    cx,
+                                )
+                                .height;
+                            self.message_heights.push(height);
+                        }
+                        self.message_heights[i]
                     }
                 };
-                container
-                    .h(ui(20.))
-                    .overflow_hidden()
-                    .flex()
-                    .gap(ui(8.))
-                    .font_family("JetBrains Mono NL")
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_size(ui(13.))
-                    .line_height(ui(20.))
-                    .letter_spacing(crate::ui::desktop::zoom::scaled(window, 0.13))
-                    .text_color(rgba(if stopped {
-                        0x0042c7b3
-                    } else if error {
-                        0xcc3333b3
-                    } else {
-                        0x000000b3
-                    }))
-                    .when(!timestamp.is_empty(), |row| {
-                        row.child(
-                            host_text::element(timestamp.into(), time_id, false, false)
-                                .flex_none()
-                                .whitespace_nowrap()
-                                .text_color(rgba(if error { 0xcc333380 } else { 0x00000059 })),
-                        )
-                    })
-                    .child(host_text::element(text.into(), id, false, false).whitespace_nowrap())
-            }),
-        );
+                self.offsets.push(self.offsets[index] + height);
+            }
+        }
+        let inset = scaled(window, 4.);
+        let height = self.offsets[self.rows.len()] + inset * 2.;
+        let maximum = (height - bounds.size.height).max(px(0.));
+        let at_bottom = self.scroll.offset().y + self.scroll.max_offset().height <= px(0.5);
+        if self.follow_pending
+            || (at_bottom && (resized || bounds.size != self.scroll.bounds().size))
+        {
+            self.scroll.set_offset(gpui::point(px(0.), -maximum));
+            self.follow_pending = false;
+        }
+        let top = (-self.scroll.offset().y).clamp(px(0.), maximum) - inset;
+        let start = self.offsets[1..].partition_point(|bottom| *bottom <= top);
+        let end =
+            self.offsets[..self.rows.len()].partition_point(|y| *y < top + bounds.size.height);
+        let content =
+            div().relative().w_full().h(height).flex_none().children((start..end).map(|index| {
+                self.row(index, window).absolute().left_0().top(self.offsets[index] + inset)
+            }));
         div()
             .size_full()
             .relative()
@@ -419,6 +471,24 @@ impl Render for LogView {
                     .child(content),
             )
             .child(Scrollbars::overlay(&self.scrollbars))
+    }
+}
+
+impl Render for LogView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = cx.entity();
+        // The pane can resize independently of the window. Lay out its virtualized
+        // content at the actual pane bounds in the same frame.
+        gpui::canvas(
+            move |bounds, window, cx| {
+                let mut viewport = view
+                    .update(cx, |view, cx| view.viewport(bounds, window, cx).into_any_element());
+                viewport.prepaint_as_root(bounds.origin, bounds.size.map(Into::into), window, cx);
+                viewport
+            },
+            |_, mut viewport, window, cx| viewport.paint(window, cx),
+        )
+        .size_full()
     }
 }
 
@@ -535,6 +605,70 @@ mod tests {
     }
 
     #[gpui::test]
+    fn messages_reflow_beside_the_timestamp_when_the_pane_resizes(cx: &mut gpui::TestAppContext) {
+        // Inspect rendered text bounds at two widths, including the row after the wrap.
+        cx.text_system()
+            .add_fonts(vec![std::borrow::Cow::Borrowed(include_bytes!(
+                "../../assets/JetBrainsMonoNL-Medium.ttf"
+            ))])
+            .unwrap();
+        let window = cx.add_window(|_, cx| LogView::new(cx));
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let message = "Notification sent to user regarding updates with a really long message that causes it to wrap";
+        window
+            .update(&mut visual, |view, _, cx| {
+                use crate::ui::app_control::{LogEntry, LogSeverity};
+                view.set(
+                    "one",
+                    &[
+                        LogEntry {
+                            message: message.into(),
+                            severity: LogSeverity::Error,
+                            timestamp_micros: Some(1),
+                        },
+                        LogEntry {
+                            message: "Next message".into(),
+                            severity: LogSeverity::Info,
+                            timestamp_micros: Some(2),
+                        },
+                    ],
+                    cx,
+                );
+            })
+            .unwrap();
+        for width in [420., 1100.] {
+            visual.simulate_resize(size(px(width), px(200.)));
+            visual.run_until_parked();
+            window
+                .update(&mut visual, |view, window, _| {
+                    let bounds = |value: &str| {
+                        window
+                            .accessibility_nodes_for_test()
+                            .find(|(_, node)| node.value() == Some(value))
+                            .unwrap()
+                            .1
+                            .bounds()
+                            .unwrap()
+                    };
+                    let timestamp = bounds(&view.timestamps[0]);
+                    let body = bounds(message);
+                    let next = bounds("Next message");
+                    assert_eq!(timestamp.y0, body.y0);
+                    assert_eq!(timestamp.height(), 20.);
+                    assert_eq!(body.x0, timestamp.x1 + 8.);
+                    assert_eq!(next.x0, body.x0);
+                    assert_eq!(next.y0, body.y1);
+                    if width == 420. {
+                        assert!(body.height() >= 40.);
+                    } else {
+                        assert_eq!(body.height(), 20.);
+                    }
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
     fn new_output_follows_only_at_bottom_and_preserves_the_reading_position(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -554,7 +688,12 @@ mod tests {
                 view.select("one", None, cx);
                 // Multiple updates before layout must follow the latest batch.
                 for next in 1..=40 {
-                    view.receive("one", batch(next, &format!("message {next}")), cx);
+                    let message = if next == 1 {
+                        "wrapped prefix ".repeat(16)
+                    } else {
+                        format!("message {next}")
+                    };
+                    view.receive("one", batch(next, &message), cx);
                 }
                 view.scroll.clone()
             })
@@ -602,9 +741,12 @@ mod tests {
             })
             .unwrap();
         visual.run_until_parked();
+        let extra_height =
+            window.read_with(&visual, |view, _| view.message_heights[0] - px(20.)).unwrap();
+        assert!(extra_height > px(0.));
         window
             .update(&mut visual, |view, _, cx| {
-                handle.set_offset(gpui::point(px(0.), px(-1000.)));
+                handle.set_offset(gpui::point(px(0.), px(-1000.) - extra_height));
                 // Evict forty messages, their start divider and stop row above the visible text.
                 for next in 257..=296 {
                     view.receive("one", batch(next, "trim prefix"), cx);

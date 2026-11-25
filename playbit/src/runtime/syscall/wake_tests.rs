@@ -239,18 +239,25 @@ fn full_queue_preserves_due_wake_until_a_turn_can_drain_it() {
 fn waking_wasm() -> Vec<u8> {
     wat::parse_str(
         r#"(module
-        (import "playbit" "pb_syscall" (func $dispatch_event (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
-        (import "playbit" "pb_syscall" (func $dispatch_wake (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
-        (import "playbit" "pb_syscall" (func $dispatch_log (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        (import "playbit" "pb_syscall" (func $dispatch_event
+            (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        (import "playbit" "pb_syscall" (func $dispatch_wake
+            (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        (import "playbit" "pb_syscall" (func $dispatch_log
+            (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
     (func $event (param i32 i32 i32) (result i32)
         (i32.wrap_i64 (call $dispatch_event (i32.const 4)
-            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.extend_i32_u (local.get 2)) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1))
+                (i64.extend_i32_u (local.get 2)) (i64.const 0) (i64.const 0) (i64.const
+                0))))
     (func $wake (param i32) (result i32)
         (i32.wrap_i64 (call $dispatch_wake (i32.const 11)
-            (i64.extend_i32_u (local.get 0)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.const 0) (i64.const 0) (i64.const 0)
+                (i64.const 0) (i64.const 0))))
     (func $log (param i32 i32) (result i32)
         (i32.wrap_i64 (call $dispatch_log (i32.const 2)
-            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.const 0)
+                (i64.const 0) (i64.const 0) (i64.const 0))))
         (memory (export "memory") 2)
         (data (i32.const 32) "Woke")
         (data (i32.const 128) "\18\00\00\00\00\00\00\00")

@@ -60,10 +60,13 @@ fn delete(scope: &Scope, names: &[Id]) -> crate::engine::Result<()> {
 
 fn multipart(boundary: &str, secret: &str, data: &[u8]) -> Vec<u8> {
     let mut body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"secret\"\r\n\r\n{secret}\r\n\
-         --{boundary}\r\nContent-Disposition: form-data; name=\"report\"; filename=\"report.json\"\r\n\
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"secret\"\r\n\r\n\
+         {secret}\r\n\
+         --{boundary}\r\nContent-Disposition: form-data; name=\"report\"; \
+         filename=\"report.json\"\r\n\
          Content-Type: application/json\r\n\r\n"
-    ).into_bytes();
+    )
+    .into_bytes();
     body.extend_from_slice(data);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     body
@@ -259,7 +262,12 @@ mod tests {
                     )
                     .expect("retain concurrent panic before acknowledging upload");
                     assert!(reports::sender_lock(&profile_for_server).is_err());
-                    write!(connection, "HTTP/1.1 {status} Response\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOk").unwrap();
+                    write!(
+                        connection,
+                        "HTTP/1.1 {status} Response\r\nContent-Length: 2\r\n\
+                         Connection: close\r\n\r\nOk"
+                    )
+                    .unwrap();
                 });
                 let scope = Scope {
                     profile: profile.path().into(),

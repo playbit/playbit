@@ -18,7 +18,7 @@ function page() {
     const error = { textContent: "Prior authentication timeout" }, invitation = { url: "https://playbit.app/s#retained" };
     const context = vm.createContext({ encodeId, decodeId, validId, recoveryListAccount: undefined, updateFrames() {}, onboarding, error, invitation, enrollment: null, parseAccountKey,
         window: { addEventListener: (name, handler) => listeners.set(name, handler) }, accountSignal: { close() {} },
-        URL, history: { replaceState() {} }, document: { createElement: element }, status: value => { message = value; },
+        URL, history: { replaceState() {} }, document: { createElement: element, body: { classList: { remove() {} } } }, status: value => { message = value; },
         textElement: (_tag, text) => ({ ...element(), textContent: text }),
         action: (text, onclick) => ({ ...element(), textContent: text, onclick }),
         beginWebReset: client => client.resetWebAccount(), webTab: 'tab', SIGN_IN_HANDOFF: 'handoff', sessionStorage: { setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) },
@@ -29,6 +29,7 @@ function page() {
     });
     vm.runInContext(source.slice(source.indexOf("let pageClosing ="), source.indexOf("let guestFailure"))
         + source.slice(source.indexOf("window.addEventListener('pagehide'"), source.indexOf("function showInvitationHeader"))
+        + source.slice(source.indexOf("function storageResetAction"), source.indexOf("const updateNotice"))
         + source.slice(source.indexOf("function showEmail()"), source.indexOf("async function useWeb()"))
         + "globalThis.emailForm = showEmail; globalThis.codeForm = showCode;", context);
     return { context, onboarding, error, invitation, stored, pagehide: event => listeners.get("pagehide")(event), status: () => message,
@@ -78,6 +79,26 @@ test("a signed-in user reviews the archived edition and can retry an unconfirmed
     assert.equal(ready, 1);
     assert.equal(await ui.context.afterAuthentication(), true);
     assert.deepEqual(calls, [["Bob", false], ["Bob", true], ["Bob", true], ["Bob", false]]);
+});
+
+test("an incompatible recovery database after agreement acceptance offers local sign-in recovery", async () => {
+    const ui = page();
+    Object.assign(ui.context, {
+        AGREEMENT, enrollment: { account: "Bob" }, canJoin: false,
+        apClient: { async agreement(_account, accept) { return accept; }, async watchAccount() {} },
+        refreshAccountPending() {}, accountNoticeFailed() {},
+        recoveryClient: { account: "Bob", async status() { throw Object.assign(Error("Incompatible"), { code: "incompatible-storage-format" }); } },
+    });
+    ui.context.document.querySelector = () => ({});
+    vm.runInContext(source.slice(source.indexOf("async function afterAuthentication()"), source.indexOf("async function showRecovery(")), ui.context);
+    const removed = [];
+    ui.context.document.body.classList.remove = value => removed.push(value);
+    assert.equal(await ui.context.afterAuthentication(), false);
+    await ui.onboarding.children.at(-1).onclick();
+    assert.deepEqual(removed, ["invited"]);
+    assert.equal(ui.onboarding.children.at(-1).textContent, "Clear local account data and sign in");
+    assert.match(ui.onboarding.children[0].textContent, /edits saved only in this browser will be lost/);
+    assert.equal(ui.error.textContent, "");
 });
 
 test("a blocked cleanup reports clearing, not sending, as what failed", async () => {

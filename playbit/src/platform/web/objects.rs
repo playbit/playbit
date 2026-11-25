@@ -68,7 +68,7 @@ impl Host {
         object_database::create(&mut tx, &schema, id, type_id, self.account, &fields)
             .map_err(store_error)?;
         let delta = tx.commit_with_delta().map_err(map_error)?;
-        self.changes.borrow_mut().push(volume.id, DatabaseId::Entry(entry), delta);
+        self.committed_change(volume.id, DatabaseId::Entry(entry), delta);
         Ok(id)
     }
     pub(super) fn edit(
@@ -89,7 +89,7 @@ impl Host {
         object_database::edit(&mut tx, &schema, record, self.account, &fields)
             .map_err(map_error)?;
         let delta = tx.commit_with_delta().map_err(map_error)?;
-        self.changes.borrow_mut().push(volume.id, DatabaseId::Entry(entry), delta);
+        self.committed_change(volume.id, DatabaseId::Entry(entry), delta);
         Ok(())
     }
 }

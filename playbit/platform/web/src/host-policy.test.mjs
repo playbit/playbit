@@ -10,7 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { OpfsStore } from "./opfs-store.ts";
-import { File, schema, account, key, version, bootstrap, createHost, entryId } from "../tests/host-fixture.mjs";
+import { File, schema, account, key, version, bootstrap, createHost, entryId, pull } from "../tests/host-fixture.mjs";
 const encoder = new TextEncoder(), decoder = new TextDecoder();
 test('compiled housekeeping retains named backing locations without granting guest access', async () => {
     const profile = bootstrap(encodeId(new Uint8Array(16).fill(0xa8)));
@@ -121,23 +121,6 @@ test("compiled prepared pull holds no writer and merges against a newer local ed
     assert.equal(receiver.read(), false, 'The later durable local edit survives incoming merge');
 });
 const empty = new Uint8Array();
-async function pull(source, target, sourceSlot, targetSlot = sourceSlot) {
-    let request = target.raw('pb_sync_begin', empty, targetSlot, 0);
-    assert(request instanceof Uint8Array);
-    assert(source.raw('pb_sync_begin', empty, sourceSlot, 1) instanceof Uint8Array);
-    for (let turns = 0; !target.host.exports.pb_sync_done(); turns++) {
-        assert(turns < 1000);
-        assert(source.raw('pb_sync_step', request, request.length) instanceof Uint8Array); request = empty;
-        for (;;) {
-            const fragment = source.raw('pb_sync_output', empty); assert(fragment instanceof Uint8Array);
-            if (!fragment.length) break;
-            const reply = target.raw('pb_sync_step', fragment, fragment.length); assert(reply instanceof Uint8Array);
-            if (reply.length) { assert.equal(request.length, 0); request = reply; }
-        }
-    }
-    assert(source.raw('pb_sync_step', request, request.length) instanceof Uint8Array);
-    assert.equal(source.host.exports.pb_sync_finish(1), 0); assert.equal(target.host.exports.pb_sync_finish(1), 0);
-}
 async function pair() {
     const profile = bootstrap(encodeId(new Uint8Array(16).fill(0xa1)));
     profile.root.share_key_with_service = true;

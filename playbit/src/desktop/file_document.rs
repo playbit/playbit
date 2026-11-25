@@ -28,7 +28,11 @@ pub(super) fn begin() -> Result<ReadGuard, String> {
     READING
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
         .map(|_| ReadGuard)
-        .map_err(|_| "A database reference is already being downloaded or opened. Try again when it finishes.".into())
+        .map_err(|_| {
+            "A database reference is already being downloaded or opened. \
+             Try again when it finishes."
+                .into()
+        })
 }
 
 pub(super) fn read(text: &str, _guard: ReadGuard) -> Result<DatabaseReference, String> {
@@ -110,7 +114,9 @@ unsafe fn coordinated<T: 'static>(
             let _: () = msg_send![url, stopAccessingSecurityScopedResource];
         }
         if error != nil {
-            return Err("The document could not be downloaded or opened. Try again when its drive is available.".into());
+            return Err("The document could not be downloaded or opened. \
+                Try again when its drive is available."
+                .into());
         }
         output
             .borrow_mut()

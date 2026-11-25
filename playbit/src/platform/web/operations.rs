@@ -452,7 +452,7 @@ pub extern "C" fn pb_web_volumes() -> i32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_web_volume_check(generation: u64, slot: u32, rights: u32) -> i32 {
     call(|_, _| {
-        if rights == 0 || rights & !7 != 0 {
+        if rights == 0 || rights & !15 != 0 {
             return Err(Error::InvalidArgument);
         }
         let generation = u32::try_from(generation).map_err(|_| Error::StaleHandle)?;
@@ -510,10 +510,21 @@ fn supported(opcode: Opcode) -> bool {
     unsafe { operation_supported(opcode as u32) == 1 }
 }
 
+const VIEW_FEATURES: &[&str] = &[
+    playbit_api::ui::CANVAS_CLEAR_FEATURE,
+    playbit_api::ui::CANVAS_PIXELS_FEATURE,
+    playbit_api::ui::CANVAS_VIEWPORT_FEATURE,
+    playbit_api::ui::CANVAS_WINDOW_FEATURE,
+    playbit_api::ui::WINDOW_SIZE_CONSTRAINTS_FEATURE,
+    playbit_api::ui::WINDOW_STYLE_FEATURE,
+];
+const VIEW_BYTES_LIMIT: usize = 4 * 1024 * 1024;
+
 pub(super) fn supports(feature: &str) -> bool {
     feature == abi::SESSION_VOLUME_FEATURE
+        || feature == abi::AUTOMATIC_VOLUMES_FEATURE
         || feature == environment::DISPLAY_NAMES_FEATURE
-        || (feature == playbit_api::ui::CANVAS_CLEAR_FEATURE && supported(Opcode::ViewSubmit))
+        || (VIEW_FEATURES.contains(&feature) && supported(Opcode::ViewSubmit))
         || playbit_api::abi::syscall::REGISTRY
             .iter()
             .any(|(opcode, capability)| *capability == feature && supported(*opcode))
@@ -529,13 +540,19 @@ pub extern "C" fn pb_web_capabilities() -> i32 {
                 arrays.ranges.push(name);
             }
         }
+        if host.has_automatic() {
+            let name = arrays.bytes(abi::AUTOMATIC_VOLUMES_FEATURE.as_bytes())?;
+            arrays.ranges.push(name);
+        }
         if host.session.borrow().shared_volume.is_some() {
             let name = arrays.bytes(abi::SESSION_VOLUME_FEATURE.as_bytes())?;
             arrays.ranges.push(name);
         }
-        if supports(playbit_api::ui::CANVAS_CLEAR_FEATURE) {
-            let name = arrays.bytes(playbit_api::ui::CANVAS_CLEAR_FEATURE.as_bytes())?;
-            arrays.ranges.push(name);
+        if supported(Opcode::ViewSubmit) {
+            for feature in VIEW_FEATURES {
+                let name = arrays.bytes(feature.as_bytes())?;
+                arrays.ranges.push(name);
+            }
         }
         let name = arrays.bytes(environment::DISPLAY_NAMES_FEATURE.as_bytes())?;
         arrays.ranges.push(name);
@@ -563,7 +580,7 @@ pub extern "C" fn pb_web_host_limit(kind: u32) -> i32 {
             return Error::Unavailable as i32;
         }
         if kind == playbit_api::abi::environment::HostLimit::ViewBytes as u32 {
-            return LIMIT as i32;
+            return VIEW_BYTES_LIMIT as i32;
         }
         // The web store and its query adapters enforce the shared ABI ceilings.
         runtime::QueryLimits::default().get(kind).unwrap_or_else(|error| error as i32)
@@ -715,7 +732,7 @@ pub extern "C" fn pb_web_schema_establish(entry: u32, types: u32, count: u32, st
             return Ok(());
         }
         let delta = tx.commit_with_delta().map_err(map_error)?;
-        host.changes.borrow_mut().push(volume.id, DatabaseId::Index, delta);
+        host.committed_change(volume.id, DatabaseId::Index, delta);
         Ok(())
     })
 }

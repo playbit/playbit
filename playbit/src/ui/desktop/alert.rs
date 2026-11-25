@@ -188,81 +188,123 @@ pub fn message(kind: Kind, details: &str, profile: &Path) -> (&'static str, Stri
 fn unscoped_message(kind: Kind, details: &str, profile: &Path) -> (&'static str, String) {
     match kind {
         Kind::DraftRetained => ("Local draft retained", bounded(details, MAX_DETAILS).into()),
-        Kind::Recoverable if details.starts_with("Couldn’t save UI zoom.") => (
-            "Zoom setting couldn’t be saved",
-            "Zoom wasn’t saved. Retry zoom or Quit.".into(),
-        ),
+        Kind::Recoverable if details.starts_with("Couldn’t save UI zoom.") => {
+            ("Zoom setting couldn’t be saved", "Zoom wasn’t saved. Retry zoom or Quit.".into())
+        }
         Kind::InputRejected => ("Input wasn’t delivered", bounded(details, MAX_DETAILS).into()),
         Kind::AppContextUnavailable => (
             "This app needs to be reopened",
-            "This app can no longer use its data. Close this window, then reopen the session from your library after access or synchronization has recovered. Earlier accepted changes may have been saved; no actions were repeated. (#1020)".into(),
+            "This app can no longer use its data. \
+             Close this window, then reopen the session from your library after access or \
+             synchronization has recovered. Earlier accepted changes may have been saved; \
+             no actions were repeated. (#1020)"
+                .into(),
         ),
-        Kind::RecoverySlow => ("Playbit is still recovering", "Playbit is reconnecting to its background process. Please wait a moment. (#1003)".into()),
-        Kind::Critical => ("Playbit can’t continue", if profile_error(details) {
-            "Playbit couldn’t open your local profile. Quit Playbit and check the profile’s logs for details. Your local data has been kept. (#1002)".into()
-        } else if corrupt_error(details) {
-            "Playbit can’t open your saved data because the local store is damaged. Quit Playbit. Your data has been kept for recovery. (#1001)".into()
-        } else if details == "The Playbit installation is incomplete. Reinstall Playbit." {
-            "Playbit’s installation is incomplete. Quit Playbit and reinstall it. (#1011)".into()
-        } else {
-            "Playbit encountered an unrecoverable error. Quit and reopen Playbit. Your last action may already have been saved; check before repeating it. (#1000)".into()
-        }),
-        Kind::Recoverable | Kind::GuestLaunch if package_upgrade_required(details) => (
-            "This app needs to be rebuilt",
-            format!("{details} (#1015)"),
+        Kind::RecoverySlow => (
+            "Playbit is still recovering",
+            "Playbit is reconnecting to its background process. Please wait a moment. (#1003)"
+                .into(),
         ),
+        Kind::Critical => (
+            "Playbit can’t continue",
+            if profile_error(details) {
+                "Playbit couldn’t open your local profile. \
+                 Quit Playbit and check the profile’s logs for details. \
+                 Your local data has been kept. (#1002)"
+                    .into()
+            } else if corrupt_error(details) {
+                "Playbit can’t open your saved data because the local store is damaged. \
+                 Quit Playbit. Your data has been kept for recovery. (#1001)"
+                    .into()
+            } else if details == "The Playbit installation is incomplete. Reinstall Playbit." {
+                "Playbit’s installation is incomplete. Quit Playbit and reinstall it. (#1011)"
+                    .into()
+            } else {
+                "Playbit encountered an unrecoverable error. Quit and reopen Playbit. \
+                 Your last action may already have been saved; check before repeating it. \
+                 (#1000)"
+                    .into()
+            },
+        ),
+        Kind::Recoverable | Kind::GuestLaunch if package_upgrade_required(details) => {
+            ("This app needs to be rebuilt", format!("{details} (#1015)"))
+        }
         #[cfg(feature = "connected-engine")]
         Kind::Recoverable | Kind::GuestLaunch
             if details == crate::engine::remote::SESSION_BUILD_UNAVAILABLE =>
         {
             ("This session’s app build is unavailable", format!("{details} (#1016)"))
         }
-        Kind::Recoverable if shared_service_upgrade_required(details) => (
-            "This session needs an updated sync service",
-            format!("{details} (#1014)"),
-        ),
-        Kind::Recoverable if incompatible_service(details) => (
-            "Sync is unavailable in this version of Playbit",
-            format!("{details} (#1014)"),
-        ),
+        Kind::Recoverable if shared_service_upgrade_required(details) => {
+            ("This session needs an updated sync service", format!("{details} (#1014)"))
+        }
+        Kind::Recoverable if incompatible_service(details) => {
+            ("Sync is unavailable in this version of Playbit", format!("{details} (#1014)"))
+        }
         Kind::Recoverable if unsupported_volume_format(details) => (
             "This session can’t be opened in this version of Playbit",
             format!("{details} (#1013)"),
         ),
         Kind::Recoverable if details == "invalid account record fields" => (
             "Playbit couldn’t read your account data",
-            format!("A saved account record has an invalid format. Account synchronization couldn’t finish.\n\n{} (#1012)", log_hint(profile)),
+            format!(
+                "A saved account record has an invalid format. Account synchronization couldn’t finish.\n\n{} (#1012)",
+                log_hint(profile)
+            ),
         ),
-        Kind::Recoverable if matches!(details,
-            "waiting for initial database synchronization"
-                | "waiting for initial volume synchronization"
-        ) => (
-            "This data hasn’t finished synchronizing",
-            "Wait for synchronization to finish, then try again. (#1017)".into(),
-        ),
-        Kind::Recoverable if matches!(details,
-            "access denied: current authority requires authenticated catch-up"
-                | "access denied: entry authority requires authenticated catch-up"
-                | "access denied: dependency authority requires authenticated catch-up"
-        ) => (
-            "This data’s permissions need to be refreshed",
-            "Wait for permission updates to finish synchronizing, then try again. (#1018)".into(),
-        ),
-        Kind::Recoverable if details
-            .strip_prefix("Couldn’t copy invitation: ")
-            .or_else(|| details.strip_prefix("Couldn’t copy session link: "))
-            .unwrap_or(details)
-            == "access denied: sharing new app sessions requires encrypted synchronization, which is not supported yet" => (
-            "This session can’t be shared yet",
-            "Sharing new app sessions isn’t supported in this version of Playbit. (#1019)".into(),
-        ),
-        Kind::Recoverable => ("Playbit couldn’t complete this action", recoverable_message(details)),
+        Kind::Recoverable
+            if matches!(
+                details,
+                "waiting for initial database synchronization"
+                    | "waiting for initial volume synchronization"
+            ) =>
+        {
+            (
+                "This data hasn’t finished synchronizing",
+                "Wait for synchronization to finish, then try again. (#1017)".into(),
+            )
+        }
+        Kind::Recoverable
+            if matches!(
+                details,
+                "access denied: current authority requires authenticated catch-up"
+                    | "access denied: entry authority requires authenticated catch-up"
+                    | "access denied: dependency authority requires authenticated catch-up"
+            ) =>
+        {
+            (
+                "This data’s permissions need to be refreshed",
+                "Wait for permission updates to finish synchronizing, then try again. (#1018)"
+                    .into(),
+            )
+        }
+        Kind::Recoverable
+            if details
+                .strip_prefix("Couldn’t copy invitation: ")
+                .or_else(|| details.strip_prefix("Couldn’t copy session link: "))
+                .unwrap_or(details)
+                == "access denied: sharing new app sessions requires encrypted synchronization, which is not supported yet" =>
+        {
+            (
+                "This session can’t be shared yet",
+                "Sharing new app sessions isn’t supported in this version of Playbit. (#1019)"
+                    .into(),
+            )
+        }
+        Kind::Recoverable => {
+            ("Playbit couldn’t complete this action", recoverable_message(details))
+        }
         Kind::LocalDraft => ("Local changes need attention", bounded(details, MAX_DETAILS).into()),
-        Kind::GuestLaunch => ("Playbit couldn’t open this app", format!("{}\n\nAfter resolving this, select the session in Sessions to open it again.", bounded(details, MAX_DETAILS))),
-        Kind::FinderOpen => (
-            "Playbit couldn’t open this volume in Finder",
-            bounded(details, MAX_DETAILS).into(),
+        Kind::GuestLaunch => (
+            "Playbit couldn’t open this app",
+            format!(
+                "{}\n\nAfter resolving this, select the session in Sessions to open it again.",
+                bounded(details, MAX_DETAILS)
+            ),
         ),
+        Kind::FinderOpen => {
+            ("Playbit couldn’t open this volume in Finder", bounded(details, MAX_DETAILS).into())
+        }
     }
 }
 
@@ -284,7 +326,9 @@ fn recoverable_message(details: &str) -> String {
     } else if details.contains("invitation") || details.contains("session link") {
         "Playbit couldn’t open this session link. Check the link and try again. (#1008)"
     } else {
-        return "Playbit couldn’t finish this action. Your change may already have been saved; check before trying again. (#1004)".into();
+        return "Playbit couldn’t finish this action. \
+                Your change may already have been saved; check before trying again. (#1004)"
+            .into();
     };
     guidance.into()
 }
@@ -667,7 +711,12 @@ mod tests {
         }
         let profile = tempfile::tempdir().expect("isolated diagnostic profile");
         let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
-            .args(["--exact", "ui::desktop::alert::tests::critical_log_preserves_the_origin_after_its_thread_exits", "--nocapture"])
+            .args([
+                "--exact",
+                "ui::desktop::alert::tests::critical_log_preserves_the_origin_after_its_\
+                 thread_exits",
+                "--nocapture",
+            ])
             .env(CHILD, profile.path())
             .env_remove("RUST_BACKTRACE")
             .env_remove("RUST_LIB_BACKTRACE")
@@ -705,7 +754,7 @@ mod tests {
         // Finder errors retain their actual recovery action and limit text at a UTF-8 boundary.
         let instructions = "This account’s Playbit drive is unavailable in Finder. Enable its File Provider location, then try again.";
         for details in
-            [instructions, "File Provider drives require the OS user's default public profile"]
+            [instructions, "Finder drives require the OS user's default Public or Testing profile"]
         {
             let (title, body) = message(Kind::FinderOpen, details, Path::new("/profile"));
             assert_eq!(title, "Playbit couldn’t open this volume in Finder");

@@ -82,7 +82,8 @@ fn required_features_gate_execution_without_blocking_retention_or_display() {
 
 #[test]
 fn optional_trace_annotations_preserve_executable_trace_ids_and_original_bytes() {
-    let trace = br#"{"future":{"color":"blue"},"names":[{"description":"Start","future":true,"kind":"mark","name":"app.start"}],"version":1}"#;
+    let trace = b"{\"future\":{\"color\":\"blue\"},\"names\":[{\"description\":\"Start\",\
+        \"future\":true,\"kind\":\"mark\",\"name\":\"app.start\"}],\"version\":1}";
     let bytes =
         with_metadata(br#"{"app_id":"test","name":"Example"}"#, &[(trace_catalog::FILE, trace)]);
     let package = Package::from_bytes(&bytes).unwrap();

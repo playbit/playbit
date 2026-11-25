@@ -8,6 +8,10 @@ import type { ResetState } from "./web-account.ts";
 // the only fields every operation carries; the rest depend on `op`.
 export interface ApOperation { op: string; operation_id: string; [key: string]: unknown }
 
+export function isWorldRequest(operation: ApOperation, kind: "sync" | "subscribe" | "publish"): boolean {
+    return operation.op === "world_replica" && (operation.request as { kind?: unknown } | null)?.kind === kind;
+}
+
 // Each advisory operation has one slot beside ordinary requests at every worker boundary.
 export type AdvisoryOperation = 'describe' | 'put_account_display_name' | 'channelDisplayName';
 export function advisoryOperation(method: string, operation?: ApOperation): AdvisoryOperation | undefined {

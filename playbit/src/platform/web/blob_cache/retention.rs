@@ -82,6 +82,9 @@ pub(super) fn saved(host: &Host, digest: &Digest, fresh: bool, confirmed: bool) 
     tx.commit().map_err(map_error)
 }
 pub(in crate::platform::web) fn protect(host: &Host, version: &BlobVersion) -> Result<()> {
+    if !host.replication_allowed(version.address.volume) {
+        return Ok(());
+    }
     host.blob_cache.borrow_mut().content(version.digest)?;
     let root = host.volumes.borrow()[0].index.clone();
     let mut tx = root.begin_write(unsafe { now() } as u64).map_err(map_error)?;

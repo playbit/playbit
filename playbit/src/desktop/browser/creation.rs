@@ -220,7 +220,9 @@ impl Browser {
         if !self.prepare_entry_navigation(cx) || self.renaming.is_some() {
             self.refresh();
             if self.error.is_empty() {
-                self.hint = "The entry was created. Finish naming the current entry, then select the new entry to give it a name.".into();
+                self.hint = "The entry was created. Finish naming the current entry, \
+                    then select the new entry to give it a name."
+                    .into();
             }
             cx.notify();
             return;

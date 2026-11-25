@@ -18,6 +18,7 @@ export interface WorkExports {
     pb_web_guest_turn(begin: number): number;
     pb_web_guest_deactivate(): number;
     pb_web_guest_cancel_volume_changes(): number;
+    pb_web_guest_cancel_wake(): number;
     pb_web_guest_reset(): number;
     pb_web_guest_state(): number;
     pb_web_guest_mutation(kind: number): number;
@@ -93,6 +94,12 @@ export class GuestWork {
         for (let i = this.events.length - 1; i >= 0; i--) {
             if (this.events[i].kind === 17) this.events.splice(i, 1);
         }
+    }
+    cancelWake(): void {
+        const index = this.events.findIndex(event => event.kind === 10);
+        if (index < 0) return;
+        checked(this.host().pb_web_guest_cancel_wake());
+        this.events.splice(index, 1);
     }
     deactivate(): void {
         checked(this.host().pb_web_guest_deactivate());

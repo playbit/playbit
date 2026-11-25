@@ -359,7 +359,11 @@ mod tests {
         crate::engine::profile::prepare(&testing, crate::release_channel::ReleaseChannel::Testing)
             .unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "platform::failure::tests::retired_native_profile_cannot_receive_the_next_channels_panic"])
+            .args([
+                "--exact",
+                "platform::failure::tests::retired_native_profile_cannot_receive_the_next_\
+                 channels_panic",
+            ])
             .env(CHILD, directory.path())
             .output()
             .unwrap();

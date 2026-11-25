@@ -1,5 +1,5 @@
 import { validId } from './identifier.ts';
-import { boundedGuest } from "./wasm-module.ts";
+import { boundedGuest, guestMemoryLimit } from "./wasm-module.ts";
 import { bindOperations, promisingMain, supportsDeadline, validateEntryPoint } from "./guest-imports.ts";
 import { GuestDeadline } from "./guest-deadline.ts";
 import type { GuestOperations } from "./guest-imports.ts";
@@ -30,15 +30,17 @@ export function resolvedSession<S extends SessionDescriptor>(current: S, resolut
 
 // Instantiation has no guest entry point side effects: boundedGuest rejects
 // implicit starts. The running instance is replaced only after these checks.
-export async function prepareGuest(wasm: Uint8Array, operations: GuestOperations, deadline = false): Promise<GuestInstance> {
+export async function prepareGuest(wasm: Uint8Array, operations: GuestOperations, requiredFeatures: readonly string[] = []): Promise<GuestInstance> {
+    const deadline = requiredFeatures.includes("event.poll.deadline");
+    const pixelCanvas = requiredFeatures.includes("ui.canvas.pixels.v1");
     if (deadline && (!supportsDeadline() || !operations.pb_event_poll_deadline)) {
         throw new Error("This browser cannot run apps requiring event.poll.deadline");
     }
-    const module = await WebAssembly.compile(boundedGuest(wasm));
+    const module = await WebAssembly.compile(boundedGuest(wasm, pixelCanvas));
     const candidate = await WebAssembly.instantiate(module, { playbit: bindOperations(module, operations, deadline) });
     validateEntryPoint(candidate.exports.pb_main);
     if (!(candidate.exports.memory instanceof WebAssembly.Memory) || typeof candidate.exports.pb_main !== "function"
-        || candidate.exports.pb_main.length !== 0 || candidate.exports.memory.buffer.byteLength > 16 * 1024 * 1024) throw new Error("This app cannot run on the web. Open it in Playbit");
+        || candidate.exports.pb_main.length !== 0 || candidate.exports.memory.buffer.byteLength > guestMemoryLimit(pixelCanvas)) throw new Error("This app cannot run on the web. Open it in Playbit");
     // The checks above establish exactly the shape GuestInstance names.
     const guest = candidate as GuestInstance;
     if (deadline) {

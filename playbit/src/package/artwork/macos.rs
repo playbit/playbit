@@ -71,7 +71,8 @@ mod tests {
 
     #[test]
     fn svg_uses_optical_bounds_and_appearance_without_recoloring() {
-        let svg = br#"<svg width="2" height="1"><rect width="1" height="1" fill="red"/><rect x="1" width="1" height="1" fill="blue"/></svg>"#;
+        let svg = b"<svg width=\"2\" height=\"1\"><rect width=\"1\" height=\"1\" fill=\"red\"/>\
+            <rect x=\"1\" width=\"1\" height=\"1\" fill=\"blue\"/></svg>";
         for side in [128, 256, 512] {
             let light = icon(svg, side, false).unwrap();
             let dark = icon(svg, side, true).unwrap();
@@ -93,7 +94,8 @@ mod tests {
         assert_eq!(image.get_pixel(256, 94).0, [255, 0, 0, 255]);
         assert_eq!(image.get_pixel(256, 405).0, [255, 0, 0, 255]);
         assert_ne!(image.get_pixel(256, 406).0, [255, 0, 0, 255]);
-        let overflow = br#"<svg width="1" height="1"><rect x="-2" y="-2" width="5" height="5" fill="red"/></svg>"#;
+        let overflow = b"<svg width=\"1\" height=\"1\"><rect x=\"-2\" y=\"-2\" width=\"5\" \
+            height=\"5\" fill=\"red\"/></svg>";
         assert_eq!(icon(overflow, 512, false).unwrap(), image);
         assert!(icon(square, 1024, false).is_err());
         assert!(icon(b"not an SVG", 512, false).is_err());

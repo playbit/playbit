@@ -64,12 +64,19 @@ impl<'a> Initialization<'a> {
         let retained = regular_file(&path)?;
         let intent = if retained {
             let bytes = read_bounded(&path, MAX_INTENT_BYTES)?;
-            serde_json::from_slice(&bytes).map_err(|e| format!(
-                "cannot read retained {INTENT}: {e}. Preserve this directory and restore the intent from backup; do not start another initialization."
-            ))?
+            serde_json::from_slice(&bytes).map_err(|e| {
+                format!(
+                    "cannot read retained {INTENT}: {e}. Preserve this directory and restore the \
+                     intent from backup; do not start another initialization."
+                )
+            })?
         } else {
             if fs::read_dir(directory)?.next().is_some() {
-                return Err("pb init requires an empty source directory or its retained .pb-init.json; this directory was not changed. Use the completed project with pb build/run, or choose an empty directory for a new project.".into());
+                return Err("pb init requires an empty source directory or its retained \
+                    .pb-init.json; this directory was not changed. \
+                    Use the completed project with pb build/run, \
+                    or choose an empty directory for a new project."
+                    .into());
             }
             let resolved = directory.canonicalize()?;
             let directory_name = resolved.file_name().and_then(|name| name.to_str());
@@ -95,14 +102,29 @@ impl<'a> Initialization<'a> {
             if retained {
                 value.recovery_error(error)
             } else {
-                format!("invalid initialization template or profile: {error}. No project files or root were created; fix the reported problem, then retry pb init.")
+                format!(
+                    "invalid initialization template or profile: {error}. \
+                     No project files or root were created; \
+                     fix the reported problem, then retry pb init."
+                )
             }
         })?;
         if value.intent.profile != profile {
-            return Err(format!("Retained initialization uses profile {}. Retry pb init with that PLAYBIT_PROFILE; no files or volumes were changed.", value.intent.profile.display()).into());
+            return Err(format!(
+                "Retained initialization uses profile {}. \
+                 Retry pb init with that PLAYBIT_PROFILE; no files or volumes were changed.",
+                value.intent.profile.display()
+            )
+            .into());
         }
         if name.is_some_and(|name| value.name().is_ok_and(|original| name != original)) {
-            return Err(format!("Retained initialization is named {:?}. Retry `pb init` without a name to resume it; rename the project after completion.", value.name()?).into());
+            return Err(format!(
+                "Retained initialization is named {:?}. \
+                 Retry `pb init` without a name to resume it; \
+                 rename the project after completion.",
+                value.name()?
+            )
+            .into());
         }
         if app_id.is_some_and(|app_id| {
             value.original_manifest().is_ok_and(|manifest| app_id != manifest.app_id)
@@ -122,8 +144,12 @@ impl<'a> Initialization<'a> {
         }
         // An atomic, synced intent is published before any project file or IPC.
         if !retained {
-            publish(&path, &serde_json::to_vec(&value.intent)?, false)
-                .map_err(|e| format!("saving initialization identity failed: {e}. No root was requested. Retain this directory and retry pb init."))?;
+            publish(&path, &serde_json::to_vec(&value.intent)?, false).map_err(|e| {
+                format!(
+                    "saving initialization identity failed: {e}. No root was requested. \
+                     Retain this directory and retry pb init."
+                )
+            })?;
         }
         #[cfg(test)]
         checkpoint(INTENT).map_err(|e| value.recovery_error(e))?;
@@ -193,7 +219,13 @@ impl<'a> Initialization<'a> {
                 .map_err(|error| format!("preparing {}: {error}", relative.display()))?;
             if regular_file(&path)? {
                 if read_bounded(&path, MAX_TEMPLATE_BYTES)? != *bytes {
-                    return Err(format!("{} conflicts with the retained template. Move that file aside, retry pb init, then reapply your edits; it has not been overwritten.", relative.display()).into());
+                    return Err(format!(
+                        "{} conflicts with the retained template. \
+                         Move that file aside, retry pb init, then reapply your edits; \
+                         it has not been overwritten.",
+                        relative.display()
+                    )
+                    .into());
                 }
                 // A previous publish may have failed at fsync, or the user may
                 // have restored this file. Establish durability before ready.
@@ -217,19 +249,29 @@ impl<'a> Initialization<'a> {
         for relative in self.intent.files.keys() {
             check_parents(self.directory, relative)?;
             if !regular_file(&self.directory.join(relative))? {
-                return Err(format!("{} is missing from the prepared project; restore it from backup or .pb-init.json before retrying pb init", relative.display()).into());
+                return Err(format!(
+                    "{} is missing from the prepared project; \
+                     restore it from backup or .pb-init.json before retrying pb init",
+                    relative.display()
+                )
+                .into());
             }
         }
         let manifest = Manifest::read(self.directory)?;
         if manifest.app_id != self.original_manifest()?.app_id {
-            return Err("playbit.toml app_id differs from the retained identity; restore its original app_id before retrying".into());
+            return Err("playbit.toml app_id differs from the retained identity; \
+                restore its original app_id before retrying"
+                .into());
         }
         let original = playbit::package::VolumeInitializers::from_json(
             self.bytes(playbit::package::VOLUME_INITIALIZERS_FILE)?,
         )?;
         let current = playbit::package::read_volume_initializers(self.directory)?;
         if serde_json::to_vec(&current)? != serde_json::to_vec(&original)? {
-            return Err("playbit-volumes.json differs from the retained declaration; move your edited declaration aside and restore the original from .pb-init.json before retrying".into());
+            return Err("playbit-volumes.json differs from the retained declaration; \
+                move your edited declaration aside and restore the original from \
+                .pb-init.json before retrying"
+                .into());
         }
         // Generated metadata is disposable, but must never traverse user links.
         check_parents(self.directory, Path::new("target/playbit/metadata.rs"))?;
@@ -250,9 +292,15 @@ impl<'a> Initialization<'a> {
         (|| -> Result<()> {
             fs::remove_file(self.directory.join(INTENT))?;
             sync_directory(self.directory)
-        })().map_err(|error| format!(
-            "Root and Git initialization succeeded, but finalizing {INTENT} failed: {error}. If the record remains, retry pb init here with the original profile; otherwise the project is complete, use pb build/run."
-        ).into())
+        })()
+        .map_err(|error| {
+            format!(
+                "Root and Git initialization succeeded, but finalizing {INTENT} failed: \
+                 {error}. If the record remains, retry pb init here with the original \
+                 profile; otherwise the project is complete, use pb build/run."
+            )
+            .into()
+        })
     }
 
     pub(crate) fn recovery_error(&self, error: impl std::fmt::Display) -> String {
@@ -294,7 +342,12 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
 fn regular_file(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(info) if info.is_file() => Ok(true),
-        Ok(_) => Err(format!("{} must be a regular file, not a link or directory; move the conflicting entry aside before retrying", path.display()).into()),
+        Ok(_) => Err(format!(
+            "{} must be a regular file, not a link or directory; \
+             move the conflicting entry aside before retrying",
+            path.display()
+        )
+        .into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e.into()),
     }

@@ -5,6 +5,7 @@ use gpui::Focusable;
 
 pub(super) fn panel(window: &Window) -> gpui::Div {
     div()
+        .occlude()
         .w(ui(416.))
         .max_w_full()
         .max_h(window.viewport_size().height - scaled(window, 40.))
@@ -115,6 +116,8 @@ impl Shell {
                     }
                     cx.stop_propagation();
                 }))
+                // The shell's title bar is inert while this overlay owns input.
+                .child(shell_view::titlebar_drag_region())
                 .child(panel)
                 .into_any_element(),
         )

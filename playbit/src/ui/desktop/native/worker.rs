@@ -1014,7 +1014,9 @@ fn run_guest(
         }
         if closing.is_some() {
             if guest.drain_failed() {
-                return Err("Accepted app work could not finish. Reopen from committed data; uncertain edits were not replayed.".into());
+                return Err("Accepted app work could not finish. Reopen from committed data; \
+                    uncertain edits were not replayed."
+                    .into());
             }
             if receiver.is_empty() && !guest.accepted_work_pending() {
                 if let Some(error) = rejected_input {

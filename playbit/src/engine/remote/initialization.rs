@@ -1,6 +1,6 @@
 //! Bounded recovery while a volume or an invited World awaits initialization.
-//! Only explicit source readiness or pre-dispatch capacity rejection schedules
-//! work. This is not a freshness poll; exhaustion waits for explicit recovery.
+//! Build adoption can start a World capture. Source readiness and pre-dispatch
+//! capacity rejection can retry a capture; exhaustion waits for explicit recovery.
 use super::{Duration, Id, Instant, Result};
 use crate::engine::publisher::VOLUME_LIMIT;
 
@@ -109,6 +109,23 @@ impl Initializations {
             *slot = None;
         }
     }
+    fn slot(&mut self, source: Source) -> Option<&mut Option<Retry>> {
+        let index = self
+            .slots
+            .iter()
+            .position(|s| s.is_some_and(|r| r.source == source))
+            .or_else(|| self.slots.iter().position(Option::is_none))?;
+        Some(&mut self.slots[index])
+    }
+    #[cfg(feature = "app-host")]
+    pub(super) fn schedule_world(&mut self, shared: Id, now: Instant) -> bool {
+        let source = Source::WorldControls(shared);
+        let Some(slot) = self.slot(source) else { return false };
+        // New build, new admission. A previous build's backoff or exhausted
+        // retries must not delay the first attempt for the adopted build.
+        *slot = Some(Retry { source, scheduled: 0, after: Some(now) });
+        true
+    }
     pub(super) fn failed(
         &mut self,
         source: impl Into<Source>,
@@ -136,13 +153,8 @@ impl Initializations {
             }
             return Ok(());
         }
-        let index = self
-            .slots
-            .iter()
-            .position(|s| s.is_some_and(|r| r.source == source))
-            .or_else(|| self.slots.iter().position(Option::is_none))
-            .ok_or("initial source readiness retry capacity exhausted")?;
-        let retry = self.slots[index].get_or_insert(Retry { source, scheduled: 0, after: None });
+        let slot = self.slot(source).ok_or("initial source readiness retry capacity exhausted")?;
+        let retry = slot.get_or_insert(Retry { source, scheduled: 0, after: None });
         if retry.after.is_some() {
             return Ok(());
         }

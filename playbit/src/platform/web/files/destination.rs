@@ -65,7 +65,7 @@ fn parents(host: &Host, directory: &Directory, path: &str) -> Result<(Option<Ent
                 .map_err(map_error)?;
             volume_index::create_at_path(&mut tx, parent, path, &info).map_err(store_error)?;
             let delta = tx.commit_with_delta().map_err(map_error)?;
-            host.changes.borrow_mut().push(volume.id, DatabaseId::Index, delta);
+            host.committed_change(volume.id, DatabaseId::Index, delta);
             parent
         }
         Err(error) => return Err(store_error(error)),
@@ -264,15 +264,10 @@ impl Destination {
             }
             volume_index::mark_published_blob_ready(&mut tx, self.entry, &kind)
                 .map_err(store_error)?;
-            tx.local_indexes()
-                .put(
-                    &blob::pending_key(&version),
-                    &serde_json::to_vec(&version).map_err(map_error)?,
-                )
-                .map_err(map_error)?;
+            host.record_blob_upload(&mut tx, &version)?;
             uncertain = true;
             let delta = tx.commit_with_delta().map_err(map_error)?;
-            host.changes.borrow_mut().push(volume.id, DatabaseId::Index, delta);
+            host.committed_change(volume.id, DatabaseId::Index, delta);
             Ok(())
         })();
         result.map_err(|error| (error, uncertain))

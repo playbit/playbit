@@ -16,6 +16,8 @@ struct Request {
 #[derive(Serialize)]
 struct Page {
     databases: Vec<DatabaseId>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blind: Vec<EntryId>,
     next: Option<EntryId>,
     root: [u8; 32],
 }
@@ -42,8 +44,35 @@ fn upload_admitted(host: &Host, volume: &Volume) -> Result<bool> {
         Err(error) => Err(error),
     }
 }
-fn page(host: &Host, request: Request, protocol: DatabaseProtocol, upload: bool) -> Result<Page> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    Read,
+    Upload,
+    WorldAppends,
+}
+
+fn uploadable(
+    check: impl Fn(Permission) -> crate::store::Result<()>,
+    allow_append: bool,
+) -> Result<bool> {
+    let permission = match check(Permission::Write) {
+        Err(crate::store::Error::AccessDenied(_)) if allow_append => check(Permission::Append),
+        other => other,
+    };
+    match permission {
+        Ok(()) => Ok(true),
+        Err(crate::store::Error::AccessDenied(_)) => Ok(false),
+        Err(error) => Err(store_error(error)),
+    }
+}
+
+fn page(host: &Host, request: Request, purpose: Purpose) -> Result<Page> {
     let volume = host.replica_volume(request.volume)?;
+    let projected = host.is_projected_world(&volume);
+    if purpose == Purpose::WorldAppends && !projected {
+        return Err(Error::AccessDenied);
+    }
+    let upload = purpose != Purpose::Read;
     let policy = policy(host, &request, &volume)?;
     crate::store::DatabasePolicy::reserved(policy.clone(), DatabaseId::Index)
         .map_err(store_error)?
@@ -58,16 +87,23 @@ fn page(host: &Host, request: Request, protocol: DatabaseProtocol, upload: bool)
         return Err(map_error("database catalog changed during gap recovery"));
     }
     if upload && !upload_admitted(host, &volume)? {
-        return Ok(Page { databases: Vec::new(), next: None, root });
+        return Ok(Page { databases: Vec::new(), blind: Vec::new(), next: None, root });
     }
     let snapshot = IndexSnapshot::new(read);
     let page = snapshot.headers(request.after, 64).map_err(store_error)?;
     let mut databases = Vec::with_capacity(66);
+    let mut blind = Vec::new();
     if request.after.is_none() && !upload {
         databases.extend([DatabaseId::Index, DatabaseId::Revocations]);
     }
     for entry in page.entries {
-        if entry.deleted || entry.protocol != Some(protocol) {
+        if entry.deleted
+            || entry.protocol != Some(DatabaseProtocol::Kvdb)
+            || projected
+                && upload
+                && snapshot.entry_policy(entry.id).map_err(store_error)?.kind
+                    != crate::store::EntryType::KvDb
+        {
             continue;
         }
         let authorize = |principal, permission| {
@@ -79,44 +115,40 @@ fn page(host: &Host, request: Request, protocol: DatabaseProtocol, upload: bool)
                 permission,
             )
         };
-        if authorize(host.actor(&volume), Permission::Read).is_ok()
-            && authorize(PLAYBIT_REPLICA_PRINCIPAL.into(), Permission::Read).is_ok()
-        {
-            if upload
-                && (!snapshot.backing_ready(entry.id).map_err(store_error)?
-                    || snapshot.backing_quarantined(entry.id).map_err(store_error)?)
-            {
-                continue;
-            }
-            if upload {
-                let writable = match authorize(host.actor(&volume), Permission::Write) {
-                    Err(crate::store::Error::AccessDenied(_))
-                        if protocol == DatabaseProtocol::Kvdb =>
-                    {
-                        authorize(host.actor(&volume), Permission::Append)
-                    }
-                    result => result,
-                };
-                match writable {
-                    Ok(()) => {}
-                    Err(crate::store::Error::AccessDenied(_)) => continue,
-                    Err(error) => return Err(store_error(error)),
-                }
-            }
-            databases.push(DatabaseId::Entry(entry.id));
+        if authorize(PLAYBIT_REPLICA_PRINCIPAL.into(), Permission::Read).is_err() {
+            continue;
         }
+        let readable = authorize(host.actor(&volume), Permission::Read).is_ok();
+        if !readable && !(projected && upload) {
+            continue;
+        }
+        if upload && !snapshot.backing_ready(entry.id).map_err(store_error)? {
+            continue;
+        }
+        let allow_append = !projected || purpose == Purpose::WorldAppends;
+        if upload && !uploadable(|right| authorize(host.actor(&volume), right), allow_append)? {
+            continue;
+        }
+        if projected && purpose == Purpose::Upload && !readable {
+            blind.push(entry.id);
+        }
+        databases.push(DatabaseId::Entry(entry.id));
     }
-    Ok(Page { databases, next: page.next, root })
+    Ok(Page { databases, blind, next: page.next, root })
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_catalog_page(length: usize) -> i32 {
-    catalog_page(length, DatabaseProtocol::Kvdb, false)
+    catalog_page(length, Purpose::Read)
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_upload_catalog_page(length: usize) -> i32 {
-    catalog_page(length, DatabaseProtocol::Kvdb, true)
+    catalog_page(length, Purpose::Upload)
 }
-fn catalog_page(length: usize, protocol: DatabaseProtocol, upload: bool) -> i32 {
+#[unsafe(no_mangle)]
+pub extern "C" fn pb_world_append_catalog_page(length: usize) -> i32 {
+    catalog_page(length, Purpose::WorldAppends)
+}
+fn catalog_page(length: usize, purpose: Purpose) -> i32 {
     crate::platform::failure::guard();
     let result = (|| {
         let input = admit_input(length, LIMIT)?;
@@ -125,7 +157,7 @@ fn catalog_page(length: usize, protocol: DatabaseProtocol, upload: bool) -> i32 
         if SYNC.with(|sync| sync.borrow().is_some()) {
             return Err(Error::Unavailable);
         }
-        serde_json::to_vec(&page(&host, request, protocol, upload)?).map_err(map_error)
+        serde_json::to_vec(&page(&host, request, purpose)?).map_err(map_error)
     })();
     match result {
         Ok(bytes) => publish_output(bytes),

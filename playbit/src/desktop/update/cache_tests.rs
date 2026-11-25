@@ -29,7 +29,8 @@ fn release() -> Release {
 fn missing_and_unusable_cache_contents_fetch_a_fresh_result() {
     // An internal prelaunch build's 95-byte cache lacks the channel field. It is
     // disposable, just like truncated JSON and schema-incompatible contents.
-    let predecessor = br#"{"finished":{"secs_since_epoch":1792394516,"nanos_since_epoch":370655000},"result":{"Ok":null}}"#;
+    let predecessor = b"{\"finished\":{\"secs_since_epoch\":1792394516,\
+        \"nanos_since_epoch\":370655000},\"result\":{\"Ok\":null}}";
     assert_eq!(predecessor.len(), 95);
     let mut invalid_release = release();
     invalid_release.sequence = 0;

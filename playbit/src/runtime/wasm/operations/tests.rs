@@ -913,14 +913,24 @@ fn host_limits_are_scalar_and_instance_scoped_on_both_wasm_backends() {
         let runtime =
             Runtime::with_backend_and_fuel_limit(backend, std::num::NonZeroU64::new(TEST_FUEL))
                 .unwrap();
-        let module = runtime.compile_app(&wat::parse_str(r#"(module
-            (import "playbit" "pb_syscall" (func $call (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        let module = runtime
+            .compile_app(
+                &wat::parse_str(
+                    r#"(module
+            (import "playbit" "pb_syscall" (func $call (param i32 i64 i64 i64 i64 i64 i64)
+                (result i64)))
             (memory (export "memory") 1)
             (func (export "pb_main"))
             (func (export "view") (param i64) (result i64)
-                (call $call (i32.const 3) (i64.const 32) (local.get 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
+                (call $call (i32.const 3) (i64.const 32) (local.get 0) (i64.const 0)
+                    (i64.const 0) (i64.const 0) (i64.const 0)))
             (func (export "limit") (param i64) (result i64)
-                (call $call (i32.const 13) (local.get 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))"#).unwrap()).unwrap();
+                (call $call (i32.const 13) (local.get 0) (i64.const 0) (i64.const 0)
+                    (i64.const 0) (i64.const 0) (i64.const 0))))"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
         let mut linker = Linker::new(&runtime.engine);
         define(&mut linker).unwrap();
         let mut store = Store::new(

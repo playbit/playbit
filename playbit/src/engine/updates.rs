@@ -66,7 +66,9 @@ impl Engine {
             if prepared.grants
                 != self.services.store.personal_volume_grants(id)?.unwrap_or_default()
             {
-                return Err("Personal volume selection changed during preparation; prepare the candidate again".into());
+                return Err("Personal volume selection changed during preparation; \
+                    prepare the candidate again"
+                    .into());
             }
             let local = self.services.store.is_local_session(id)?
                 && (old.shared_volume.is_none()
@@ -93,10 +95,20 @@ impl Engine {
                 // Existing local execution remains stopped until its host
                 // explicitly reconstructs. Adoption never replays an initializer.
                 if !local {
-                    self.remote
-                        .as_mut()
-                        .ok_or("A network operation is in progress")?
-                        .adopted_session(id);
+                    let remote =
+                        self.remote.as_mut().ok_or("A network operation is in progress")?;
+                    remote.adopted_session(id);
+                    // Bootstrap can fetch Shared for a candidate, but World
+                    // admission belongs to the build we have now adopted.
+                    if old.resolved_build_id != candidate.resolved_build_id
+                        && candidate.app.publisher != self.services.store.account().id
+                        && candidate.is_distinct_world(candidate.root_volume)
+                        && !remote.schedule_world_initialization(candidate.replica_volume())
+                    {
+                        // A full initialization registry falls back to the
+                        // ordinary background sync, which visits this World too.
+                        self.bootstrap_pending = true;
+                    }
                 }
             }
             self.updates.remove(id);

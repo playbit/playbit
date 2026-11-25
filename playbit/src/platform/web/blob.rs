@@ -61,6 +61,19 @@ pub(super) fn pending_key(version: &BlobVersion) -> Vec<u8> {
     key
 }
 impl Host {
+    pub(super) fn record_blob_upload(
+        &self,
+        tx: &mut kvdb::WriteTxn<'_, OpfsStorage>,
+        version: &BlobVersion,
+    ) -> Result<()> {
+        if self.replication_allowed(version.address.volume) {
+            tx.local_indexes()
+                .put(&pending_key(version), &serde_json::to_vec(version).map_err(map_error)?)
+                .map_err(map_error)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn authorize_blob(
         &self,
         volume: &Volume,

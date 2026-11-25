@@ -83,9 +83,13 @@ pub fn call(store: &LocalStore, bytes: &[u8]) -> (bool, Result<Vec<u8>>) {
 fn encode_reply(reply: Result<Reply>) -> Result<Vec<u8>> {
     let reply = reply?;
     let mut output = Output(Vec::new());
-    serde_json::to_writer(&mut output, &reply).map_err(|_| Error::System(
-        "The database response exceeds 256 KiB. The action may have completed; do not repeat it automatically.".into()
-    ))?;
+    serde_json::to_writer(&mut output, &reply).map_err(|_| {
+        Error::System(
+            "The database response exceeds 256 KiB. The action may have completed; \
+             do not repeat it automatically."
+                .into(),
+        )
+    })?;
     Ok(output.0)
 }
 
@@ -99,7 +103,9 @@ fn execute(store: &LocalStore, request: Request) -> Result<Reply> {
         Request::Open { reference } => {
             open_database(store, &access, &reference).map_err(|error| match error {
                 Error::NotFound(_) => Error::System(
-                    "This database is unavailable on this device. Sign in to its account and open its volume in Playbit, then try again.".into(),
+                    "This database is unavailable on this device. \
+                     Sign in to its account and open its volume in Playbit, then try again."
+                        .into(),
                 ),
                 Error::AccessDenied(_) => Error::System(
                     "Your account does not currently have access to this database.".into(),

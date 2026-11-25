@@ -36,9 +36,12 @@ export interface ReplicaHead<Ticket = unknown> {
 // The local store: outbound head/ack and inbound apply of a decoded replica delta.
 export interface LiveReplicationLocal<Ticket = unknown> {
     retired?(): void;
+    volumeCurrent?(id: string): boolean;
     head(current: LiveReplicationCurrent): Promise<ReplicaHead<Ticket> | null | undefined>;
     ack(ticket: Ticket, current: LiveReplicationCurrent): Promise<unknown>;
     published?(head: ReplicaHead<Ticket>, current: LiveReplicationCurrent): Promise<unknown>;
+    // A scoped rejection can retire the volatile ticket and recover its durable source.
+    rejected?(head: ReplicaHead<Ticket>, code: string, current: LiveReplicationCurrent): Promise<boolean>;
     apply(source: string, database: DatabaseId, delta: Uint8Array, current: LiveReplicationCurrent, evidence?: Uint8Array): Promise<unknown>;
     terminal(source: string, terminal: ReplicaTerminal, current: LiveReplicationCurrent): Promise<unknown>;
     catchUpLog?(source: string, database: DatabaseId, current: LiveReplicationCurrent): Promise<unknown>;
@@ -73,6 +76,7 @@ export interface LiveReplicationOptions<Ticket = unknown> {
     timeout?: number;
 }
 export interface LiveReplicationStream {
+    additional?: boolean;
     scope: ReplicaScope;
     source: string;
     handle: number;
@@ -132,6 +136,9 @@ export class LiveReplication<Ticket = unknown> {
         this.run = null;
     }
     current(run: LiveReplicationRun): boolean { return this.run === run && !run.stopped; }
+    scopeCurrent(scope: ReplicaScope): boolean {
+        return scope.kind === 'account' || this.local.volumeCurrent?.(scope.volume_id) !== false;
+    }
     streamCurrent(run: LiveReplicationRun, stream: LiveReplicationStream): boolean {
         return this.current(run) && !stream.stopped && run.streams.includes(stream);
     }
@@ -151,7 +158,7 @@ export class LiveReplication<Ticket = unknown> {
     }
     failStream(run: LiveReplicationRun, stream: LiveReplicationStream, error: unknown, stage: ReplicationStage = 'delivery'): void {
         if (!this.streamCurrent(run, stream)) return;
-        if (stream.scope.kind !== 'entry' || ['ap-transport', 'authentication-required', 'access-revoked', 'replica-authority'].includes((error as Errorish)?.code ?? '')) {
+        if ((stream.scope.kind !== 'entry' && !stream.additional) || ['ap-transport', 'authentication-required', 'access-revoked', 'replica-authority'].includes((error as Errorish)?.code ?? '')) {
             this.fail(run, error, stage); return;
         }
         stream.stopped = true;
@@ -161,10 +168,30 @@ export class LiveReplication<Ticket = unknown> {
             source: stream.source, message: String((error as Errorish)?.message ?? error).slice(0, 512), code: (error as Errorish)?.code, stage });
     }
     async subscribe(run: LiveReplicationRun, stream: LiveReplicationStream): Promise<boolean> {
+        if (!this.streamCurrent(run, stream) || !this.scopeCurrent(stream.scope)) return false;
         const { handle, ack } = await this.ap('subscribeReplica', { ...operation(stream.scope),
             op: stream.scope.kind === 'account' ? 'subscribe_account' : 'subscribe_replica', operation_id: this.operationId() });
         if (!this.streamCurrent(run, stream)) { await this.ap('streamClose', handle); return false; }
         stream.handle = handle; stream.cursor = new ReplicaCursor(ack); return true;
+    }
+    removeVolume(volume: string): void {
+        const run = this.run;
+        if (!run) return;
+        for (const stream of run.streams.slice()) {
+            if (stream.scope.kind === 'account' || stream.scope.volume_id !== volume) continue;
+            stream.stopped = true;
+            run.streams.splice(run.streams.indexOf(stream), 1);
+            stream.checkpoint?.reject(new Error('Volume access changed'));
+            if (stream.handle) void this.ap('streamClose', stream.handle).catch(() => {});
+        }
+    }
+    recoverVolumeCatalog(volume: string): void {
+        const run = this.run;
+        if (!run || !this.current(run)) return;
+        const source = run.streams.find(stream => stream.source === volume && stream.additional);
+        const gap = failure('replica-gap', 'World publication requires fresh catalog authority');
+        if (source && !source.stopped) this.failStream(run, source, gap, 'publication');
+        else this.state({ source: volume, kind: 'reconnecting', stage: 'publication', code: gap.code, message: gap.message });
     }
     async stop(): Promise<void> {
         const run = this.run;
@@ -189,9 +216,11 @@ export class LiveReplication<Ticket = unknown> {
         run.setup = (async () => {
             for (const scope of scopes) {
                 if (!this.current(run)) return;
+                if (!this.scopeCurrent(scope)) continue;
                 const stream: LiveReplicationStream = { scope, source: replicaSource(scope), handle: 0, stopped: false, checkpoint: null };
                 run.streams.push(stream);
-                if (!await this.subscribe(run, stream)) return;
+                try { await this.subscribe(run, stream); }
+                catch (error) { if (this.streamCurrent(run, stream)) throw error; }
             }
             if (!this.current(run)) return;
             stage = 'catch_up';
@@ -205,16 +234,17 @@ export class LiveReplication<Ticket = unknown> {
     }
     // Subscribe before detached capture. Reservation and replacement use this
     // run's existing 512 slots; a selected retry never retires healthy siblings.
-    async add(scope: Extract<ReplicaScope, { kind: 'entry' }>, bootstrap: LiveReplicationBootstrap): Promise<void> {
-        if (scope.kind !== 'entry') throw new Error('Invalid selected replica scope');
+    async add(scope: Exclude<ReplicaScope, { kind: 'account' }>, bootstrap: LiveReplicationBootstrap): Promise<void> {
+        if (scope.kind !== 'entry' && scope.kind !== 'volume') throw new Error('Invalid additional replica scope');
         const identity = replicaSource(scope), run = this.run;
         if (!run || !this.current(run)) throw failure('replica-gap', 'Replica connection requires recovery');
         await run.setup;
         if (!this.current(run) || !run.active) throw failure('replica-gap', 'Replica connection requires recovery');
+        if (!this.scopeCurrent(scope)) return;
         const previous = run.streams.find(stream => stream.source === identity);
         if (previous && !previous.stopped) { await previous.setup; return; }
         if (!previous && run.streams.length === 512) throw new Error('Replica subscription capacity exceeded');
-        const stream: LiveReplicationStream = { scope, source: identity, handle: 0, stopped: false, checkpoint: null };
+        const stream: LiveReplicationStream = { additional: true, scope, source: identity, handle: 0, stopped: false, checkpoint: null };
         if (previous) run.streams[run.streams.indexOf(previous)] = stream;
         else run.streams.push(stream);
         let stage: ReplicationStage = 'subscription';
@@ -249,14 +279,27 @@ export class LiveReplication<Ticket = unknown> {
                 const head = await this.local.head(() => this.current(run));
                 if (!this.current(run)) return;
                 if (!head) break;
+                const current = () => this.current(run) && this.scopeCurrent(head.publication);
+                if (!current()) continue; // The tombstone also discarded this local ticket.
                 const request = this.publicationRequest(head);
                 if (request) {
-                    await this.ap('publishReplica', request, head.bytes);
-                    if (!this.current(run)) return;
-                    await this.local.published?.(head, () => this.current(run));
-                    if (!this.current(run)) return;
+                    try { await this.ap('publishReplica', request, head.bytes); }
+                    catch (error) {
+                        if (!current()) continue;
+                        const code = (error as Errorish)?.code;
+                        if ((code === 'world-participant-revoked' || code === 'ap-rejected' || code === 'world-entry-rejected')
+                            && await this.local.rejected?.(head, code, current)) continue;
+                        if (current()) throw error;
+                        continue;
+                    }
                 }
-                await this.local.ack(head.ticket, () => this.current(run));
+                try {
+                    if (request && current()) await this.local.published?.(head, current);
+                    if (current()) await this.local.ack(head.ticket, current);
+                } catch (error) {
+                    // Local processing may have yielded to deletion after AP acknowledged.
+                    if (current()) throw error;
+                }
                 if (!this.current(run)) return;
             }
             // A publication receipt is not proof that the receiver applied it.

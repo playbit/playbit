@@ -48,7 +48,7 @@ mkdir -p "$output/tests"
     "$web"/tests/browser-account.mjs "$web"/tests/personal-store-browser.mjs \
     "$web"/tests/installation-browser.mjs "$web"/tests/storage-registration.mjs "$web"/tests/opfs-recovery-browser.mjs
 cp "$web"/tests/*.html "$web/tests/reconnect-browser-worker.js" "$output/tests/"
-cp "$web/controls.css" "$web/index.html" "$output/"
+cp "$web/controls.css" "$web/index.html" "$web/invitation/invitation.css" "$web"/invitation/*.svg "$output/"
 cp playbit/src/channels.json "$output/"
 cp playbit/assets/InterVariable.ttf playbit/assets/check-*.svg "$output/"
 cp "target/wasm32-unknown-unknown/$profile/playbit.wasm" "$output/"

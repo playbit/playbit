@@ -359,10 +359,12 @@ mod tests {
     fn guest(message: &str, trap: bool) -> Vec<u8> {
         wat::parse_str(format!(
             r#"(module
-            (import "playbit" "pb_syscall" (func $dispatch_log (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+            (import "playbit" "pb_syscall" (func $dispatch_log
+                (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
     (func $log (param i32 i32) (result i32)
         (i32.wrap_i64 (call $dispatch_log (i32.const 2)
-            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.const 0)
+                (i64.const 0) (i64.const 0) (i64.const 0))))
             (memory (export "memory") 1)
             (data (i32.const 8) "{message}")
             (func (export "pb_main")
@@ -384,10 +386,12 @@ mod tests {
         let encoded: String = bytes.iter().map(|byte| format!("\\{byte:02x}")).collect();
         wat::parse_str(format!(
             r#"(module
-            (import "playbit" "pb_syscall" (func $dispatch_view (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+            (import "playbit" "pb_syscall" (func $dispatch_view
+                (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
     (func $view (param i32 i32) (result i32)
         (i32.wrap_i64 (call $dispatch_view (i32.const 3)
-            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.const 0)
+                (i64.const 0) (i64.const 0) (i64.const 0))))
             (memory (export "memory") 1)
             (data (i32.const 8) "{encoded}")
             (func (export "pb_main")

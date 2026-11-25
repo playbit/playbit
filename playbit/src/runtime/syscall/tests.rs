@@ -634,10 +634,12 @@ fn file_image_guest() -> Vec<u8> {
     // is independent of the guest epoch used by presentation callbacks.
     wat::parse_str(format!(
         r#"(module
-        (import "playbit" "pb_syscall" (func $dispatch_view (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        (import "playbit" "pb_syscall" (func $dispatch_view
+            (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
     (func $view (param i32 i32) (result i32)
         (i32.wrap_i64 (call $dispatch_view (i32.const 3)
-            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.const 0)
+                (i64.const 0) (i64.const 0) (i64.const 0))))
         (memory (export "memory") 1)
         (data (i32.const 1024) "{encoded}")
         (func (export "pb_main")
@@ -1827,8 +1829,11 @@ fn file_references_round_trip_and_cannot_forge_content_metadata() {
 
 #[test]
 fn trapped_generation_refuses_reentry_input_and_wakes() {
-    let wasm = CALLER.replace("(func (export \"pb_main\"))",
-        "(func (export \"pb_main\") (i32.store (i32.const 0) (i32.add (i32.load (i32.const 0)) (i32.const 1))) unreachable)");
+    let wasm = CALLER.replace(
+        "(func (export \"pb_main\"))",
+        "(func (export \"pb_main\") (i32.store (i32.const 0) (i32.add (i32.load \
+         (i32.const 0)) (i32.const 1))) unreachable)",
+    );
     for backend in [ExecutionBackend::Native, ExecutionBackend::Pulley] {
         let runtime = Runtime::with_backend(backend).unwrap();
         let mut guest = runtime

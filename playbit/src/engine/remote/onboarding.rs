@@ -152,7 +152,11 @@ impl Remote {
             },
             source,
         })?;
-        Err(format!("Sync requires the current Playbit User Agreement. Read {TERMS_URL} and run pb accept-terms --revision {TERMS_REVISION}.").into())
+        Err(format!(
+            "Sync requires the current Playbit User Agreement. \
+             Read {TERMS_URL} and run pb accept-terms --revision {TERMS_REVISION}."
+        )
+        .into())
     }
 
     /// Resolve returning users before presenting onboarding, on the sign-in worker.

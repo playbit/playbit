@@ -551,12 +551,26 @@ impl Shell {
     pub fn personal_panel(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let _timing = crate::trace::Span::new("ui.personal.build");
         let theme = Theme::light();
-        let mut panel = div().flex().flex_col().gap_4()
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .gap_4()
             .child(self.host_text(HostText::ConsentTitle, "Personal volume access", cx).text_2xl())
-            .child(self.host_text(HostText::ConsentInstructions, "Choose the volumes this session may use. Mounts persist across app updates.", cx))
-            .child(self.host_text(HostText::ConsentHint,
-                "Unchecked volumes stay private. Write access also requires Read. Changes apply when you save.", cx)
-                .text_size(crate::ui::desktop::zoom::length(12.)).text_color(rgba(theme.color(ThemeColor::TextSecondary).0)));
+            .child(self.host_text(
+                HostText::ConsentInstructions,
+                "Choose the volumes this session may use. Mounts persist across app updates.",
+                cx,
+            ))
+            .child(
+                self.host_text(
+                    HostText::ConsentHint,
+                    "Unchecked volumes stay private. Write access also requires Read. \
+                     Changes apply when you save.",
+                    cx,
+                )
+                .text_size(crate::ui::desktop::zoom::length(12.))
+                .text_color(rgba(theme.color(ThemeColor::TextSecondary).0)),
+            );
         let volumes = self
             .personal
             .as_ref()

@@ -55,7 +55,11 @@ fn template(
         Manifest::from_source(std::str::from_utf8(&files[Path::new("playbit.toml")])?)?;
     manifest.name = name.into();
     if !playbit::package::valid_app_id(app_id) {
-        return Err("invalid app_id: provide --app-id with 1–64 lowercase ASCII letters/digits in nonempty components separated by dots or hyphens".into());
+        return Err(
+            "invalid app_id: provide --app-id with 1–64 lowercase ASCII letters/digits in \
+             nonempty components separated by dots or hyphens"
+                .into(),
+        );
     }
     manifest.app_id = app_id.into();
     manifest.lang = Some(language);
@@ -67,12 +71,16 @@ fn template(
             build_artifact: None,
         };
         manifest.native = Some(NativeBuild {
-        build_cmd: "cargo rustc --bin playbit-app --features native --target aarch64-apple-darwin -- @target/playbit/native.rsp".into(),
-        release: BuildCommand {
-            build_cmd: "cargo rustc --release --bin playbit-app --features native --target aarch64-apple-darwin -- @target/playbit/native.rsp".into(),
-            build_artifact: None,
-        },
-    });
+            build_cmd: "cargo rustc --bin playbit-app --features native --target \
+                aarch64-apple-darwin -- @target/playbit/native.rsp"
+                .into(),
+            release: BuildCommand {
+                build_cmd: "cargo rustc --release --bin playbit-app --features native --target \
+                    aarch64-apple-darwin -- @target/playbit/native.rsp"
+                    .into(),
+                build_artifact: None,
+            },
+        });
     }
     files.insert("playbit.toml".into(), toml::to_string_pretty(&manifest)?.into_bytes());
     let readme = project_readme(&resources.with_file_name("MacOS"));

@@ -104,6 +104,17 @@ fn sessions_min_size(scale: f32) -> gpui::Size<gpui::Pixels> {
     size(px(500. * scale.max(1.)), px(300. * scale.max(1.)))
 }
 
+pub(super) fn titlebar_drag_region() -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .w_full()
+        .h(ui(44.))
+        .min_h(px(44.))
+        .window_control_area(gpui::WindowControlArea::Drag)
+}
+
 impl Shell {
     pub(super) fn launch(
         worker: (
@@ -503,16 +514,7 @@ impl Shell {
             .text_color(rgba(theme.color(Role::Text).0))
             .bg(rgba(theme.color(Role::WindowBackground).0))
             // Paint the native drag region first so controls can exclude it.
-            .child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .w_full()
-                    .h(ui(44.))
-                    .min_h(px(44.))
-                    .window_control_area(gpui::WindowControlArea::Drag),
-            )
+            .child(titlebar_drag_region())
             .child(sidebar)
             .child(content)
             // The final element observes CPU scene construction. This is not

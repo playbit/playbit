@@ -294,9 +294,20 @@ mod tests {
         let directory = tempfile::tempdir().expect("profiles");
         let app = Connected::open(directory.path().join("app"), || {}).expect("app owner");
         let profile = directory.path().join("provider");
-        let mut child = Child(Command::new(std::env::current_exe().expect("test executable"))
-            .args(["--exact", "engine::file_provider::replica::tests::process_enrollment_and_committed_write_survive_owner_termination", "--nocapture"])
-            .env(CHILD, &profile).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("provider process"));
+        let mut child = Child(
+            Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "--exact",
+                    "engine::file_provider::replica::tests::process_enrollment_and_committed_\
+                     write_survive_owner_termination",
+                    "--nocapture",
+                ])
+                .env(CHILD, &profile)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("provider process"),
+        );
         let mut output = std::io::BufReader::new(child.0.stdout.take().expect("output"));
         let mut identity = None;
         for _ in 0..16 {

@@ -1,7 +1,7 @@
 //! Installation preferences and isolated durable native profiles.
 //! Explicit profiles have their own selection state and never change the user's
-//! remembered channel. Process leases prevent another installation or helper
-//! from selecting a conflicting environment while ordinary work is running.
+//! remembered channel. Every client of a profile shares its channel lease,
+//! including clients launched through an alias or another installation.
 use super::Result;
 use crate::release_channel::ReleaseChannel;
 use std::{
@@ -17,7 +17,7 @@ pub(crate) const PROFILE_MARKER: &str = "channel";
 const CONFLICT: &str = "Another Playbit process is using a different channel. Close Playbit apps and commands before switching channels. Your profiles have been preserved.";
 static CURRENT: OnceLock<Mutex<Option<Selection>>> = OnceLock::new();
 
-fn default_path(home: &Path, channel: ReleaseChannel) -> PathBuf {
+pub(super) fn default_path(home: &Path, channel: ReleaseChannel) -> PathBuf {
     home.join(match channel {
         ReleaseChannel::Public => ".playbit",
         ReleaseChannel::Testing => ".playbit-testing",
@@ -44,11 +44,6 @@ impl Drop for Lease {
             crate::diagnostic!("Failed to release profile channel lease: {error}");
         }
     }
-}
-
-struct Locations {
-    preference: Option<PathBuf>,
-    active: PathBuf,
 }
 
 fn installation_path(executable: &Path) -> Result<PathBuf> {
@@ -188,23 +183,32 @@ pub(crate) fn isolated_benchmark_profile(path: &Path) -> Result<PathBuf> {
     Ok(profile)
 }
 
-fn locations(home: &Path, profile: Option<&Path>) -> Result<Locations> {
-    let active = home.join(".playbit-runtime");
-    let Some(profile) = profile else {
-        return Ok(Locations {
-            preference: Some(installation_preference(home, &std::env::current_exe()?)?),
-            active,
-        });
-    };
-    if matches_default_profile(home, profile, ReleaseChannel::Public)?
-        || matches_default_profile(home, profile, ReleaseChannel::Testing)?
-    {
-        // Helpers and prepared guests carry a validated profile rather than
-        // changing the installation's remembered user preference.
-        return Ok(Locations { preference: None, active });
+pub(super) fn default_runtime_path(home: &Path, channel: ReleaseChannel) -> PathBuf {
+    // Keep the established Public state for installed Public clients.
+    if cfg!(target_os = "macos") && channel == ReleaseChannel::Testing {
+        home.join(".playbit-runtime-testing")
+    } else {
+        home.join(".playbit-runtime")
     }
-    let active = custom_state_path(profile)?;
-    Ok(Locations { preference: Some(active.clone()), active })
+}
+
+fn default_runtime(home: &Path, profile: &Path) -> Result<Option<PathBuf>> {
+    for channel in [ReleaseChannel::Public, ReleaseChannel::Testing] {
+        if matches_default_profile(home, profile, channel)? {
+            return Ok(Some(default_runtime_path(home, channel)));
+        }
+    }
+    Ok(None)
+}
+
+fn selection_state(home: &Path, executable: &Path, profile: Option<&Path>) -> Result<PathBuf> {
+    match profile {
+        None => installation_preference(home, executable),
+        Some(profile) => match default_runtime(home, profile)? {
+            Some(runtime) => Ok(runtime),
+            None => custom_state_path(profile),
+        },
+    }
 }
 
 fn custom_state_path(profile: &Path) -> Result<PathBuf> {
@@ -218,12 +222,16 @@ fn custom_state_path(profile: &Path) -> Result<PathBuf> {
 
 fn matches_default_profile(home: &Path, profile: &Path, channel: ReleaseChannel) -> Result<bool> {
     let default = canonical_profile(&default_path(home, channel))?;
+    matches_profile_path(profile, &default)
+}
+
+fn matches_profile_path(profile: &Path, default: &Path) -> Result<bool> {
     if profile == default {
         return Ok(true);
     }
     #[cfg(target_os = "macos")]
     if let (Some(parent), Some(default_parent)) = (profile.parent(), default.parent()) {
-        if let (Ok(profile), Ok(default)) = (fs::metadata(profile), fs::metadata(&default)) {
+        if let (Ok(profile), Ok(default)) = (fs::metadata(profile), fs::metadata(default)) {
             return Ok(same_file(&profile, &default));
         }
         if let (Ok(parent), Ok(default_parent_metadata)) =
@@ -231,7 +239,7 @@ fn matches_default_profile(home: &Path, profile: &Path, channel: ReleaseChannel)
             && same_file(&parent, &default_parent_metadata)
             && case_insensitive(&File::open(default_parent)?)?
         {
-            return Ok(macos_names_equal(profile, &default));
+            return Ok(macos_names_equal(profile, default));
         }
     }
     Ok(false)
@@ -284,7 +292,32 @@ fn case_insensitive(directory: &File) -> Result<bool> {
 const NAME_NAMESPACE: &str = ".playbit-profile-names";
 
 #[cfg(target_os = "macos")]
-fn require_unreserved_profile_name(profile: &Path) -> Result<()> {
+fn require_unreserved_profile_name(home: &Path, profile: &Path) -> Result<()> {
+    // A missing parent can still sit below an existing alias into runtime
+    // state. Resolve that prefix before creating any of its descendants.
+    let resolved;
+    let profile = if profile.parent().is_some_and(|parent| !parent.exists()) {
+        let prefix =
+            profile.ancestors().find(|parent| parent.is_dir()).ok_or("Missing profile parent")?;
+        resolved = prefix.canonicalize()?.join(profile.strip_prefix(prefix)?);
+        resolved.as_path()
+    } else {
+        profile
+    };
+    for path in profile.ancestors() {
+        for name in [".playbit-runtime", ".playbit-runtime-testing", ".playbit-installations"] {
+            if !macos_names_equal(path, Path::new(name)) {
+                continue;
+            }
+            if matches_profile_path(path, &home.join(name))? {
+                return Err("Profile path is reserved for Playbit channel state".into());
+            }
+            #[cfg(feature = "connected-engine")]
+            if matches_profile_path(path, &credential_home()?.join(name))? {
+                return Err("Profile path is reserved for Playbit channel state".into());
+            }
+        }
+    }
     let namespace = Path::new(NAME_NAMESPACE);
     for path in profile.ancestors().filter(|path| macos_names_equal(path, namespace)) {
         if path.file_name() == namespace.file_name()
@@ -442,12 +475,13 @@ pub(crate) fn credential_home() -> Result<PathBuf> {
     Ok(home)
 }
 
-fn write(state: &Path, channel: ReleaseChannel) -> Result<()> {
-    let mut file = private_file(&state.join("selected.tmp"))?;
+pub(super) fn write_state(state: &Path, name: &str, bytes: &[u8]) -> Result<()> {
+    let temporary = state.join(format!("{name}.tmp"));
+    let mut file = private_file(&temporary)?;
     file.set_len(0)?;
-    file.write_all(channel.name().as_bytes())?;
+    file.write_all(bytes)?;
     file.sync_all()?;
-    fs::rename(state.join("selected.tmp"), state.join("selected"))?;
+    fs::rename(temporary, state.join(name))?;
     File::open(state)?.sync_all()?;
     Ok(())
 }
@@ -474,7 +508,7 @@ impl Selection {
             .map(|path| -> Result<PathBuf> {
                 let path = canonical_profile(path)?;
                 #[cfg(target_os = "macos")]
-                require_unreserved_profile_name(&path)?;
+                require_unreserved_profile_name(&home, &path)?;
                 if explicit.is_some_and(ReleaseChannel::is_personal) {
                     require_personal_profile(&home, &path)?;
                 }
@@ -486,24 +520,16 @@ impl Selection {
             })
             .transpose()?;
         let switchable = profile.is_none();
-        let locations = locations(&home, profile.as_deref())?;
-        private_directory(&locations.active)?;
-        if let Some(preference) = &locations.preference {
-            if switchable {
-                private_directory(&home.join(".playbit-installations"))?;
-            }
-            private_directory(preference)?;
+        let executable = std::env::current_exe()?;
+        let state = selection_state(&home, &executable, profile.as_deref())?;
+        if switchable {
+            private_directory(&home.join(".playbit-installations"))?;
         }
-        let state = locations.preference.as_ref().unwrap_or(&locations.active);
-        let _admission = lock_admission(&locations.active)?;
+        private_directory(&state)?;
+        let _admission = lock_admission(&state)?;
         let remembered = read(&state.join("selected"))?;
-        let (path, channel) = resolve_selection(
-            &home,
-            &std::env::current_exe()?,
-            profile.as_deref(),
-            explicit,
-            remembered,
-        )?;
+        let (path, channel) =
+            resolve_selection(&home, &executable, profile.as_deref(), explicit, remembered)?;
         if channel == ReleaseChannel::Testing
             && matches_default_profile(&home, &path, ReleaseChannel::Public)?
         {
@@ -511,10 +537,21 @@ impl Selection {
                 "Testing requires its own profile; ~/.playbit is reserved for Public".into()
             );
         }
-        let active_channel = read(&locations.active.join("selected"))?.unwrap_or_default();
-        let active = admit(&locations.active, &path, channel, active_channel)?;
-        if locations.preference.is_some() && remembered != Some(channel) {
-            write(state, channel)?;
+        // An ordinary launch serializes its installation preference and then
+        // admits the selected profile. Bound helpers only need the profile lock.
+        let runtime;
+        let _profile_admission;
+        let (active_state, active_channel) = if switchable {
+            runtime = selection_state(&home, &executable, Some(&path))?;
+            private_directory(&runtime)?;
+            _profile_admission = lock_admission(&runtime)?;
+            (&runtime, read(&runtime.join("selected"))?)
+        } else {
+            (&state, remembered)
+        };
+        let active = admit(active_state, &path, channel, active_channel.unwrap_or_default())?;
+        if switchable && remembered != Some(channel) {
+            write_state(&state, "selected", channel.name().as_bytes())?;
         }
         Ok(Self {
             channel,
@@ -552,7 +589,7 @@ fn admit(
     // Public solely because its channel marker disappeared.
     prepare(path, channel)?;
     if exclusive && (channel != remembered || !state.join("selected").exists()) {
-        write(state, channel)?;
+        write_state(state, "selected", channel.name().as_bytes())?;
     }
     Ok(active)
 }
@@ -569,9 +606,10 @@ pub fn initialize_gui() -> Result<()> {
 #[cfg(all(not(target_os = "ios"), feature = "process"))]
 pub(super) fn recover_gui_profile(home: &Path, path: &Path, channel: ReleaseChannel) -> Result<()> {
     let path = canonical_profile(path)?;
-    let Some(state) = locations(home, Some(&path))?.preference else {
+    if default_runtime(home, &path)?.is_some() {
         return super::recovery_endpoint::retire_if_stale(&path, channel);
-    };
+    }
+    let state = custom_state_path(&path)?;
     // Keep the retained owner stable while retiring its peer when the sibling
     // state exists. A missing sibling directory is never created by recovery.
     let _admission = match fs::symlink_metadata(&state) {
@@ -670,15 +708,12 @@ pub fn initialize() -> Result<()> {
     Ok(())
 }
 
-/// Join the profile the client already admitted. Launchd uses the retained
-/// default selection; isolated Launch Services requests carry their own binding.
+/// Join the profile the client already admitted. Each launchd job names its
+/// channel. Isolated Launch Services requests also carry a bound profile path.
 #[cfg(all(target_os = "macos", feature = "process"))]
-pub(super) fn initialize_agent(isolated: Option<(&Path, ReleaseChannel)>) -> Result<()> {
-    if isolated.is_none() && std::env::var_os("PLAYBIT_PROFILE").is_some() {
-        return initialize();
-    }
+pub(super) fn initialize_agent(channel: ReleaseChannel, isolated: Option<&Path>) -> Result<()> {
     let home = dirs::home_dir().ok_or("Home directory is unavailable")?;
-    let (path, channel) = if let Some((path, channel)) = isolated {
+    let path = if let Some(path) = isolated {
         if !path.is_absolute()
             || std::env::var_os(super::testing_profile::CREDENTIALS_ENV).is_some()
         {
@@ -694,14 +729,17 @@ pub(super) fn initialize_agent(isolated: Option<(&Path, ReleaseChannel)>) -> Res
                 "Background engine profile or channel does not match the isolated request".into()
             );
         }
-        (path, channel)
+        path
     } else {
-        let channel = read(&home.join(".playbit-runtime/selected"))?
-            .ok_or("Open Playbit before starting its background service")?;
         if channel.is_personal() {
             return Err("Personal Testing requires an isolated background engine request".into());
         }
-        (canonical_profile(&default_path(&home, channel))?, channel)
+        let path = canonical_profile(&default_path(&home, channel))?;
+        let state = default_runtime(&home, &path)?.ok_or("Default profile state is unavailable")?;
+        if read(&state.join("selected"))? != Some(channel) {
+            return Err("Open Playbit before starting its background service".into());
+        }
+        path
     };
     let mut current =
         CURRENT.get_or_init(|| Mutex::new(None)).lock().expect("profile selection lock");
@@ -740,11 +778,8 @@ pub fn resolve_environment() -> Result<(PathBuf, ReleaseChannel)> {
     let profile = profile_from_environment()?;
     let home = dirs::home_dir().ok_or("Home directory is unavailable")?.canonicalize()?;
     let executable = std::env::current_exe()?;
-    let state = match profile.as_deref() {
-        Some(path) => locations(&home, Some(path))?.preference,
-        None => Some(installation_preference(&home, &executable)?),
-    };
-    let remembered = state.map(|state| read(&state.join("selected"))).transpose()?.flatten();
+    let state = selection_state(&home, &executable, profile.as_deref())?;
+    let remembered = read(&state.join("selected"))?;
     resolve_selection(&home, &executable, profile.as_deref(), explicit, remembered)
 }
 
@@ -778,8 +813,8 @@ pub fn initialize_selected(path: &Path, channel: ReleaseChannel) -> Result<()> {
     Ok(())
 }
 
-/// The GUI has retired its worker and stopped its authenticated engine before
-/// this call. Other clients/guests retain leases and refuse a conflicting switch.
+/// The GUI has retired its worker and any engine its installation owns before
+/// this call. Other clients and guests retain their existing profile bindings.
 /// Disk work occurs on a background lane, outside the short current-state lock.
 #[cfg(feature = "desktop")]
 pub(crate) fn switch_to(channel: ReleaseChannel) -> Result<()> {
@@ -795,7 +830,9 @@ pub(crate) fn switch_to(channel: ReleaseChannel) -> Result<()> {
             return Ok(());
         }
         if !current.switchable {
-            return Err("An explicit PLAYBIT_PROFILE cannot change environment. Launch the other channel with its own isolated profile.".into());
+            return Err("An explicit PLAYBIT_PROFILE cannot change environment. \
+                Launch the other channel with its own isolated profile."
+                .into());
         }
         (current.channel, current.active.take())
     };
@@ -805,7 +842,12 @@ pub(crate) fn switch_to(channel: ReleaseChannel) -> Result<()> {
         Ok(incoming) => incoming,
         Err(error) => {
             let restored = Selection::open(&home, None, Some(previous));
-            let restored = restored.map_err(|restore| format!("{error}; could not restore profile ownership: {restore}. Reopen Playbit to recover."))?;
+            let restored = restored.map_err(|restore| {
+                format!(
+                    "{error}; could not restore profile ownership: {restore}. \
+                     Reopen Playbit to recover."
+                )
+            })?;
             *CURRENT.get().expect("initialized profile").lock().expect("profile selection lock") =
                 Some(restored);
             return Err(error);
@@ -1030,7 +1072,11 @@ mod tests {
             let mut child =
                 std::process::Command::new(std::env::current_exe().expect("test runner"));
             child
-                .args(["--exact", "engine::profile::tests::unit_test_profile_is_isolated_from_the_launch_environment"])
+                .args([
+                    "--exact",
+                    "engine::profile::tests::unit_test_profile_is_isolated_from_the_launch_\
+                     environment",
+                ])
                 .env(CHILD, &result)
                 .env("HOME", home.path())
                 .env_remove("PLAYBIT_CHANNEL")
@@ -1150,6 +1196,25 @@ mod tests {
                 ReleaseChannel::FixtureB
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn custom_profile_cannot_replace_runtime_state_through_a_parent_alias() {
+        let home = tempfile::tempdir().expect("temporary home");
+        let runtime = home.path().join(".playbit-runtime-testing");
+        private_directory(&runtime).expect("runtime");
+        let link = home.path().join("alias");
+        std::os::unix::fs::symlink(&runtime, &link).expect("runtime alias");
+        for path in [&runtime, &link.join("missing/child")] {
+            assert!(
+                Selection::open(home.path(), Some(path), Some(ReleaseChannel::Testing)).is_err()
+            );
+        }
+        assert!(!runtime.join("missing").exists());
+        let unrelated = home.path().join("projects/.playbit-runtime-testing");
+        Selection::open(home.path(), Some(&unrelated), Some(ReleaseChannel::Testing))
+            .expect("unrelated project profile");
     }
 
     #[test]
@@ -1355,7 +1420,12 @@ mod tests {
             Selection::open(home.path(), None, Some(ReleaseChannel::Testing)).expect("selection");
         let mut child =
             std::process::Command::new(std::env::current_exe().expect("test executable"));
-        child.args(["--exact", "engine::profile::tests::configured_relaunch_restores_signal_delivery_from_a_blocked_worker"])
+        child
+            .args([
+                "--exact",
+                "engine::profile::tests::configured_relaunch_restores_signal_delivery_from_a_\
+                 blocked_worker",
+            ])
             .env(CHILD, "1");
         // SAFETY: only async-signal-safe calls execute in the child before exec.
         unsafe {
@@ -1398,16 +1468,23 @@ mod tests {
     }
 
     #[test]
-    fn selection_is_remembered_and_conflicting_processes_cannot_switch_it() {
-        // Leases include helpers: selecting another channel requires retirement.
+    fn ordinary_selections_retain_channel_and_helper_ownership() {
+        // macOS can serve the two default profiles concurrently. A helper may
+        // never reinterpret the profile it joined, even via another installation.
         let home = tempfile::tempdir().expect("home");
         let public = Selection::open(home.path(), None, None).expect("public");
         assert_eq!(public.channel, ReleaseChannel::Public);
-        assert!(Selection::open(home.path(), None, Some(ReleaseChannel::Testing)).is_err());
         let helper = Selection::open(home.path(), Some(&public.path), Some(ReleaseChannel::Public))
             .expect("same-channel helper");
+        assert_eq!(
+            Selection::open(home.path(), None, Some(ReleaseChannel::Testing)).is_ok(),
+            cfg!(target_os = "macos")
+        );
+        assert!(
+            Selection::open(home.path(), Some(&public.path), Some(ReleaseChannel::Testing))
+                .is_err()
+        );
         drop(public);
-        assert!(Selection::open(home.path(), None, Some(ReleaseChannel::Testing)).is_err());
         drop(helper);
         let testing =
             Selection::open(home.path(), None, Some(ReleaseChannel::Testing)).expect("testing");
@@ -1434,14 +1511,15 @@ mod tests {
     fn agent_joins_bound_guest_without_changing_gui_preference() {
         const CHILD: &str = "PLAYBIT_AGENT_PROFILE_CHILD";
         if std::env::var_os(CHILD).is_some() {
-            initialize_agent(None).expect("join admitted Testing guest");
+            initialize_agent(ReleaseChannel::Testing, None).expect("join admitted Testing guest");
             let home = dirs::home_dir().expect("fixture home");
             assert_eq!(current(), (home.join(".playbit-testing"), ReleaseChannel::Testing));
             return;
         }
         let home = tempfile::tempdir().expect("isolated home");
         let home = home.path().canonicalize().expect("canonical home");
-        drop(Selection::open(&home, None, Some(ReleaseChannel::Public)).expect("Public GUI"));
+        let _public =
+            Selection::open(&home, None, Some(ReleaseChannel::Public)).expect("Public GUI");
         let testing = home.join(".playbit-testing");
         let guest = Selection::open(&home, Some(&testing), Some(ReleaseChannel::Testing))
             .expect("bound Testing guest");
@@ -1553,7 +1631,7 @@ mod tests {
 
     #[test]
     fn relocated_default_profile_retains_shared_process_ownership() {
-        // A helper uses the same global admission even when ~/.playbit is a link.
+        // The bound helper and normal GUI lock the same relocated profile.
         let home = tempfile::tempdir().expect("home");
         let actual = home.path().join("actual");
         private_directory(&actual).expect("profile");
@@ -1564,10 +1642,11 @@ mod tests {
         // A concurrent fork retains this file description until exec.
         let inherited =
             helper.active.as_ref().expect("helper lease").0.try_clone().expect("inherited lease");
+        let peer = private_file(&home.path().join(".playbit-runtime/active.lock")).expect("lease");
         drop(public);
-        assert!(Selection::open(home.path(), None, Some(ReleaseChannel::Testing)).is_err());
+        assert!(matches!(peer.try_lock(), Err(TryLockError::WouldBlock)));
         drop(helper);
-        assert!(Selection::open(home.path(), None, Some(ReleaseChannel::Testing)).is_ok());
+        peer.try_lock().expect("last helper released the profile lease");
         drop(inherited);
     }
 

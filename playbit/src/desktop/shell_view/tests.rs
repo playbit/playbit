@@ -41,6 +41,13 @@ fn shell_zoom_scales_templates_modals_and_native_minimum(cx: &mut gpui::TestAppC
             .unwrap();
         host.update(cx, |host, cx| host.open_join_dialog(cx));
         cx.run_until_parked();
+        #[cfg(target_os = "macos")]
+        {
+            let titlebar_bottom = (44. * scale).max(44.);
+            let can_drag = |y| cx.window_can_drag_at(window.into(), gpui::point(px(160.), px(y)));
+            assert!(can_drag(titlebar_bottom - 1.), "Join Session title bar at zoom {scale}");
+            assert!(!can_drag(titlebar_bottom + 1.), "Join Session backdrop at zoom {scale}");
+        }
         window
             .update(cx, |_, window, _| {
                 let submit = window

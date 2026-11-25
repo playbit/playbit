@@ -2,7 +2,7 @@
 //! before any rejected local data can leave the active generation.
 use super::*;
 
-pub(super) fn rejected(stage: &Preparation, actor: DataActor, entry: EntryId) -> Result<bool> {
+pub(super) fn rejected(host: &Host, stage: &Preparation, entry: EntryId) -> Result<bool> {
     if stage.archive.borrow().rejected_backings.contains(&entry) {
         return Ok(true);
     }
@@ -10,6 +10,7 @@ pub(super) fn rejected(stage: &Preparation, actor: DataActor, entry: EntryId) ->
     if !original.source_backing_ready(entry).map_err(store_error)? {
         return Ok(false);
     }
+    let actor = host.actor(&stage.volume);
     let unavailable =
         match DatabasePolicy::read_source(&stage.accepted_index, DatabaseId::Entry(entry)) {
             Ok(policy) => {
@@ -19,6 +20,24 @@ pub(super) fn rejected(stage: &Preparation, actor: DataActor, entry: EntryId) ->
                         && allowed(policy.authorize(actor, Permission::Append))?)
                 {
                     return Ok(false);
+                }
+                if host.is_projected_world(&stage.volume)
+                    && policy.entry.as_ref().is_some_and(|entry| {
+                        entry.kind == crate::store::EntryType::KvDb
+                            && entry.protocol == Some(DatabaseProtocol::Kvdb)
+                    })
+                    && allowed(policy.authorize(actor, Permission::Append))?
+                    && allowed(policy.authorize_reader(ReplicaReader::Service))?
+                {
+                    let old = DatabasePolicy::read(&stage.original.index, DatabaseId::Entry(entry))
+                        .map_err(store_error)?;
+                    // Retained Append can replay only authored births. Losing
+                    // Write still sends the backing through reconciliation.
+                    if allowed(old.authorize(actor, Permission::Append))?
+                        && !allowed(old.authorize(actor, Permission::Write))?
+                    {
+                        return Ok(false);
+                    }
                 }
                 !allowed(policy.authorize_reader(ReplicaReader::SessionParticipant(actor)))?
                     || !allowed(policy.authorize_reader(ReplicaReader::Service))?

@@ -6,9 +6,23 @@
     --border: #0000004d; --focus-ring: #0009; --text-selection: #c2d8ff;
     --primary-background: #6b6b6b; --primary-pressed: #555; --primary-text: #fff;
     --destructive-background: #ec4000; --destructive-pressed: #cb2c00; --destructive-text: #fff;
-    color-scheme: light; background: #ececec; color: var(--text); padding: 12px;
+    color-scheme: light; background: var(--window-background, #ececec); color: var(--text); padding: 12px;
     font: 500 11px/16px Inter, sans-serif; letter-spacing: .22px;
 }
+body:has(#app[data-window-layout]) { max-width: none; }
+#app[data-window-layout] { box-sizing: border-box; margin-inline: auto; overflow: auto; }
+#app[data-window-content] { padding: 0; }
+#app canvas[data-window-canvas] { display: block; max-width: none; border-radius: 0; }
+#app[data-window-layout] canvas:not([data-window-canvas]) { width: auto; max-width: 100%; }
+#app .guest-context-popup {
+    position: fixed; inset: auto; margin: 0; padding: 6px; box-sizing: border-box;
+    max-width: min(320px, 100vw); max-height: min(420px, 100vh); overflow: auto;
+    color: var(--text); background: var(--menu-background, var(--control-background));
+    border: 1px solid var(--menu-border, var(--border)); border-radius: 8px; box-shadow: 0 4px 24px #0004;
+}
+#app .guest-context-popup button { display: block; width: calc(100% - 8px); text-align: start; }
+#app .guest-context-popup details { margin: 4px; opacity: 1; font: inherit; }
+#app .guest-context-popup summary { padding: 4px; }
 #app .column { gap: 4px; } #app .row { gap: 0; align-items: center; }
 body:has(#app .guest-scroll) { display: flex; flex-direction: column; height: 100dvh; box-sizing: border-box; }
 body:has(#app .guest-scroll) > * { flex-shrink: 0; }
@@ -31,7 +45,7 @@ body:has(#app .guest-scroll) > * { flex-shrink: 0; }
     box-shadow: 0 0 0 .5px var(--border), inset 0 1px 1px #00000021;
 }
 #app .guest-field::placeholder { color: var(--text-disabled); opacity: 1; }
-#app .guest-field::selection { background: var(--text-selection); color: var(--text); }
+#app .guest-field::selection { background: var(--text-selection); color: var(--text-selection-text, var(--text)); }
 #app .guest-field:focus { outline: 2px solid var(--focus-ring); outline-offset: 0; }
 #app .guest-field:disabled { color: var(--text-disabled); background: var(--control-disabled); }
 #app .guest-button {

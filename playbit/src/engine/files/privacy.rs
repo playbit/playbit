@@ -70,7 +70,7 @@ pub fn restrict_new(file: &File) -> io::Result<()> {
 }
 
 #[cfg(target_vendor = "apple")]
-mod acl {
+pub(crate) mod acl {
     use super::*;
     use std::ffi::{c_int, c_void};
     // sys/acl.h: Darwin extended ACLs are distinct from unsupported POSIX types.
@@ -97,7 +97,7 @@ mod acl {
             }
         }
     }
-    pub(super) fn empty(file: &File) -> io::Result<bool> {
+    pub(crate) fn empty(file: &File) -> io::Result<bool> {
         // SAFETY: retained descriptor; returned allocation is owned by Acl.
         let raw = unsafe { acl_get_fd_np(file.as_raw_fd(), EXTENDED) };
         if raw.is_null() && io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {

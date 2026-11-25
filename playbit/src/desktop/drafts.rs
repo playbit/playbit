@@ -239,14 +239,18 @@ impl Drafts {
         };
         let record = self.records.get(&write.id).expect("active draft has retained state");
         if record.draft.is_some() {
-            return Err("Another local copy changed this draft. Your current edit is retained. Discard it to keep the other local copy.".into());
+            return Err("Another local copy changed this draft. Your current edit is retained. \
+                Discard it to keep the other local copy."
+                .into());
         }
         let bytes = peer
             .as_deref()
             .map_or(Ok(0), BrowserDraft::retained_bytes)
             .map_err(|error| error.to_string())?;
         if self.retained_bytes() + bytes > MAX_ACCOUNT_BYTES {
-            return Err("The other local copy exceeds the 8 MiB draft memory limit. Save or discard another draft, then retry.".into());
+            return Err("The other local copy exceeds the 8 MiB draft memory limit. \
+                Save or discard another draft, then retry."
+                .into());
         }
         // A tombstone is the user's decision to retire this local intent. Never send
         // its stale CAS deletion against the other writer's replacement.

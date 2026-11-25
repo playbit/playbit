@@ -25,7 +25,8 @@
     input[type=checkbox] { width:20px; height:20px; }
     canvas { width:100%; max-width:480px; height:auto; touch-action:none; border-radius:6px; outline-offset:3px; }
     #status { margin:24px 0; } details { overflow-wrap:anywhere; margin-top:24px; }
-    #install-playbit { margin-bottom:20px; } #install-playbit p { margin-top:10px; line-height:1.5; }
+    #native-actions { display:flex; align-items:center; flex-wrap:wrap; gap:16px; margin-block:20px; }
+    #native-actions a { margin-left:0; }
     pre { white-space:pre-wrap; } #error { color:light-dark(#a32415,#ff8c7d); }
     body.store-corrupt { background:light-dark(#fff,#202322); min-height:calc(100vh - 48px); }
     .store-corrupt > .muted, .store-corrupt > details, .store-corrupt #status { display:none; }
@@ -36,20 +37,44 @@
     .store-corrupt #onboarding button { align-self:center; border:0; border-radius:999px; padding:12px 24px; background:#0088f5; color:#fff; }
     .store-corrupt #error { max-width:480px; margin:0 auto; }
 </style>
+<link rel="modulepreload" href="./playbit.js">
 <link rel="stylesheet" href="./controls.css">
-<header><strong>Playbit</strong><nav><a id="open-installed" hidden>Open in Playbit</a> <button id="close-app" hidden>Close app</button> <button id="sign-out" hidden>Sign out</button></nav></header>
+<link rel="stylesheet" href="./invitation.css">
+<header>
+    <strong>Playbit</strong>
+    <a class="invitation-brand" href="/" aria-label="Playbit home"><img src="./symbol-dark.svg" width="34" height="24" alt=""></a>
+    <nav><button id="close-app" hidden>Close app</button> <button id="sign-out" hidden>Sign out</button></nav>
+</header>
 <div id="environment-controls"><label>Environment <select id="environment"><option value="public">Public</option><option value="testing">Testing</option></select></label><span id="testing" hidden>Testing</span><button id="copy-environment" type="button">Copy diagnostics</button></div><pre id="environment-details" hidden></pre>
-<section id="invitation"><h1 id="invitation-title"></h1><p id="invitation-detail"></p></section>
-<details id="install-playbit" hidden><summary>Install Playbit for Mac</summary>
-<p><a id="download-playbit" download>Download for Mac (Apple silicon)</a></p>
-<p id="install-instructions">Open the downloaded zip and move Playbit to Applications. Then return to this page and choose Open in Playbit. Your invitation stays here while you install and sign in.</p>
-</details>
-<p class="muted">Browser participation is experimental. <span id="native-preference">Prefer Open in Playbit for the native beta.</span> <a href="/docs/">Manual and help</a></p>
+<section id="invitation" aria-labelledby="invitation-title">
+    <h1 id="invitation-title"></h1>
+    <p class="invitation-intro">Join this session with the desktop app or try the experimental web runtime</p>
+    <p id="invitation-detail"></p>
+</section>
+<div id="native-actions">
+    <a id="open-installed" hidden>Join in macOS app</a>
+    <div id="install-playbit" hidden>
+        <a id="download-playbit" download>Download macOS app</a>
+        <details class="install-help"><summary>Installation instructions</summary>
+            <p id="install-instructions">Open the downloaded zip and move Playbit to Applications. Then return to this page and join in the macOS app.</p>
+        </details>
+    </div>
+</div>
+<p class="muted">Browser participation is experimental. <span id="native-preference">Prefer the macOS app for the native beta.</span> <a href="/docs/">Manual and help</a></p>
 <p id="status" role="status">Opening…</p><p id="error" role="alert"></p>
 <section id="onboarding"></section>
 <main id="app"></main>
 <details><summary>Offline edits</summary><section id="offline-edits" hidden></section></details>
 <details><summary>Local session</summary><pre id="identity"></pre></details>
+<footer class="invitation-footer">
+    <nav aria-label="Footer">
+        <a href="/" aria-label="Playbit home"><img src="./symbol-light-small.svg" width="22" height="16" alt=""></a>
+        <a href="/about/">About</a>
+        <a href="/help/">Help</a>
+        <a href="/docs/">Docs</a>
+        <a class="footer-download" download hidden>Download for Mac</a>
+    </nav>
+    <p>© Playbit 2021 – 2026</p>
+</footer>
 <script type="module" src="./native-handoff.js"></script>
-<script type="module" src="./playbit.js"></script>
 </html>

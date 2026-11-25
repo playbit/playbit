@@ -40,17 +40,14 @@ const WORKERS: usize = 4;
 #[cfg(all(target_os = "macos", feature = "process"))]
 const SOCKET: &str = "file-provider.sock";
 
-/// macOS domains are shared by bundle identity. An isolated launch must never
-/// adopt the OS user's public domains, even when it overrides HOME.
+/// Only the OS user's matching default profile can own a channel's Finder drive.
 #[cfg(all(target_os = "macos", feature = "process"))]
-pub fn require_system_profile(profile: &Path) -> Result<()> {
-    let public = crate::release_channel::ReleaseChannel::Public;
-    if super::profile::for_profile(profile)? != public
-        || !super::profile::is_default_profile(profile, public)?
-    {
-        return Err("File Provider drives require the OS user's default public profile".into());
+pub fn require_system_profile(profile: &Path) -> Result<crate::release_channel::ReleaseChannel> {
+    let channel = super::profile::for_profile(profile)?;
+    if !super::profile::is_default_profile(profile, channel)? {
+        return Err("Finder drives require the OS user's default Public or Testing profile".into());
     }
-    Ok(())
+    Ok(channel)
 }
 
 #[cfg(all(test, target_os = "macos", feature = "process"))]

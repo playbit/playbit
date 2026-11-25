@@ -20,13 +20,23 @@ final class ProviderEnumerator: NSObject, NSFileProviderEnumerator {
     static let encodedCheckpointBytes = 16777216
     #endif
     let client: ProviderClient
-    let domain: NSFileProviderDomain
+    let account: String
+    #if os(macOS)
+    private let testing: Bool
+    #endif
     let container: NSFileProviderItemIdentifier
     let storage: URL?
     let lifecycle = NSLock()
     var invalidated = false
     init(client: ProviderClient, domain: NSFileProviderDomain, container: NSFileProviderItemIdentifier, storage: URL? = nil) {
-        self.client = client; self.domain = domain; self.container = container; self.storage = storage
+        self.client = client; self.container = container; self.storage = storage
+        #if os(macOS)
+        let identity = DriveIdentity(domain.identifier)
+        self.account = identity?.account ?? ""
+        self.testing = identity?.channel == .testing
+        #else
+        self.account = domain.identifier.rawValue
+        #endif
     }
     func invalidate() { lifecycle.lock(); invalidated = true; lifecycle.unlock() }
     func checkActive() throws {
@@ -59,14 +69,19 @@ final class ProviderEnumerator: NSObject, NSFileProviderEnumerator {
         let after: String?
     }
     func rootDirectory() throws -> URL {
-        let root = try storage ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+        var root = try storage ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
             appropriateFor: nil, create: true).appendingPathComponent("AccountProviderCheckpoints", isDirectory: true)
+        #if os(macOS)
+        if testing {
+            root.appendPathComponent("testing", isDirectory: true)
+        }
+        #endif
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root
     }
     func accountDirectory() throws -> URL {
-        guard Identifier.valid(domain.identifier.rawValue) else { throw NSFileProviderError(.notAuthenticated) }
-        let directory = try rootDirectory().appendingPathComponent(Self.hash(Data(domain.identifier.rawValue.utf8)), isDirectory: true)
+        guard Identifier.valid(account) else { throw NSFileProviderError(.notAuthenticated) }
+        let directory = try rootDirectory().appendingPathComponent(Self.hash(Data(account.utf8)), isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let others = try FileManager.default.contentsOfDirectory(at: rootDirectory(), includingPropertiesForKeys: [.contentModificationDateKey])
             .filter { validHash($0.lastPathComponent) && $0 != directory }
@@ -96,7 +111,7 @@ final class ProviderEnumerator: NSObject, NSFileProviderEnumerator {
     /// Short cross-process leases protect exposure admission before local commits.
     /// The ledger is durable state, separate from evictable checkpoint metadata.
     func withExposure<T>(update: Bool, _ body: (inout [String: [String: Data]]) throws -> T) throws -> T {
-        guard Identifier.valid(domain.identifier.rawValue) else { throw NSFileProviderError(.notAuthenticated) }
+        guard Identifier.valid(account) else { throw NSFileProviderError(.notAuthenticated) }
         let activity = ProcessInfo.processInfo.beginActivity(options: .userInitiated, reason: "Keep Playbit Files edits")
         defer { ProcessInfo.processInfo.endActivity(activity) }
         Self.checkpointLock.lock(); defer { Self.checkpointLock.unlock() }
@@ -136,11 +151,11 @@ final class ProviderEnumerator: NSObject, NSFileProviderEnumerator {
     func reserveVolume(_ volume: String, name: String) throws {
         guard Identifier.valid(volume) else { throw CocoaError(.fileReadCorruptFile) }
         try withExposure(update: true) { ledger in
-            var known = ledger[domain.identifier.rawValue] ?? [:]
+            var known = ledger[account] ?? [:]
             if known[volume] == nil {
                 known[volume] = try JSONSerialization.data(withJSONObject: ["id": volume, "filename": name, "reserved": true], options: [.sortedKeys])
             }
-            ledger[domain.identifier.rawValue] = known
+            ledger[account] = known
         }
     }
     func disambiguate(_ folders: inout [String: Data]) throws {
@@ -175,7 +190,7 @@ final class ProviderEnumerator: NSObject, NSFileProviderEnumerator {
     func catalog(_ completion: @escaping (Result<[String: Data], Error>) -> Void) {
         do {
             try checkActive()
-            let known = try withExposure(update: false) { Array(($0[domain.identifier.rawValue] ?? [:]).keys).sorted() }
+            let known = try withExposure(update: false) { Array(($0[account] ?? [:]).keys).sorted() }
             client.call(["op": "catalog", "known": known]) { result in
                 do {
                     try self.checkActive()
@@ -190,14 +205,14 @@ final class ProviderEnumerator: NSObject, NSFileProviderEnumerator {
                         current[id] = try JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
                     }
                     try self.withExposure(update: true) { ledger in
-                        let previous = ledger[self.domain.identifier.rawValue] ?? [:]
+                        let previous = ledger[self.account] ?? [:]
                         var reservations: [String: Data] = [:]
                         for (id, bytes) in previous where current[id] == nil || retired.contains(id) {
                             if try self.folder(bytes)["reserved"] as? Bool == true { reservations[id] = bytes }
                             else { current[id] = try self.unavailable(bytes) }
                         }
                         try self.disambiguate(&current)
-                        ledger[self.domain.identifier.rawValue] = current.merging(reservations) { visible, _ in visible }
+                        ledger[self.account] = current.merging(reservations) { visible, _ in visible }
                     }
                     completion(.success(current))
                 } catch { completion(.failure(error)) }

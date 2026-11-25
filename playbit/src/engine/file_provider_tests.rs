@@ -591,7 +591,8 @@ fn enrollment_does_not_wait_for_provider_push_registration() {
     let request = std::thread::spawn(move || {
         call(
             &profile,
-            br#"{"op":"push_token","token":"abcd","invalidated":true,"bundle":"playbit.engine","sandbox":false}"#,
+            b"{\"op\":\"push_token\",\"token\":\"abcd\",\"invalidated\":true,\
+              \"bundle\":\"playbit.engine\",\"sandbox\":false}",
         )
     });
     ap.request_held.recv_timeout(Duration::from_secs(5)).unwrap();

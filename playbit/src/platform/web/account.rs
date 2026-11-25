@@ -309,10 +309,12 @@ pub extern "C" fn pb_scope_addresses(length: usize) -> i32 {
     struct ScopeRequest {
         app: AppIdentity,
         session: Option<String>,
+        account: Option<Id>,
+        installation: Option<Id>,
     }
 
     crate::platform::failure::guard();
-    // Two base58 IDs, a 64-byte app identifier and the bounded JSON envelope.
+    // Canonical IDs, a 64-byte app identifier and the bounded JSON envelope.
     input(length, 512, |bytes| {
         let request: ScopeRequest = serde_json::from_slice(bytes).map_err(map_error)?;
         let world = request
@@ -327,6 +329,29 @@ pub extern "C" fn pb_scope_addresses(length: usize) -> i32 {
                 .volume_id(AutomaticVolumeRole::Session, Some(session), None, None)
                 .map_err(map_error)?;
             result["shared"] = serde_json::json!(shared);
+            if let (Some(account), Some(installation)) = (request.account, request.installation) {
+                for (name, role) in [
+                    ("user", AutomaticVolumeRole::User),
+                    ("user_session", AutomaticVolumeRole::UserSession),
+                    ("local", AutomaticVolumeRole::Local),
+                    ("local_session", AutomaticVolumeRole::LocalSession),
+                ] {
+                    let id = request
+                        .app
+                        .volume_id(
+                            role,
+                            role.is_session().then_some(session),
+                            Some(account),
+                            role.is_local().then_some(installation),
+                        )
+                        .map_err(map_error)?;
+                    result[name] = serde_json::json!(id);
+                }
+            } else if request.account.is_some() || request.installation.is_some() {
+                return Err(Error::InvalidArgument);
+            }
+        } else if request.account.is_some() || request.installation.is_some() {
+            return Err(Error::InvalidArgument);
         }
         serde_json::to_vec(&result).map_err(map_error)
     })

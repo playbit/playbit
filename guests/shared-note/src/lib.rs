@@ -144,7 +144,8 @@ impl App {
                         self.subscribed[channel] = true;
                     }
                     self.channel_status =
-                        "Live messages are ephemeral. Save keeps the note in this session’s Shared data."
+                        "Live messages are ephemeral. Save keeps the note in this session’s \
+                         Shared data."
                             .into();
                 }
                 Err(error) => {

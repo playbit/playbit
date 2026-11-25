@@ -986,8 +986,8 @@ snapshot, so it cannot erase a concurrent replacement. Each account retains at
 most 32 endpoints. Pushes coalesce to one account-domain working-set hint per
 endpoint. Namespace/blob hints require an owned personal volume with a
 provisioned service replica; account-replica publications may signal catalog
-changes even for an empty account. Push payloads contain only the canonical
-account domain identity and the File Provider working-set container, never
+changes even for an empty account. Push payloads contain only the File Provider
+domain identifier and the working-set container, never
 volume names, item identifiers or data. They confer no authority or
 delivery/execution guarantee.
 

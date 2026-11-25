@@ -9,8 +9,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
     required init(domain: NSFileProviderDomain) {
         self.domain = domain
         #if os(macOS)
-        self.client = ProviderClient(account: domain.identifier.rawValue,
-            profile: domain.userInfo?["profile"] as? String ?? "")
+        self.client = ProviderClient(domain: domain)
         #else
         self.client = ProviderClient(account: domain.identifier.rawValue)
         #endif
@@ -61,7 +60,12 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension {
             }
             client.call(node.itemRequest()) { result in
                 switch result {
-                case .success(let value): operation.finish(((value["item"] as? [String: Any]).map(ProviderItem.init), nil))
+                case .success(let value):
+                    var item = value["item"] as? [String: Any]
+                    #if os(macOS)
+                    if node == .root { item?["filename"] = self.domain.displayName }
+                    #endif
+                    operation.finish((item.map(ProviderItem.init), nil))
                 case .failure(let error): operation.finish((nil, error))
                 }
             }

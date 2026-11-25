@@ -33,6 +33,7 @@ pub struct Engine {
     pub(super) invitation: Option<invitation::Invitation>,
     pub(crate) bootstrap_pending: bool,
     pub(super) pending_join: Option<String>,
+    pub(super) joined_for_open: Option<String>,
     pub(super) network_request_waiter: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) network_response: Option<std::result::Result<reply::Reply, String>>,
     pub(crate) completion: Completion,
@@ -142,6 +143,7 @@ impl Engine {
             provider_revision: services.store.delivery_provider_revision(None, None).0,
             bootstrap_pending: remote.enrolled() && !remote.offline(),
             pending_join: None,
+            joined_for_open: None,
             remote: Some(remote),
             network,
             background: None,
@@ -439,7 +441,7 @@ impl Engine {
                 self.network.builds.retry(&retained.resolved_build_id);
                 Reply::Status(Box::new(self.status_snapshot()?))
             }
-            Request::TransferStatus => Reply::Transfer { transfer: self.transfer_status() },
+            Request::TransferStatus => Reply::Transfer { transfer: self.opening_transfer_status() },
             Request::CancelTransfer => {
                 self.cancel_transfer()?;
                 Reply::Transfer { transfer: self.transfer_status() }

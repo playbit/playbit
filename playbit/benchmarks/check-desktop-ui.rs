@@ -301,10 +301,22 @@ fn main() {
                             control.set_popup_open(true, cx);
                             control
                         }));
-                        let session = cx.new(|cx| Control::new(3,
-                            Properties { kind: Kind::Button(ButtonStyle::Default), label: "", disabled: false, theme: &Theme::light() },
-                            Rc::new(move |_, _| session_received.set(session_received.get() + 1)), cx,
-                        ).toolbar_icon("session-icon"));
+                        let session = cx.new(|cx| {
+                            Control::new(
+                                3,
+                                Properties {
+                                    kind: Kind::Button(ButtonStyle::Default),
+                                    label: "",
+                                    disabled: false,
+                                    theme: &Theme::light(),
+                                },
+                                Rc::new(move |_, _| {
+                                    session_received.set(session_received.get() + 1)
+                                }),
+                                cx,
+                            )
+                            .toolbar_icon("session-icon")
+                        });
                         Fixture { buttons, session }
                     })
                 },
@@ -333,7 +345,10 @@ fn main() {
                 let can_drag = native_drag_allowed(view, x as f64, y as f64);
                 assert_eq!(can_drag, expected, "native drag permission at ({x},{y})");
             }
-            println!("Native WindowServer drag geometry: titlebar=true, session slot=false, control=false");
+            println!(
+                "Native WindowServer drag geometry: titlebar=true, session slot=false, \
+                 control=false"
+            );
             cx.update(|cx| capture(owner.into(), "pressed", cx)).unwrap();
             check_pressed_pixels();
             let native_owner = cx.update(|cx| native_window(owner.into(), cx)).unwrap();
@@ -348,9 +363,21 @@ fn main() {
             native_mouse(native_owner, 2, 140., 60.);
             Timer::after(Duration::from_millis(50)).await;
             let frame_after: cocoa::foundation::NSRect = unsafe { msg_send![native_owner, frame] };
-            assert_eq!((frame_before.origin.x, frame_before.origin.y, frame_before.size.width, frame_before.size.height),
-                (frame_after.origin.x, frame_after.origin.y, frame_after.size.width, frame_after.size.height),
-                "canceling a session press must not move the native window");
+            assert_eq!(
+                (
+                    frame_before.origin.x,
+                    frame_before.origin.y,
+                    frame_before.size.width,
+                    frame_before.size.height
+                ),
+                (
+                    frame_after.origin.x,
+                    frame_after.origin.y,
+                    frame_after.size.width,
+                    frame_after.size.height
+                ),
+                "canceling a session press must not move the native window"
+            );
             assert_eq!(session_actions.get(), 0, "dragging out cancels the action");
             let movable: bool = unsafe { msg_send![native_owner, isMovable] };
             assert!(movable, "release preserves configured window movability");
@@ -358,7 +385,10 @@ fn main() {
             native_mouse(native_owner, 2, 199., 16.);
             Timer::after(Duration::from_millis(50)).await;
             assert_eq!(session_actions.get(), 1, "ordinary session click still dispatches once");
-            println!("Native titlebar session down/drag-out/up: frame unchanged, action canceled; ordinary click dispatched once");
+            println!(
+                "Native titlebar session down/drag-out/up: frame unchanged, action canceled; \
+                 ordinary click dispatched once"
+            );
             let owner_handle: AnyWindowHandle = owner.into();
             // Menu-only runs keep unrelated titlebar timing out of the cohort.
             if !std::env::args().any(|argument| argument == "--menus-only") {
@@ -368,18 +398,26 @@ fn main() {
                     native_mouse(native_owner, 1, 199., 16.);
                     native_mouse(native_owner, 6, 140., 60.);
                     native_mouse(native_owner, 2, 140., 60.);
-                    owner_handle.update(cx, |_, window, cx| { let _ = window.draw(cx); }).unwrap();
+                    owner_handle
+                        .update(cx, |_, window, cx| {
+                            let _ = window.draw(cx);
+                        })
+                        .unwrap();
                     drag_samples.push(start.elapsed().as_secs_f64() * 1000.);
                 }
                 assert_eq!(session_actions.get(), 1, "all canceling gestures must stay canceled");
                 drag_samples.sort_by(f64::total_cmp);
-                println!("native titlebar cancellation + CPU draw ms n=1000 p50={} p95={} p99={} max={}",
-                    drag_samples[499], drag_samples[949], drag_samples[989], drag_samples[999]);
+                println!(
+                    "native titlebar cancellation + CPU draw ms n=1000 p50={} p95={} p99={} max={}",
+                    drag_samples[499], drag_samples[949], drag_samples[989], drag_samples[999]
+                );
             }
 
             // Preserve whichever key status this application has, without activating it.
             let expected_key: bool = unsafe { msg_send![native_owner, isKeyWindow] };
-            println!("Native owner key status before opening: {expected_key} (application not activated)");
+            println!(
+                "Native owner key status before opening: {expected_key} (application not activated)"
+            );
             let request = owner
                 .update(cx, |_, window, cx| {
                     popup::Request::context(
@@ -387,7 +425,8 @@ fn main() {
                         point(px(70.), px(60.)),
                         vec![
                             action(1, "First", false),
-                            MenuEntry::Submenu { icon: None,
+                            MenuEntry::Submenu {
+                                icon: None,
                                 label: "More".into(),
                                 disabled: false,
                                 items: vec![action(2, "Child", false), action(3, "Disabled", true)],
@@ -486,10 +525,17 @@ fn main() {
             println!("pointer cancellation and matching down/up passed");
             let native_actions = Rc::new(std::cell::Cell::new(0));
             let received = native_actions.clone();
-            let request = owner.update(cx, |_, window, cx| popup::Request::context(
-                window, point(px(70.), px(60.)), vec![action(1, "First", false), action(2, "Second", false)],
-                Rc::new(move |id, _| received.set(id)), cx,
-            )).unwrap();
+            let request = owner
+                .update(cx, |_, window, cx| {
+                    popup::Request::context(
+                        window,
+                        point(px(70.), px(60.)),
+                        vec![action(1, "First", false), action(2, "Second", false)],
+                        Rc::new(move |id, _| received.set(id)),
+                        cx,
+                    )
+                })
+                .unwrap();
             cx.update(|cx| popup::open(request, cx)).unwrap();
             Timer::after(Duration::from_millis(150)).await;
             check_menu_focus(native_owner, native_menu, expected_key);
@@ -499,43 +545,90 @@ fn main() {
             let mut samples = Vec::with_capacity(1000);
             for i in 0..1000 {
                 let start = std::time::Instant::now();
-                let (character, code) = if i % 2 == 0 { ("\u{f700}", 126) } else { ("\u{f701}", 125) };
+                let (character, code) =
+                    if i % 2 == 0 { ("\u{f700}", 126) } else { ("\u{f701}", 125) };
                 native_key(native_owner, character, code);
-                menu.update(cx, |_, window, cx| { let _ = window.draw(cx); }).unwrap();
+                menu.update(cx, |_, window, cx| {
+                    let _ = window.draw(cx);
+                })
+                .unwrap();
                 samples.push(start.elapsed().as_secs_f64() * 1000.);
             }
             samples.sort_by(f64::total_cmp);
-            println!("native menu arrow + CPU draw ms n=1000 p50={} p95={} p99={} max={}",
-                samples[499], samples[949], samples[989], samples[999]);
+            println!(
+                "native menu arrow + CPU draw ms n=1000 p50={} p95={} p99={} max={}",
+                samples[499], samples[949], samples[989], samples[999]
+            );
             native_key(native_owner, "\u{f700}", 126);
             Timer::after(Duration::from_millis(30)).await;
             native_key(native_owner, "\r", 36);
             Timer::after(Duration::from_millis(100)).await;
-            assert_eq!(native_actions.get(), 1, "type-ahead selects Second, Up selects First, Return activates First");
-            unsafe { let key: bool = msg_send![native_owner, isKeyWindow]; assert_eq!(key, expected_key); }
+            assert_eq!(
+                native_actions.get(),
+                1,
+                "type-ahead selects Second, Up selects First, Return activates First"
+            );
+            unsafe {
+                let key: bool = msg_send![native_owner, isKeyWindow];
+                assert_eq!(key, expected_key);
+            }
             check_menu_detached(native_menu);
-            println!("Recycled child menu preserves owner key status; native type-ahead/Up/Return dispatch once through modal monitor");
+            println!(
+                "Recycled child menu preserves owner key status; \
+                 native type-ahead/Up/Return dispatch once through modal monitor"
+            );
             // Exercise every navigation key through NSApplication and the modal
             // monitor, with real arrow modifier flags, rather than GPUI injection.
             let received = native_actions.clone();
-            let request = owner.update(cx, |_, window, cx| popup::Request::context(
-                window, point(px(70.), px(60.)), vec![action(1, "First", false),
-                    MenuEntry::Submenu { icon: None, label: "More".into(), disabled: false,
-                        items: vec![action(2, "Child", false)] }, action(3, "Last", false)],
-                Rc::new(move |id, _| received.set(id)), cx,
-            )).unwrap();
+            let request = owner
+                .update(cx, |_, window, cx| {
+                    popup::Request::context(
+                        window,
+                        point(px(70.), px(60.)),
+                        vec![
+                            action(1, "First", false),
+                            MenuEntry::Submenu {
+                                icon: None,
+                                label: "More".into(),
+                                disabled: false,
+                                items: vec![action(2, "Child", false)],
+                            },
+                            action(3, "Last", false),
+                        ],
+                        Rc::new(move |id, _| received.set(id)),
+                        cx,
+                    )
+                })
+                .unwrap();
             cx.update(|cx| popup::open(request, cx)).unwrap();
             Timer::after(Duration::from_millis(100)).await;
-            for (characters, code) in [("\u{f701}", 125), ("\u{f701}", 125),
-                ("\u{f703}", 124), ("\u{f702}", 123), ("\u{f703}", 124), ("\r", 36)] {
+            for (characters, code) in [
+                ("\u{f701}", 125),
+                ("\u{f701}", 125),
+                ("\u{f703}", 124),
+                ("\u{f702}", 123),
+                ("\u{f703}", 124),
+                ("\r", 36),
+            ] {
                 native_key(native_owner, characters, code);
                 Timer::after(Duration::from_millis(30)).await;
             }
-            assert_eq!(native_actions.get(), 2, "Down/Down/Right/Left/Right/Return activates Child");
-            let request = owner.update(cx, |_, window, cx| popup::Request::context(
-                window, point(px(70.), px(60.)), vec![action(1, "First", false)],
-                Rc::new(|_, _| panic!("Escape must not activate")), cx,
-            )).unwrap();
+            assert_eq!(
+                native_actions.get(),
+                2,
+                "Down/Down/Right/Left/Right/Return activates Child"
+            );
+            let request = owner
+                .update(cx, |_, window, cx| {
+                    popup::Request::context(
+                        window,
+                        point(px(70.), px(60.)),
+                        vec![action(1, "First", false)],
+                        Rc::new(|_, _| panic!("Escape must not activate")),
+                        cx,
+                    )
+                })
+                .unwrap();
             cx.update(|cx| popup::open(request, cx)).unwrap();
             Timer::after(Duration::from_millis(100)).await;
             native_key(native_owner, "\u{1b}", 53);
@@ -547,79 +640,158 @@ fn main() {
                 cx.update(|cx| {
                     zoom::change(cx, delta);
                     let scale = zoom::factor(cx);
-                    owner.update(cx, |_, window, _| {
-                        window.resize(size(px(220. * scale), px(160. * scale)));
-                    }).unwrap();
-                }).unwrap();
+                    owner
+                        .update(cx, |_, window, _| {
+                            window.resize(size(px(220. * scale), px(160. * scale)));
+                        })
+                        .unwrap();
+                })
+                .unwrap();
                 Timer::after(Duration::from_millis(100)).await;
-                cx.update(|cx| capture(owner.into(), &format!("zoom-{units}-controls"), cx)).unwrap();
+                cx.update(|cx| capture(owner.into(), &format!("zoom-{units}-controls"), cx))
+                    .unwrap();
                 for anchor in ["context", "above", "below"] {
                     let selected = native_actions.clone();
                     selected.set(0);
-                    let request = owner.update(cx, |fixture, window, cx| {
-                        let scale = zoom::factor(cx);
-                        let mut first = action(1, "First", false);
-                        if let MenuEntry::Action { checked, .. } = &mut first {
-                            *checked = Some(true);
-                        }
-                        let items = vec![first, MenuEntry::Separator,
-                            MenuEntry::Submenu { icon: None, label: "More".into(), disabled: false,
-                                items: vec![action(2, "Child", false), action(3, "Disabled", true)] },
-                            action(4, "Last", false)];
-                        let activate: controls::Activate = Rc::new(move |id, _| selected.set(id));
-                        if anchor == "context" {
-                            popup::Request::context(window, point(px(70. * scale), px(60. * scale)), items, activate, cx)
-                        } else {
-                            let request = popup::Request::button(window,
-                                Bounds::new(point(px(20. * scale), px(20. * scale)), size(px(100. * scale), px(24. * scale))),
-                                "First".into(), items, activate, fixture.buttons[0].downgrade(), cx);
-                            if anchor == "above" { request.above_button() } else { request.below_button() }
-                        }
-                    }).unwrap();
+                    let request = owner
+                        .update(cx, |fixture, window, cx| {
+                            let scale = zoom::factor(cx);
+                            let mut first = action(1, "First", false);
+                            if let MenuEntry::Action { checked, .. } = &mut first {
+                                *checked = Some(true);
+                            }
+                            let items = vec![
+                                first,
+                                MenuEntry::Separator,
+                                MenuEntry::Submenu {
+                                    icon: None,
+                                    label: "More".into(),
+                                    disabled: false,
+                                    items: vec![
+                                        action(2, "Child", false),
+                                        action(3, "Disabled", true),
+                                    ],
+                                },
+                                action(4, "Last", false),
+                            ];
+                            let activate: controls::Activate =
+                                Rc::new(move |id, _| selected.set(id));
+                            if anchor == "context" {
+                                popup::Request::context(
+                                    window,
+                                    point(px(70. * scale), px(60. * scale)),
+                                    items,
+                                    activate,
+                                    cx,
+                                )
+                            } else {
+                                let request = popup::Request::button(
+                                    window,
+                                    Bounds::new(
+                                        point(px(20. * scale), px(20. * scale)),
+                                        size(px(100. * scale), px(24. * scale)),
+                                    ),
+                                    "First".into(),
+                                    items,
+                                    activate,
+                                    fixture.buttons[0].downgrade(),
+                                    cx,
+                                );
+                                if anchor == "above" {
+                                    request.above_button()
+                                } else {
+                                    request.below_button()
+                                }
+                            }
+                        })
+                        .unwrap();
                     cx.update(|cx| popup::open(request, cx)).unwrap();
                     Timer::after(Duration::from_millis(100)).await;
                     cx.update(|cx| capture(menu, &format!("zoom-{units}-{anchor}"), cx)).unwrap();
                     native_key(native_owner, "m", 46);
                     native_key(native_owner, "\u{f703}", 124);
                     Timer::after(Duration::from_millis(100)).await;
-                    cx.update(|cx| capture(menu, &format!("zoom-{units}-{anchor}-child"), cx)).unwrap();
+                    cx.update(|cx| capture(menu, &format!("zoom-{units}-{anchor}-child"), cx))
+                        .unwrap();
                     native_key(native_owner, "\r", 36);
                     Timer::after(Duration::from_millis(50)).await;
-                    assert_eq!(native_actions.get(), 2, "scaled {anchor} submenu action at {units}");
+                    assert_eq!(
+                        native_actions.get(),
+                        2,
+                        "scaled {anchor} submenu action at {units}"
+                    );
                 }
             }
-            let request = owner.update(cx, |_, window, cx| popup::Request::context(
-                window, point(px(40.), px(40.)), vec![action(1, "First", false)],
-                Rc::new(|_, _| panic!("zoom must cancel without activating")), cx,
-            )).unwrap();
+            let request = owner
+                .update(cx, |_, window, cx| {
+                    popup::Request::context(
+                        window,
+                        point(px(40.), px(40.)),
+                        vec![action(1, "First", false)],
+                        Rc::new(|_, _| panic!("zoom must cancel without activating")),
+                        cx,
+                    )
+                })
+                .unwrap();
             cx.update(|cx| popup::open(request, cx)).unwrap();
             Timer::after(Duration::from_millis(50)).await;
             cx.update(|cx| key(menu, "cmd-=", cx)).unwrap();
             Timer::after(Duration::from_millis(50)).await;
             cx.update(|cx| assert_eq!(zoom::factor(cx), 0.75)).unwrap();
             assert!(!popup::is_modal_active(), "zoom cancels the menu's old hit regions");
-            println!("50.00%, 123.45%, 200.00% controls and all native popup anchors/submenus passed; live menu zoom cancels without activation");
+            println!(
+                "50.00%, 123.45%, 200.00% controls and all native popup anchors/submenus \
+                 passed; live menu zoom cancels without activation"
+            );
             // Exercise deferred cancellation, retargeting and owner closure on
             // the same retained native panel, with no app activation.
-            let request = owner.update(cx, |_, window, cx| popup::Request::context(
-                window, point(px(70.), px(60.)), vec![action(1, "First", false)],
-                Rc::new(|_, _| panic!("lifecycle checks must not activate")), cx,
-            )).unwrap();
-            cx.update(|cx| { popup::open(request.clone(), cx); popup::dismiss(cx); }).unwrap();
+            let request = owner
+                .update(cx, |_, window, cx| {
+                    popup::Request::context(
+                        window,
+                        point(px(70.), px(60.)),
+                        vec![action(1, "First", false)],
+                        Rc::new(|_, _| panic!("lifecycle checks must not activate")),
+                        cx,
+                    )
+                })
+                .unwrap();
+            cx.update(|cx| {
+                popup::open(request.clone(), cx);
+                popup::dismiss(cx);
+            })
+            .unwrap();
             Timer::after(Duration::from_millis(30)).await;
             check_menu_detached(native_menu);
-            let other = cx.update(|cx| cx.open_window(WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    point(px(400.), px(100.)), size(px(220.), px(160.))))),
-                focus: false,
-                ..Default::default()
-            }, |_, cx| cx.new(|_| OtherOwner)).unwrap()).unwrap();
+            let other = cx
+                .update(|cx| {
+                    cx.open_window(
+                        WindowOptions {
+                            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                                point(px(400.), px(100.)),
+                                size(px(220.), px(160.)),
+                            ))),
+                            focus: false,
+                            ..Default::default()
+                        },
+                        |_, cx| cx.new(|_| OtherOwner),
+                    )
+                    .unwrap()
+                })
+                .unwrap();
             let other_native = cx.update(|cx| native_window(other.into(), cx)).unwrap();
             let other_key: bool = unsafe { msg_send![other_native, isKeyWindow] };
-            let other_request = other.update(cx, |_, window, cx| popup::Request::context(
-                window, point(px(210.), px(130.)), vec![action(1, "Menu outside its owner", false)],
-                Rc::new(|_, _| panic!("owner closure must not activate")), cx,
-            )).unwrap();
+            let other_request = other
+                .update(cx, |_, window, cx| {
+                    popup::Request::context(
+                        window,
+                        point(px(210.), px(130.)),
+                        vec![action(1, "Menu outside its owner", false)],
+                        Rc::new(|_, _| panic!("owner closure must not activate")),
+                        cx,
+                    )
+                })
+                .unwrap();
             cx.update(|cx| popup::open(other_request, cx)).unwrap();
             Timer::after(Duration::from_millis(100)).await;
             check_menu_focus(other_native, native_menu, other_key);
@@ -637,8 +809,15 @@ fn main() {
                 // turn, then draw both the owner and menu. No GPU fence or
                 // physical-presentation claim is made by this CPU boundary.
                 Timer::after(Duration::from_millis(1)).await;
-                owner_handle.update(cx, |_, window, cx| { let _ = window.draw(cx); }).unwrap();
-                menu.update(cx, |_, window, cx| { let _ = window.draw(cx); }).unwrap();
+                owner_handle
+                    .update(cx, |_, window, cx| {
+                        let _ = window.draw(cx);
+                    })
+                    .unwrap();
+                menu.update(cx, |_, window, cx| {
+                    let _ = window.draw(cx);
+                })
+                .unwrap();
                 let visible: bool = unsafe { msg_send![native_menu, isVisible] };
                 assert!(visible, "menu must be attached before readiness is sampled");
                 open_samples.push(start.elapsed().as_secs_f64() * 1000.);
@@ -647,13 +826,20 @@ fn main() {
                 check_menu_detached(native_menu);
                 close_samples.push(start.elapsed().as_secs_f64() * 1000.);
             }
-            for (name, samples) in [("menu open + attach + owner/menu CPU draw", &mut open_samples),
-                ("menu close + detach", &mut close_samples)] {
+            for (name, samples) in [
+                ("menu open + attach + owner/menu CPU draw", &mut open_samples),
+                ("menu close + detach", &mut close_samples),
+            ] {
                 samples.sort_by(f64::total_cmp);
-                println!("{name} ms n=1000 p50={} p95={} p99={} max={}",
-                    samples[499], samples[949], samples[989], samples[999]);
+                println!(
+                    "{name} ms n=1000 p50={} p95={} p99={} max={}",
+                    samples[499], samples[949], samples[989], samples[999]
+                );
             }
-            println!("Deferred cancellation, owner retargeting, overflow, owner closure and 1000 reuse cycles passed");
+            println!(
+                "Deferred cancellation, owner retargeting, overflow, \
+                 owner closure and 1000 reuse cycles passed"
+            );
             cx.update(|cx| cx.quit()).unwrap();
         })
         .detach();

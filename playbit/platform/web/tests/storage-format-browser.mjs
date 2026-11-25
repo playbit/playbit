@@ -1,4 +1,5 @@
 // Isolated-origin web browser evidence: real IndexedDB upgrades, OPFS and WebCrypto.
+import { automaticStorageCases } from './automatic-storage-browser.mjs';
 import { numberedId } from './identifier-fixture.mjs';
 import { openMetadata, storageFormat, watchMetadata, storageFormatAvailable, finishWebStorageReset, FORMAT_STORE, FORMAT_KEY, METADATA_VERSION } from '../src/storage-format.ts';
 import { resetWebAccount, ACCOUNT_STORAGE_LOCK } from '../src/web-account.ts';
@@ -56,6 +57,7 @@ export async function webStorageFormatCases() {
         const restore = await format.createWritable(); await restore.write(original); await restore.close(); await admitWebProfile(directory);
         const file = async name => { const result = await (await directory.getFileHandle(name, { create: true })).createSyncAccessHandle(); handles.push(result); return result; };
         const resources = new OpfsResources([await file('writer0'), await file('writer1')], [await file('stage0'), await file('stage1')]);
+        const privateScopes = await automaticStorageCases(resources);
         store = await OpfsStore.open(await file('data'), resources, async () => {});
         const first = store.begin(true); first.put(Uint8Array.of(1), Uint8Array.of(7)); first.end(true);
         const before = store.handle.getSize();
@@ -111,7 +113,7 @@ export async function webStorageFormatCases() {
         check(!storageFormatAvailable(), 'Already newer metadata failed to fence watcher initialization');
         await rejected(() => resetWebAccount({ resume: true }, async () => {}, globalThis, finishWebStorageReset));
         check(!storageFormatAvailable(), 'Account reset cleared installation incompatibility');
-        return { installation, checks: 'markerless version retained; aborted creation; OPFS update refusal; real IDB versionchange; cached grant syscall denied; cached AP writes denied; lower-version open refused; accepted OPFS commit refused; pending ciphertext retained; explicit reset completes under exclusive lock and same worker opens empty account state; incompatible installation remains fenced', retained_record_bytes: intent.ciphertext.length + 40 };
+        return { installation, privateScopes, checks: 'markerless version retained; aborted creation; OPFS update refusal; real IDB versionchange; cached grant syscall denied; cached AP writes denied; lower-version open refused; accepted OPFS commit refused; pending ciphertext retained; explicit reset completes under exclusive lock and same worker opens empty account state; incompatible installation remains fenced', retained_record_bytes: intent.ciphertext.length + 40 };
     } finally {
         database?.close(); store?.close();
         for (const handle of handles) { try { handle.close(); } catch { /* Resource owner already closed it. */ } }

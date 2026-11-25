@@ -587,13 +587,17 @@ fn wasm_begin_copies_inputs_and_short_take_never_reexecutes_storage() {
         let (state, records, _) = state();
         let context = state.context.clone();
         drop(state);
-        let wasm = wat::parse_str(r#"(module
-            (import "playbit" "pb_syscall" (func $sys (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        let wasm = wat::parse_str(
+            r#"(module
+            (import "playbit" "pb_syscall" (func $sys (param i32 i64 i64 i64 i64 i64 i64)
+                (result i64)))
             (memory (export "memory") 2)
             (func (export "pb_main"))
             (func (export "invoke") (param i32 i64 i64 i64 i64 i64 i64) (result i64)
                 (call $sys (local.get 0) (local.get 1) (local.get 2)
-                    (local.get 3) (local.get 4) (local.get 5) (local.get 6))))"#).unwrap();
+                    (local.get 3) (local.get 4) (local.get 5) (local.get 6))))"#,
+        )
+        .unwrap();
         let mut guest = Runtime::with_backend(backend)
             .unwrap()
             .create_guest(&wasm, context, Box::new(TestHost(Rc::clone(&records))))
@@ -684,13 +688,18 @@ fn wasm_file_begin_and_take_admit_spans_and_keep_short_results_on_both_backends(
         let (state, records, _) = state();
         let context = state.context.clone();
         let runtime = crate::runtime::Runtime::with_backend(mode).unwrap();
-        let wasm = wat::parse_str(r#"(module
-            (import "playbit" "pb_syscall" (func $call (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        let wasm = wat::parse_str(
+            r#"(module
+            (import "playbit" "pb_syscall" (func $call (param i32 i64 i64 i64 i64 i64 i64)
+                (result i64)))
             (memory (export "memory") 1)
             (func (export "pb_main"))
             (func (export "invoke") (param i32 i64 i64 i64 i64 i64 i64) (result i64)
-                local.get 0 local.get 1 local.get 2 local.get 3 local.get 4 local.get 5 local.get 6
-                call $call))"#).unwrap();
+                local.get 0 local.get 1 local.get 2 local.get 3 local.get 4 local.get 5
+                    local.get 6
+                call $call))"#,
+        )
+        .unwrap();
         let mut guest =
             runtime.create_guest(&wasm, context, Box::new(TestHost(Rc::clone(&records)))).unwrap();
         let app = &mut guest.store.data_mut().app;

@@ -212,7 +212,10 @@ impl<'a> InitOptions<'a> {
                     "--name" if options.name.is_none() => options.name = Some(value),
                     "--app-id" if options.app_id.is_none() => {
                         if !playbit::package::valid_app_id(value) {
-                            return Err("invalid --app-id: expected 1–64 lowercase ASCII letters/digits in nonempty components separated by dots or hyphens".into());
+                            return Err("invalid --app-id: expected 1–64 lowercase ASCII \
+                                letters/digits in nonempty components separated by dots or \
+                                hyphens"
+                                .into());
                         }
                         options.app_id = Some(value);
                     }
@@ -268,7 +271,8 @@ impl Options {
                 .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
             {
                 format!(
-                    "No playbit.toml in {}. Run this command in a Playbit app directory, or create one with pb init PATH.",
+                    "No playbit.toml in {}. Run this command in a Playbit app directory, \
+                     or create one with pb init PATH.",
                     directory.display()
                 )
                 .into()
@@ -402,7 +406,9 @@ fn parse_gas_limit(value: &str) -> Result<Option<NonZeroU64>> {
         None => (value, 1),
     };
     if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err("invalid --gas-limit: expected an unsigned decimal value, optionally followed by M (1,000,000); 0 is unlimited".into());
+        return Err("invalid --gas-limit: expected an unsigned decimal value, \
+            optionally followed by M (1,000,000); 0 is unlimited"
+            .into());
     }
     let limit = digits
         .parse::<u64>()
@@ -539,7 +545,11 @@ fn product_in(target: &Path, mode: BuildMode, name: &str) -> Result<PathBuf> {
         || name.contains(['/', ':'])
         || name.chars().any(char::is_control)
     {
-        return Err(format!("app name must fit a 255-byte .{extension} filename and contain no slash, colon or control character").into());
+        return Err(format!(
+            "app name must fit a 255-byte .{extension} filename and contain no slash, \
+             colon or control character"
+        )
+        .into());
     }
     Ok(target
         .join(if mode.release { "release" } else { "debug" })
@@ -828,7 +838,12 @@ fn open_selected_run(
         selected_mounts(options),
     )?;
     if options.trace {
-        crate::trace::start(profile, instance).map_err(|error| format!("Instance {instance} was launched, but tracing could not start: {error}. Inspect this instance before launching again."))?;
+        crate::trace::start(profile, instance).map_err(|error| {
+            format!(
+                "Instance {instance} was launched, but tracing could not start: {error}. \
+                 Inspect this instance before launching again."
+            )
+        })?;
     }
     Ok((prepared, instance))
 }
@@ -1106,7 +1121,9 @@ pub(super) fn prepare(
     }
     match call(Request::PrepareSession { session: id.into() })? {
         Reply::SessionPrepared(prepared) => Ok(prepared),
-        _ => Err("The completed transfer did not prepare this session. Inspect its recorded state; preparation was not repeated.".into()),
+        _ => Err("The completed transfer did not prepare this session. \
+            Inspect its recorded state; preparation was not repeated."
+            .into()),
     }
 }
 

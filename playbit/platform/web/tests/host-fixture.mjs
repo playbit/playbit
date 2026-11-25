@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { encodeId, decodeId } from '../src/identifier.ts';
 import { readFile } from "node:fs/promises";
 import { OpfsStore, OpfsResources } from "../src/opfs-store.ts";
@@ -128,4 +129,23 @@ export async function createHost(profile, existingStores, now = () => 1000, wrap
     };
     return { host, stores, resources, call, raw, edit, create, read, readField, volumes, query, register, handle, storageErrors, operations };
 
+}
+
+export function pull(source, target, sourceSlot, targetSlot = sourceSlot) {
+    const empty = new Uint8Array();
+    let request = target.raw('pb_sync_begin', empty, targetSlot, 0);
+    assert(request instanceof Uint8Array);
+    assert(source.raw('pb_sync_begin', empty, sourceSlot, 1) instanceof Uint8Array);
+    for (let turns = 0; !target.host.exports.pb_sync_done(); turns++) {
+        assert(turns < 1000);
+        assert(source.raw('pb_sync_step', request, request.length) instanceof Uint8Array); request = empty;
+        for (;;) {
+            const fragment = source.raw('pb_sync_output', empty); assert(fragment instanceof Uint8Array);
+            if (!fragment.length) break;
+            const reply = target.raw('pb_sync_step', fragment, fragment.length); assert(reply instanceof Uint8Array);
+            if (reply.length) { assert.equal(request.length, 0); request = reply; }
+        }
+    }
+    assert(source.raw('pb_sync_step', request, request.length) instanceof Uint8Array);
+    assert.equal(source.host.exports.pb_sync_finish(1), 0); assert.equal(target.host.exports.pb_sync_finish(1), 0);
 }

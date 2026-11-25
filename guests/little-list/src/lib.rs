@@ -47,7 +47,9 @@ fn describe(error: impl std::fmt::Debug) -> String {
 fn describe_read(error: Error) -> String {
     match error {
         Error::AccessDenied => {
-            "This list can't be read right now. Check access and synchronization, then reopen it if needed.".into()
+            "This list can't be read right now. Check access and synchronization, \
+             then reopen it if needed."
+                .into()
         }
         _ => describe(error),
     }

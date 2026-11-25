@@ -44,11 +44,25 @@ if (typeof document !== "undefined") {
         const link = document.querySelector<HTMLAnchorElement>("#open-installed");
         if (link) { link.href = uri; link.hidden = false; }
         const title = document.querySelector<HTMLElement>("#invitation-title");
-        if (title) title.textContent = "You’re invited";
+        if (title) title.textContent = "You're invited";
+        if (!new URLSearchParams(location.search).has("app")) document.body.classList.add("invited");
     }
     const install = document.querySelector<HTMLElement>("#install-playbit");
     const download = document.querySelector<HTMLAnchorElement>("#download-playbit");
-    if (install && download && /Macintosh|Mac OS X/.test(navigator.userAgent) && !/iPhone|iPad/.test(navigator.userAgent)) {
-        void configureInstallation(install, download, deployment.channel);
+    if (install && download) {
+        void configureInstallation(install, download, deployment.channel).then(available => {
+            const footerDownload = document.querySelector<HTMLAnchorElement>('.footer-download');
+            if (available && footerDownload) {
+                footerDownload.href = download.href;
+                footerDownload.hidden = false;
+            }
+        });
     }
+    // A browser without runtime support can still use the native invitation.
+    void import(new URL("./playbit.js", import.meta.url).href).catch(failure => {
+        const error = document.querySelector<HTMLElement>("#error");
+        if (error) error.textContent = `The web runtime could not start. ${failure.message}`;
+        const status = document.querySelector<HTMLElement>("#status");
+        if (status) status.textContent = "Browser participation is unavailable";
+    });
 }

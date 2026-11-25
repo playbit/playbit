@@ -48,13 +48,17 @@ pub(super) fn main(focus_window: bool) -> Result<bool> {
         || super::guest_runtime::runtime_for_engine(&engine)? != Path::new(&installation.runtime)
         || super::guest_runtime::loaded_cdhash()? != installation.runtime_hash
     {
-        return Err("The guest runtime and engine installation differ. Reopen this app from Playbit to refresh its wrapper".into());
+        return Err("The guest runtime and engine installation differ. \
+            Reopen this app from Playbit to refresh its wrapper"
+            .into());
     }
     let profile_lock = profile_gate(&profile)?;
     profile_lock.lock_shared()?;
     let binding = RuntimeBinding::read(&profile)?.ok_or("Missing profile runtime binding")?;
     if binding != RuntimeBinding::from(&installation) {
-        return Err("This wrapper belongs to another runtime installation. Reopen it from Playbit to refresh it".into());
+        return Err("This wrapper belongs to another runtime installation. \
+            Reopen it from Playbit to refresh it"
+            .into());
     }
     crate::ui::desktop::native::run_guest(
         profile.clone(),
@@ -71,7 +75,7 @@ pub(super) fn main(focus_window: bool) -> Result<bool> {
                 if let Some(binding) = binding {
                     return Ok(Some(binding));
                 }
-                match reserve(&profile, &selected.id, false, focus_window, vec![], true, None)? {
+                match reserve(&profile, &selected, false, focus_window, vec![], true, None)? {
                     Routing::Reserved(reservation) => Ok(Some(reservation.instance)),
                     Routing::Existing(_) => Ok(None),
                 }
@@ -180,7 +184,7 @@ pub struct LaunchOptions {
 
 fn reserve(
     profile: &Path,
-    session: &str,
+    session: &Session,
     fresh: bool,
     focus_window: bool,
     host_mounts: Vec<crate::engine::host_mount::HostMount>,
@@ -200,15 +204,25 @@ fn reserve(
         return Err("Unexpected engine launch-incarnation reply".into());
     };
     if !fresh {
-        let Reply::InstanceOwners(owners) =
-            reply(profile, &Request::InstanceList { session: session.into() })?
+        let Reply::InstanceOwners(mut owners) =
+            reply(profile, &Request::InstanceList { session: session.id.clone() })?
         else {
             return Err("Unexpected session-instance routing reply".into());
         };
-        if let Some(owner) = owners.iter().rev().find(|owner| {
+        if let Some(owner) = owners.iter_mut().rev().find(|owner| {
             matches!(owner.instance.state, State::Owned | State::Unknown) && owner.process.is_some()
         }) {
             let presentation = if focus_window {
+                // An update can be selected before the same process claims its
+                // replacement generation. Bind the observation to that one transition.
+                if owner.instance.build != session.resolved_build_id {
+                    owner.instance.owner_generation = owner
+                        .instance
+                        .owner_generation
+                        .checked_add(1)
+                        .ok_or("Session-instance owner generation exhausted")?;
+                    owner.instance.build.clone_from(&session.resolved_build_id);
+                }
                 activate(profile, incarnation, owner)?
             } else {
                 owner.presentation
@@ -221,11 +235,13 @@ fn reserve(
             }));
         }
         if !owners.is_empty() {
-            return Err("This app has an unconfirmed launch or owner. Inspect the recorded session instance before starting another one.".into());
+            return Err("This app has an unconfirmed launch or owner. \
+                Inspect the recorded session instance before starting another one."
+                .into());
         }
     }
     let request = Id::generate()?;
-    let retained = self::session(profile, session)?;
+    let retained = self::session(profile, &session.id)?;
     let grants = if let Some(grants) = selected_volumes {
         grants
     } else {
@@ -244,7 +260,7 @@ fn reserve(
         .collect();
     let saved = if !fresh && restore_host_mounts {
         let Reply::InstanceConfigurations(configurations) =
-            reply(profile, &Request::InstanceConfigurations { session: session.into() })?
+            reply(profile, &Request::InstanceConfigurations { session: session.id.clone() })?
         else {
             return Err("Unexpected saved-instance reply".into());
         };
@@ -259,7 +275,7 @@ fn reserve(
             restore_host_mounts,
             request,
             incarnation,
-            session: session.into(),
+            session: session.id.clone(),
             extra_volumes,
             host_mounts: host_mounts.into_boxed_slice(),
         }
@@ -286,7 +302,7 @@ fn reserve(
         }
     };
     if instance.launch_request != request
-        || instance.session != session
+        || instance.session != session.id
         || instance.state != State::Reserved
     {
         return Err("The launch reservation has another binding or has already dispatched".into());
@@ -322,7 +338,7 @@ fn prepare_launch(
     let (bundle, _profile_lock) = prepare_bundle(&profile, session)?;
     let Reservation { instance, incarnation } = match reserve(
         &profile,
-        &session.id,
+        session,
         fresh,
         focus_window,
         host_mounts,
@@ -511,10 +527,20 @@ pub(super) fn launch_async(
         },
     )?;
     let receipt = pending.receipt;
-    std::thread::Builder::new().name("guest-launch-completion".into()).stack_size(256 * 1024).spawn(move || {
-        let _credit = credit;
-        completion(receipt, pending.wait().map(|_| ()).map_err(|error| error.to_string()));
-    }).map_err(|error| format!("Launch was submitted but its completion could not be observed: {error}; inspect instance {} before another launch", receipt.instance))?;
+    std::thread::Builder::new()
+        .name("guest-launch-completion".into())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let _credit = credit;
+            completion(receipt, pending.wait().map(|_| ()).map_err(|error| error.to_string()));
+        })
+        .map_err(|error| {
+            format!(
+                "Launch was submitted but its completion could not be observed: {error}; \
+                 inspect instance {} before another launch",
+                receipt.instance
+            )
+        })?;
     Ok(receipt)
 }
 
@@ -575,9 +601,14 @@ fn prepare_bundle(profile: &Path, session: &Session) -> Result<(PathBuf, fs::Fil
     let bundle = parent.join(format!("{}.app", filename(&name)));
     let previous = existing_bundle(&parent)?;
     if let Some(previous) = &previous {
-        let retained = read_installation(&previous.join("Contents/MacOS/Playbit")).map_err(|error| {
-            format!("{error}; preserve and move the generated app bundle aside, then reopen this app from Playbit. Your saved data is retained: {}", previous.display())
-        })?;
+        let retained =
+            read_installation(&previous.join("Contents/MacOS/Playbit")).map_err(|error| {
+                format!(
+                    "{error}; preserve and move the generated app bundle aside, \
+                     then reopen this app from Playbit. Your saved data is retained: {}",
+                    previous.display()
+                )
+            })?;
         validate_binding(&retained, &descriptor)?;
         if retained == descriptor && previous == &bundle {
             return Ok((bundle, profile_lock));
@@ -778,7 +809,11 @@ fn bind_profile(profile: &Path, installation: &Installation) -> Result<fs::File>
                         State::Reserved | State::Owned | State::Unknown | State::Draining
                     )
                 }) {
-                    return Err("Quit this profile's guest apps and resolve pending launches before changing runtime installation".into());
+                    return Err(
+                        "Quit this profile's guest apps and resolve pending launches before \
+                         changing runtime installation"
+                            .into(),
+                    );
                 }
             }
         }
@@ -1019,7 +1054,9 @@ fn validate_binding(retained: &Installation, expected: &Installation) -> Result<
     if retained.app != expected.app
         || (retained.profile != expected.profile && Path::new(&retained.profile).exists())
     {
-        return Err("The wrapper belongs to another account or application; preserve it and resolve the app namespace collision".into());
+        return Err("The wrapper belongs to another account or application; \
+            preserve it and resolve the app namespace collision"
+            .into());
     }
     Ok(())
 }
@@ -1154,19 +1191,38 @@ pub(super) fn activate(
     use crate::ui::app_control::{Exchange, Operation};
     // Restore only this verified owner's local interface. Never replay Show or
     // create a replacement guest after an uncertain response.
-    let Reply::InstanceShowing { presentation, .. } = reply(
+    let ready = Exchange::connect(
         profile,
-        &Request::InstanceShow {
-            incarnation,
-            instance: owner.instance.id,
-            owner_generation: owner.instance.owner_generation,
-        },
-    )?
-    else {
-        return Err("Unexpected app presentation reply".into());
+        owner,
+        Operation::WaitForBuild { build: owner.instance.build.clone() },
+    )
+    .and_then(Exchange::receive);
+    let shown = match ready {
+        Ok(_) => {
+            let Reply::InstanceShowing { presentation, .. } = reply(
+                profile,
+                &Request::InstanceShow {
+                    incarnation,
+                    instance: owner.instance.id,
+                    owner_generation: owner.instance.owner_generation,
+                },
+            )?
+            else {
+                return Err("Unexpected app presentation reply".into());
+            };
+            Exchange::connect(profile, owner, Operation::Show { presentation })
+                .and_then(Exchange::receive)
+                .map(|_| presentation)
+        }
+        // A missing listener can belong to a verified app with a recovery
+        // dialog. Other readiness failures must leave presentation untouched.
+        Err(error) if missing_endpoint(error.as_ref()) => Err(error),
+        Err(error) => {
+            return Err(
+                format!("Couldn’t confirm readiness for the selected app build: {error}").into()
+            );
+        }
     };
-    let shown = Exchange::connect(profile, owner, Operation::Show { presentation })
-        .and_then(Exchange::receive);
     let identity = owner.process.as_ref().expect("selected owner has a verified process");
     use objc::{class, msg_send, runtime::Object, sel, sel_impl};
     let pid = i32::try_from(identity.pid())
@@ -1188,9 +1244,7 @@ pub(super) fn activate(
         owner?.ok_or("The recorded app owner exited before activation; it was not relaunched")?;
         // Even a failed owner can have a recovery/quit dialog. Bring its verified
         // process forward before reporting a missing control endpoint.
-        if let Err(error) = shown {
-            return Err(activation_error(error).into());
-        }
+        let presentation = shown.map_err(activation_error)?;
         if !active {
             return Err(
                 "The verified app owner could not be activated; its instance was not relaunched"
@@ -1201,11 +1255,17 @@ pub(super) fn activate(
     }
 }
 
-fn activation_error(error: Box<dyn std::error::Error + Send + Sync>) -> String {
-    if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+fn missing_endpoint(error: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
+    error.downcast_ref::<std::io::Error>().is_some_and(|error| {
         matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused)
-    }) {
-        "This session’s app is still open, but it is no longer responding to Playbit. Quit that app, then start the session again. Your saved data is retained.".into()
+    })
+}
+
+fn activation_error(error: Box<dyn std::error::Error + Send + Sync>) -> String {
+    if missing_endpoint(error.as_ref()) {
+        "This session’s app is still open, but it is no longer responding to Playbit. \
+         Quit that app, then start the session again. Your saved data is retained."
+            .into()
     } else {
         format!("Couldn’t contact this session’s existing app: {error}")
     }
@@ -1482,10 +1542,15 @@ mod tests {
     fn descriptor() -> Installation {
         Installation {
             profile: "/private/tmp/profile".into(),
-            engine: "/private/tmp/Playbit.app/Contents/Helpers/playbit-engine.app/Contents/MacOS/playbit-engine".into(),
+            engine: "/private/tmp/Playbit.app/Contents/Helpers/playbit-engine.app/Contents/MacOS/\
+                     playbit-engine"
+                .into(),
             runtime: "/private/tmp/Playbit.app/Contents/Frameworks/libplaybit_runtime.dylib".into(),
             runtime_hash: [7; 20],
-            app: crate::package::AppIdentity { publisher: Id::from_bytes([3; 16]), app_id: "pinball".into() },
+            app: crate::package::AppIdentity {
+                publisher: Id::from_bytes([3; 16]),
+                app_id: "pinball".into(),
+            },
             build: crate::identifier::encode(&[4; 32]),
             icon: crate::identifier::encode(&[5; 32]),
         }

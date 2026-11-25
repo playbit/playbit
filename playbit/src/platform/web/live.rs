@@ -22,6 +22,16 @@ pub(super) struct Changes {
     issued: u64,
 }
 impl Changes {
+    pub(super) fn discard_volume(&mut self, volume: Id) {
+        self.queue.retain(|change| {
+            if change.volume != volume {
+                return true;
+            }
+            self.bytes -= change.bytes.len();
+            false
+        });
+    }
+
     pub(super) fn retire_backings(&mut self, volume: Id, entries: &BTreeSet<EntryId>) {
         for change in &mut self.queue {
             if change.volume == volume
@@ -142,12 +152,34 @@ impl LiveFrame<'_> {
     }
 }
 impl Host {
+    pub(super) fn committed_change(&self, volume: Id, database: DatabaseId, delta: CommittedDelta) {
+        if self.replication_allowed(volume) {
+            self.changes.borrow_mut().push(volume, database, delta);
+        }
+    }
+
+    pub(super) fn replication_allowed(&self, volume: Id) -> bool {
+        use crate::package::AutomaticVolumeRole as Role;
+        if self.deleted_user_volume(volume) {
+            return false;
+        }
+        match self.automatic_role(volume) {
+            Some(Role::Root) | None => true,
+            Some(Role::Session) => self.session.borrow().shared_volume == Some(volume),
+            Some(Role::User) => self.user_volume == Some(volume),
+            Some(Role::UserSession | Role::Local | Role::LocalSession) => false,
+        }
+    }
+
     pub(super) fn replica_policy(
         &self,
         volume: &Volume,
         database: DatabaseId,
         initialize: bool,
     ) -> Result<DatabasePolicy> {
+        if !self.replication_allowed(volume.id) {
+            return Err(Error::AccessDenied);
+        }
         let volumes = self.volumes.borrow();
         let empty =
             volume.index.begin_read().map_err(map_error)?.root_hash().map_err(map_error)?.is_none();
@@ -157,7 +189,10 @@ impl Host {
         if initialize
             && database == DatabaseId::Index
             && empty
-            && (volumes.iter().any(|v| v.id == volume.id) || preparation)
+            && (volumes.iter().any(|v| v.id == volume.id)
+                || preparation
+                || self.automatic_role(volume.id)
+                    == Some(crate::package::AutomaticVolumeRole::Root))
         {
             if preparation {
                 self.authorize(&volumes[0], None, Permission::Read)?;
@@ -437,14 +472,34 @@ pub extern "C" fn pb_live_peek() -> i32 {
             return Ok(0);
         };
         let volume = host.replica_volume(change.volume)?;
-        host.admit_volume(&volume, Permission::Write)?;
+        let admission = host.admit_volume(&volume, Permission::Write).map(drop);
+        let projected = host.is_projected_world(&volume);
+        if !projected {
+            admission?;
+        }
         let policy = DatabasePolicy::read(&volume.index, change.database);
-        let bytes = match policy {
-            Ok(policy) => outbound_change(&host, &volume, &policy, &change.bytes)?,
+        let (bytes, catch_up) = match policy {
+            Ok(policy) => match admission
+                .and_then(|()| outbound_change(&host, &volume, &policy, &change.bytes))
+            {
+                Err(Error::AccessDenied | Error::Unavailable)
+                    if projected
+                        && policy
+                            .entry
+                            .as_ref()
+                            .is_some_and(|entry| entry.kind == crate::store::EntryType::KvDb) =>
+                {
+                    // Retain the backing and append births. Reconcile this source
+                    // against AP without blocking the next Shared publication.
+                    (Vec::new(), true)
+                }
+                result => (result?, false),
+            },
             Err(crate::store::Error::NotFound(_))
                 if matches!(change.database, DatabaseId::Entry(_)) =>
             {
-                Vec::new()
+                admission?;
+                (Vec::new(), false)
             }
             Err(error) => return Err(map_error(error)),
         };
@@ -453,7 +508,7 @@ pub extern "C" fn pb_live_peek() -> i32 {
         output.extend_from_slice(change.volume.as_bytes());
         output.extend_from_slice(&change.database.to_bytes());
         output.extend_from_slice(&change.ticket.to_le_bytes());
-        output.push(0);
+        output.push(u8::from(catch_up));
         output.extend_from_slice(&bytes);
         assert!(output.len() <= 41 + MAX_DELTA, "live framing preserves the delta budget");
         Ok(output.len())
@@ -552,7 +607,7 @@ pub extern "C" fn pb_live_ack(ticket: u64) -> i32 {
     })
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn pb_live_rebase() -> i32 {
+pub extern "C" fn pb_live_rebase(gap_only: u32) -> i32 {
     crate::platform::failure::guard();
     HOST.with(|cell| {
         let host = cell.borrow();
@@ -560,6 +615,9 @@ pub extern "C" fn pb_live_rebase() -> i32 {
             return Error::Unavailable as i32;
         };
         let mut changes = host.changes.borrow_mut();
+        if gap_only != 0 && !changes.gap {
+            return 0;
+        }
         changes.queue.clear();
         changes.bytes = 0;
         changes.gap = false;

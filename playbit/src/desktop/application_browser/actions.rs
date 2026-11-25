@@ -400,17 +400,37 @@ impl Shell {
         cx.spawn(async move |host, cx| {
             let (created, uncertain, result) = work.await;
             let _ = host.update(cx, |host, cx| {
-                if host.signing_out || !host.send.same_worker(&sender) || host.account.id != account { return; }
+                if host.signing_out || !host.send.same_worker(&sender) || host.account.id != account
+                {
+                    return;
+                }
                 host.applications.action_busy = false;
-                let select = host.applications.selected.as_ref() == Some(&app.identity) && host.selected_session_id().is_none();
+                let select = host.applications.selected.as_ref() == Some(&app.identity)
+                    && host.selected_session_id().is_none();
                 if let Some(session) = created {
-                    if !host.sessions.iter().any(|row| row.id == session.id) && host.sessions.len() < MAX_SESSIONS {
-                        host.sessions.push(SessionRow { reference: String::new(), id: session.id.clone(), resolved_build_id: session.resolved_build_id.clone(), app_name: Some(app.name.clone()), build_state: crate::engine::builds::BuildState::Ready });
+                    if !host.sessions.iter().any(|row| row.id == session.id)
+                        && host.sessions.len() < MAX_SESSIONS
+                    {
+                        host.sessions.push(SessionRow {
+                            reference: String::new(),
+                            id: session.id.clone(),
+                            resolved_build_id: session.resolved_build_id.clone(),
+                            app_name: Some(app.name.clone()),
+                            build_state: crate::engine::builds::BuildState::Ready,
+                        });
                     }
-                    if !host.applications.catalog.iter().any(|row| row.id == session.id) && host.applications.catalog.len() < MAX_SESSIONS { host.applications.catalog.push(session.clone()); }
-                    if select { host.sidebar_session = Some(session.id); }
+                    if !host.applications.catalog.iter().any(|row| row.id == session.id)
+                        && host.applications.catalog.len() < MAX_SESSIONS
+                    {
+                        host.applications.catalog.push(session.clone());
+                    }
+                    if select {
+                        host.sidebar_session = Some(session.id);
+                    }
                     host.rebuild_application_list();
-                    if select { host.select_application_session(cx); }
+                    if select {
+                        host.select_application_session(cx);
+                    }
                 }
                 match result {
                     Ok((prepared, instance)) if select => {
@@ -419,16 +439,24 @@ impl Shell {
                         host.refresh_logs(cx);
                     }
                     Ok(_) => {}
-                    Err(error) => host.error = if uncertain {
-                        host.applications.uncertain_app = Some(app.identity);
-                        format!("The session may have been created. Check retained sessions before opening again. {error}")
-                    } else { error.to_string() },
+                    Err(error) => {
+                        host.error = if uncertain {
+                            host.applications.uncertain_app = Some(app.identity);
+                            format!(
+                                "The session may have been created. \
+                                 Check retained sessions before opening again. {error}"
+                            )
+                        } else {
+                            error.to_string()
+                        }
+                    }
                 }
                 host.applications.refresh_needed = true;
                 host.refresh_application_instances(cx);
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
         cx.notify();
     }
 

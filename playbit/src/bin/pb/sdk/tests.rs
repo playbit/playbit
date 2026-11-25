@@ -29,7 +29,12 @@ fn rust_toolchain_release_aliases_require_the_matching_series() {
     use std::os::unix::fs::PermissionsExt;
     let root = tempfile::tempdir().unwrap();
     let compiler = root.path().join("rustc");
-    fs::write(&compiler, "#!/bin/sh\ncase \"$1\" in --version) echo 'rustc 1.99.0 (fixture)' ;; *) echo '/sdk/fixture' ;; esac\n").unwrap();
+    fs::write(
+        &compiler,
+        "#!/bin/sh\ncase \"$1\" in --version) echo 'rustc 1.99.0 (fixture)' ;; \
+         *) echo '/sdk/fixture' ;; esac\n",
+    )
+    .unwrap();
     fs::set_permissions(&compiler, fs::Permissions::from_mode(0o700)).unwrap();
     let tools = Tools {
         language: Language::Rust,
@@ -48,7 +53,14 @@ fn rust_toolchain_release_aliases_require_the_matching_series() {
         );
     }
     for version in ["1.101.0-nightly", "1.101.0-beta.2", "1.101.0"] {
-        fs::write(&tools.programs["rustc"], format!("#!/bin/sh\ncase \"$1\" in --version) echo 'rustc {version} (fixture)' ;; *) echo '/sdk/fixture' ;; esac\n")).unwrap();
+        fs::write(
+            &tools.programs["rustc"],
+            format!(
+                "#!/bin/sh\ncase \"$1\" in --version) echo 'rustc {version} (fixture)' ;; \
+                 *) echo '/sdk/fixture' ;; esac\n"
+            ),
+        )
+        .unwrap();
         let channel = if version.contains("nightly") {
             "nightly"
         } else if version.contains("beta") {

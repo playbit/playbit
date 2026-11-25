@@ -354,8 +354,12 @@ impl LocalStore {
         self.committed_account_record(changed);
         self.changes.observed_changed(None);
         let outcome = if erasing {
-            let cleanup_error = self.finish_app_data_removal(app).err().map(|error|
-                format!("App removed. Local cleanup will resume when Playbit next opens this profile: {error}"));
+            let cleanup_error = self.finish_app_data_removal(app).err().map(|error| {
+                format!(
+                    "App removed. Local cleanup will resume when Playbit next opens this \
+                     profile: {error}"
+                )
+            });
             AppRemovalResult::Removed {
                 erased_volumes: inventory.local.into_iter().collect(),
                 cleanup_error,

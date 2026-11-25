@@ -95,7 +95,10 @@ impl Follow {
                             None => playbit::diagnostic!("App exited: {status}"),
                         },
                         Ok(None) => playbit::diagnostic!("App log stream stopped: {error}"),
-                        Err(status_error) => playbit::diagnostic!("App log stream stopped: {error}; could not read app exit status: {status_error}"),
+                        Err(status_error) => playbit::diagnostic!(
+                            "App log stream stopped: {error}; could not read app exit status: \
+                             {status_error}"
+                        ),
                     }
                 }
             })?;

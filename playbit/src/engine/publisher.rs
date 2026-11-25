@@ -2943,12 +2943,18 @@ mod tests {
             actor.begin_fence(keys, 2, reply, FenceAdmission(Arc::new(AtomicBool::new(true))));
             assert_eq!(
                 result.await.unwrap().unwrap_err().to_string(),
-                format!("Couldn’t sync database {missing} in volume {volume}\npublication fence volume is not initialized"),
+                format!(
+                    "Couldn’t sync database {missing} in volume {volume}\n\
+                     publication fence volume is not initialized"
+                ),
             );
             actor.disconnect();
             let (reply, result) = test_reply();
             actor.command(fence_command(&[volume], reply));
-            assert_eq!(result.await.unwrap().unwrap_err().to_string(), "AP connection disconnected; recovery required");
+            assert_eq!(
+                result.await.unwrap().unwrap_err().to_string(),
+                "AP connection disconnected; recovery required"
+            );
         });
     }
 

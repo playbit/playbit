@@ -96,17 +96,27 @@ impl Task {
                                     erased_volumes: Vec::new(),
                                     cleanup_error: None,
                                 };
-                                return Ok(Preparation::Reply(Box::new(Reply::AppRemoved(removed))));
+                                return Ok(Preparation::Reply(Box::new(Reply::AppRemoved(
+                                    removed,
+                                ))));
                             }
                             for session in embedded {
                                 if store.catalog_session(&session)?.app == app {
-                                    return Err("Close the running embedded app before removing its local data".into());
+                                    return Err(
+                                        "Close the running embedded app before removing its \
+                                         local data"
+                                            .into(),
+                                    );
                                 }
                             }
                             #[cfg(all(not(target_os = "ios"), feature = "process"))]
                             stop_writers(&path, &store, &app, &owners)?;
                         }
-                        Ok(Reply::AppRemoved(store.remove_app(&app, confirmed, delete_local_data)?))
+                        Ok(Reply::AppRemoved(store.remove_app(
+                            &app,
+                            confirmed,
+                            delete_local_data,
+                        )?))
                     }
                     Request::OpenAppVolume { app, role } => {
                         store.open_app_volume(&app, role).map(Reply::Volume).map_err(Into::into)

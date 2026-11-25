@@ -9,7 +9,7 @@ final class Drives: NSObject, PKPushRegistryDelegate {
     var registry: PKPushRegistry!
     var domains: [String: NSFileProviderDomain] = [:]
     var dirty: Set<String> = []
-    var pending: (account: String, ready: Bool)?
+    var pending: (identity: DriveIdentity, profile: String, ready: Bool)?
     var reconciling = false
     var token: Data?
     var tokenInvalidated = false
@@ -20,7 +20,6 @@ final class Drives: NSObject, PKPushRegistryDelegate {
     let process = Process()
     let input = Pipe()
     var buffer = Data()
-    var profile = ""
     init(bridge: URL) { self.bridge = bridge; super.init() }
     func start() throws {
         registry = PKPushRegistry(queue: .main)
@@ -43,11 +42,12 @@ final class Drives: NSObject, PKPushRegistryDelegate {
                     guard let value = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                         let account = value["account"] as? String,
                         let profile = value["profile"] as? String,
-                        let volumes = value["volumes"] as? [[String: Any]] else { continue }
-                    self.profile = profile
+                        let volumes = value["volumes"] as? [[String: Any]],
+                        let channel = DriveIdentity.Channel(rawValue: value["channel"] as? String ?? ""),
+                        let identity = DriveIdentity(channel: channel, account: account) else { continue }
                     self.connected = value["connected"] as? Bool ?? false
                     guard volumes.count <= 256 else { exit(1) }
-                    self.pending = (account, value["provider_ready"] as? Bool ?? false)
+                    self.pending = (identity, profile, value["provider_ready"] as? Bool ?? false)
                     self.dirty.insert(account)
                     self.reconcile()
                 }
@@ -71,14 +71,9 @@ final class Drives: NSObject, PKPushRegistryDelegate {
                     return
                 }
                 let group = DispatchGroup()
-                for domain in current where domain.userInfo?["profile"] as? String == self.profile {
-                    guard !desired.ready || domain.identifier.rawValue != desired.account else { continue }
-                    // Old layouts need explicit retirement after retaining their
-                    // pending replicas. A catalog refresh never deletes them.
-                    if !Identifier.valid(domain.identifier.rawValue) {
-                        NSLog("Retain the previous Playbit File Provider locations before retiring them")
-                        continue
-                    }
+                let registration = DriveRegistration(current: current, identity: desired.identity,
+                    profile: desired.profile, ready: desired.ready)
+                for domain in registration.remove {
                     group.enter()
                     NSFileProviderManager.remove(domain, mode: .preserveDownloadedUserData) { _, error in
                         if let error { NSLog("File Provider removal: %@", error.localizedDescription) }
@@ -86,19 +81,17 @@ final class Drives: NSObject, PKPushRegistryDelegate {
                     }
                 }
                 self.domains.removeAll()
-                if desired.ready, Identifier.valid(desired.account) {
-                    let identifier = NSFileProviderDomainIdentifier(desired.account)
-                    let domain = NSFileProviderDomain(identifier: identifier, displayName: "Playbit")
-                    domain.userInfo = ["profile": self.profile]
-                    domain.supportsSyncingTrash = false
-                    self.domains[desired.account] = domain
-                    if !current.contains(where: { $0.identifier == identifier && $0.displayName == "Playbit" }) {
+                if let domain = registration.active {
+                    self.domains[desired.identity.account] = domain
+                    if registration.needsRegistration {
                         group.enter()
                         NSFileProviderManager.add(domain) { error in
                             if let error { NSLog("File Provider registration: %@", error.localizedDescription) }
                             group.leave()
                         }
                     }
+                } else if desired.ready {
+                    NSLog("File Provider domain belongs to another profile")
                 }
                 group.notify(queue: .main) {
                     for id in signals {
@@ -173,7 +166,7 @@ public func runFileProvider() -> Int32 {
 enum FileProviderManagement {
     static let profileBytesMax = 4096
     static let domainBytesMax = 45 // Two canonical 16-byte IDs and one separator.
-    static let domainCountMax = 257 // 256 legacy volume locations plus the account drive.
+    static let domainCountMax = 258 // 256 legacy volume locations plus both channel drives.
     static let replyBytesMax = 524288
     static let operationSecondsMax: TimeInterval = 30
 
@@ -312,7 +305,7 @@ public func manageFileProvider(_ profilePointer: UnsafePointer<CChar>,
 
 /// The containing app resolves stable item identities through the registered
 /// domain. Finder owns opening; no path is reconstructed from display names.
-private enum VolumeOpening {
+enum VolumeOpening {
     static let errorBytesMax = 4096
 
     static func complete(_ context: UnsafeMutableRawPointer?,
@@ -332,7 +325,7 @@ private enum VolumeOpening {
             throw FileProviderManagement.Failure(message: "File Provider domain count exceeds the management limit")
         }
         let matching = domains.filter {
-            $0.identifier.rawValue == account && $0.userInfo?["profile"] as? String == profile
+            DriveIdentity($0.identifier)?.account == account && $0.userInfo?["profile"] as? String == profile
         }
         guard matching.count == 1, let domain = matching.first else {
             throw FileProviderManagement.Failure(message: "This account’s Playbit drive is unavailable in Finder. Enable its File Provider location, then try again.")

@@ -15,8 +15,9 @@ import { pendingAccountRecord, observeAccountMetadata, removedAppsIn } from './a
 import { AccountSignal } from './account-notices.ts';
 import { showOfflineEdits } from './offline-edits.ts';
 import { holdWebAccount, reloadWebAccount, SIGN_IN_HANDOFF, SIGN_IN_AFTER_RESET, prepareWebAccount, beginWebReset } from './web-account.ts';
-import type { SceneNode, SceneContainer, SceneScroll } from "./scene.ts";
+import type { MenuItem, SceneCanvas, SceneMenu, SceneNode, SceneScroll, SceneWindow } from "./scene.ts";
 import { drawCanvas } from "./canvas.ts";
+import { applyGuestWindow, canvasExtent, layoutGuestWindow } from "./guest-window.ts";
 import type { ReplicationState } from "./live-replication.ts";
 import { replicationDiagnostic } from "./live-replication.ts";
 import type { RuntimeMethod, RuntimeMethods, RuntimeWorkerMessage, RuntimePresentation, RuntimeOpenResult, RuntimeUpdateState } from "./runtime-protocol.ts";
@@ -76,6 +77,7 @@ function createWorker() {
             engineFailure = data.engineFailure;
             updateFrames();
             current.terminate();
+            retireCanvasPresses();
             for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error(engineFailure)); }
             pending.clear();
             error.textContent = engineFailure;
@@ -124,6 +126,7 @@ function createWorker() {
             return;
         }
         if (data.replicaScene) { render(data.replicaScene); return; }
+        if (data.surfaceReady) { scheduleSurface(); return; }
         if (Object.hasOwn(data, "update")) { showUpdate(data.update as RuntimeUpdateState | null); return; }
         if (data.adopted) {
             guestFailure = undefined; error.textContent = "";
@@ -146,19 +149,24 @@ function call<M extends RuntimeMethod>(method: M, args?: RuntimeMethods[M]["args
     return new Promise<RuntimeMethods[M]["result"]>((resolve, reject) => {
         const timer = method === "close" || (method === "input" && appClosing) ? undefined : setTimeout(() => {
             engineFailure = "The app stopped responding. Reload to reopen retained data.";
-            updateFrames(); pending.delete(id); worker.terminate(); reject(new Error("The app stopped responding. Reload to reopen retained data."));
+            updateFrames(); pending.delete(id); worker.terminate(); retireCanvasPresses(); reject(new Error(engineFailure));
         }, method === "open" || invitation ? 300000 : 5000);
         pending.set(id, { method, resolve, reject, timer }); worker.postMessage({ id, method, args });
     });
 }
 const submissions = new Map<number, Promise<RuntimePresentation>>();
 const editors = new Map<number, Editor>();
+type CanvasPress = { canvas: HTMLCanvasElement; target: number } & ({ kind: 11; pointerId: number } | { kind: 12; key: number });
+const heldCanvasPresses = new Set<CanvasPress>();
+let reservedCanvasBytes = 0;
 let inputTail: Promise<unknown> = Promise.resolve(), inputCount = 0, inputBytes = 0, draftFailures = 0;
 let appClosing = false, appClosed = false, closeTask: Promise<{ closed: true }> | undefined;
 let inputFailure: { target: number; message: string } | undefined;
-async function input(kind: number, target: number, data: Uint8Array): Promise<RuntimePresentation> {
+type MenuSelection = { owner: HTMLElement; revision: number };
+async function input(kind: number, target: number, data: Uint8Array, menu?: MenuSelection): Promise<RuntimePresentation> {
     if (appClosing || appClosed) throw new Error("The app is finishing accepted work. This input was not accepted.");
     if (kind === 3 && submissions.has(target)) return submissions.get(target)!;
+    const current = worker;
     const retrying = inputFailure;
     const failures = draftFailures;
     if (kind === 2) {
@@ -172,22 +180,44 @@ async function input(kind: number, target: number, data: Uint8Array): Promise<Ru
             if (field.revision !== field.sent) await input(14, field.id, field.edits.payload(field.element.value));
         }
     }
+    if (current !== worker) throw new Error("The app changed before this input reached it.");
+    return queueInput(kind, target, data, retrying, failures, undefined, menu);
+}
+function queueInput(kind: number, target: number, data: Uint8Array, retrying = inputFailure,
+    failures = draftFailures, transition?: { press: CanvasPress; down: boolean }, menu?: MenuSelection): Promise<RuntimePresentation> {
     // Admission happens before chaining: retained closures and payloads are bounded.
     if (appClosing || appClosed) throw new Error("The app is finishing accepted work. This input was not accepted.");
-    if (data.length > MAX_TEXT_EVENT_BYTES || inputCount >= 32 || inputBytes + data.length > 2 * 1024 * 1024) {
+    // A press reserves one slot and its ABI payload size. Its release
+    // exchanges that reservation for an entry in the same FIFO.
+    const change = transition ? transition.down ? 1 : -1 : 0;
+    const reserved = heldCanvasPresses.size + change;
+    const reservedBytes = reservedCanvasBytes + change * data.length;
+    if (data.length > MAX_TEXT_EVENT_BYTES || inputCount + reserved >= 32
+        || inputBytes + data.length + reservedBytes > 2 * 1024 * 1024) {
         const failure = new Error("The app is busy. Your text is retained; try again.");
         inputFailure = { target, message: failure.message };
         error.textContent = failure.message; throw failure;
     }
+    if (transition) {
+        if (transition.down) heldCanvasPresses.add(transition.press);
+        else heldCanvasPresses.delete(transition.press);
+        reservedCanvasBytes = reservedBytes;
+    }
+    const current = worker;
     const editor = (kind === 3 || kind === 14) ? editors.get(target) : null;
     const revision = editor?.revision;
     if (editor) { editor.sent = revision!; editor.edits.queued(); }
     inputCount++; inputBytes += data.length;
     const promise = inputTail.catch(() => {}).then(async () => {
+        if (current !== worker) throw new Error("The app changed before this input reached it.");
         if (kind === 2 && failures !== draftFailures) {
             throw new Error("Your latest text has not reached the app. Edit it or press Return to retry.");
         }
-        const result = await call("input", { kind, target, data });
+        if (menu && (!main.contains(menu.owner) || menus.get(menu.owner)?.revision !== menu.revision)) {
+            throw new Error("The menu changed. Open it again to choose an action.");
+        }
+        const result = await call("input", { kind, target, data, ...(menu ? { menuRevision: menu.revision } : {}) });
+        if (current !== worker) throw new Error("The app changed before this input completed.");
         if (editor && (kind === 3 || kind === 14)) {
             editor.acknowledged = Math.max(editor.acknowledged, revision!);
         }
@@ -200,14 +230,38 @@ async function input(kind: number, target: number, data: Uint8Array): Promise<Ru
         }
         return result;
     }).catch(failure => {
-        if (editor) { draftFailures++; if (editor.sent === revision) editor.sent = editor.acknowledged; }
-        inputFailure = { target, message: failure.message };
-        error.textContent = failure.message; throw failure;
+        if (current === worker && (!transition || main.contains(transition.press.canvas))) {
+            if (editor) { draftFailures++; if (editor.sent === revision) editor.sent = editor.acknowledged; }
+            inputFailure = { target, message: failure.message }; error.textContent = failure.message;
+        }
+        throw failure;
     })
-        .finally(() => { inputCount--; inputBytes -= data.length; if (kind === 3) submissions.delete(target); updateFrames(); });
+        .finally(() => {
+            inputCount--; inputBytes -= data.length;
+            if (kind === 3 && submissions.get(target) === promise) submissions.delete(target);
+            updateFrames();
+        });
     inputTail = promise;
     if (kind === 3) submissions.set(target, promise);
     return promise;
+}
+function sendCanvasPress(press: CanvasPress, data: Uint8Array, down: boolean): boolean {
+    try { void queueInput(press.kind, press.target, data, inputFailure, draftFailures, { press, down }).catch(() => {}); }
+    catch { return false; }
+    return true;
+}
+function releasePointerCapture(press: CanvasPress): void {
+    if (press.kind === 11 && press.canvas.hasPointerCapture(press.pointerId)) press.canvas.releasePointerCapture(press.pointerId);
+}
+function cancelCanvasPress(press: CanvasPress): void {
+    if (sendCanvasPress(press, press.kind === 11 ? words(0, 0, 3, 0) : words(press.key, 0), false)) releasePointerCapture(press);
+}
+function retireCanvasPresses(): void {
+    for (const press of heldCanvasPresses) {
+        heldCanvasPresses.delete(press);
+        releasePointerCapture(press);
+    }
+    reservedCanvasBytes = 0;
 }
 function lockGuestControls(): void {
     for (const editor of editors.values()) editor.element.readOnly = true;
@@ -218,6 +272,7 @@ function lockGuestControls(): void {
 }
 function closeApp(): Promise<{ closed: true }> {
     if (closeTask) return closeTask;
+    for (const press of heldCanvasPresses) cancelCanvasPress(press);
     appClosing = true;
     updateFrames();
     for (const item of pending.values()) if (item.method === "input") { clearTimeout(item.timer); item.timer = undefined; }
@@ -239,6 +294,17 @@ function closeApp(): Promise<{ closed: true }> {
     return closeTask;
 }
 function element(node: SceneNode): HTMLElement {
+    if (node.kind === "context-menu") {
+        const container = document.createElement("div"); container.className = "guest-context";
+        menus.set(container, node);
+        container.append(element(node.children[0]));
+        container.oncontextmenu = event => {
+            event.preventDefault();
+            event.stopPropagation();
+            showContextMenu(container, event.clientX, event.clientY);
+        };
+        return container;
+    }
     if (node.kind === "column" || node.kind === "row" || node.kind === "scroll") {
         const container = document.createElement("div"); container.className = node.kind === "scroll" ? "guest-scroll" : node.kind;
         if (node.kind === "scroll") updateScroll(container, node);
@@ -307,26 +373,114 @@ function element(node: SceneNode): HTMLElement {
     if (node.kind === "canvas") {
         const canvas = document.createElement("canvas");
         if (node.id === 0) {
-            canvas.setAttribute("aria-hidden", "true"); drawCanvas(canvas, node); return canvas;
+            canvas.setAttribute("aria-hidden", "true"); paintCanvas(canvas, node); return canvas;
         }
         canvas.tabIndex = 0;
-        canvas.setAttribute("aria-label", "Micro Kart driving surface"); canvas.dataset.control = String(node.id);
+        canvas.setAttribute("aria-label", "Game canvas"); canvas.dataset.control = String(node.id);
         const pointer = (event: PointerEvent, phase: number) => {
-            if (phase === 1) { canvas.setPointerCapture(event.pointerId); canvas.focus(); }
+            if (!main.contains(canvas)) return;
+            let active: Extract<CanvasPress, { kind: 11 }> | undefined;
+            for (const press of heldCanvasPresses) {
+                if (press.kind === 11 && press.canvas === canvas) { active = press; break; }
+            }
+            if (phase === 1) {
+                if (active || event.button !== 0 || !event.isPrimary) return;
+            } else if (!active || active.pointerId !== event.pointerId) return;
+            if (active && phase === 3) { cancelCanvasPress(active); return; }
             const rect = canvas.getBoundingClientRect();
-            const x = Math.round(Math.max(0, Math.min(canvas.width, (event.clientX - rect.left) * canvas.width / rect.width)));
-            const y = Math.round(Math.max(0, Math.min(canvas.height, (event.clientY - rect.top) * canvas.height / rect.height)));
-            input(11, node.id, words(x, y, phase, phase < 2 ? event.buttons & 1 : 0)).catch(() => {});
+            const current = canvasScenes.get(canvas)!;
+            if (!rect.width || !rect.height) {
+                if (active && phase === 2) cancelCanvasPress(active);
+                return;
+            }
+            const width = current.extent ? rect.width : current.width, height = current.extent ? rect.height : current.height;
+            const x = Math.round(Math.max(0, Math.min(width, (event.clientX - rect.left) * width / rect.width)));
+            const y = Math.round(Math.max(0, Math.min(height, (event.clientY - rect.top) * height / rect.height)));
+            const bytes = words(x, y, phase, phase < 2 ? event.buttons & 1 : 0);
+            if (phase === 1) {
+                const press: CanvasPress = { canvas, target: node.id, kind: 11, pointerId: event.pointerId };
+                if (!sendCanvasPress(press, bytes, true)) return;
+                try { canvas.setPointerCapture(event.pointerId); }
+                catch { cancelCanvasPress(press); return; }
+                canvas.focus({ preventScroll: true });
+            } else if (phase === 2) {
+                if (sendCanvasPress(active!, bytes, false)) releasePointerCapture(active!);
+            } else input(11, node.id, bytes).catch(() => {});
         };
-        canvas.onpointerdown = event => pointer(event, 1); canvas.onpointermove = event => { if (event.buttons & 1) pointer(event, 0); };
+        canvas.onpointerdown = event => pointer(event, 1); canvas.onpointermove = event => pointer(event, event.buttons & 1 ? 0 : 2);
         canvas.onpointerup = event => pointer(event, 2); canvas.onpointercancel = event => pointer(event, 3);
-        const keys: Record<string, number> = { ArrowLeft: 1, ArrowRight: 2, ArrowUp: 3, ArrowDown: 4, " ": 5 };
-        const keyboard = (event: KeyboardEvent, pressed: number) => { if (keys[event.key]) { event.preventDefault(); if (!event.repeat) input(12, node.id, words(keys[event.key], pressed)).catch(() => {}); } };
-        canvas.onkeydown = event => keyboard(event, 1); canvas.onkeyup = event => keyboard(event, 0);
-        canvas.onblur = () => { for (let key = 1; key <= 5; key++) input(12, node.id, words(key, 0)).catch(() => {}); input(11, node.id, words(0, 0, 3, 0)).catch(() => {}); };
-        drawCanvas(canvas, node); return canvas;
+        canvas.onlostpointercapture = event => pointer(event, 3);
+        const keys: Record<string, number> = { ArrowLeft: 1, ArrowRight: 2, ArrowUp: 3, ArrowDown: 4, Space: 5, " ": 5 };
+        const keyboard = (event: KeyboardEvent, down: boolean) => {
+            const key = keys[event.code] ?? keys[event.key];
+            const shortcut = event.altKey || event.metaKey || event.ctrlKey;
+            if (!key || (down && shortcut) || !main.contains(canvas)) return;
+            if (!shortcut) event.preventDefault();
+            for (const press of heldCanvasPresses) {
+                if (press.kind !== 12 || press.canvas !== canvas || press.key !== key) continue;
+                if (!down) cancelCanvasPress(press);
+                return;
+            }
+            if (down) sendCanvasPress({ canvas, target: node.id, kind: 12, key }, words(key, 1), true);
+        };
+        canvas.onkeydown = event => keyboard(event, true); canvas.onkeyup = event => keyboard(event, false);
+        canvas.onblur = () => { for (const press of heldCanvasPresses) if (press.canvas === canvas) cancelCanvasPress(press); };
+        paintCanvas(canvas, node); return canvas;
     }
     throw new Error(`Unsupported control ${node.kind}`);
+}
+const canvasScenes = new WeakMap<HTMLCanvasElement, SceneCanvas>();
+const menus = new WeakMap<HTMLElement, SceneMenu>();
+let contextPopup: (MenuSelection & { element: HTMLElement }) | undefined;
+let pixelScale = 1;
+
+function paintCanvas(canvas: HTMLCanvasElement, node: SceneCanvas): void {
+    canvasScenes.set(canvas, node);
+    drawCanvas(canvas, node, renderedWindow || node.extent ? pixelScale : 1, !!renderedWindow?.constraints);
+}
+
+function showContextMenu(container: HTMLElement, x: number, y: number): void {
+    contextPopup?.element.remove();
+    const popup = document.createElement("div");
+    popup.className = "guest-context-popup";
+    popup.setAttribute("popover", "auto");
+    popup.setAttribute("aria-label", "Game actions");
+    const append = (parent: HTMLElement, items: MenuItem[]): void => {
+        for (const item of items) {
+            if (item.kind === "separator") parent.append(document.createElement("hr"));
+            else if (item.kind === "submenu") {
+                const group = document.createElement("details"), label = document.createElement("summary");
+                label.textContent = item.label; group.append(label);
+                if (item.disabled) label.addEventListener("click", event => event.preventDefault());
+                else append(group, item.items);
+                parent.append(group);
+            } else {
+                const button = document.createElement("button"); button.type = "button";
+                button.className = "guest-button"; button.disabled = item.disabled;
+                button.textContent = item.label; button.dataset.style = item.destructive ? "2" : "0";
+                if (item.checked !== undefined) button.setAttribute("aria-pressed", String(item.checked));
+                button.onclick = () => {
+                    if (contextPopup?.element !== popup) return;
+                    popup.hidePopover(); input(2, item.id, new Uint8Array(), { owner: container, revision }).catch(() => {});
+                };
+                parent.append(button);
+            }
+        }
+    };
+    const { items, revision } = menus.get(container)!;
+    append(popup, items);
+    main.append(popup); contextPopup = { element: popup, owner: container, revision };
+    popup.addEventListener("toggle", () => {
+        if (!popup.matches(":popover-open")) {
+            popup.remove();
+            if (contextPopup?.element === popup) contextPopup = undefined;
+        }
+    });
+    popup.showPopover();
+    const anchor = container.getBoundingClientRect();
+    popup.style.left = `${Math.max(0, Math.min(x || anchor.left, window.innerWidth - popup.offsetWidth))}px`;
+    popup.style.top = `${Math.max(0, Math.min(y || anchor.top, window.innerHeight - popup.offsetHeight))}px`;
+    popup.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
 }
 function restoreCheckbox(check: HTMLInputElement, id: number): void {
     if (!main.contains(check)) return;
@@ -368,6 +522,7 @@ function patch(dom: Element | undefined, previous: SceneTreeNode, node: SceneTre
     }
     if (node.children) {
         if (node.kind === "scroll") updateScroll(dom as HTMLElement, node);
+        if (node.kind === "context-menu") menus.set(dom as HTMLElement, node);
         let index = 0;
         // The usual reply changes values, not order. Do not allocate an index.
         for (; index < node.children.length && index < previous.children!.length; index++) {
@@ -382,7 +537,7 @@ function patch(dom: Element | undefined, previous: SceneTreeNode, node: SceneTre
             while (dom.children.length > node.children.length) dom.lastElementChild!.remove();
         }
     } else if (node.kind === "text") dom.textContent = node.text;
-    else if (node.kind === "canvas") drawCanvas(dom as HTMLCanvasElement, node);
+    else if (node.kind === "canvas") paintCanvas(dom as HTMLCanvasElement, node);
     else updateControl(dom, node);
     return dom;
 }
@@ -444,17 +599,60 @@ function moveSibling(parent: Element, child: Element, before: Element | null): v
 function createReplacement(current: Element | undefined, node: SceneNode): HTMLElement {
     const next = element(node); if (current) current.replaceWith(next); return next;
 }
-let renderedScene: SceneContainer | undefined;
+let renderedScene: SceneNode | undefined, renderedWindow: SceneWindow | undefined;
 function render(result: RuntimePresentation): void {
     (document.querySelector("#close-app") as HTMLButtonElement).hidden = false;
+    const measure = !renderedScene || !!(renderedWindow?.constraints || result.window?.constraints
+        || canvasExtent(renderedScene) || canvasExtent(result.scene));
+    if (renderedWindow || result.window || canvasExtent(result.scene) || (renderedScene && canvasExtent(renderedScene))) {
+        renderedWindow = result.window;
+        applyGuestWindow(main, result.scene, renderedWindow);
+    }
     if (!renderedScene || !main.firstElementChild) main.replaceChildren(element(result.scene));
     else patch(main.firstElementChild, renderedScene, result.scene);
     renderedScene = result.scene;
+    if (contextPopup && (!main.contains(contextPopup.owner) || menus.get(contextPopup.owner)?.revision !== contextPopup.revision)) {
+        contextPopup.element.remove(); contextPopup = undefined;
+    }
+    // Removing a focused canvas need not dispatch blur.
+    for (const press of heldCanvasPresses) if (!main.contains(press.canvas)) cancelCanvasPress(press);
+    if (measure) scheduleSurface();
     updateFrames();
     for (const [id, editor] of editors) if (!main.contains(editor.element)) editors.delete(id);
     for (const log of result.logs ?? []) console.info(`[Playbit] ${log}`);
     if (appClosing) lockGuestControls();
 }
+let surfaceDelivery: { worker: Worker; queued: boolean; inFlight: boolean; changed: boolean; acknowledged: string } | undefined;
+function canDeliverSurface(): boolean {
+    return Boolean(renderedScene && !appClosing && !pageClosing && !guestFailure && !engineFailure);
+}
+function scheduleSurface(): void {
+    if (!canDeliverSurface()) return;
+    const delivery = surfaceDelivery?.worker === worker ? surfaceDelivery
+        : surfaceDelivery = { worker, queued: false, inFlight: false, changed: false, acknowledged: "" };
+    if (delivery.inFlight) { delivery.changed = true; return; }
+    if (delivery.queued) return;
+    delivery.queued = true;
+    queueMicrotask(async () => {
+        delivery.queued = false;
+        if (delivery.worker !== worker || !canDeliverSurface()) return;
+        const bytes = layoutGuestWindow(main, renderedWindow), key = bytes.toString();
+        if (key === delivery.acknowledged) return;
+        delivery.inFlight = true;
+        pixelScale = new DataView(bytes.buffer).getFloat32(8, true);
+        try {
+            const result = await call("surface", bytes);
+            if (result && delivery.worker === worker) { delivery.acknowledged = key; render(result); }
+        }
+        catch (failure) { if (delivery.worker === worker) error.textContent = (failure as Error).message; }
+        finally {
+            delivery.inFlight = false;
+            if (delivery.worker === worker && delivery.changed) { delivery.changed = false; scheduleSurface(); }
+        }
+    });
+}
+window.addEventListener("resize", scheduleSurface);
+document.addEventListener("visibilitychange", scheduleSurface);
 let frameRequest: number | undefined, frameTarget: number | undefined;
 let framePending = false, frameTime = 0;
 function canvasFrameTarget(node: SceneTreeNode | undefined): number | undefined {
@@ -492,21 +690,14 @@ const statusElement = document.querySelector("#status") as HTMLElement, onboardi
 function status(message: string): void { statusElement.textContent = message; }
 function textElement<K extends keyof HTMLElementTagNameMap>(tag: K, text: string): HTMLElementTagNameMap[K] { const node = document.createElement(tag); node.textContent = text; return node; }
 function action(label: string, callback: (event: MouseEvent) => unknown): HTMLButtonElement { const node = textElement("button", label); node.type = "button"; node.onclick = callback; return node; }
-function isCorruptStore(failure: unknown): boolean {
-    return (failure as { code?: string })?.code === "corrupt_store";
-}
-function showCorruptStore(): void {
-    document.body.classList.add("store-corrupt");
-    (document.querySelector("#invitation") as HTMLElement).hidden = true;
-    (document.querySelector("#install-playbit") as HTMLElement).hidden = true;
-    (document.querySelector("#sign-out") as HTMLElement).hidden = true;
-    main.replaceChildren();
-    status("");
-    error.textContent = "";
-    const reset = action("Reset & Sign in", async () => {
+function storageResetAction(label: string, incompatible: boolean): HTMLButtonElement {
+    const reset = action(label, async () => {
+        if (incompatible && !window.confirm("Clear Playbit’s saved account and app data from this browser? Unsynced edits will be permanently lost.")) return;
+        const retainInvitation = incompatible && invitation?.url;
+        if (retainInvitation) history.replaceState(null, '', `/s${new URL(invitation.url).hash}`);
         reset.disabled = true;
         error.textContent = "";
-        sessionStorage.setItem(SIGN_IN_AFTER_RESET, "1");
+        sessionStorage.setItem(SIGN_IN_AFTER_RESET, retainInvitation ? "invitation" : "1");
         try { await beginWebReset(apClient, webTab); }
         catch (failure) {
             if (pageClosing) return;
@@ -515,11 +706,40 @@ function showCorruptStore(): void {
             reset.disabled = false;
         }
     });
+    return reset;
+}
+function showStorageProblem(failure: unknown): boolean {
+    const code = (failure as { code?: string } | null)?.code;
+    if (code !== "incompatible-installation-format" && code !== "incompatible-storage-format" && code !== "corrupt_store") return false;
+    document.body.classList.remove("invited");
+    if (code === "incompatible-installation-format") {
+        status("This browser’s Playbit installation needs a different version");
+        error.textContent = "";
+        onboarding.replaceChildren(textElement("p", "Open the invitation in a new browser profile to keep this installation and its offline edits. To start over here, remove this site’s data in your browser settings. This erases the saved sign-in, installation identity and unsynced edits."));
+        return true;
+    }
+    if (code === "incompatible-storage-format") {
+        status("Your saved browser data needs a different version of Playbit");
+        error.textContent = "";
+        onboarding.replaceChildren(
+            textElement("p", "To keep this data, open the invitation in another browser profile. To sign in again here, clear the saved account and app data. Any edits saved only in this browser will be lost."),
+            storageResetAction("Clear local account data and sign in", true),
+        );
+        return true;
+    }
+    document.body.classList.add("store-corrupt");
+    (document.querySelector("#invitation") as HTMLElement).hidden = true;
+    (document.querySelector("#native-actions") as HTMLElement).hidden = true;
+    (document.querySelector("#sign-out") as HTMLElement).hidden = true;
+    main.replaceChildren();
+    status("");
+    error.textContent = "";
     onboarding.replaceChildren(
         textElement("h1", "Oh no…"),
         textElement("p", "The local store has become corrupt. Some data may not have been backed up."),
-        reset,
+        storageResetAction("Reset & Sign in", false),
     );
+    return true;
 }
 const updateNotice = document.createElement("section");
 updateNotice.setAttribute("aria-live", "polite"); updateNotice.hidden = true;
@@ -599,8 +819,19 @@ function persistInvitation(joined = opened): void {
 }
 function replaceWorker(reason: string): void {
     worker.terminate();
+    retireCanvasPresses();
     for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error(reason)); } pending.clear();
     for (const handle of streams) apClient.streamClose(handle).catch(() => {}); streams.clear();
+    surfaceDelivery = undefined;
+    if (renderedScene) {
+        submissions.clear(); editors.clear(); inputFailure = undefined;
+        renderedScene = undefined; renderedWindow = undefined; guestFailure = undefined; pixelScale = 1;
+        contextPopup?.element.remove(); contextPopup = undefined;
+        main.replaceChildren(); delete main.dataset.scene;
+        applyGuestWindow(main, undefined, undefined);
+        main.style.removeProperty("width"); main.style.removeProperty("height");
+        updateFrames();
+    }
     createWorker();
 }
 function cancelJoin(): void {
@@ -620,6 +851,7 @@ async function afterAuthentication(): Promise<boolean> {
     let accepted;
     try { accepted = await apClient.agreement(account, false); }
     catch (failure) {
+        if (showStorageProblem(failure)) return false;
         status("Couldn’t check your agreement");
         error.textContent = (failure as Error).message;
         onboarding.replaceChildren(action("Try again", useWeb));
@@ -639,6 +871,7 @@ async function afterAuthentication(): Promise<boolean> {
                 await apClient.agreement(account, true);
                 await afterAgreement();
             } catch (failure) {
+                if (showStorageProblem(failure)) return;
                 error.textContent = (failure as Error).message;
                 accept.disabled = false;
             }
@@ -760,7 +993,7 @@ async function refreshRecoveredAppVisibility(): Promise<void> {
                 const parsed = await retainedInvitation(entry, selectedChannel);
                 const removed = await removedAppsIn(account, [entry.session.app]);
                 if (removed.size || !button.isConnected || enrollment.account !== account) return;
-                if (opened) { await call("close"); worker.terminate(); createWorker(); opened = false; main.replaceChildren(); delete main.dataset.scene; }
+                if (opened) { await call("close"); replaceWorker("Opening another recovered app"); opened = false; }
                 invitation = parsed; paused = false; canJoin = true; persistInvitation(false); showInvitationHeader(); showJoin();
             } catch (failure) { error.textContent = (failure as Error).message; }
         });
@@ -833,7 +1066,9 @@ async function useWeb(): Promise<boolean | undefined> {
         apClient ??= new ApClient(selectedChannel);
         enrollment = await apClient.connect() as Enrollment;
     } catch (failure) {
+        if (showStorageProblem(failure)) return false;
         if (/WebTransport|shared AP connections/.test((failure as Error).message)) {
+            status("Browser participation is unavailable");
             const next = configuration(selectedChannel).macos_manifest ? "Open this invitation in Playbit" : "Open this invitation in a supported browser";
             error.textContent = `${(failure as Error).message}. ${next}`;
             return;
@@ -844,8 +1079,7 @@ async function useWeb(): Promise<boolean | undefined> {
     if (enrollment) {
         try { return await afterAuthentication(); }
         catch (failure) {
-            if (isCorruptStore(failure)) showCorruptStore();
-            else { error.textContent = (failure as Error).message; onboarding.replaceChildren(action("Try again", useWeb)); }
+            if (!showStorageProblem(failure)) { error.textContent = (failure as Error).message; onboarding.replaceChildren(action("Try again", useWeb)); }
         }
     }
     return false;
@@ -943,8 +1177,13 @@ async function join(): Promise<void> {
         status("Opening app…");
         // `readInvitation` above opened the envelope before the readiness stream reported `ready`.
         const replica = replicaCapability(invitation.invitation!).volume.id;
-        personalCatalog = (await personalVolumes(await recoveryClient.catalog())).filter(item => item.volume.id !== replica);
-        const result = await call("open", { profile: invitation.session_id, account: enrollment.account, invitation: invitation.invitation!, personal: personalCatalog });
+        const catalog = await recoveryClient.catalog();
+        personalCatalog = (await personalVolumes(catalog)).filter(item => item.volume.id !== replica);
+        const scope = catalog.scopes?.find(scope => scope.kind === "session" && scope.id === invitation.session_id);
+        const creationScope = scope?.kind === "session" ? scope : undefined;
+        const userVolume = creationScope?.user_volume ? catalog.volumes.find(item => item.volume.id === creationScope.user_volume) : undefined;
+        const result = await call("open", { profile: invitation.session_id, account: enrollment.account, invitation: invitation.invitation!,
+            personal: personalCatalog, creationScope, userVolume });
         runtimeSession = result.identity.session;
         showOfflineEdits(document.querySelector('#offline-edits') as HTMLElement, result.identity,
             personalCatalog.map(item => item.volume), call);
@@ -961,9 +1200,9 @@ async function join(): Promise<void> {
         if (current !== attempt) return;
         console.error("Could not join invitation", failure);
         joining = false;
-        worker.terminate(); createWorker();
-        if (isCorruptStore(failure)) { showCorruptStore(); return; }
-        const kind = /^Unsupported guest view operation \d+$/.test((failure as Error).message) ? "unsupported"
+        replaceWorker("Invitation opening failed");
+        if (showStorageProblem(failure)) return;
+        const kind = (failure as { code?: string }).code === "unsupported" || /^Unsupported guest view operation \d+$/.test((failure as Error).message) ? "unsupported"
             : /access denied|participant revoked|root version provisioning/i.test((failure as Error).message) ? "denied" : "failed";
         showJoinProblem(kind, (failure as Error).message);
     }
@@ -1004,13 +1243,14 @@ document.addEventListener("visibilitychange", () => { updateFrames(); if ((opene
 window.addEventListener("pageshow", () => { if (opened || recoveryListAccount) void call("reconnect"); });
 window.addEventListener('pagehide', event => { if (!event.persisted) { pageClosing = true; updateFrames(); if (recoveryListAccount) worker.terminate(); accountSignal.close(); apClient?.close(); } });
 function showInvitationHeader(): void {
-    (document.querySelector("#invitation-title") as HTMLElement).textContent = "You’re invited";
+    (document.querySelector("#invitation-title") as HTMLElement).textContent = "You're invited";
     (document.querySelector("#invitation-detail") as HTMLElement).textContent = `Join ${(invitation.invitation && replicaCapability(invitation.invitation).volume.name) || "a shared app"}. Your personal data stays separate unless you choose to connect it.`;
     const installed = document.querySelector("#open-installed") as HTMLAnchorElement;
     installed.hidden = !invitation.uri;
     if (invitation.uri) installed.href = invitation.uri;
 }
 (document.querySelector('#sign-out') as HTMLButtonElement).onclick = async event => {
+    if (!window.confirm("Sign out and clear Playbit’s saved account and app data from this browser? Unsynced edits will be permanently lost.")) return;
     (event.target as HTMLButtonElement).disabled = true; error.textContent = ''; status('Signing out and clearing web browser data…');
     sessionStorage.removeItem(SIGN_IN_HANDOFF);
     try { await beginWebReset(apClient, webTab); }
@@ -1020,22 +1260,27 @@ async function start(): Promise<RuntimeOpenResult | undefined> {
     apClient = webAccountClient;
     const reset = initialReset;
     const nextEmail = sessionStorage.getItem(SIGN_IN_HANDOFF);
+    if (reset.error || nextEmail || sessionStorage.getItem(SIGN_IN_AFTER_RESET)) {
+        document.body.classList.remove("invited");
+    }
     if (reset.error) {
         sessionStorage.removeItem(SIGN_IN_HANDOFF);
+        if (showStorageProblem(reset)) return;
         error.textContent = reset.error; status('Web browser data could not be cleared');
         onboarding.replaceChildren(action('Clear web browser data and try again', () => beginWebReset(apClient, webTab)));
         return;
     }
-    if (sessionStorage.getItem(SIGN_IN_AFTER_RESET)) {
+    const signIn = sessionStorage.getItem(SIGN_IN_AFTER_RESET);
+    if ((nextEmail || signIn === "invitation") && isSessionPath(location.pathname) && location.hash) {
+        invitation = await parseInvitation(`${configuration(selectedChannel).website}/s${location.hash}`, selectedChannel); showInvitationHeader();
+    }
+    if (signIn) {
         sessionStorage.removeItem(SIGN_IN_AFTER_RESET);
         showEmail();
         return;
     }
     if (nextEmail) {
         sessionStorage.removeItem(SIGN_IN_HANDOFF);
-        if (isSessionPath(location.pathname) && location.hash) {
-            invitation = await parseInvitation(`${configuration(selectedChannel).website}/s${location.hash}`, selectedChannel); showInvitationHeader();
-        }
         status('Sending code…');
         try {
             const { email, accountKey } = JSON.parse(nextEmail) as { email: string; accountKey: string };
@@ -1047,7 +1292,7 @@ async function start(): Promise<RuntimeOpenResult | undefined> {
             } else { await apClient.requestCode({ email }); showCode(email); }
         }
         catch (failure) {
-            if (isCorruptStore(failure)) { showCorruptStore(); return; }
+            if (showStorageProblem(failure)) return;
             if (enrollment) await afterAuthentication(); else showEmail();
             error.textContent = (failure as Error).message;
         }
@@ -1084,13 +1329,26 @@ async function start(): Promise<RuntimeOpenResult | undefined> {
     }
     paused = Boolean(remembered && saved!.paused); persistInvitation(Boolean(remembered && saved!.joined));
     showInvitationHeader();
-    onboarding.replaceChildren(action("Use on web", useWeb));
-    status(invitation.uri ? "Open in Playbit or continue on the web" : "Continue on the web to join");
-    if (saved?.joined && !paused && await useWeb()) await join();
+    const browser = action("Join in web browser (experimental)", async () => {
+        browser.disabled = true;
+        document.body.classList.remove("invited");
+        status("Connecting…");
+        try { await useWeb(); }
+        finally { browser.disabled = false; }
+    });
+    browser.id = "join-browser";
+    onboarding.replaceChildren(browser);
+    const resume = remembered && saved!.joined && !paused;
+    document.body.classList.toggle("invited", !resume);
+    if (resume) {
+        status("Reopening session…");
+        if (await useWeb()) await join();
+    } else {
+        status("");
+    }
 }
 const ready = start().catch(failure => {
-    if (isCorruptStore(failure)) showCorruptStore();
-    else { error.textContent = failure.message; status("Could not open this invitation"); }
+    if (!showStorageProblem(failure)) { error.textContent = failure.message; status("Could not open this invitation"); }
     throw failure;
 });
 (document.querySelector("#close-app") as HTMLButtonElement).onclick = () => { void closeApp().catch(() => {}); };

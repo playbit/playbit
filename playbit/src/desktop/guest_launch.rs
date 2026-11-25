@@ -43,17 +43,17 @@ pub(super) fn intent(args: &[OsString], focus_window: bool) -> crate::engine::Re
         }
         _ => (args, None),
     };
-    let instance =
-        match args {
-            [] => None,
-            [flag, id] if flag == "--session-instance" => Some(crate::store::Id::parse(
-                id.to_str().ok_or("Invalid session instance argument")?,
-            )?),
-            _ => return Err(
-                "Expected [--session-instance ID] [--gas-limit=N] [--background] in a prepared guest application"
-                    .into(),
-            ),
-        };
+    let instance = match args {
+        [] => None,
+        [flag, id] if flag == "--session-instance" => {
+            Some(crate::store::Id::parse(id.to_str().ok_or("Invalid session instance argument")?)?)
+        }
+        _ => {
+            return Err("Expected [--session-instance ID] [--gas-limit=N] [--background] in a \
+                prepared guest application"
+                .into());
+        }
+    };
     if fuel_limit.is_some() && instance.is_none() {
         return Err("A positive fuel limit requires a prepared session instance".into());
     }

@@ -1124,35 +1124,46 @@ impl Form {
                     Ok(Completion { result: Ok(Outcome::Opened(instance)), .. }) => {
                         this.launched = Some(instance);
                         cx.emit(FormEvent::Launched(instance));
-                    },
+                    }
                     Ok(Completion { result: Ok(Outcome::Folders(loaded)), .. }) => {
                         this.busy = false;
                         if let Some(config) = loaded.configuration {
                             this.load(config, loaded.unavailable, cx);
                         } else {
-                            this.error = "No saved GUI instances. Open a session to choose its folders.".into();
+                            this.error =
+                                "No saved GUI instances. Open a session to choose its folders."
+                                    .into();
                         }
-                    },
+                    }
                     Ok(Completion { result: Err(error), .. }) => {
                         this.busy = false;
                         this.uncertain = error.uncertain;
                         this.error = error.message;
                         if this.uncertain {
-                            this.error.push_str(if matches!(this.target, Target::Configuration(_)) { " Reload folders to check the saved state before editing again." } else { " Check Sessions before opening again." });
+                            this.error.push_str(
+                                if matches!(this.target, Target::Configuration(_)) {
+                                    " Reload folders to check the saved state before editing again."
+                                } else {
+                                    " Check Sessions before opening again."
+                                },
+                            );
                         }
-                    },
+                    }
                     Err(_) => {
                         this.busy = false;
                         this.uncertain = true;
-                        this.error = "The action could not be confirmed. Reload folders or check Sessions before trying again.".into();
-                    },
+                        this.error = "The action could not be confirmed. \
+                            Reload folders or check Sessions before trying again."
+                            .into();
+                    }
                 }
                 if !this.error.is_empty() {
                     cx.emit(FormEvent::Error(this.error.clone()));
                 }
                 cx.notify();
             });
-        }).detach();
+        })
+        .detach();
     }
 }
 impl Render for Form {
@@ -1160,9 +1171,27 @@ impl Render for Form {
         if self.is_launch_dialog() {
             return self.launch_review(window, cx);
         }
-        let mut body = div().flex().flex_col().flex_none().w_full().min_w_0().gap_3()
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .gap_3()
             .child(self.text((0, 0), FOLDER_ACCESS_TITLE.into(), true, false, cx).text_2xl())
-            .child(self.text((0, 1), "Choose folders this session window can read on this Mac. Each window has its own folder access. Allow changes to let the app edit files. The app may share folder contents with other people in the session.".into(), false, false, cx));
+            .child(
+                self.text(
+                    (0, 1),
+                    "Choose folders this session window can read on this Mac. \
+                     Each window has its own folder access. \
+                     Allow changes to let the app edit files. \
+                     The app may share folder contents with other people in the session."
+                        .into(),
+                    false,
+                    false,
+                    cx,
+                ),
+            );
         let disabled = self.busy
             || self.picker
             || self.uncertain

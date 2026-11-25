@@ -130,7 +130,8 @@ mod tests {
         let build = crate::identifier::encode(&[0xab; 32]);
         let folder = dir.path().join(crate::paths::APP_DISPLAYS);
         std::fs::create_dir_all(&folder).unwrap();
-        let icon = br#"<svg width="24" height="24"><rect width="24" height="24" fill="red" opacity="0.5"/></svg>"#;
+        let icon = b"<svg width=\"24\" height=\"24\"><rect width=\"24\" height=\"24\" \
+            fill=\"red\" opacity=\"0.5\"/></svg>";
         let mut display = crate::network::ap::operation::BuildDisplay {
             app_id: "test".into(),
             build_id: build.clone(),
@@ -159,7 +160,9 @@ mod tests {
     fn native_buffer_renders_and_rejects_bad_inputs_without_touching_output() {
         let profile = tempfile::tempdir().unwrap();
         std::fs::create_dir(profile.path().join(crate::paths::BUILDS)).unwrap();
-        let icon = br#"<svg width="24" height="24"><rect width="24" height="24" fill="red" opacity="0.5"/></svg>"#.to_vec();
+        let icon = b"<svg width=\"24\" height=\"24\"><rect width=\"24\" height=\"24\" \
+            fill=\"red\" opacity=\"0.5\"/></svg>"
+            .to_vec();
         let mut package = Package::new(
             "test".into(),
             "Artwork".into(),

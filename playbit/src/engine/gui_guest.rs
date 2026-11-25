@@ -34,9 +34,16 @@ pub enum RecoveryError {
 impl std::fmt::Display for RecoveryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::AlreadyAttempted => "This engine incarnation cannot reconstruct the stopped app at this selected build; uncertain actions were not repeated.",
-            Self::DrainPending => "Earlier accepted work is still finishing; no action was repeated.",
-            Self::ContextUnavailable => super::service_events::StopReason::ContextUnavailable.message(),
+            Self::AlreadyAttempted => {
+                "This engine incarnation cannot reconstruct the stopped app at this selected \
+                 build; uncertain actions were not repeated."
+            }
+            Self::DrainPending => {
+                "Earlier accepted work is still finishing; no action was repeated."
+            }
+            Self::ContextUnavailable => {
+                super::service_events::StopReason::ContextUnavailable.message()
+            }
         })
     }
 }
@@ -206,7 +213,9 @@ impl Guest {
                 return Err("Unexpected stopped-owner classification reply".into());
             };
             if observed != incarnation {
-                return Err("The engine changed during app-stop classification; inspect it again before recovery".into());
+                return Err("The engine changed during app-stop classification; \
+                    inspect it again before recovery"
+                    .into());
             }
             match reason {
                 super::service_events::StopReason::ContextUnavailable => {

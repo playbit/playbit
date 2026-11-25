@@ -94,10 +94,16 @@ mod platform {
         token: [u32; 8],
         pid: libc::pid_t,
         uuid: [u8; 16],
-        engine: bool,
+        path: Option<std::path::PathBuf>,
     }
     impl Peer {
         pub fn capture(stream: &UnixStream) -> Result<Self> {
+            Self::capture_at(stream, None)
+        }
+        pub(in crate::engine) fn capture_at(
+            stream: &UnixStream,
+            expected: Option<&Path>,
+        ) -> Result<Self> {
             crate::engine::ipc::verify_peer(stream)?;
             let bytes = option::<32>(stream, libc::LOCAL_PEERTOKEN)?;
             let token = std::array::from_fn(|i| {
@@ -127,23 +133,81 @@ mod platform {
                 }
             }
             let length = path.iter().position(|b| *b == 0).unwrap_or(path.len());
-            let engine = path_available
-                && Path::new(OsStr::from_bytes(&path[..length])).file_name()
-                    == Some(OsStr::new("playbit-engine"));
-            Ok(Self { token, pid, uuid, engine })
+            let path = Path::new(OsStr::from_bytes(&path[..length]));
+            if let Some(expected) = expected
+                && (!path_available || path != expected)
+            {
+                return Err("Another Playbit installation is using this profile. \
+                    Open that installation to continue."
+                    .into());
+            }
+            Ok(Self { token, pid, uuid, path: path_available.then(|| path.to_owned()) })
         }
         pub fn matches(&self, executable: &Path) -> Result<bool> {
             Ok(self.uuid == executable_uuid(executable)?)
+        }
+        /// A legacy helper can have a different build and wire protocol. Use
+        /// the originating installation's designated code requirement to
+        /// recognize another release of that helper by its socket audit token.
+        pub(in crate::engine) fn verify_signing_identity(&self, executable: &Path) -> Result<()> {
+            use core_foundation::{base::TCFType, data::CFData, url::CFURL};
+            use security_framework::os::macos::code_signing::{
+                Flags, GuestAttributes, SecCode, SecRequirement, SecStaticCode,
+            };
+            use security_framework_sys::code_signing::{SecRequirementRef, SecStaticCodeRef};
+            unsafe extern "C" {
+                fn SecCodeCopyDesignatedRequirement(
+                    code: SecStaticCodeRef,
+                    flags: u32,
+                    requirement: *mut SecRequirementRef,
+                ) -> i32;
+            }
+            let url = CFURL::from_path(executable, false).ok_or("Invalid Playbit helper path")?;
+            let expected = SecStaticCode::from_path(&url, Flags::NONE)?;
+            let mut requirement = std::ptr::null_mut();
+            // SAFETY: expected is live and a successful copy returns an owned requirement.
+            let status = unsafe {
+                SecCodeCopyDesignatedRequirement(
+                    expected.as_concrete_TypeRef(),
+                    0,
+                    &mut requirement,
+                )
+            };
+            if status != 0 {
+                return Err(security_framework::base::Error::from_code(status).into());
+            }
+            if requirement.is_null() {
+                return Err("Missing Playbit helper signing identity".into());
+            }
+            // SAFETY: the successful copy above returned a non-null owned requirement.
+            let requirement = unsafe { SecRequirement::wrap_under_create_rule(requirement) };
+            let bytes = self.token.map(u32::to_ne_bytes);
+            let token = CFData::from_buffer(bytes.as_flattened());
+            let mut attributes = GuestAttributes::new();
+            attributes.set_audit_token(token.as_concrete_TypeRef());
+            let process = SecCode::copy_guest_with_attribues(None, &attributes, Flags::NONE)?;
+            process.check_validity(Flags::NONE, &requirement).map_err(|_| {
+                "The local process does not have Playbit's engine signing identity.".into()
+            })
         }
         pub(crate) fn audit_token(&self) -> [u32; 8] {
             self.token
         }
         pub fn require_engine(&self) -> Result<()> {
+            self.engine_path().map(|_| ())
+        }
+        pub(in crate::engine) fn engine_path(&self) -> Result<&Path> {
             // SAFETY: getpid has no pointer arguments or side effects.
-            if !self.engine || self.pid <= 1 || self.pid == unsafe { libc::getpid() } {
-                return Err("The local endpoint is not a separate Playbit engine. It was left running; your data is unchanged.".into());
+            if self.pid > 1
+                && self.pid != unsafe { libc::getpid() }
+                && let Some(path) = self.path.as_deref()
+                && path.file_name() == Some(OsStr::new("playbit-engine"))
+            {
+                return Ok(path);
             }
-            Ok(())
+            Err("The local endpoint is not a separate Playbit engine. \
+                It was left running; your data is unchanged."
+                .into())
         }
         pub(super) fn stop_inner(mut self, timeout: Duration, replace_data: bool) -> Result<()> {
             self.require_engine()?;
@@ -326,7 +390,9 @@ mod platform {
         }
         pub fn require_engine(&self) -> Result<()> {
             if self.pid <= 1 || self.pid == unsafe { libc::getpid() } {
-                return Err("The local endpoint is not a separate Playbit engine. It was left running; your data is unchanged.".into());
+                return Err("The local endpoint is not a separate Playbit engine. \
+                    It was left running; your data is unchanged."
+                    .into());
             }
             let name = match fs::read_link(&self.executable) {
                 Ok(name) => name,
@@ -339,7 +405,9 @@ mod platform {
                 name.file_name().and_then(|name| name.to_str()),
                 Some("playbit-engine" | "playbit-engine (deleted)")
             ) {
-                return Err("The local endpoint is not a Playbit engine. It was left running; your data is unchanged.".into());
+                return Err("The local endpoint is not a Playbit engine. It was left running; \
+                    your data is unchanged."
+                    .into());
             }
             Ok(())
         }

@@ -95,14 +95,18 @@ fn typed_metadata_survives_short_buffers_and_round_trips_on_both_backends() {
     // Unicode lengths, zero/maximum argument counts and maximum volume count.
     let wasm = wat::parse_str(
         r#"(module
-        (import "playbit" "pb_syscall" (func $dispatch_args (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
-        (import "playbit" "pb_syscall" (func $dispatch_volumes (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        (import "playbit" "pb_syscall" (func $dispatch_args
+            (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        (import "playbit" "pb_syscall" (func $dispatch_volumes
+            (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
     (func $args (param i32) (result i32)
         (i32.wrap_i64 (call $dispatch_args (i32.const 6)
-            (i64.extend_i32_u (local.get 0)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.const 0) (i64.const 0) (i64.const 0)
+                (i64.const 0) (i64.const 0))))
     (func $volumes (param i32) (result i32)
         (i32.wrap_i64 (call $dispatch_volumes (i32.const 7)
-            (i64.extend_i32_u (local.get 0)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.const 0) (i64.const 0) (i64.const 0)
+                (i64.const 0) (i64.const 0))))
         (memory (export "memory") 2)
         (func (export "pb_main"))
         (func (export "arguments") (param i32) (result i32) local.get 0 call $args)

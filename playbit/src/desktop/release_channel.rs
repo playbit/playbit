@@ -1,5 +1,5 @@
-//! User-initiated environment switches retire the current profile's workers and
-//! authenticated engine. Cached account/UI state never crosses that boundary.
+//! User-initiated environment switches retire this client's workers and any
+//! engine it owns. Cached account/UI state never crosses that boundary.
 use super::*;
 use crate::release_channel::ReleaseChannel;
 
@@ -35,9 +35,9 @@ impl Shell {
                 .as_ref()
                 .is_some_and(|browser| browser.read(cx).has_pending_entry_operation())
         {
-            return Err(
-                "Finish naming entries or wait for the current file operation before switching environments.".into()
-            );
+            return Err("Finish naming entries or wait for the current file operation before \
+                switching environments."
+                .into());
         }
         if self.defer_draft_retirement(draft_lifecycle::Retirement::Channel(channel), cx) {
             return Ok(());
@@ -85,19 +85,36 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         let job = cx.background_executor().spawn(async move {
-            crate::diagnostic!("Switching environment from {} to {}", previous.name(), channel.name());
+            crate::diagnostic!(
+                "Switching environment from {} to {}",
+                previous.name(),
+                channel.name()
+            );
             let executable = std::env::current_exe().map_err(|error| error.to_string())?;
             let engine = crate::engine::launch::executable_for(&executable)
                 .map_err(|error| error.to_string())?;
-            crate::engine::launch::stop_for_reconfiguration(&profile, &engine)
+            crate::engine::launch::check_switch_destination(channel, &engine)
                 .map_err(|error| error.to_string())?;
-            crate::diagnostic!("Previous environment's engine stopped");
+            if crate::engine::launch::retire_profile_engine(&profile, &engine, previous)
+                .map_err(|error| error.to_string())?
+            {
+                crate::engine::launch_agent::control(
+                    crate::engine::launch_agent::ServiceAction::RetireOwned,
+                    previous,
+                )
+                .map_err(|error| error.to_string())?;
+            }
             crate::engine::profile::switch_to(channel).map_err(|error| error.to_string())?;
             let mut reopen = std::process::Command::new(executable);
             crate::engine::profile::configure_relaunch(&mut reopen)
                 .map_err(|error| error.to_string())?;
             if let Err(error) = reopen.spawn() {
-                crate::engine::profile::switch_to(previous).map_err(|restore| format!("Could not reopen Playbit: {error}; could not restore the previous channel: {restore}"))?;
+                crate::engine::profile::switch_to(previous).map_err(|restore| {
+                    format!(
+                        "Could not reopen Playbit: {error}; \
+                         could not restore the previous channel: {restore}"
+                    )
+                })?;
                 return Err(format!("Could not reopen Playbit: {error}"));
             }
             crate::diagnostic!("Reopened Playbit in {}", channel.name());

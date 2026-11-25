@@ -73,15 +73,42 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
             ));
             output.push_str(&format!("impl {}Table {{\n", name));
             output.push_str(&format!(
-                "    pub fn root() -> {}Table {{\n        {}Table {{ prefix: b\"Table:{}/\" }}\n    }}\n",
+                concat!(
+                    "    pub fn root() -> {}Table {{\n",
+                    "        {}Table {{ prefix: b\"Table:{}/\" }}\n",
+                    "    }}\n",
+                ),
                 name, name, name
             ));
-            output.push_str("    pub fn add(&self, doc: &mut Doc, rng: &mut impl RNG) -> UUID {\n        let id = UUID::generate(rng);\n        doc.mod_insert(self.prefix, doc.get_data(self.prefix).len() as u32, &id.to_bytes());\n        id\n    }\n", );
-            output.push_str( "    pub fn remove(&self, doc: &mut Doc, id: UUID) {\n        for i in 0..self.len(doc) {\n            if self.get(doc, i) == id {\n                doc.mod_remove(self.prefix, (i as u32) * 16, 16);\n                break;\n            }\n        }\n    }\n", );
-            output.push_str( "    pub fn get(&self, doc: &Doc, index: usize) -> UUID {\n        UUID::from_bytes(doc.get_data(self.prefix)[index * 16..(index + 1) * 16].try_into().unwrap())\n    }\n", );
-            output.push_str(
-                "    pub fn len(&self, doc: &Doc) -> usize {\n        doc.get_data(self.prefix).len() / 16\n    }\n",
-            );
+            output.push_str(concat!(
+                "    pub fn add(&self, doc: &mut Doc, rng: &mut impl RNG) -> UUID {\n",
+                "        let id = UUID::generate(rng);\n",
+                "        doc.mod_insert(self.prefix, ",
+                "doc.get_data(self.prefix).len() as u32, &id.to_bytes());\n",
+                "        id\n",
+                "    }\n",
+            ));
+            output.push_str(concat!(
+                "    pub fn remove(&self, doc: &mut Doc, id: UUID) {\n",
+                "        for i in 0..self.len(doc) {\n",
+                "            if self.get(doc, i) == id {\n",
+                "                doc.mod_remove(self.prefix, (i as u32) * 16, 16);\n",
+                "                break;\n",
+                "            }\n",
+                "        }\n",
+                "    }\n",
+            ));
+            output.push_str(concat!(
+                "    pub fn get(&self, doc: &Doc, index: usize) -> UUID {\n",
+                "        UUID::from_bytes(doc.get_data(self.prefix)[index * ",
+                "16..(index + 1) * 16].try_into().unwrap())\n",
+                "    }\n",
+            ));
+            output.push_str(concat!(
+                "    pub fn len(&self, doc: &Doc) -> usize {\n",
+                "        doc.get_data(self.prefix).len() / 16\n",
+                "    }\n",
+            ));
             output.push_str("}\n\n");
             output.push_str("#[derive(Debug)]\n");
             output.push_str(&format!(
@@ -98,24 +125,43 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
 
         if mode == "root" {
             output.push_str(&format!(
-                "    pub fn root() -> {} {{\n        {} {{ prefix: b\"{}/\", link: None }}\n    }}\n",
+                concat!(
+                    "    pub fn root() -> {} {{\n",
+                    "        {} {{ prefix: b\"{}/\", link: None }}\n",
+                    "    }}\n",
+                ),
                 name, name, name
             ));
         } else if mode == "table" {
             output.push_str(&format!(
-                "    pub fn from_row(row: UUID) -> {} {{\n        {} {{ prefix: b\"Table:{}/\", link: Some(row.to_bytes()) }}\n    }}\n",
+                concat!(
+                    "    pub fn from_row(row: UUID) -> {} {{\n",
+                    "        {} {{ prefix: b\"Table:{}/\", link: Some(row.to_bytes()) }}\n",
+                    "    }}\n",
+                ),
                 name, name, name
             ));
         } else if mode == "anon" {
             output.push_str(&format!(
-                "    pub fn from_link(link: UUID) -> {} {{\n        {} {{ prefix: b\"Anon:{}/\", link: Some(link.to_bytes()) }}\n    }}\n",
+                concat!(
+                    "    pub fn from_link(link: UUID) -> {} {{\n",
+                    "        {} {{ prefix: b\"Anon:{}/\", link: Some(link.to_bytes()) }}\n",
+                    "    }}\n",
+                ),
                 name, name, name
             ));
         }
 
-        output.push_str(
-            "    pub fn object_key(&self) -> Vec<u8> {\n        let mut object_key = self.prefix.to_owned();\n        if let Some(link) = self.link {\n            object_key.extend_from_slice(&link);\n            object_key.extend_from_slice(b\"/\");\n        }\n        object_key\n    }\n",
-        );
+        output.push_str(concat!(
+            "    pub fn object_key(&self) -> Vec<u8> {\n",
+            "        let mut object_key = self.prefix.to_owned();\n",
+            "        if let Some(link) = self.link {\n",
+            "            object_key.extend_from_slice(&link);\n",
+            "            object_key.extend_from_slice(b\"/\");\n",
+            "        }\n",
+            "        object_key\n",
+            "    }\n",
+        ));
 
         let mut field_offset = 0;
         let mut secondary_objects = 0;
@@ -135,91 +181,315 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
 
             match kind.as_ref() {
                 "i64" => {
-                    output.push_str(&format!("    pub fn get_{}(&self, doc: &Doc) -> i64 {{\n        extract_i64(doc.get_data(&self.object_key()), {})\n    }}\n", field_name, field_offset));
-                    output.push_str(&format!("    pub fn set_{}(&self, doc: &mut Doc, new_value: i64) {{\n        doc.mod_set(&self.object_key(), {}, &new_value.to_le_bytes());\n    }}\n", field_name, field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn get_{}(&self, doc: &Doc) -> i64 {{\n",
+                            "        extract_i64(doc.get_data(&self.object_key()), {})\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn set_{}(&self, doc: &mut Doc, new_value: i64) {{\n",
+                            "        doc.mod_set(&self.object_key(), {}, ",
+                            "&new_value.to_le_bytes());\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
                     field_offset += 8;
                 }
                 "i32" => {
-                    output.push_str(&format!("    pub fn get_{}(&self, doc: &Doc) -> i32 {{\n        extract_i32(doc.get_data(&self.object_key()), {})\n    }}\n", field_name, field_offset));
-                    output.push_str(&format!("    pub fn set_{}(&self, doc: &mut Doc, new_value: i32) {{\n        doc.mod_set(&self.object_key(), {}, &new_value.to_le_bytes());\n    }}\n", field_name, field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn get_{}(&self, doc: &Doc) -> i32 {{\n",
+                            "        extract_i32(doc.get_data(&self.object_key()), {})\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn set_{}(&self, doc: &mut Doc, new_value: i32) {{\n",
+                            "        doc.mod_set(&self.object_key(), {}, ",
+                            "&new_value.to_le_bytes());\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
                     field_offset += 4;
                 }
                 "i16" => {
-                    output.push_str(&format!("    pub fn get_{}(&self, doc: &Doc) -> i16 {{\n        extract_i16(doc.get_data(&self.object_key()), {})\n    }}\n", field_name, field_offset));
-                    output.push_str(&format!("    pub fn set_{}(&self, doc: &mut Doc, new_value: i16) {{\n        doc.mod_set(&self.object_key(), {}, &new_value.to_le_bytes());\n    }}\n", field_name, field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn get_{}(&self, doc: &Doc) -> i16 {{\n",
+                            "        extract_i16(doc.get_data(&self.object_key()), {})\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn set_{}(&self, doc: &mut Doc, new_value: i16) {{\n",
+                            "        doc.mod_set(&self.object_key(), {}, ",
+                            "&new_value.to_le_bytes());\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
                     field_offset += 2;
                 }
                 "i8" => {
-                    output.push_str(&format!("    pub fn get_{}(&self, doc: &Doc) -> i8 {{\n        extract_i8(doc.get_data(&self.object_key()), {})\n    }}\n", field_name, field_offset));
-                    output.push_str(&format!("    pub fn set_{}(&self, doc: &mut Doc, new_value: i8) {{\n        doc.mod_set(&self.object_key(), {}, &new_value.to_le_bytes());\n    }}\n", field_name, field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn get_{}(&self, doc: &Doc) -> i8 {{\n",
+                            "        extract_i8(doc.get_data(&self.object_key()), {})\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn set_{}(&self, doc: &mut Doc, new_value: i8) {{\n",
+                            "        doc.mod_set(&self.object_key(), {}, ",
+                            "&new_value.to_le_bytes());\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
                     field_offset += 1;
                 }
                 "u64" => {
-                    output.push_str(&format!("    pub fn get_{}(&self, doc: &Doc) -> u64 {{\n        extract_u64(doc.get_data(&self.object_key()), {})\n    }}\n", field_name, field_offset));
-                    output.push_str(&format!("    pub fn set_{}(&self, doc: &mut Doc, new_value: u64) {{\n        doc.mod_set(&self.object_key(), {}, &new_value.to_le_bytes());\n    }}\n", field_name, field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn get_{}(&self, doc: &Doc) -> u64 {{\n",
+                            "        extract_u64(doc.get_data(&self.object_key()), {})\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn set_{}(&self, doc: &mut Doc, new_value: u64) {{\n",
+                            "        doc.mod_set(&self.object_key(), {}, ",
+                            "&new_value.to_le_bytes());\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
                     field_offset += 8;
                 }
                 "u32" => {
-                    output.push_str(&format!("    pub fn get_{}(&self, doc: &Doc) -> u32 {{\n        extract_u32(doc.get_data(&self.object_key()), {})\n    }}\n", field_name, field_offset));
-                    output.push_str(&format!("    pub fn set_{}(&self, doc: &mut Doc, new_value: u32) {{\n        doc.mod_set(&self.object_key(), {}, &new_value.to_le_bytes());\n    }}\n", field_name, field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn get_{}(&self, doc: &Doc) -> u32 {{\n",
+                            "        extract_u32(doc.get_data(&self.object_key()), {})\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn set_{}(&self, doc: &mut Doc, new_value: u32) {{\n",
+                            "        doc.mod_set(&self.object_key(), {}, ",
+                            "&new_value.to_le_bytes());\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
                     field_offset += 4;
                 }
                 "u16" => {
-                    output.push_str(&format!("    pub fn get_{}(&self, doc: &Doc) -> u16 {{\n        extract_u16(doc.get_data(&self.object_key()), {})\n    }}\n", field_name, field_offset));
-                    output.push_str(&format!("    pub fn set_{}(&self, doc: &mut Doc, new_value: u16) {{\n        doc.mod_set(&self.object_key(), {}, &new_value.to_le_bytes());\n    }}\n", field_name, field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn get_{}(&self, doc: &Doc) -> u16 {{\n",
+                            "        extract_u16(doc.get_data(&self.object_key()), {})\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn set_{}(&self, doc: &mut Doc, new_value: u16) {{\n",
+                            "        doc.mod_set(&self.object_key(), {}, ",
+                            "&new_value.to_le_bytes());\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
                     field_offset += 2;
                 }
                 "u8" => {
-                    output.push_str(&format!("    pub fn get_{}(&self, doc: &Doc) -> u8 {{\n        extract_u8(doc.get_data(&self.object_key()), {})\n    }}\n", field_name, field_offset));
-                    output.push_str(&format!("    pub fn set_{}(&self, doc: &mut Doc, new_value: u8) {{\n        doc.mod_set(&self.object_key(), {}, &new_value.to_le_bytes());\n    }}\n", field_name, field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn get_{}(&self, doc: &Doc) -> u8 {{\n",
+                            "        extract_u8(doc.get_data(&self.object_key()), {})\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn set_{}(&self, doc: &mut Doc, new_value: u8) {{\n",
+                            "        doc.mod_set(&self.object_key(), {}, ",
+                            "&new_value.to_le_bytes());\n",
+                            "    }}\n",
+                        ),
+                        field_name, field_offset
+                    ));
                     field_offset += 1;
                 }
                 "list-of-links" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> ListOfLinks {{\n        ListOfLinks {{ prefix: self.prefix, link: self.link, secondary: b\"{}\" }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> ListOfLinks {{\n",
+                            "        ListOfLinks {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\" }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "list-of-i64" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> ListOfInteger<i64> {{\n        ListOfInteger {{ prefix: self.prefix, link: self.link, secondary: b\"{}\", _phantom: std::marker::PhantomData }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> ListOfInteger<i64> {{\n",
+                            "        ListOfInteger {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\", _phantom: ",
+                            "std::marker::PhantomData }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "list-of-i32" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> ListOfInteger<i32> {{\n        ListOfInteger {{ prefix: self.prefix, link: self.link, secondary: b\"{}\", _phantom: std::marker::PhantomData }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> ListOfInteger<i32> {{\n",
+                            "        ListOfInteger {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\", _phantom: ",
+                            "std::marker::PhantomData }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "list-of-i16" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> ListOfInteger<i16> {{\n        ListOfInteger {{ prefix: self.prefix, link: self.link, secondary: b\"{}\", _phantom: std::marker::PhantomData }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> ListOfInteger<i16> {{\n",
+                            "        ListOfInteger {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\", _phantom: ",
+                            "std::marker::PhantomData }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "list-of-i8" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> ListOfInteger<i8> {{\n        ListOfInteger {{ prefix: self.prefix, link: self.link, secondary: b\"{}\", _phantom: std::marker::PhantomData }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> ListOfInteger<i8> {{\n",
+                            "        ListOfInteger {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\", _phantom: ",
+                            "std::marker::PhantomData }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "list-of-u64" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> ListOfInteger<u64> {{\n        ListOfInteger {{ prefix: self.prefix, link: self.link, secondary: b\"{}\", _phantom: std::marker::PhantomData }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> ListOfInteger<u64> {{\n",
+                            "        ListOfInteger {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\", _phantom: ",
+                            "std::marker::PhantomData }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "list-of-u32" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> ListOfInteger<u32> {{\n        ListOfInteger {{ prefix: self.prefix, link: self.link, secondary: b\"{}\", _phantom: std::marker::PhantomData }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> ListOfInteger<u32> {{\n",
+                            "        ListOfInteger {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\", _phantom: ",
+                            "std::marker::PhantomData }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "list-of-u16" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> ListOfInteger<u16> {{\n        ListOfInteger {{ prefix: self.prefix, link: self.link, secondary: b\"{}\", _phantom: std::marker::PhantomData }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> ListOfInteger<u16> {{\n",
+                            "        ListOfInteger {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\", _phantom: ",
+                            "std::marker::PhantomData }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "list-of-u8" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> ListOfInteger<u8> {{\n        ListOfInteger {{ prefix: self.prefix, link: self.link, secondary: b\"{}\", _phantom: std::marker::PhantomData }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> ListOfInteger<u8> {{\n",
+                            "        ListOfInteger {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\", _phantom: ",
+                            "std::marker::PhantomData }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "bytes" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> Bytes {{\n        Bytes {{ prefix: self.prefix, link: self.link, secondary: b\"{}\" }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> Bytes {{\n",
+                            "        Bytes {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\" }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "utf8-string" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> UTF8String {{\n        UTF8String {{ prefix: self.prefix, link: self.link, secondary: b\"{}\" }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> UTF8String {{\n",
+                            "        UTF8String {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\" }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 "rich-text-document" => {
-                    output.push_str(&format!("    pub fn {}(&self) -> RichTextDocument {{\n        RichTextDocument {{ prefix: self.prefix, link: self.link, secondary: b\"{}\" }}\n    }}\n", field_name, secondary_objects));
+                    output.push_str(&format!(
+                        concat!(
+                            "    pub fn {}(&self) -> RichTextDocument {{\n",
+                            "        RichTextDocument {{ prefix: self.prefix, link: ",
+                            "self.link, secondary: b\"{}\" }}\n",
+                            "    }}\n",
+                        ),
+                        field_name, secondary_objects
+                    ));
                     secondary_objects += 1;
                 }
                 _ => {
@@ -368,49 +638,97 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
 
             match kind.as_ref() {
                 "i64" => {
-                    output.push_str(&format!("if object_key.is_empty() && item.modification.offset == {} && item.modification.kind == ModKind::Set {{\n", field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "if object_key.is_empty() && item.modification.offset == {} ",
+                            "&& item.modification.kind == ModKind::Set {{\n",
+                        ),
+                        field_offset
+                    ));
                     output.push_str(&format!("            ChangeTo{}::Set_{}\n", name, field_name));
                     output.push_str("        } else ");
                     field_offset += 8;
                 }
                 "i32" => {
-                    output.push_str(&format!("if object_key.is_empty() && item.modification.offset == {} && item.modification.kind == ModKind::Set {{\n", field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "if object_key.is_empty() && item.modification.offset == {} ",
+                            "&& item.modification.kind == ModKind::Set {{\n",
+                        ),
+                        field_offset
+                    ));
                     output.push_str(&format!("            ChangeTo{}::Set_{}\n", name, field_name));
                     output.push_str("        } else ");
                     field_offset += 4;
                 }
                 "i16" => {
-                    output.push_str(&format!("if object_key.is_empty() && item.modification.offset == {} && item.modification.kind == ModKind::Set {{\n", field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "if object_key.is_empty() && item.modification.offset == {} ",
+                            "&& item.modification.kind == ModKind::Set {{\n",
+                        ),
+                        field_offset
+                    ));
                     output.push_str(&format!("            ChangeTo{}::Set_{}\n", name, field_name));
                     output.push_str("        } else ");
                     field_offset += 2;
                 }
                 "i8" => {
-                    output.push_str(&format!("if object_key.is_empty() && item.modification.offset == {} && item.modification.kind == ModKind::Set {{\n", field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "if object_key.is_empty() && item.modification.offset == {} ",
+                            "&& item.modification.kind == ModKind::Set {{\n",
+                        ),
+                        field_offset
+                    ));
                     output.push_str(&format!("            ChangeTo{}::Set_{}\n", name, field_name));
                     output.push_str("        } else ");
                     field_offset += 1;
                 }
                 "u64" => {
-                    output.push_str(&format!("if object_key.is_empty() && item.modification.offset == {} && item.modification.kind == ModKind::Set {{\n", field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "if object_key.is_empty() && item.modification.offset == {} ",
+                            "&& item.modification.kind == ModKind::Set {{\n",
+                        ),
+                        field_offset
+                    ));
                     output.push_str(&format!("            ChangeTo{}::Set_{}\n", name, field_name));
                     output.push_str("        } else ");
                     field_offset += 8;
                 }
                 "u32" => {
-                    output.push_str(&format!("if object_key.is_empty() && item.modification.offset == {} && item.modification.kind == ModKind::Set {{\n", field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "if object_key.is_empty() && item.modification.offset == {} ",
+                            "&& item.modification.kind == ModKind::Set {{\n",
+                        ),
+                        field_offset
+                    ));
                     output.push_str(&format!("            ChangeTo{}::Set_{}\n", name, field_name));
                     output.push_str("        } else ");
                     field_offset += 4;
                 }
                 "u16" => {
-                    output.push_str(&format!("if object_key.is_empty() && item.modification.offset == {} && item.modification.kind == ModKind::Set {{\n", field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "if object_key.is_empty() && item.modification.offset == {} ",
+                            "&& item.modification.kind == ModKind::Set {{\n",
+                        ),
+                        field_offset
+                    ));
                     output.push_str(&format!("            ChangeTo{}::Set_{}\n", name, field_name));
                     output.push_str("        } else ");
                     field_offset += 2;
                 }
                 "u8" => {
-                    output.push_str(&format!("if object_key.is_empty() && item.modification.offset == {} && item.modification.kind == ModKind::Set {{\n", field_offset));
+                    output.push_str(&format!(
+                        concat!(
+                            "if object_key.is_empty() && item.modification.offset == {} ",
+                            "&& item.modification.kind == ModKind::Set {{\n",
+                        ),
+                        field_offset
+                    ));
                     output.push_str(&format!("            ChangeTo{}::Set_{}\n", name, field_name));
                     output.push_str("        } else ");
                     field_offset += 1;
@@ -427,7 +745,10 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
                 "list-of-i64" => {
                     output.push_str(&format!("if object_key == b\"{}\" {{\n", secondary_objects));
                     output.push_str(&format!(
-                        "            ChangeTo{}::Update_{}(ChangeToListOfInteger::<i64>::decode(item))\n",
+                        concat!(
+                            "            ChangeTo{}::Update_{}(ChangeToListOfInteger::",
+                            "<i64>::decode(item))\n",
+                        ),
                         name, field_name
                     ));
                     output.push_str("        } else ");
@@ -436,7 +757,10 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
                 "list-of-i32" => {
                     output.push_str(&format!("if object_key == b\"{}\" {{\n", secondary_objects));
                     output.push_str(&format!(
-                        "            ChangeTo{}::Update_{}(ChangeToListOfInteger::<i32>::decode(item))\n",
+                        concat!(
+                            "            ChangeTo{}::Update_{}(ChangeToListOfInteger::",
+                            "<i32>::decode(item))\n",
+                        ),
                         name, field_name
                     ));
                     output.push_str("        } else ");
@@ -445,7 +769,10 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
                 "list-of-i16" => {
                     output.push_str(&format!("if object_key == b\"{}\" {{\n", secondary_objects));
                     output.push_str(&format!(
-                        "            ChangeTo{}::Update_{}(ChangeToListOfInteger::<i16>::decode(item))\n",
+                        concat!(
+                            "            ChangeTo{}::Update_{}(ChangeToListOfInteger::",
+                            "<i16>::decode(item))\n",
+                        ),
                         name, field_name
                     ));
                     output.push_str("        } else ");
@@ -454,7 +781,10 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
                 "list-of-i8" => {
                     output.push_str(&format!("if object_key == b\"{}\" {{\n", secondary_objects));
                     output.push_str(&format!(
-                        "            ChangeTo{}::Update_{}(ChangeToListOfInteger::<i8>::decode(item))\n",
+                        concat!(
+                            "            ChangeTo{}::Update_{}(ChangeToListOfInteger::<i8>",
+                            "::decode(item))\n",
+                        ),
                         name, field_name
                     ));
                     output.push_str("        } else ");
@@ -463,7 +793,10 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
                 "list-of-u64" => {
                     output.push_str(&format!("if object_key == b\"{}\" {{\n", secondary_objects));
                     output.push_str(&format!(
-                        "            ChangeTo{}::Update_{}(ChangeToListOfInteger::<u64>::decode(item))\n",
+                        concat!(
+                            "            ChangeTo{}::Update_{}(ChangeToListOfInteger::",
+                            "<u64>::decode(item))\n",
+                        ),
                         name, field_name
                     ));
                     output.push_str("        } else ");
@@ -472,7 +805,10 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
                 "list-of-u32" => {
                     output.push_str(&format!("if object_key == b\"{}\" {{\n", secondary_objects));
                     output.push_str(&format!(
-                        "            ChangeTo{}::Update_{}(ChangeToListOfInteger::<u32>::decode(item))\n",
+                        concat!(
+                            "            ChangeTo{}::Update_{}(ChangeToListOfInteger::",
+                            "<u32>::decode(item))\n",
+                        ),
                         name, field_name
                     ));
                     output.push_str("        } else ");
@@ -481,7 +817,10 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
                 "list-of-u16" => {
                     output.push_str(&format!("if object_key == b\"{}\" {{\n", secondary_objects));
                     output.push_str(&format!(
-                        "            ChangeTo{}::Update_{}(ChangeToListOfInteger::<u16>::decode(item))\n",
+                        concat!(
+                            "            ChangeTo{}::Update_{}(ChangeToListOfInteger::",
+                            "<u16>::decode(item))\n",
+                        ),
                         name, field_name
                     ));
                     output.push_str("        } else ");
@@ -490,7 +829,10 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
                 "list-of-u8" => {
                     output.push_str(&format!("if object_key == b\"{}\" {{\n", secondary_objects));
                     output.push_str(&format!(
-                        "            ChangeTo{}::Update_{}(ChangeToListOfInteger::<u8>::decode(item))\n",
+                        concat!(
+                            "            ChangeTo{}::Update_{}(ChangeToListOfInteger::<u8>",
+                            "::decode(item))\n",
+                        ),
                         name, field_name
                     ));
                     output.push_str("        } else ");
@@ -517,7 +859,10 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
                 "rich-text-document" => {
                     output.push_str(&format!("if object_key == b\"{}\" {{\n", secondary_objects));
                     output.push_str(&format!(
-                        "            ChangeTo{}::Update_{}(ChangeToRichTextDocument::decode(item))\n",
+                        concat!(
+                            "            ChangeTo{}::Update_",
+                            "{}(ChangeToRichTextDocument::decode(item))\n",
+                        ),
                         name, field_name
                     ));
                     output.push_str("        } else ");
@@ -578,14 +923,32 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
         };
         if mode == "root" {
             output.push_str(&format!("if item.object_key.starts_with(b\"{}/\") {{\n", name));
-            output.push_str(&format!("            Change::ToRoot{}(ChangeTo{}::decode(item, item.object_key.strip_prefix(b\"{}/\").unwrap()))\n", name, name, name));
+            output.push_str(&format!(
+                concat!(
+                    "            Change::ToRoot{}(ChangeTo{}::decode(item, ",
+                    "item.object_key.strip_prefix(b\"{}/\").unwrap()))\n",
+                ),
+                name, name, name
+            ));
             output.push_str("        } else ");
         } else if mode == "table" {
             output.push_str(&format!("if item.object_key == b\"Table:{}/\" {{\n", name));
             output.push_str("            if item.modification.kind == ModKind::Insert {\n");
-            output.push_str(&format!("                Change::ToTable{}(ChangeTo{}Table::Add(UUID::from_bytes(item.bytes.try_into().unwrap())))\n", name, name));
+            output.push_str(&format!(
+                concat!(
+                    "                Change::ToTable{}(ChangeTo{}Table::Add(UUID::from_",
+                    "bytes(item.bytes.try_into().unwrap())))\n",
+                ),
+                name, name
+            ));
             output.push_str("            } else if item.modification.kind == ModKind::Remove {\n");
-            output.push_str(&format!("                Change::ToTable{}(ChangeTo{}Table::Remove(item.modification.offset / 16))\n", name, name));
+            output.push_str(&format!(
+                concat!(
+                    "                Change::ToTable{}(ChangeTo{}Table::Remove(item",
+                    ".modification.offset / 16))\n",
+                ),
+                name, name
+            ));
             output.push_str("            } else {\n");
             output.push_str(&format!(
                 "                Change::ToTable{}(ChangeTo{}Table::Nop)\n",
@@ -594,15 +957,40 @@ pub fn process_schema(input: Result<String>) -> Result<String> {
             output.push_str("            }\n");
             output.push_str("        } else ");
 
-            output.push_str(&format!( "if item.object_key.starts_with(b\"Table:{}/\") && item.object_key.len() >= 24 + b\"{}\".len() && item.object_key[23 + b\"{}\".len()] == 0x2F {{\n", name, name, name ));
-            output.push_str(&format!("            Change::ToRow{}(UUID::from_bytes((&item.object_key[7 + b\"{}\".len()..23 + b\"{}\".len()]).try_into().unwrap()), ChangeTo{}::decode(item, &item.object_key[24 + b\"{}\".len()..]))\n", name, name, name, name, name));
+            output.push_str(&format!(
+                concat!(
+                    "if item.object_key.starts_with(b\"Table:{}/\") && ",
+                    "item.object_key.len() >= 24 + b\"{}\".len() && item.object_key[23 + ",
+                    "b\"{}\".len()] == 0x2F {{\n",
+                ),
+                name, name, name
+            ));
+            output.push_str(&format!(
+                concat!(
+                    "            Change::ToRow{}(UUID::from_bytes((&item.object_key[7 + ",
+                    "b\"{}\".len()..23 + b\"{}\".len()]).try_into().unwrap()), ",
+                    "ChangeTo{}::decode(item, &item.object_key[24 + b\"{}\".len()..]))\n",
+                ),
+                name, name, name, name, name
+            ));
             output.push_str("        } else ");
         } else if mode == "anon" {
             output.push_str(&format!(
-                "if item.object_key.starts_with(b\"Anon:{}/\") && item.object_key.len() >= 23 + b\"{}\".len() && item.object_key[22 + b\"{}\".len()] == 0x2F {{\n",
+                concat!(
+                    "if item.object_key.starts_with(b\"Anon:{}/\") && ",
+                    "item.object_key.len() >= 23 + b\"{}\".len() && item.object_key[22 + ",
+                    "b\"{}\".len()] == 0x2F {{\n",
+                ),
                 name, name, name
             ));
-            output.push_str(&format!("            Change::ToAnon{}(UUID::from_bytes((&item.object_key[6 + b\"{}\".len()..22 + b\"{}\".len()]).try_into().unwrap()), ChangeTo{}::decode(item, &item.object_key[23 + b\"{}\".len()..]))\n", name, name, name, name, name));
+            output.push_str(&format!(
+                concat!(
+                    "            Change::ToAnon{}(UUID::from_bytes((&item.object_key[6 + ",
+                    "b\"{}\".len()..22 + b\"{}\".len()]).try_into().unwrap()), ",
+                    "ChangeTo{}::decode(item, &item.object_key[23 + b\"{}\".len()..]))\n",
+                ),
+                name, name, name, name, name
+            ));
             output.push_str("        } else ");
         }
     }

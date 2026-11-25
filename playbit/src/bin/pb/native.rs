@@ -113,7 +113,11 @@ fn configure(manifest: &playbit::package::Manifest, output: &Path, sdk: &Path) -
         return Err("native SDK archive exceeds 64 MiB".into());
     }
     let mut config = format!("const APP_NAME: &str = {:?};\n", manifest.name);
-    config.push_str(&format!("#[used]\n#[allow(unsafe_code)]\n#[unsafe(link_section = \"__TEXT,__pbbundle\")]\nstatic PACKAGE_DIGEST: [u8; 32] = {:?};\n", package.digest()));
+    config.push_str(&format!(
+        "#[used]\n#[allow(unsafe_code)]\n#[unsafe(link_section = \"__TEXT,\
+         __pbbundle\")]\nstatic PACKAGE_DIGEST: [u8; 32] = {:?};\n",
+        package.digest()
+    ));
     config.push_str(&format!("const _: [u8; 32] = {:?};\n", sdk_hash.finalize().as_bytes()));
     config.push_str(&directives);
     playbit::package::metadata::write_changed(&output.join("native-app.rs"), config.as_bytes())?;

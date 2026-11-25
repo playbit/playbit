@@ -227,6 +227,29 @@ pub extern "C" fn pb_publisher_status(length: usize) -> i32 {
     result.unwrap_or_else(|error| error as i32)
 }
 
+pub(super) fn scope_initializer(
+    host: &Host,
+    slot: Option<u32>,
+    build: &str,
+    role: AutomaticVolumeRole,
+) -> Result<crate::store::initialization::RootInitialization> {
+    let package = if let Some(slot) = slot {
+        let candidates = CANDIDATES.lock().expect("package candidates lock");
+        let Some(Candidate::Ready(package)) = candidates.get(&slot) else {
+            return Err(Error::NotFound);
+        };
+        (**package).clone()
+    } else {
+        host.files.borrow().bundle.as_ref().ok_or(Error::Unavailable)?.0.clone()
+    };
+    if package.identity().map_err(map_error)? != &host.session.borrow().app
+        || package.id().map_err(map_error)? != build
+    {
+        return Err(Error::AccessDenied);
+    }
+    package.initializer(role).map_err(map_error)
+}
+
 fn admit_execution(package: &Package, shared: bool) -> Result<()> {
     package
         .admit_execution(|name| {
@@ -313,12 +336,23 @@ pub extern "C" fn pb_package_adopt(slot: u32) -> i32 {
     operations::call(|host, _| {
         let session = host.session.borrow();
         admit_execution(&package, session.shared_volume.is_some())?;
-        if package.identity().map_err(map_error)? != &session.app {
+        if package.identity().map_err(map_error)? != &session.app
+            || package.id().map_err(map_error)? != session.resolved_build_id
+        {
             return Err(Error::AccessDenied);
         }
         let mut files = host.files.borrow_mut();
         if !files.ready_for_bundle() {
             return Err(Error::Busy);
+        }
+        if package
+            .required_host_features()
+            .iter()
+            .any(|feature| feature == playbit_api::abi::data::AUTOMATIC_VOLUMES_FEATURE)
+        {
+            host.bind_automatic()?;
+        } else {
+            host.automatic.borrow_mut().enabled = false;
         }
         files.bundle = Some((*package, new_bundle_id()));
         Ok(())

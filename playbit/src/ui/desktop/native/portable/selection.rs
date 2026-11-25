@@ -68,7 +68,9 @@ impl Selection {
             }
         };
         if session.resolved_build_id != build || &session.app != package.identity()? {
-            return Err("This session uses a different app build. Run the matching native app or use a separate profile.".into());
+            return Err("This session uses a different app build. \
+                Run the matching native app or use a separate profile."
+                .into());
         }
         let access = Access::session_version(store.account().id, &session.id, &build);
         if store.is_local_session(&session.id)? {

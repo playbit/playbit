@@ -38,7 +38,9 @@ impl Endpoint {
         match lease.try_lock() {
             Ok(()) => (),
             Err(TryLockError::WouldBlock) => {
-                return Err("A Playbit engine is still running for this profile. Reopen Playbit to finish recovery.".into());
+                return Err("A Playbit engine is still running for this profile. \
+                    Reopen Playbit to finish recovery."
+                    .into());
             }
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }

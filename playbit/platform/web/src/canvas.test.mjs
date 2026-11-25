@@ -17,7 +17,8 @@ test("Canvas mode is required and canonical; static input keeps pointer and key 
         assert.throws(() => validateInput(controls, 13, 17, words(100001)), /Invalid input/);
     }
     assert.throws(() => decodeScene(canvas(8)), /Truncated Canvas clear color/);
-    for (const mode of [2, 4, 0xffffffff]) assert.throws(() => decodeScene(canvas(mode)), /Canvas/);
+    assert.throws(() => decodeScene(canvas(0xffffffff)), /Canvas/);
+    for (const mode of [2, 4]) assert.throws(() => decodeScene(canvas(mode)), /Extended canvas must be the root/);
     const missing = new Uint8Array([...new TextEncoder().encode("PBV1"), ...command(1, 0), ...command(22, 17, words(320, 240, 0)), ...command(4, 0)]);
     assert.throws(() => decodeScene(missing), /canvas/);
 });
@@ -51,9 +52,12 @@ test("Canvas text preserves Unicode and drawing order, rejecting malformed exter
     assert.equal(decodeScene(scene([label("")])).controls.get(1).items[0].text, "");
 });
 
-test("packed pixel Canvas items reject explicitly on the browser host", () => {
+test("packed pixel Canvas items retain order, source geometry and exact alpha", () => {
     const pixels = [...words(2, 0, 0, 16, 16, 0, 1, 1, 4), 255, 0, 0, 255];
-    assert.throws(() => decodeScene(scene([rect, pixels])), /Unknown Canvas item/);
+    assert.deepEqual(decodeScene(scene([rect, pixels])).controls.get(1).items, [
+        { kind: "rect", x: 2, y: 3, width: 100, height: 24, color: 0xaabbccff },
+        { kind: "pixels", x: 0, y: 0, width: 16, height: 16, sourceWidth: 1, sourceHeight: 1, rgba: Uint8Array.of(255, 0, 0, 255) },
+    ]);
 });
 
 test("Canvas item and UTF-8 budgets apply across all controls in a scene", () => {
@@ -87,11 +91,11 @@ test("decorative SDK canvases are repeatable, noninteractive and static", () => 
 test("rectangle and text fills preserve Display P3 SDK colors", () => {
     const fills = [];
     const context = {
-        clearRect() {}, save() {}, beginPath() {}, rect() {}, clip() {}, restore() {},
+        clearRect() {}, setTransform() {}, save() {}, beginPath() {}, rect() {}, clip() {}, restore() {},
         fillRect() { fills.push(["rect", this.fillStyle]); },
         fillText() { fills.push(["text", this.fillStyle]); },
     };
-    const canvas = { getContext(kind, options) {
+    const canvas = { style: {}, closest: () => null, toggleAttribute() {}, getContext(kind, options) {
         assert.equal(kind, "2d"); assert.deepEqual(options, { colorSpace: "display-p3" });
         return context;
     } };
@@ -105,4 +109,31 @@ test("rectangle and text fills preserve Display P3 SDK colors", () => {
     ] });
     assert.deepEqual([canvas.width, canvas.height], [16, 16]);
     assert.deepEqual(fills, [["rect", `color(display-p3 0 0 1 / ${128 / 255})`], ["rect", "color(display-p3 1 0 0 / 1)"], ["text", `color(display-p3 0 1 0 / ${128 / 255})`]]);
+});
+
+test("canvas composites straight-alpha sRGB pixels with nearest-neighbor sampling", () => {
+    const operations = [], rgba = Uint8Array.of(120, 54, 219, 99);
+    const context = { setTransform() {}, clearRect() {}, fillRect() { operations.push("clear color"); },
+        drawImage(source, ...bounds) { operations.push(["pixels", source.width, source.height, this.imageSmoothingEnabled, ...bounds]); } };
+    const bitmap = { getContext(kind, options) {
+        assert.equal(kind, "2d"); assert.deepEqual(options, { colorSpace: "srgb" });
+        return { putImageData(image, x, y) { operations.push(["source", ...image.data, x, y]); } };
+    } };
+    const previousDocument = globalThis.document, previousImageData = globalThis.ImageData;
+    globalThis.document = { createElement(name) { assert.equal(name, "canvas"); return bitmap; } };
+    globalThis.ImageData = class { constructor(data, width, height, options) {
+        assert.deepEqual([width, height, options.colorSpace], [1, 1, "srgb"]);
+        this.data = data;
+    } };
+    try {
+        const canvas = { style: {}, closest: () => null, toggleAttribute() {}, getContext: () => context };
+        drawCanvas(canvas, { kind: "canvas", id: 1, width: 16, height: 16, frames: 0, clearColor: 0x001122ff,
+            items: [{ kind: "pixels", x: 2, y: 3, width: 4, height: 5, sourceWidth: 1, sourceHeight: 1, rgba }] }, 2, true);
+        assert.deepEqual([canvas.width, canvas.height], [32, 32]);
+        assert.deepEqual([canvas.style.width, canvas.style.height, canvas.style.aspectRatio], ["16px", "", "16 / 16"]);
+        assert.deepEqual(operations, ["clear color", ["source", 120, 54, 219, 99, 0, 0], ["pixels", 1, 1, false, 2, 3, 4, 5]]);
+    } finally {
+        globalThis.document = previousDocument;
+        globalThis.ImageData = previousImageData;
+    }
 });

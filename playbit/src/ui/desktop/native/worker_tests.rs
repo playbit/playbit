@@ -148,8 +148,10 @@ fn service_guest_owner_delivers_completions_and_drains_without_an_engine_scene_e
             "Guest worker fixture",
             false,
         );
-        let wasm = wat::parse_str(r#"(module
-            (import "playbit" "pb_syscall" (func $sys (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+        let wasm = wat::parse_str(
+            r#"(module
+            (import "playbit" "pb_syscall" (func $sys (param i32 i64 i64 i64 i64 i64 i64)
+                (result i64)))
             (memory (export "memory") 1)
             (global $began (mut i32) (i32.const 0))
             (global $pending (mut i64) (i64.const 0))
@@ -159,7 +161,9 @@ fn service_guest_owner_delivers_completions_and_drains_without_an_engine_scene_e
                 (i32.store (i32.const 1024) (i32.const 24))
                 (i32.store (i32.const 1028) (i32.const 0))
                 (loop $events
-                    (if (i64.ne (call $sys (i32.const 4) (i64.const 1024) (i64.const 1056) (i64.const 1024) (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const -6)) (then (br $events))))
+                    (if (i64.ne (call $sys (i32.const 4) (i64.const 1024) (i64.const 1056)
+                        (i64.const 1024) (i64.const 0) (i64.const 0) (i64.const 0))
+                        (i64.const -6)) (then (br $events))))
                 (if (i32.eqz (global.get $began)) (then
                     ;; Enumerate the fixture's root and bundle volumes, including root tags.
                     (i32.store (i32.const 64) (i32.const 64))
@@ -182,15 +186,21 @@ fn service_guest_owner_delivers_completions_and_drains_without_an_engine_scene_e
                     (i32.store (i32.const 512) (i32.const 32))
                     (i64.store (i32.const 520) (i64.load (i32.const 1544)))
                     (global.set $pending (call $sys (i32.const 258) (i64.const 512)
-                        (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
+                        (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const
+                            0)))
                     (if (i64.le_s (global.get $pending) (i64.const 0)) (then unreachable))
                     (global.set $began (i32.const 1))
                     return))
                 (i32.store (i32.const 256) (i32.const 52))
                 (i32.store (i32.const 276) (i32.const 48))
                 (i32.store (i32.const 292) (i32.const 56))
-                (if (i64.eq (call $sys (i32.const 259) (global.get $pending) (i64.const 256) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const 0)) (then
-                    (drop (call $sys (i32.const 2) (i64.const 4096) (i64.const 9) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))))))"#).unwrap();
+                (if (i64.eq (call $sys (i32.const 259) (global.get $pending) (i64.const 256)
+                    (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const 0))
+                    (then
+                    (drop (call $sys (i32.const 2) (i64.const 4096) (i64.const 9) (i64.const
+                        0) (i64.const 0) (i64.const 0) (i64.const 0)))))))"#,
+        )
+        .unwrap();
         let package = crate::package::Package::new(
             "test".into(),
             "Guest worker".into(),
@@ -277,8 +287,10 @@ fn automatic_engine_restart_and_revocation_preserve_owner_admission() {
     view.column_end();
     let view = view.finish();
     let bytes: String = view.iter().map(|byte| format!("\\{byte:02x}")).collect();
-    let wasm = wat::parse_str(format!(r#"(module
-        (import "playbit" "pb_syscall" (func $sys (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+    let wasm = wat::parse_str(format!(
+        r#"(module
+        (import "playbit" "pb_syscall" (func $sys (param i32 i64 i64 i64 i64 i64 i64)
+            (result i64)))
         (memory (export "memory") 1)
         (data (i32.const 1024) "{bytes}")
         (data (i32.const 8) "clicked")
@@ -286,11 +298,18 @@ fn automatic_engine_restart_and_revocation_preserve_owner_admission() {
             (i32.store (i32.const 8192) (i32.const 24))
             (i32.store (i32.const 8196) (i32.const 0))
             (loop $events
-                (if (i64.eq (call $sys (i32.const 4) (i64.const 8192) (i64.const 8224) (i64.const 1024) (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const -6)) (then return))
+                (if (i64.eq (call $sys (i32.const 4) (i64.const 8192) (i64.const 8224)
+                    (i64.const 1024) (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const
+                    -6)) (then return))
                 (if (i32.eq (i32.load offset=16 (i32.const 8192)) (i32.const 2)) (then
-                    (drop (call $sys (i32.const 2) (i64.const 8) (i64.const 7) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))))
-                (drop (call $sys (i32.const 3) (i64.const 1024) (i64.const {length}) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
-                (br $events))))"#, length=view.len())).unwrap();
+                    (drop (call $sys (i32.const 2) (i64.const 8) (i64.const 7) (i64.const 0)
+                        (i64.const 0) (i64.const 0) (i64.const 0)))))
+                (drop (call $sys (i32.const 3) (i64.const 1024) (i64.const {length})
+                    (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
+                (br $events))))"#,
+        length = view.len()
+    ))
+    .unwrap();
     let package = crate::package::Package::new(
         "test".into(),
         "Recovery fixture".into(),
@@ -1306,7 +1325,7 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
     assert_eq!((generation, instance), (1, id));
     // A fragmented or oversized peer occupies only its bounded socket slot;
     // other controls and the local input owner remain usable.
-    use std::io::Write;
+    use std::io::{Read, Write};
     let mut partial =
         UnixStream::connect(app_control::socket_path(directory.path(), id).unwrap()).unwrap();
     partial
@@ -1495,7 +1514,39 @@ fn gui_owner_controls_bound_identity_logs_input_and_quit_without_replay() {
     assert!(call(&owner, Operation::Frame).is_err());
     let prior_owner = owner.clone();
     owner.instance.owner_generation = 2;
-    publisher.opened(2, crate::identifier::encode(&[0xef; 32]), handle);
+    owner.instance.build = crate::identifier::encode(&[0xef; 32]);
+    let readiness = Operation::WaitForBuild { build: owner.instance.build.clone() };
+    let ready = Exchange::connect(directory.path(), &owner, readiness).unwrap();
+    assert!(call(&owner, Operation::Show { presentation: 1 }).is_err());
+    let mut probe = ready.cancellation_handle().unwrap();
+    probe.set_nonblocking(true).unwrap();
+    assert!(
+        matches!(probe.read(&mut [0]), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the old generation must leave the read-only observation pending"
+    );
+    probe.set_nonblocking(false).unwrap();
+    publisher.opened(2, owner.instance.build.clone(), handle);
+    assert!(
+        matches!(ready.receive().unwrap(), Reply::Accepted { instance, generation: 2 } if instance == id)
+    );
+    assert!(
+        call(&prior_owner, Operation::WaitForBuild { build: prior_owner.instance.build.clone() })
+            .is_err()
+    );
+    assert!(
+        call(&owner, Operation::WaitForBuild { build: prior_owner.instance.build.clone() })
+            .is_err()
+    );
+    assert!(lifecycle.is_empty(), "waiting for a build does not request Show");
+    assert!(matches!(
+        call(&owner, Operation::Show { presentation: 1 }).unwrap(),
+        Reply::Accepted { .. }
+    ));
+    assert!(matches!(
+        lifecycle.try_recv().unwrap(),
+        Output::ShowRequested { owner_generation: 2, presentation: 1 }
+    ));
+    assert!(lifecycle.is_empty());
     publisher.frame(Some(vec![1, 2, 3]), &["Fresh owner".into()]);
     let Reply::Logs(resumed) = paused_reader.join().unwrap().unwrap() else { panic!() };
     assert!(resumed.reset && resumed.cursor.generation == 2);

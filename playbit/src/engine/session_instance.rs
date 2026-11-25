@@ -418,7 +418,9 @@ pub(super) mod registry {
         }
         fn available(&self) -> Result<()> {
             if self.failed {
-                Err("Session-instance registry needs recovery; no new ownership or data work was admitted".into())
+                Err("Session-instance registry needs recovery; \
+                     no new ownership or data work was admitted"
+                    .into())
             } else {
                 Ok(())
             }
@@ -878,7 +880,11 @@ pub(super) mod registry {
                 return Ok(binding.clone());
             }
             if incarnation != self.incarnation {
-                return Err("Launch incarnation changed; inspect the original request before choosing a new launch".into());
+                return Err(
+                    "Launch incarnation changed; inspect the original request before choosing \
+                     a new launch"
+                        .into(),
+                );
             }
             if self.records.len() >= MAX_RECORDS
                 || self.records.iter().filter(|record| !terminal(record.instance.state)).count()
@@ -891,7 +897,9 @@ pub(super) mod registry {
             if self.records.iter().filter(|record| !terminal(record.instance.state)).count()
                 >= MAX_PROCESSES
             {
-                return Err("GUI process limit reached, including launch reservations; this launch did not start".into());
+                return Err("GUI process limit reached, including launch reservations; \
+                    this launch did not start"
+                    .into());
             }
             instance.id = Id::generate()?;
             instance.owner_generation = 0;
@@ -981,7 +989,9 @@ pub(super) mod registry {
                 != Some(context)
                 || record.owner.as_ref() != Some(&owner.identity)
             {
-                return Err("Session-instance context has lost ownership; accepted mutations must not be replayed".into());
+                return Err("Session-instance context has lost ownership; \
+                    accepted mutations must not be replayed"
+                    .into());
             }
             Ok(record.instance.clone())
         }
@@ -1025,7 +1035,9 @@ pub(super) mod registry {
                     record.instance.build != build,
                 )
             {
-                return Err("Reconstruction no longer owns the exact prior generation; uncertain actions must not be repeated".into());
+                return Err("Reconstruction no longer owns the exact prior generation; \
+                    uncertain actions must not be repeated"
+                    .into());
             }
             let generation = next_generation(prior.owner_generation)
                 .ok_or("Session-instance owner generation exhausted")?;

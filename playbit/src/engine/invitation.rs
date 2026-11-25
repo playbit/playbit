@@ -55,36 +55,67 @@ impl Watch {
                 let mut envelope = envelope;
                 loop {
                     let state = service_client::receive_invitation(&mut stream).await?;
-                    let registered = !matches!(state, crate::network::ap::operation::InvitationStatus::WaitingRegistration);
+                    let registered = !matches!(
+                        state,
+                        crate::network::ap::operation::InvitationStatus::WaitingRegistration
+                    );
                     assert!(send.capacity() <= WATCH_LIMIT);
-                    if send.send(Ok(Event::State(state.into()))).await.is_err() { return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(()); }
+                    if send.send(Ok(Event::State(state.into()))).await.is_err() {
+                        return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(());
+                    }
                     completion.notify();
                     if envelope && registered {
-                        let read = ServiceRequest::ReadInvitation { operation_id: Id::generate()?.to_string(), session_id: session.clone(), proof: proof.clone() };
+                        let read = ServiceRequest::ReadInvitation {
+                            operation_id: Id::generate()?.to_string(),
+                            session_id: session.clone(),
+                            proof: proof.clone(),
+                        };
                         // A failed read is shown as a failure with its own retry:
                         // after a final Ready no further readiness change may
                         // arrive to retry it. A later change still retries it.
-                        let message = match service_client::request(&connection, &read).await
+                        let message = match service_client::request(&connection, &read)
+                            .await
                             .map_err(|error| error.to_string())
-                            .and_then(|response| response.data.ok_or_else(|| "missing invitation envelope".into())) {
-                            Ok(data) => match (data["envelope"].as_str(), serde_json::from_value::<Session>(data["session"].clone())) {
-                                (Some(text), Ok(registered)) => { envelope = false; Event::Envelope { envelope: text.into(), registered } }
-                                _ => Event::State(InvitationState::Failed { message: "The invitation could not be read: missing or invalid invitation registration".into() }),
+                            .and_then(|response| {
+                                response.data.ok_or_else(|| "missing invitation envelope".into())
+                            }) {
+                            Ok(data) => match (
+                                data["envelope"].as_str(),
+                                serde_json::from_value::<Session>(data["session"].clone()),
+                            ) {
+                                (Some(text), Ok(registered)) => {
+                                    envelope = false;
+                                    Event::Envelope { envelope: text.into(), registered }
+                                }
+                                _ => Event::State(InvitationState::Failed {
+                                    message: "The invitation could not be read: \
+                                        missing or invalid invitation registration"
+                                        .into(),
+                                }),
                             },
-                            Err(error) => Event::State(InvitationState::Failed { message: format!("The invitation could not be read: {error}") }),
+                            Err(error) => Event::State(InvitationState::Failed {
+                                message: format!("The invitation could not be read: {error}"),
+                            }),
                         };
                         assert!(send.capacity() <= WATCH_LIMIT);
-                        if send.send(Ok(message)).await.is_err() { return Ok(()); }
+                        if send.send(Ok(message)).await.is_err() {
+                            return Ok(());
+                        }
                         completion.notify();
                     }
                 }
-            }.await;
+            }
+            .await;
             if let Err(error) = result {
                 let message = error.to_string();
                 let mut end = message.len().min(512);
-                while !message.is_char_boundary(end) { end -= 1; }
+                while !message.is_char_boundary(end) {
+                    end -= 1;
+                }
                 assert!(send.capacity() <= WATCH_LIMIT);
-                if send.send(Err(message[..end].into())).await.is_ok() { completion.notify(); }
+                if send.send(Err(message[..end].into())).await.is_ok() {
+                    completion.notify();
+                }
             }
         });
         Ok(Self { connection: observed, receive, task })

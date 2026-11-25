@@ -11,7 +11,7 @@ import { AP, SERVICE_PROTOCOL, MAX_SERVICE_REQUEST, MAX_SERVICE_DESCRIPTION, Fra
 import type { FrameInput, Frame } from "./ap-codec.ts";
 import { MAX_REPLICA_EVENT, replicaInteger, snapshotInteger, bloblogInteger, subscriptionAck, replicaEvent } from "./replication.ts";
 import type { ApMethods, ApOperation, ApResponse, ApDescription, ApStatus, ApReplicaSubscription, ApPublicationAck, ApInvitationEvent } from "./ap-protocol.ts";
-import { advisoryOperation, type AdvisoryOperation } from './ap-protocol.ts';
+import { advisoryOperation, isWorldRequest, type AdvisoryOperation } from './ap-protocol.ts';
 
 // Web upload sources retain their 64 MiB admission ceiling. Package
 // downloads use bounded streaming in package-stream.ts.
@@ -559,6 +559,7 @@ export class ApConnection {
 
     async begin(operation: ApOperation, generation?: number): Promise<number> {
         if (generation !== undefined && (!this.status().connected || generation !== this.connectionCount)) throw failure('bloblog-offline', 'Append connection is unavailable');
+        if (operation.op === 'world_replica') operation = { ...operation, required_features: ['world-replica.v1'] };
         if (operation.op === 'publish_bloblog' || operation.op === 'get_bloblog') operation = { ...operation, required_features: ['bloblog-append-v1'] };
         if (!this.ready) throw failure("ap-transport", "AP is disconnected; reconnect before retrying pending work");
         await this.ready;
@@ -653,7 +654,10 @@ export class ApConnection {
             let code = "ap-rejected";
             if (response.denial == null && response.code === 'operation_failed' && response.error === 'AP request capacity exhausted') {
                 code = 'ap-capacity';
-            } else if (state.operation.op === 'publish_bloblog' && response.denial) {
+            } else if (isWorldRequest(state.operation, 'publish') && response.denial == null && response.code === 'operation_failed'
+                && response.error === 'unauthorized replica entry') {
+                code = 'world-entry-rejected';
+            } else if ((state.operation.op === 'publish_bloblog' || state.operation.op === 'world_replica') && response.denial) {
                 const denied = response.denial;
                 if (response.code !== 'operation_failed' || denied.cause !== 'participant_revoked'
                     || Object.keys(denied).sort().join() !== 'account_id,build_id,cause,session_id,volume_id'
@@ -661,7 +665,11 @@ export class ApConnection {
                     || !(denied.session_id === null && denied.build_id === null
                         || validId(denied.session_id, 32) && validId(denied.build_id, 32)))
                     throw new Error('Invalid AP denial');
-                code = 'bloblog-denied';
+                if (state.operation.op === 'world_replica' && denied.volume_id === state.operation.volume_id
+                    && denied.session_id === state.operation.session_id && denied.build_id === state.operation.build_id
+                    && this.account !== null && denied.account_id === this.account) {
+                    code = 'world-participant-revoked';
+                } else if (state.operation.op === 'publish_bloblog') code = 'bloblog-denied';
             }
             throw Object.assign(failure(code, response.error ?? "AP operation failed"), { serviceCode: response.code });
         }
@@ -671,13 +679,13 @@ export class ApConnection {
     streamResponse(handle: number): Promise<ApResponse> {
         return this.streamStep(handle, async state => {
             return this.responseBody(state, await this.serviceFrame(state),
-                state.operation.op === "sync_database" ? snapshotInteger
+                state.operation.op === "sync_database" || isWorldRequest(state.operation, "sync") ? snapshotInteger
                     : state.operation.op === 'get_bloblog' ? bloblogInteger : undefined);
         });
     }
 
     async subscribeReplica(operation: ApOperation): Promise<ApReplicaSubscription> {
-        if (!["subscribe_replica", "subscribe_account"].includes(operation.op)) throw new Error("Invalid replica subscription");
+        if (!["subscribe_replica", "subscribe_account"].includes(operation.op) && !isWorldRequest(operation, "subscribe")) throw new Error("Invalid replica subscription");
         if (this.replicaStreams >= 512) throw new Error("Replica subscription capacity exceeded");
         this.replicaStreams++;
         let handle: number | undefined, admitted = false;
@@ -726,7 +734,7 @@ export class ApConnection {
     }
 
     async publishReplica(operation: ApOperation, bytes: Uint8Array, generation?: number): Promise<ApPublicationAck> {
-        if (!["publish_replica", "publish_account", "publish_bloblog"].includes(operation.op)
+        if ((!["publish_replica", "publish_account", "publish_bloblog"].includes(operation.op) && !isWorldRequest(operation, "publish"))
             || !(bytes instanceof Uint8Array) || !bytes.length || bytes.length > 65536) throw new Error("Invalid replica publication");
         const expires = Date.now() + this.operationTimeout;
         const handle = await this.begin(operation, generation);

@@ -286,23 +286,25 @@ impl DirectXRenderer {
                     self.draw_paths_from_intermediate(paths)
                 }
                 PrimitiveBatch::Underlines(underlines) => self.draw_underlines(underlines),
-                PrimitiveBatch::MonochromeSprites {
-                    texture_id,
-                    sprites,
-                } => self.draw_monochrome_sprites(texture_id, sprites),
-                PrimitiveBatch::PolychromeSprites {
-                    texture_id,
-                    sprites,
-                } => self.draw_polychrome_sprites(texture_id, sprites),
+                PrimitiveBatch::MonochromeSprites { texture_id, sprites } => {
+                    self.draw_monochrome_sprites(texture_id, sprites)
+                }
+                PrimitiveBatch::PolychromeSprites { texture_id, sprites } => {
+                    self.draw_polychrome_sprites(texture_id, sprites)
+                }
                 PrimitiveBatch::Surfaces(surfaces) => self.draw_surfaces(surfaces),
-            }.context(format!("scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, {} poly, {} surfaces",
-                    scene.paths.len(),
-                    scene.shadows.len(),
-                    scene.quads.len(),
-                    scene.underlines.len(),
-                    scene.monochrome_sprites.len(),
-                    scene.polychrome_sprites.len(),
-                    scene.surfaces.len(),))?;
+            }
+            .context(format!(
+                "scene too large: {} paths, {} shadows, {} quads, {} underlines, {} mono, \
+                 {} poly, {} surfaces",
+                scene.paths.len(),
+                scene.shadows.len(),
+                scene.quads.len(),
+                scene.underlines.len(),
+                scene.monochrome_sprites.len(),
+                scene.polychrome_sprites.len(),
+                scene.surfaces.len(),
+            ))?;
         }
         self.present()
     }

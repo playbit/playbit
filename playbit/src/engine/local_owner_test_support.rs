@@ -120,21 +120,29 @@ fn independent_instances_share_one_session_and_release_capacity_on_known_quit() 
 fn guest_deadline_runs_in_the_local_event_loop_without_engine_input() {
     let directory = tempfile::tempdir().unwrap();
     let mut engine = Engine::open(directory.path()).unwrap();
-    let wasm = wat::parse_str(r#"(module
-            (import "playbit" "pb_syscall" (func $dispatch_log (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
-            (import "playbit" "pb_syscall" (func $dispatch_event (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
-            (import "playbit" "pb_syscall" (func $dispatch_wake (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+    let wasm = wat::parse_str(
+        r#"(module
+            (import "playbit" "pb_syscall" (func $dispatch_log
+                (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+            (import "playbit" "pb_syscall" (func $dispatch_event
+                (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+            (import "playbit" "pb_syscall" (func $dispatch_wake
+                (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
     (func $log (param i32 i32) (result i32)
         (i32.wrap_i64 (call $dispatch_log (i32.const 2)
-            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.const 0)
+                (i64.const 0) (i64.const 0) (i64.const 0))))
     (func $event (param i32 i32 i32) (result i32)
         (i32.store (local.get 0) (i32.const 24))
         (i32.store offset=4 (local.get 0) (i32.const 0))
         (i32.wrap_i64 (call $dispatch_event (i32.const 4)
-            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1)) (i64.extend_i32_u (local.get 2)) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.extend_i32_u (local.get 1))
+                (i64.extend_i32_u (local.get 2)) (i64.const 0) (i64.const 0) (i64.const
+                0))))
     (func $wake (param i32) (result i32)
         (i32.wrap_i64 (call $dispatch_wake (i32.const 11)
-            (i64.extend_i32_u (local.get 0)) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0))))
+            (i64.extend_i32_u (local.get 0)) (i64.const 0) (i64.const 0) (i64.const 0)
+                (i64.const 0) (i64.const 0))))
             (memory (export "memory") 1)
             (global $started (mut i32) (i32.const 0))
             (data (i32.const 8) "turn")
@@ -144,9 +152,12 @@ fn guest_deadline_runs_in_the_local_event_loop_without_engine_input() {
                     (global.set $started (i32.const 1))
                     (if (call $wake (i32.const 1000)) (then unreachable))))
                 (loop $events
-                    (local.set $status (call $event (i32.const 8192) (i32.const 8224) (i32.const 1024)))
+                    (local.set $status (call $event (i32.const 8192) (i32.const 8224)
+                        (i32.const 1024)))
                     (if (i32.eq (local.get $status) (i32.const -6)) (then return))
-                    (br $events))))"#).unwrap();
+                    (br $events))))"#,
+    )
+    .unwrap();
     let package =
         crate::engine::Package::new("test".into(), "Wake".into(), wasm, Default::default())
             .unwrap();

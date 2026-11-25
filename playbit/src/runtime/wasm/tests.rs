@@ -665,14 +665,18 @@ fn pure_apps_need_no_imports() {
 
 #[test]
 fn unknown_opcode_is_unsupported() {
-    let wasm = wat::parse_str(r#"(module
-        (import "playbit" "pb_syscall" (func $syscall (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+    let wasm = wat::parse_str(
+        r#"(module
+        (import "playbit" "pb_syscall" (func $syscall (param i32 i64 i64 i64 i64 i64 i64)
+            (result i64)))
         (memory (export "memory") 1)
         (func (export "pb_main")
             (if (i64.ne
                 (call $syscall (i32.const -1) (i64.const -1) (i64.const -1)
                     (i64.const -1) (i64.const -1) (i64.const -1) (i64.const -1))
-                (i64.const -7)) (then unreachable))))"#).unwrap();
+                (i64.const -7)) (then unreachable))))"#,
+    )
+    .unwrap();
     for &backend in test_backends() {
         let runtime = Runtime::with_backend(backend).unwrap();
         runtime.validate_guest(&wasm).unwrap();

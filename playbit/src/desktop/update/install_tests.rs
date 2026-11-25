@@ -7,9 +7,19 @@ fn sign(app: &Path, sequence: u64) {
     fs::create_dir_all(app.join("Contents/Resources")).unwrap();
     fs::copy("/bin/echo", app.join("Contents/MacOS/Playbit")).unwrap();
     fs::write(app.join("Contents/Resources/data"), b"retained resource").unwrap();
-    fs::write(app.join("Contents/Info.plist"), format!(
-        "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>playbit.engine</string><key>CFBundleExecutable</key><string>Playbit</string><key>CFBundlePackageType</key><string>APPL</string><key>PlaybitVersion</key><string>1.0.0</string><key>PlaybitReleaseSequence</key><string>{sequence}</string><key>LSMinimumSystemVersion</key><string>15.0</string></dict></plist>"
-    )).unwrap();
+    fs::write(
+        app.join("Contents/Info.plist"),
+        format!(
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>\
+             CFBundleIdentifier</key><string>playbit.engine</string><key>\
+             CFBundleExecutable</key><string>Playbit</string><key>\
+             CFBundlePackageType</key><string>APPL</string><key>PlaybitVersion</key>\
+             <string>1.0.0</string><key>PlaybitReleaseSequence</key><string>\
+             {sequence}</string><key>LSMinimumSystemVersion</key><string>15.0</string>\
+             </dict></plist>"
+        ),
+    )
+    .unwrap();
     assert!(
         Command::new("/usr/bin/codesign")
             .args(["--force", "--timestamp=none", "--sign"])

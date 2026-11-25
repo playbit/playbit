@@ -121,7 +121,9 @@ impl Manifest {
                 || value.native.is_some()
                 || value.trace.is_some()
             {
-                return Err("managed OCaml projects cannot declare build commands, artifacts, native builds or trace declarations".into());
+                return Err("managed OCaml projects cannot declare build commands, artifacts, \
+                    native builds or trace declarations"
+                    .into());
             }
         } else if release_omitted {
             value.release = release_command();

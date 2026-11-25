@@ -71,7 +71,7 @@ fn blind_world_receipt_covers_only_the_locally_submitted_snapshot() {
 #[test]
 #[cfg(feature = "connected-engine")]
 fn blind_append_replay_advances_past_a_full_batch_of_conflicts() {
-    use super::super::world::{kv_append_key, kv_append_record};
+    use crate::store::key_value::{kv_append_key, kv_append_record};
     use crate::store::{DatabaseId, volume_index::EntryKind};
     let (directory, store, volume, access) = setup();
     let entry = store.create_database(&access, volume.id, "saves", EntryKind::KvDb {}).unwrap();
@@ -125,10 +125,10 @@ fn world_append_receipt_requires_exact_ap_root_and_exact_birth_contents() {
     let original = store.db(volume.id, database).unwrap();
     let mut tx = original.begin_write(now_unix_secs()).unwrap();
     let clock = tx.clock();
-    let marker = super::super::world::kv_append_key(clock);
+    let marker = crate::store::key_value::kv_append_key(clock);
     tx.put(b"same-key", b"original").unwrap();
     tx.local_indexes()
-        .put(&marker, &super::super::world::kv_append_record(b"same-key", b"original"))
+        .put(&marker, &crate::store::key_value::kv_append_record(b"same-key", b"original"))
         .unwrap();
     tx.commit().unwrap();
     let conflicting = empty_detached_replica(directory.path(), &original).unwrap();

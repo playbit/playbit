@@ -69,9 +69,9 @@ def build(app, output):
         "CFBundleName": "Playbit Provider Service", "CFBundlePackageType": "XPC!",
         "CFBundleExecutable": "PlaybitProviderService", "XPCService": {"ServiceType": "Application"}})
     compile_swift(extension / "Contents/MacOS/PlaybitFileProvider",
-        ["../../ios/Host/Identifier.swift", "Bridge.swift", "Operation.swift", "Item.swift", "Enumerator.swift", "Extension.swift"], "PlaybitFileProvider", True)
+        ["../../ios/Host/Identifier.swift", "Domain.swift", "Bridge.swift", "Operation.swift", "Item.swift", "Enumerator.swift", "Extension.swift"], "PlaybitFileProvider", True)
     compile_swift(service / "Contents/MacOS/PlaybitProviderService", ["Service.swift"], "PlaybitProviderService")
-    compile_swift(contents / "Frameworks/PlaybitDrives.dylib", ["../../ios/Host/Identifier.swift", "Drives.swift"], "PlaybitDrives", library=True)
+    compile_swift(contents / "Frameworks/PlaybitDrives.dylib", ["../../ios/Host/Identifier.swift", "Domain.swift", "Drives.swift"], "PlaybitDrives", library=True)
     shutil.copy2(app.parent / "playbit-file-provider", contents / "MacOS/playbit-file-provider")
     identity = os.environ.get("PB_SIGN_IDENTITY", "-")
     host = plistlib.loads((contents / "Resources/runtime-entitlements.plist").read_bytes())

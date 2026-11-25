@@ -5,20 +5,36 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { stripTypeScriptTypes } from "node:module";
-import { validateInput as validateSceneInput } from "./scene.ts";
+import { surfaceBytes, validateInput as validateSceneInput } from "./scene.ts";
 const validateInput = (...args) => validateSceneInput(...args, decodeTextInput);
 import { drawCanvas } from "./canvas.ts";
+import { canvasExtent } from "./guest-window.ts";
 
 // Types are replaced by whitespace, so the slice offsets below still hold.
 const source = stripTypeScriptTypes(await readFile(new URL("./app.ts", import.meta.url), "utf8"), { mode: "strip" });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function page(twoFields = false, nativeMove = true) {
     const metrics = { moves: 0, insertions: 0, replacements: 0, maps: 0 };
-    const document = { activeElement: null, createElement: tag => new Element(tag), querySelector: () => ({ textContent: "" }) };
+    const document = { activeElement: null, createElement: tag => new Element(tag), querySelector: () => ({ textContent: "" }), addEventListener() {} };
     class Element {
-        constructor(tag) { this.tagName = tag; this.dataset = {}; this.style = {}; this.children = []; this.listeners = {}; this.value = ""; }
-        getContext() { return { clearRect() {}, fillRect() {} }; }
+        constructor(tag) {
+            this.tagName = tag; this.dataset = {}; this.style = { removeProperty(name) { delete this[name]; } };
+            this.children = []; this.listeners = {}; this.value = "";
+        }
+        getContext() { return { clearRect() {}, fillRect() {}, setTransform() {} }; }
+        getBoundingClientRect() { return { left: 0, top: 0, width: 320, height: 240 }; }
+        setPointerCapture(id) { this.capturedPointer = id; }
+        hasPointerCapture(id) { return this.capturedPointer === id; }
+        releasePointerCapture(id) {
+            assert.equal(this.capturedPointer, id);
+            delete this.capturedPointer;
+            this.onlostpointercapture?.({ pointerId: id });
+        }
         addEventListener(name, fn) { this.listeners[name] = fn; }
+        showPopover() { this.open = true; }
+        hidePopover() { this.open = false; this.listeners.toggle?.(); }
+        matches(selector) { return selector === ":popover-open" && this.open; }
+        querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null; }
         append(...children) { for (const child of children) { child.parent = this; this.children.push(child); } }
         replaceChildren(...children) { this.children = []; this.append(...children); }
         replaceWith(next) {
@@ -28,6 +44,7 @@ function page(twoFields = false, nativeMove = true) {
             next.parent = this.parent; this.parent = null;
         }
         remove() {
+            if (!this.parent) return;
             if (this.contains(document.activeElement)) document.activeElement = null;
             this.parent.children.splice(this.parent.children.indexOf(this), 1); this.parent = null;
         }
@@ -59,6 +76,8 @@ function page(twoFields = false, nativeMove = true) {
         focus() { document.activeElement = this; }
         contains(node) { return node === this || this.children.some(child => child.contains(node)); }
         setAttribute(key, value) { this[key] = value; }
+        toggleAttribute(key, present) { if (present) this.setAttribute(key, ""); else delete this[key]; }
+        closest() { return null; }
         get parentElement() { return this.parent; }
         get nextElementSibling() { return this.parent?.children[this.parent.children.indexOf(this) + 1] ?? null; }
         get firstElementChild() { return this.children[0]; }
@@ -76,22 +95,29 @@ function page(twoFields = false, nativeMove = true) {
     if (!nativeMove) delete Element.prototype.moveBefore;
     const frames = new Map(); let nextFrame = 0;
     const calls = [], main = new Element("main"), error = { actions: [], after(button) { this.actions.push(button); } }, status = {};
+    const windowListeners = {};
+    let surface = surfaceBytes(320, 240, 1, 3);
+    let captureSurfaces = false;
     let terminated = 0, recoveryIdentity;
-    const context = vm.createContext({ NativeTextEdits, MAX_TEXT_EVENT_BYTES, encodeId, decodeId, validId, drawCanvas, TextEncoder, encoder: new TextEncoder(), Uint8Array, console, error, main, app: "todo",
+    const context = vm.createContext({ NativeTextEdits, MAX_TEXT_EVENT_BYTES, encodeId, decodeId, validId, drawCanvas, canvasExtent, TextEncoder, encoder: new TextEncoder(), Uint8Array, console, error, main, app: "todo",
         guestFailure: undefined, engineFailure: undefined, pageClosing: false,
         requestAnimationFrame: callback => { frames.set(++nextFrame, callback); return nextFrame; },
         cancelAnimationFrame: id => frames.delete(id),
         words: (...values) => { const data = new Uint8Array(values.length * 4), view = new DataView(data.buffer); values.forEach((n, i) => view.setUint32(i * 4, n, true)); return data; },
-        document, status: value => { status.textContent = value; }, WebAssembly: { Suspending() {}, promising() {} }, Map: class extends Map { constructor(...args) { super(...args); metrics.maps++; } },
-        pending: new Map(), clearTimeout, worker: { terminate: () => terminated++ },
+        document, window: { addEventListener(name, callback) { windowListeners[name] = callback; } }, status: value => { status.textContent = value; }, WebAssembly: { Suspending() {}, promising() {} }, Map: class extends Map { constructor(...args) { super(...args); metrics.maps++; } },
+        applyGuestWindow() {}, layoutGuestWindow: () => surface, queueMicrotask,
+        pending: new Map(), streams: new Set(), clearTimeout, worker: { terminate: () => terminated++ },
+        createWorker: () => { context.worker = { terminate: () => terminated++ }; },
         action: (label, callback) => ({ label, callback }),
         showOfflineEdits: (_container, identity) => { recoveryIdentity = identity; },
-        call: (method, args) => new Promise((resolve, reject) => calls.push({ method, args, resolve, reject })),
+        call: (method, args) => method === "surface" && !captureSurfaces ? Promise.resolve(undefined)
+            : new Promise((resolve, reject) => calls.push({ worker: context.worker, method, args, resolve, reject })),
         URL, Image: class { async decode() {} }, webAccountClient: {}, initialReset: {},
         sessionStorage: { getItem: () => null }, SIGN_IN_HANDOFF: "test", SIGN_IN_AFTER_RESET: "test-reset", parameters: { has: name => name === "app" }, profile: "test",
     });
     vm.runInContext(source.slice(source.indexOf("const submissions ="), source.indexOf("const statusElement"))
-        + "globalThis.submit = input; globalThis.present = render; globalThis.framesChanged = updateFrames; globalThis.close = closeApp;", context);
+        + source.slice(source.indexOf("function replaceWorker"), source.indexOf("function cancelJoin"))
+        + "globalThis.submit = input; globalThis.present = render; globalThis.framesChanged = updateFrames; globalThis.close = closeApp; globalThis.replaceRuntime = replaceWorker;", context);
     const scene = (value, disabled = false, checkState = 0) => ({ kind: "column", children: [
         { kind: "row", children: [{ kind: "input", id: 1, value, placeholder: "New task", disabled: false },
             { kind: "button", id: 2, label: "Add", state: 0, disabled },
@@ -104,10 +130,12 @@ function page(twoFields = false, nativeMove = true) {
     context.present({ scene: scene("", true) });
     return { calls, frames, setFrameState: values => { Object.assign(context, values); context.framesChanged(); },
         display: time => { assert.equal(frames.size, 1); const [id, callback] = frames.entries().next().value; frames.delete(id); return callback(time); },
-        close: context.close, terminated: () => terminated, recoveryIdentity: () => recoveryIdentity,
+        close: context.close, replaceRuntime: context.replaceRuntime, terminated: () => terminated, recoveryIdentity: () => recoveryIdentity,
         error, status, field, button, checkbox, main, document, metrics, scene,
-        renderScene: scene => context.present({ scene }),
+        renderScene: (scene, window) => context.present({ scene, window }),
+        captureSurfaces() { captureSurfaces = true; },
         resolveScene: (index, scene) => calls[index].resolve({ scene }),
+        resize(width, height) { surface = surfaceBytes(width, height, 1, 3); windowListeners.resize(); },
         start: ({ suspending = true, promising = true } = {}) => {
             if (!suspending) delete context.WebAssembly.Suspending;
             if (!promising) delete context.WebAssembly.promising;
@@ -537,6 +565,284 @@ test("web browsers without moveBefore can open a local app", async () => {
 const canvasScene = (frames, id = 17) => ({ kind: "column", children: [
     { kind: "canvas", id, width: 320, height: 240, frames, items: [] },
 ] });
+test("canvas releases tracked keys even when a browser shortcut modifier is held", async () => {
+    const ui = page(), scene = canvasScene(0);
+    ui.renderScene(scene);
+    const canvas = ui.main.firstElementChild.children[0];
+    let prevented = 0;
+    const key = (fields = {}) => ({ key: "ArrowRight", preventDefault() { prevented++; }, ...fields });
+    canvas.onkeydown(key({ ctrlKey: true }));
+    canvas.onkeyup(key({ ctrlKey: true }));
+    await tick();
+    assert.equal(ui.calls.length, 0, "untracked browser shortcuts stay with the browser");
+
+    canvas.onkeydown(key());
+    canvas.onkeyup(key({ key: "End", code: "ArrowRight", ctrlKey: true }));
+    await tick();
+    assert.equal(ui.calls.length, 1);
+    assert.equal(ui.calls[0].args.kind, 12);
+    assert.deepEqual([...new Uint32Array(ui.calls[0].args.data.buffer)], [2, 1]);
+    ui.resolveScene(0, scene);
+    await tick();
+    assert.equal(ui.calls.length, 2);
+    assert.equal(ui.calls[1].args.kind, 12);
+    assert.deepEqual([...new Uint32Array(ui.calls[1].args.data.buffer)], [2, 0]);
+    ui.resolveScene(1, scene);
+    canvas.onblur();
+    await tick();
+    assert.equal(ui.calls.length, 2, "blur has no tracked key left to release");
+    assert.equal(prevented, 1, "release also preserves the browser shortcut");
+});
+
+for (const release of ["keyup", "blur"]) test(`a full input queue preserves the canvas release ordered by ${release}`, async () => {
+    const ui = page(), scene = canvasScene(0), key = { key: "ArrowRight", preventDefault() {} };
+    ui.renderScene(scene);
+    const canvas = ui.main.firstElementChild.children[0];
+    canvas.onkeydown(key);
+    await tick(); ui.resolveScene(0, scene); await tick();
+
+    const accepted = Array.from({ length: 31 }, () => ui.raw(11, 17, new Uint8Array(16)));
+    await assert.rejects(ui.raw(11, 17, new Uint8Array(16)), /busy/);
+    if (release === "keyup") canvas.onkeyup(key); else canvas.onblur();
+    canvas.onblur();
+    await assert.rejects(ui.raw(11, 17, new Uint8Array(16)), /busy/);
+    for (let index = 1; index <= accepted.length; index++) {
+        assert.equal(ui.calls[index].args.kind, 11);
+        ui.resolveScene(index, scene); await tick();
+    }
+    await Promise.all(accepted);
+    assert.deepEqual(ui.calls.filter(call => call.args.kind === 12).map(call => Array.from(new Uint32Array(call.args.data.buffer))),
+        [[2, 1], [2, 0]]);
+    ui.resolveScene(32, scene); await tick();
+    canvas.onblur(); await tick();
+    assert.equal(ui.calls.length, 33);
+});
+
+const mouse = (fields = {}) => ({ pointerId: 7, isPrimary: true, button: 0, buttons: 1, clientX: 20, clientY: 30, ...fields });
+const inputWords = call => Array.from(new Uint32Array(call.args.data.buffer));
+
+for (const release of ["pointerup", "pointercancel", "lostpointercapture", "blur"]) test(`full queue preserves a mouse release on ${release}`, async () => {
+    const ui = page(), scene = canvasScene(0);
+    ui.renderScene(scene);
+    const canvas = ui.main.firstElementChild.children[0];
+    canvas.onpointerdown(mouse({ button: 2, buttons: 2 }));
+    canvas.onpointerdown(mouse({ isPrimary: false }));
+    assert.equal(canvas.hasPointerCapture(7), false);
+    canvas.onpointerdown(mouse());
+    await tick();
+    assert.equal(canvas.hasPointerCapture(7), true);
+    assert.deepEqual(inputWords(ui.calls[0]), [20, 30, 1, 1]);
+    ui.resolveScene(0, scene); await tick();
+
+    for (let move = 1; move <= 32; move++) canvas.onpointermove(mouse({ clientX: move }));
+    assert.match(ui.error.textContent, /busy/);
+    canvas.onpointerup(mouse({ pointerId: 99, buttons: 0 }));
+    assert.equal(canvas.hasPointerCapture(7), true, "another pointer cannot release the active mouse");
+    if (release === "blur") canvas.onblur();
+    else if (release === "lostpointercapture") canvas.releasePointerCapture(7);
+    else canvas[`on${release}`](mouse({ buttons: 0, clientX: 80 }));
+    assert.equal(canvas.hasPointerCapture(7), false);
+    canvas.onpointerup(mouse({ buttons: 0 }));
+    canvas.onblur();
+    canvas.onpointerdown(mouse());
+    assert.equal(canvas.hasPointerCapture(7), false, "a rejected down never captures the pointer");
+    canvas.onpointerup(mouse({ buttons: 0 }));
+    await tick();
+    for (let index = 1; index <= 31; index++) {
+        assert.deepEqual(inputWords(ui.calls[index]), [index, 30, 0, 1]);
+        ui.resolveScene(index, scene); await tick();
+    }
+    assert.deepEqual(inputWords(ui.calls[32]), release === "pointerup" ? [80, 30, 2, 0] : [0, 0, 3, 0]);
+    ui.resolveScene(32, scene); await tick();
+    assert.equal(ui.calls.length, 33);
+
+    canvas.onpointerdown(mouse()); // Mouse pointer IDs are reused.
+    canvas.onpointermove(mouse({ buttons: 2 })); // The primary button lifts while the second remains held.
+    canvas.onpointerup(mouse({ buttons: 0 }));
+    await tick();
+    assert.deepEqual(inputWords(ui.calls[33]), [20, 30, 1, 1]);
+    ui.resolveScene(33, scene); await tick();
+    assert.deepEqual(inputWords(ui.calls[34]), [20, 30, 2, 0]);
+    ui.resolveScene(34, scene); await tick();
+    assert.equal(ui.calls.length, 35);
+});
+
+test("held keys and mouse presses share queue slot and byte reservations", async () => {
+    const ui = page(), scene = canvasScene(0), key = { key: "ArrowRight", preventDefault() {} };
+    ui.renderScene(scene);
+    const canvas = ui.main.firstElementChild.children[0];
+    canvas.onkeydown(key);
+    canvas.onpointerdown(mouse());
+    await tick(); ui.resolveScene(0, scene); await tick(); ui.resolveScene(1, scene); await tick();
+
+    const queued = Array.from({ length: 8 }, (_, index) => ui.raw(14, 1, new Uint8Array(256 * 1024 - (index === 7 ? 24 : 0))));
+    await assert.rejects(ui.raw(14, 1, new Uint8Array(1)), /busy/);
+    for (let index = 8; index < 30; index++) queued.push(ui.raw(14, 1, new Uint8Array()));
+    canvas.onpointerup(mouse({ buttons: 0 }));
+    canvas.onkeyup(key);
+    await assert.rejects(ui.raw(14, 1, new Uint8Array()), /busy/);
+    for (let index = 2; index < queued.length + 2; index++) { ui.resolveScene(index, scene); await tick(); }
+    await Promise.all(queued);
+    assert.deepEqual(inputWords(ui.calls[32]), [20, 30, 2, 0]);
+    ui.resolveScene(32, scene); await tick();
+    assert.deepEqual(inputWords(ui.calls[33]), [2, 0]);
+    ui.resolveScene(33, scene); await tick();
+});
+
+test("retiring a worker releases its browser pointer capture and fences its queued transitions", async () => {
+    const ui = page(), scene = canvasScene(0);
+    ui.renderScene(scene);
+    const retired = ui.main.firstElementChild.children[0];
+    retired.onpointerdown(mouse()); await tick();
+    retired.onpointercancel(mouse());
+    retired.onpointerdown(mouse());
+    assert.equal(retired.hasPointerCapture(7), true);
+    ui.replaceRuntime("Opening another recovered app");
+    assert.equal(retired.hasPointerCapture(7), false);
+    ui.resolveScene(0, scene); await tick();
+    assert.equal(ui.calls.length, 1);
+
+    ui.renderScene(scene);
+    const current = ui.main.firstElementChild.children[0];
+    current.onpointerdown(mouse());
+    retired.onpointerup(mouse({ buttons: 0 }));
+    current.onpointerup(mouse({ buttons: 0 }));
+    await tick();
+    assert.notEqual(ui.calls[0].worker, ui.calls[1].worker);
+    assert.deepEqual(inputWords(ui.calls[1]), [20, 30, 1, 1]);
+    ui.resolveScene(1, scene); await tick();
+    assert.deepEqual(inputWords(ui.calls[2]), [20, 30, 2, 0]);
+    ui.resolveScene(2, scene); await tick();
+    assert.equal(ui.calls.length, 3);
+});
+
+test("a regular column receives surface events after a constrained scene releases its window", async () => {
+    const ui = page();
+    ui.captureSurfaces();
+    ui.renderScene(ui.scene(""), { constraints: { minWidth: 500, maxWidth: 500, minHeight: 400, maxHeight: 400, aspectRatio: 0 } });
+    ui.resize(500, 400);
+    await tick();
+    ui.resolveScene(0, ui.scene(""));
+    await tick();
+    ui.resize(375, 650);
+    await tick();
+    assert.equal(ui.calls[1].method, "surface");
+    assert.deepEqual(ui.calls[1].args, surfaceBytes(375, 650, 1, 3));
+    ui.resolveScene(1, ui.scene("compact"));
+    await tick();
+    assert.equal(ui.field().value, "compact");
+    assert.equal(ui.calls.length, 2);
+});
+
+test("an open context menu tracks its owner and keeps the action a player saw", async () => {
+    const ui = page();
+    const scene = label => ({ kind: "context-menu", revision: label === "Join room A" ? 1 : 2, items: [{ kind: "submenu", label: "Room", items: [
+        { kind: "menu-action", id: 42, label, disabled: false },
+    ] }], children: [ui.scene("")] });
+    const open = () => ui.main.firstElementChild.oncontextmenu({ clientX: 12, clientY: 10, preventDefault() {}, stopPropagation() {} });
+    ui.renderScene(scene("Join room A"));
+    open();
+    const popup = ui.main.lastElementChild, oldAction = popup.children[0].children[1];
+    ui.renderScene(scene("Join room A"));
+    assert.equal(ui.main.lastElementChild, popup, "a normal frame keeps the menu open");
+    ui.renderScene(scene("Leave room B"));
+    assert.equal(ui.main.contains(popup), false);
+    oldAction.onclick();
+    await tick();
+    assert.equal(ui.calls.length, 0, "the previous label cannot dispatch the new action");
+    open();
+    const updated = ui.main.lastElementChild.children[0].children[1];
+    assert.equal(updated.textContent, "Leave room B");
+    updated.onclick();
+    await tick();
+    assert.equal(ui.calls[0].args.target, 42);
+    assert.equal(ui.calls[0].args.menuRevision, 2);
+    ui.resolveScene(0, scene("Leave room B"));
+    await tick();
+    open();
+    const removed = ui.main.lastElementChild;
+    const held = ui.raw(2, 2, new Uint8Array());
+    await tick();
+    removed.children[0].children[1].onclick();
+    ui.resolveScene(1, scene("Join room A")); await held; await tick();
+    assert.match(ui.error.textContent, /menu changed/);
+    assert.equal(ui.calls.length, 2, "the stale menu click never crossed into the worker");
+    open();
+    const lastPopup = ui.main.lastElementChild;
+    ui.renderScene(ui.scene(""));
+    assert.equal(ui.main.contains(lastPopup), false, "removing the owner also closes its menu");
+});
+
+test("ignored canvas geometry is sent again on resize and deduplicated after acceptance", async () => {
+    const ui = page();
+    ui.captureSurfaces();
+    const scene = { ...canvasScene(0).children[0], extent: "window" };
+    ui.renderScene(scene);
+    await tick();
+    assert.equal(ui.calls.length, 1);
+    assert.equal(ui.calls[0].method, "surface");
+    ui.calls[0].resolve(undefined);
+    await tick();
+    assert.equal(ui.calls.length, 1, "a deferred resize is not polled");
+
+    ui.resize(320, 240);
+    await tick();
+    assert.equal(ui.calls.length, 2);
+    assert.deepEqual(ui.calls[1].args, ui.calls[0].args);
+    ui.resolveScene(1, scene);
+    await tick();
+    ui.resize(320, 240);
+    await tick();
+    assert.equal(ui.calls.length, 2, "accepted geometry is deduplicated");
+});
+
+test("overlapping resize measurements coalesce to the latest geometry", async () => {
+    const ui = page();
+    ui.captureSurfaces();
+    const scene = { ...canvasScene(0).children[0], extent: "window" };
+    ui.renderScene(scene);
+    await tick();
+    ui.resize(640, 480);
+    ui.resize(960, 720);
+    assert.equal(ui.calls.length, 1);
+    ui.calls[0].resolve(undefined);
+    await tick();
+    assert.equal(ui.calls.length, 2);
+    assert.deepEqual(ui.calls[1].args, surfaceBytes(960, 720, 1, 3));
+    ui.resolveScene(1, scene);
+    await tick();
+    assert.equal(ui.calls.length, 2);
+});
+
+for (const delayed of ["success", "error"]) test(`recovered worker receives identical dimensions and ignores a late surface ${delayed}`, async () => {
+    const ui = page(), scene = { ...canvasScene(0).children[0], extent: "window" };
+    ui.captureSurfaces();
+    ui.renderScene(scene);
+    await tick(); ui.resolveScene(0, scene); await tick();
+    ui.resize(640, 480);
+    await tick();
+    const old = ui.calls[1];
+    ui.replaceRuntime("Opening another recovered app");
+    assert.equal(ui.terminated(), 1);
+    ui.resize(320, 240);
+    await tick();
+    assert.equal(ui.calls.length, 2, "no stale scene is sized while awaiting Open");
+    const recoveredScene = { ...scene, id: 18 };
+    ui.renderScene(recoveredScene); await tick();
+    assert.equal(ui.calls[2].method, "surface");
+    assert.notEqual(ui.calls[0].worker, ui.calls[2].worker);
+    assert.deepEqual(ui.calls[0].args, ui.calls[2].args);
+    ui.resolveScene(2, recoveredScene); await tick();
+
+    if (delayed === "success") old.resolve({ scene });
+    else old.reject(new Error("Retired worker rejected a resize"));
+    await tick();
+    ui.resize(320, 240); await tick();
+    assert.equal(ui.main.firstElementChild.dataset.control, "18");
+    assert.equal(ui.error.textContent, undefined);
+    assert.equal(ui.calls.length, 3, "retired responses cannot replace the new worker's acknowledgment");
+});
+
 test("static Canvas quiesces; continuous Canvas keeps one callback and one input", async () => {
     const ui = page();
     ui.renderScene(canvasScene(0));
@@ -595,14 +901,14 @@ test("click ahead of a display callback can stop or replace Canvas demand", asyn
 
 test("Canvas labels clip before painting, use the requested font, and restore for later rectangles", () => {
     const operations = [];
-    const context = { clearRect: (...args) => operations.push(["clear", ...args]),
+    const context = { clearRect: (...args) => operations.push(["clear", ...args]), setTransform() {},
         fillRect: (...args) => operations.push(["fill", ...args]),
         save: () => operations.push(["save"]), beginPath: () => operations.push(["path"]),
         rect: (...args) => operations.push(["clip-bounds", ...args]), clip: () => operations.push(["clip"]),
         fillText: (...args) => operations.push(["text", context.font, context.textBaseline, ...args]),
         restore: () => operations.push(["restore"]),
     };
-    const scope = vm.createContext({ encodeId, decodeId, validId, surface: { getContext: () => context }, node: {
+    const scope = vm.createContext({ encodeId, decodeId, validId, surface: { getContext: () => context, closest: () => null, toggleAttribute() {}, style: {} }, node: {
         width: 320, height: 240, items: [
             { kind: "text", x: 2, y: 3, width: 100, height: 24, color: 0xffffffff, fontSize: 16, bold: true, text: "日本語" },
             { kind: "rect", x: 1, y: 1, width: 3, height: 4, color: 0 },

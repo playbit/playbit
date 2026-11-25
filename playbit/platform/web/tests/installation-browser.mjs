@@ -1,9 +1,9 @@
 import { encodeId } from '../src/identifier.ts';
 import { validId } from '../src/identifier.ts';
-import { METADATA_VERSION } from '../src/storage-format.ts';
+import { INSTALLATION_DATABASE, METADATA_VERSION } from '../src/storage-format.ts';
 // Run only on an isolated test origin: this probe deliberately corrupts and
 // deletes its installation database to exercise fail-closed initialization.
-import { installationIdentity, INSTALLATION_DATABASE } from '../src/installation.ts';
+import { installationIdentity } from '../src/installation.ts';
 import { deleteWebAccount } from '../src/web-account.ts';
 const require = (condition, message) => { if (!condition) throw Error(message); };
 const remove = () => new Promise((resolve, reject) => {

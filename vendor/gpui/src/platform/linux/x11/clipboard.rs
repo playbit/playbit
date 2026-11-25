@@ -1166,11 +1166,21 @@ pub enum Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-			Error::ContentNotAvailable => f.write_str("The clipboard contents were not available in the requested format or the clipboard is empty."),
-			Error::ClipboardOccupied => f.write_str("The native clipboard is not accessible due to being held by an other party."),
-			Error::ConversionFailure => f.write_str("The image or the text that was about the be transferred to/from the clipboard could not be converted to the appropriate format."),
-			Error::Unknown { description } => f.write_fmt(format_args!("Unknown error while interacting with the clipboard: {description}")),
-		}
+            Error::ContentNotAvailable => f.write_str(
+                "The clipboard contents were not available in the requested format or the \
+                 clipboard is empty.",
+            ),
+            Error::ClipboardOccupied => f.write_str(
+                "The native clipboard is not accessible due to being held by an other party.",
+            ),
+            Error::ConversionFailure => f.write_str(
+                "The image or the text that was about the be transferred to/from the \
+                 clipboard could not be converted to the appropriate format.",
+            ),
+            Error::Unknown { description } => f.write_fmt(format_args!(
+                "Unknown error while interacting with the clipboard: {description}"
+            )),
+        }
     }
 }
 

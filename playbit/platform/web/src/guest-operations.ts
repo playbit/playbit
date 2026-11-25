@@ -1,4 +1,5 @@
 import { MAX_TEXT_EVENT_BYTES } from "./text-input.ts";
+import { MAX_VIEW_BYTES } from "./scene.ts";
 import { ABI as L } from './guest-layout.ts';
 import { ChannelHost } from "./channel-host.ts";
 import type { ChannelExports } from "./channel-host.ts";
@@ -73,14 +74,36 @@ const encoder = new TextEncoder(), decoder = new TextDecoder("utf-8", { fatal: t
 interface Retained { bytes?: Uint8Array<ArrayBuffer>; snapshot?: ResultSnapshot; id?: Uint8Array<ArrayBuffer>; entry?: Uint8Array<ArrayBuffer>; owned?: FileCompletion }
 export const IDENTITY_CHANGED = 0x80000015;
 type EnvironmentChange = 5 | typeof IDENTITY_CHANGED;
-export type RuntimeOperations = GuestOperations & { data: GuestData<Retained>; reset(): void; refreshVolumes(): void; environmentChanged(kind: EnvironmentChange): void; readonly quitOnLastWindow: boolean; channelEvent(name:string,source:Uint8Array,message:Uint8Array,data:Uint8Array):boolean };
+export type RuntimeOperations = GuestOperations & { data: GuestData<Retained>; reset(): void; refreshVolumes(): void; environmentChanged(kind: EnvironmentChange): void; readonly quitOnLastWindow: boolean; readonly wakeDue: boolean; queueWake(): void; cancelWake(): void; channelEvent(name:string,source:Uint8Array,message:Uint8Array,data:Uint8Array):boolean };
 const objectLayout: readonly BufferLayout[] = [[24, L.field, 256], [40, L.value, 4096], [56, null, 1048576]];
+// Private capability ceiling. The host evaluates Write against the specific KV entry.
+const KV_WRITE = 8;
 const maximumPageValues = Math.floor((16 * 1024 * 1024 - 64 * 256 * 40 - 1048576 - 64 * 48) / 80);
 const pageLayout: readonly BufferLayout[] = [[32, L.objectInfo, 64], [48, L.field, 16384], [64, L.value, maximumPageValues], [80, null, 1048576]];
 const schemaLayout: readonly BufferLayout[] = [[8, L.schemaType, 256], [24, L.schemaField, 4096], [40, null, 1048576]];
 const volumesLayout: readonly BufferLayout[] = [[16, L.volume, 256], [32, L.range, 16384], [48, null, 1048576]];
+// Mirrors the SDK's minimum and maximum guest wake delays, in milliseconds.
+const MIN_WAKE_DELAY = 1000, MAX_WAKE_DELAY = 86_400_000;
 export function guestOperations(services: Services): RuntimeOperations {
     let quitOnLastWindow: boolean | undefined;
+    let wake: { due: bigint; timer?: ReturnType<typeof setTimeout> } | undefined;
+    function cancelWake(): void {
+        clearTimeout(wake?.timer);
+        wake = undefined;
+        services.work.cancelWake();
+    }
+    function queueWake(): void {
+        if (!wake || clockNs() < wake.due || services.work.draining) return;
+        try { services.work.queue({ kind: 10, target: 0, data: new Uint8Array() }); }
+        catch (error) {
+            // A full event queue leaves the expired deadline pending until an
+            // existing event has drained. A wake never displaces an input.
+            if (error instanceof AbiError && error.status === -9) return;
+            throw error;
+        }
+        clearTimeout(wake.timer);
+        wake = undefined;
+    }
     const channelHost=new ChannelHost(()=>services.host());
     const session=()=>{const client=services.channels?.();if(!client)throw new AbiError(-7);return client;};
     let volumeWatch: bigint | undefined;
@@ -185,6 +208,7 @@ export function guestOperations(services: Services): RuntimeOperations {
             const output = admit(memory, payload, capacity, 1, 1, MAX_TEXT_EVENT_BYTES);
             disjoint([header, output]);
             view(memory, header).setUint32(L.event.offsets.written, 0, true);
+            queueWake();
             const event = services.events[0]; if (!event) return -6;
             if (event.data.length > output.length) return event.data.length;
             bytes(memory, output).set(event.data);
@@ -219,6 +243,24 @@ export function guestOperations(services: Services): RuntimeOperations {
     return {
         admitOperation: services.admitOperation,
         data: pending,
+        cancelWake,
+        queueWake,
+        get wakeDue() { return wake !== undefined && clockNs() >= wake.due; },
+        pb_wake_after: delay => call(() => {
+            if (services.work.draining) return -10;
+            if (!Number.isInteger(delay) || delay < MIN_WAKE_DELAY || delay > MAX_WAKE_DELAY) return -3;
+            cancelWake();
+            const alarm: NonNullable<typeof wake> = { due: clockNs() + BigInt(delay) * 1_000_000n };
+            wake = alarm;
+            const arm = () => {
+                if (wake !== alarm) return;
+                const remaining = alarm.due - clockNs();
+                if (remaining <= 0n) { services.ready?.(); return; }
+                alarm.timer = setTimeout(arm, Number((remaining + 999_999n) / 1_000_000n));
+            };
+            arm();
+            return 0;
+        }),
         environmentChanged(kind) {
             if (services.work.draining) return;
             environmentChanges.add(kind);
@@ -230,6 +272,7 @@ export function guestOperations(services: Services): RuntimeOperations {
         },
         reset: () => {
             // Clear owner declarations only after accepted work has drained.
+            cancelWake();
             pending.reset();
             quitOnLastWindow = undefined;
             volumes = undefined;
@@ -322,7 +365,7 @@ export function guestOperations(services: Services): RuntimeOperations {
             services.log(text); return 0;
         }),
         pb_view_submit: (pointer, length) => call(() => {
-            const memory = services.memory(), region = admit(memory, pointer, length, 1, 1, 1024 * 1024);
+            const memory = services.memory(), region = admit(memory, pointer, length, 1, 1, MAX_VIEW_BYTES);
             services.submit(bytes(memory, region)); return 0;
         }),
         pb_event_poll: (pointer, payload, capacity) => call(() => pollEvent(pointer, payload, capacity)),
@@ -367,7 +410,7 @@ export function guestOperations(services: Services): RuntimeOperations {
             const keyOffset = input.text(key, length, 511), valueOffset = input.text(value, valueLength, 61440), source = input.finish();
             return begin(21, 2 * source.length,
                 () => hostCall(source, host => host.pb_web_kv_put(entryOffset, keyOffset, length, valueOffset, valueLength), () => ({})),
-                fileMount(source.slice(entryOffset, entryOffset + 32), 2));
+                fileMount(source.slice(entryOffset, entryOffset + 32), KV_WRITE));
         }),
         pb_kv_put_take: (generation, slot) => call(() => pending.take(generation, slot, 21, () => 0)),
         pb_kv_delete_begin: (entry, key, length) => call(() => {
@@ -376,7 +419,7 @@ export function guestOperations(services: Services): RuntimeOperations {
             const input = new Input(memory), entryOffset = input.entry(entry), keyOffset = input.text(key, length, 511), source = input.finish();
             return begin(22, 2 * source.length,
                 () => hostCall(source, host => host.pb_web_kv_delete(entryOffset, keyOffset, length), () => ({})),
-                fileMount(source.slice(entryOffset, entryOffset + 32), 2));
+                fileMount(source.slice(entryOffset, entryOffset + 32), KV_WRITE));
         }),
         pb_kv_delete_take: (generation, slot) => call(() => pending.take(generation, slot, 22, () => 0)),
         pb_bloblog_append_begin: (generation, slot, log, blobs, count, stride, appendId) => call(() => {

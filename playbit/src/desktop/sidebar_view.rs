@@ -315,7 +315,8 @@ impl Shell {
                             "The app list failed to load"
                         }
                     } else if sessions_empty {
-                        "Your personal and saved apps appear here\n\nNo apps available; try a featured app, or create an app using a template"
+                        "Your personal and saved apps appear here\n\n\
+                         No apps available; try a featured app, or create an app using a template"
                     } else {
                         "The app list failed to load"
                     },
@@ -444,10 +445,11 @@ impl Shell {
                 self.host_text(
                     HostText::EmptyVolumes,
                     concat!(
-                        "Your personal volumes appear here\n\nThey provide synchronized ",
-                        "storage which you can access from within Playbit apps\n\nNo volumes available"
+                        "Your personal volumes appear here\n\n",
+                        "They provide synchronized storage which you can access ",
+                        "from within Playbit apps\n\nNo volumes available"
                     ),
-                    cx
+                    cx,
                 )
                 .p(ui(12.))
                 .text_size(ui(13.))
@@ -659,7 +661,8 @@ impl Shell {
         {
             browser.update(cx, |browser, cx| {
                 browser.show_hint(
-                    "Finish naming the entry or wait for the file operation before renaming a volume.",
+                    "Finish naming the entry or wait for the file operation \
+                     before renaming a volume.",
                     cx,
                 );
             });

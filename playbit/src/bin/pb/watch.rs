@@ -284,7 +284,9 @@ impl SourceWatch {
                 work.take().expect("the condition variable predicate requires pending work");
             drop(work);
             if flags & FAILED != 0 {
-                return Err("Source watching failed; the running app is retained. Run pb run again to resume watching.".into());
+                return Err("Source watching failed; the running app is retained. \
+                    Run pb run again to resume watching."
+                    .into());
             }
             let mut remaining = MAX_CHANGED_BYTES;
             let source = flags & SOURCE != 0

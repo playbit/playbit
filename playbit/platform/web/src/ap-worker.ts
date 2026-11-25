@@ -29,6 +29,7 @@ const selectedChannel = workerChannel(self.location.href);
 let connection = new ApConnection(selectedChannel);
 observeStorageFormat(() => { connection.transport?.close(); connection.disconnected(connection.transport); });
 let accountNotices = new AccountNotices();
+let resetCode: string | undefined;
 let resetting: Promise<void> | null | undefined, resetError: string | null | undefined, completedReset: string | null | undefined, generation = 0;
 async function resetAccount(args: ResetAccountArgs): Promise<void> {
     if (resetting) { await resetting.catch(() => {}); return; }
@@ -39,11 +40,11 @@ async function resetAccount(args: ResetAccountArgs): Promise<void> {
     resetting = resetWebAccount(args as ResetRequest, () => Promise.allSettled([...inFlight]), globalThis, async () => {
         await finishWebStorageReset();
         connection = new ApConnection(selectedChannel); accountNotices = new AccountNotices();
-        completedReset = args.token; resetError = null; generation++;
+        completedReset = args.token; resetError = null; resetCode = undefined; generation++;
     });
     try {
         await resetting;
-    } catch (error) { resetError = String((error as Errorish).message ?? error); }
+    } catch (error) { resetError = String((error as Errorish).message ?? error); resetCode = (error as Errorish).code; }
     finally { resetting = null; }
 }
 const inFlight = new Set<Promise<void>>();
@@ -69,7 +70,7 @@ self.onconnect = ({ ports: [port] }) => {
             // handles must never address a new account's reused handle numbers.
             channelReceipts.clear();channelOwner=connection;
             handles.clear(); accountNotices.detach(port); portGeneration = generation;
-            port.postMessage({ id, result: { error: resetError } }); return;
+            port.postMessage({ id, result: { error: resetError, code: resetCode } }); return;
         }
         if (portGeneration !== generation) {
             port.postMessage({ id, error: 'This web browser has signed out. Reload to continue' }); return;

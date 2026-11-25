@@ -68,8 +68,8 @@ cargo test --locked -p playbit --example benchmark-account-record
 swift_target="$(uname -m)-apple-macosx$MACOSX_DEPLOYMENT_TARGET"
 swiftc -target "$swift_target" -O playbit/platform/apple/FileProvider/Operation.swift playbit/platform/macos/Tests/ProviderOperationTests.swift -o "$RUNNER_TEMP"/provider-operation-tests
 "$RUNNER_TEMP"/provider-operation-tests
-swiftc -target "$swift_target" -O playbit/platform/ios/Host/Identifier.swift playbit/platform/macos/FileProvider/Drives.swift playbit/platform/macos/Tests/ProviderPushTests.swift -o "$RUNNER_TEMP"/provider-push-tests
-swiftc -target "$swift_target" -O playbit/platform/ios/Host/Identifier.swift \
+swiftc -target "$swift_target" -O playbit/platform/ios/Host/Identifier.swift playbit/platform/macos/FileProvider/{Domain,Drives}.swift playbit/platform/macos/Tests/ProviderPushTests.swift -o "$RUNNER_TEMP"/provider-push-tests
+swiftc -target "$swift_target" -O playbit/platform/ios/Host/Identifier.swift playbit/platform/macos/FileProvider/Domain.swift \
     playbit/platform/apple/FileProvider/Item.swift playbit/platform/apple/FileProvider/Enumerator.swift \
     playbit/platform/macos/Tests/ProviderNamespaceTests.swift -o "$RUNNER_TEMP"/provider-namespace-tests
 "$RUNNER_TEMP"/provider-namespace-tests

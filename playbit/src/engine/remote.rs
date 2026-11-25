@@ -3518,7 +3518,9 @@ impl Remote {
     }
     pub(crate) fn admit(&self, store: &LocalStore, session: &Session) -> Result<()> {
         if store.is_local_session(&session.id)? && session.shared_volume.is_none() {
-            return Err("sharing app sessions requires encrypted synchronization, which is not supported yet".into());
+            return Err("sharing app sessions requires encrypted synchronization, \
+                which is not supported yet"
+                .into());
         }
         store.require_replication_supported(session.replica_volume())?;
         self.sync_registration_dependencies(store, session.replica_volume(), Some(&session.id))?;
@@ -5376,7 +5378,8 @@ mod tests {
                 if outcome == "stale pending backing" {
                     assert!(matches!(gap, LiveGap::PendingBacking));
                     assert!(error.to_string().contains(
-                        "replica subscription requires gap recovery\nAlso waiting for initial database synchronization"
+                        "replica subscription requires gap recovery\n\
+                         Also waiting for initial database synchronization"
                     ));
                 } else {
                     assert!(matches!(gap, LiveGap::Apply(_)));
@@ -7409,7 +7412,10 @@ mod authentication_log_tests {
         let text = fs::read_to_string(&log).expect("persisted diagnostic");
         assert_eq!(text.lines().count(), 3);
         for operation in ["request-code", "sign-in-with-key", "sign-in-with-code"] {
-            assert!(text.contains(&format!("authentication {operation}: InvalidTiming: AP authentication timing envelope is invalid")));
+            assert!(text.contains(&format!(
+                "authentication {operation}: InvalidTiming: \
+                 AP authentication timing envelope is invalid"
+            )));
         }
         assert_eq!(fs::metadata(&log).expect("log mode").permissions().mode() & 0o777, 0o600);
         log_authentication_protocol_error(

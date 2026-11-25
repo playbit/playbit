@@ -286,7 +286,9 @@ fn probe(tools: &Tools) -> Result<()> {
                 Path::new("."),
             )?;
             if !Path::new(result.trim()).is_dir() {
-                return Err("Missing rust wasm32-unknown-unknown target. Run `rustup target add wasm32-unknown-unknown` or use --sdk=builtin".into());
+                return Err("Missing rust wasm32-unknown-unknown target. \
+                    Run `rustup target add wasm32-unknown-unknown` or use --sdk=builtin"
+                    .into());
             }
         }
         Language::Ocaml => {
@@ -477,7 +479,12 @@ impl RustRequirements {
                 || installed == requested
                 || installed.starts_with(&format!("{requested}-"));
             if !matches {
-                return Err(format!("project requires Rust {requested}, selected SDK provides {actual}; install the requested system toolchain or restart pb run after changing toolchain requirements").into());
+                return Err(format!(
+                    "project requires Rust {requested}, selected SDK provides {actual}; \
+                     install the requested system toolchain or restart pb run after changing \
+                     toolchain requirements"
+                )
+                .into());
             }
         }
         // Cargo ignores compiler prereleases when checking package.rust-version.

@@ -30,7 +30,7 @@ use std::{
     time::{Duration, Instant},
 };
 const MAX_SOCKETS: usize = 8;
-const MAX_LOG_WAITERS: usize = 4;
+const MAX_WAITERS: usize = 4;
 const MAX_WRITES: usize = 8 * 1024 * 1024;
 // Even when data replies exhaust their credit, each socket can return one short
 // pre-admission refusal (binding, request size, or busy) including framing.
@@ -123,30 +123,37 @@ impl Publisher {
     fn notify(&self) {
         self.poller.notify().expect("live app control readiness notification");
     }
-    fn respond(
-        &self,
-        generation: u64,
-        operation: Operation,
-        outputs: &async_channel::Sender<Output>,
-    ) -> Result<Option<Reply>> {
-        let mut state = self.snapshot.lock().expect("app control snapshot lock poisoned");
-        // Process claim precedes the first admitted turn. Initial logs may wait;
-        // other controls refuse until the snapshot has an owner generation.
-        if state.generation == 0 {
-            if matches!(operation, Operation::Logs { after: None }) {
-                return Ok(None);
+    fn observe(&self, generation: u64, wait: &Wait) -> Result<Option<Reply>> {
+        let state = self.snapshot.lock().expect("app control snapshot lock poisoned");
+        match wait {
+            Wait::Build(build) => {
+                if state.generation < generation {
+                    return Ok(None);
+                }
+                if state.generation != generation || state.build != *build {
+                    return Err(
+                        "The selected app build or owner generation changed before Show".into()
+                    );
+                }
+                Ok(Some(Reply::Accepted { instance: self.instance, generation }))
             }
-            return Err("The app controls are not ready yet; this request was not applied".into());
-        }
-        let follow_reset = matches!(operation, Operation::Logs { after: Some(_) })
-            && state.generation > generation;
-        if state.generation != generation && !follow_reset {
-            return Err(
-                "The session instance changed owner generation; no action was repeated".into()
-            );
-        }
-        match operation {
-            Operation::Logs { after } => {
+            Wait::Logs(after) => {
+                if state.generation == 0 {
+                    if after.is_none() {
+                        return Ok(None);
+                    }
+                    return Err(
+                        "The app controls are not ready yet; this request was not applied".into()
+                    );
+                }
+                if state.generation != generation
+                    && !(after.is_some() && state.generation > generation)
+                {
+                    return Err(
+                        "The session instance changed owner generation; no action was repeated"
+                            .into(),
+                    );
+                }
                 let cursor = LogCursor {
                     instance: self.instance,
                     generation: state.generation,
@@ -171,6 +178,27 @@ impl Publisher {
                     reset: after.is_some() && !same,
                 })))
             }
+        }
+    }
+    fn respond(
+        &self,
+        generation: u64,
+        operation: Operation,
+        outputs: &async_channel::Sender<Output>,
+    ) -> Result<Reply> {
+        let mut state = self.snapshot.lock().expect("app control snapshot lock poisoned");
+        if state.generation == 0 {
+            return Err("The app controls are not ready yet; this request was not applied".into());
+        }
+        if state.generation != generation {
+            return Err(
+                "The session instance changed owner generation; no action was repeated".into()
+            );
+        }
+        match operation {
+            Operation::WaitForBuild { .. } | Operation::Logs { .. } => {
+                unreachable!("read-only waits use observe")
+            }
             Operation::Screenshot => Err("Screenshot requires an active native window".into()),
             Operation::Frame => {
                 if let Some(error) = &state.failure {
@@ -185,12 +213,12 @@ impl Publisher {
                 let scene = state.scene.clone();
                 let build = state.build.clone();
                 drop(state);
-                Ok(Some(Reply::Frame {
+                Ok(Reply::Frame {
                     instance: self.instance,
                     generation,
                     build,
                     scene: scene.as_ref().clone(),
-                }))
+                })
             }
             Operation::Input { kind, target, data } => {
                 if state.quitting {
@@ -217,7 +245,7 @@ impl Publisher {
                         "App input queue is full or closed; this input did not start".into()
                     );
                 }
-                Ok(Some(Reply::Accepted { instance: self.instance, generation }))
+                Ok(Reply::Accepted { instance: self.instance, generation })
             }
             Operation::Show { presentation } => {
                 if state.quitting {
@@ -226,7 +254,7 @@ impl Publisher {
                 outputs
                     .try_send(Output::ShowRequested { owner_generation: generation, presentation })
                     .map_err(|_| "The app lifecycle queue is busy; Show was not requested")?;
-                Ok(Some(Reply::Accepted { instance: self.instance, generation }))
+                Ok(Reply::Accepted { instance: self.instance, generation })
             }
             Operation::Quit => {
                 if state.quitting {
@@ -238,7 +266,7 @@ impl Publisher {
                     .try_send(Output::QuitRequested)
                     .map_err(|_| "The app lifecycle queue is busy; Quit was not requested")?;
                 state.quitting = true;
-                Ok(Some(Reply::Accepted { instance: self.instance, generation }))
+                Ok(Reply::Accepted { instance: self.instance, generation })
             }
         }
     }
@@ -328,15 +356,19 @@ impl Drop for Endpoint {
         }
     }
 }
+enum Wait {
+    Build(String),
+    Logs(Option<LogCursor>),
+}
 enum State {
     Reading {
         header: [u8; codec::HEADER_LEN],
         received: usize,
         body: codec::Bytes,
     },
-    Logs {
+    Waiting {
         generation: u64,
-        after: Option<LogCursor>,
+        wait: Wait,
     },
     #[cfg(target_os = "macos")]
     Screenshot {
@@ -562,37 +594,44 @@ impl Reactor {
                 Err(error) => self.reply(index, Reply::Error { error: error.to_string() }),
             };
         }
-        let wait = match &operation {
-            Operation::Logs { after } => Some(*after),
-            _ => None,
+        // Only read-only operations may be retained and re-evaluated on a
+        // publisher wake. Never retain or replay Show, input or Quit.
+        let wait = match operation {
+            Operation::Logs { after } => Wait::Logs(after),
+            Operation::WaitForBuild { build } => {
+                if !crate::identifier::valid(&build, 32) || generation == 0 {
+                    return self.reply(
+                        index,
+                        Reply::Error { error: "Invalid app readiness binding".into() },
+                    );
+                }
+                Wait::Build(build)
+            }
+            _ => {
+                let reply = self.publisher.respond(generation, operation, &self.outputs);
+                return self.reply(index, reply.unwrap_or_else(control_error));
+            }
         };
-        if wait.is_some()
-            && self
-                .pending
-                .iter()
-                .filter(|pending| matches!(pending.state, State::Logs { .. }))
-                .count()
-                == MAX_LOG_WAITERS
-        {
-            return self.reply(
-                index,
-                Reply::Error {
-                    error: "App log wait capacity is full; this wait did not start".into(),
-                },
-            );
-        }
-        match self.publisher.respond(generation, operation, &self.outputs) {
+        match self.publisher.observe(generation, &wait) {
             Ok(Some(reply)) => self.reply(index, reply),
+            Err(error) => self.reply(index, control_error(error)),
             Ok(None) => {
-                self.pending[index].state =
-                    State::Logs { generation, after: wait.expect("only a log request can wait") };
-                self.pending[index].deadline = None;
+                if self.pending.iter().filter(|p| matches!(p.state, State::Waiting { .. })).count()
+                    >= MAX_WAITERS
+                {
+                    return self.reply(
+                        index,
+                        Reply::Error {
+                            error: "App control wait capacity is full; this wait did not start"
+                                .into(),
+                        },
+                    );
+                }
+                self.pending[index].deadline = matches!(wait, Wait::Build(_))
+                    .then(|| Instant::now() + app_control::BUILD_READY_TIMEOUT);
+                self.pending[index].state = State::Waiting { generation, wait };
                 Ok(())
             }
-            Err(error) => self.reply(
-                index,
-                Reply::Error { error: error.to_string().chars().take(1024).collect() },
-            ),
         }
     }
     #[cfg(target_os = "macos")]
@@ -650,20 +689,17 @@ impl Reactor {
                 .modify(&self.pending[index].stream, self.pending[index].interest())?;
             return Ok(());
         }
-        let State::Logs { generation, after } = self.pending[index].state else {
+        let State::Waiting { generation, wait } = &self.pending[index].state else {
             return Ok(());
         };
         if self.write_bytes() + app_control::REPLY_LIMIT > DATA_WRITE_BUDGET {
             return Ok(());
         }
-        let reply =
-            match self.publisher.respond(generation, Operation::Logs { after }, &self.outputs) {
-                Ok(Some(reply)) => reply,
-                Ok(None) => return Ok(()),
-                Err(error) => {
-                    Reply::Error { error: error.to_string().chars().take(1024).collect() }
-                }
-            };
+        let reply = match self.publisher.observe(*generation, wait) {
+            Ok(Some(reply)) => reply,
+            Ok(None) => return Ok(()),
+            Err(error) => control_error(error),
+        };
         self.reply(index, reply)?;
         self.publisher
             .poller
@@ -696,6 +732,9 @@ impl Reactor {
         assert!(self.write_bytes() <= MAX_WRITES, "app control response credit");
         Ok(())
     }
+}
+fn control_error(error: Box<dyn std::error::Error + Send + Sync>) -> Reply {
+    Reply::Error { error: error.to_string().chars().take(1024).collect() }
 }
 impl Drop for Reactor {
     fn drop(&mut self) {
@@ -734,8 +773,7 @@ mod tests {
             publisher.frame(None, &["before crash".into()]);
             let failure: super::super::super::alert::Failure = report.clone().into();
             publisher.stopped(Some(&failure.details));
-            let reply =
-                publisher.respond(1, Operation::Logs { after: None }, &outputs).unwrap().unwrap();
+            let reply = publisher.observe(1, &Wait::Logs(None)).unwrap().unwrap();
             let bytes =
                 codec::encode(&reply, app_control::REPLY_LIMIT - codec::HEADER_LEN).unwrap();
             let archived = codec::access::<app_control::ArchivedReply>(&bytes).unwrap();
@@ -784,15 +822,12 @@ mod tests {
         );
         let error = publisher.respond(1, Operation::Frame, &outputs).unwrap_err();
         assert!(error.to_string().contains("tool snapshot limit"));
-        let Some(Reply::Logs(batch)) =
-            publisher.respond(1, Operation::Logs { after: None }, &outputs).unwrap()
-        else {
+        let Some(Reply::Logs(batch)) = publisher.observe(1, &Wait::Logs(None)).unwrap() else {
             panic!("large presentations retain readable logs")
         };
         assert_eq!(batch.lines[0].message, "large frame presented");
         publisher.frame(Some(vec![0; app_control::MAX_SCENE_BYTES]), &[]);
-        let Some(Reply::Frame { scene, .. }) =
-            publisher.respond(1, Operation::Frame, &outputs).unwrap()
+        let Reply::Frame { scene, .. } = publisher.respond(1, Operation::Frame, &outputs).unwrap()
         else {
             panic!("the exact tool snapshot limit fits")
         };

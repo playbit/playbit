@@ -412,7 +412,9 @@ async fn control_subscription(
 ) -> Result<(ApStream, Vec<u8>, Option<DisplayNames>)> {
     let mut frame = if app_updates_only {
         if instance.is_some() {
-            return Err("sharing app sessions requires encrypted synchronization, which is not supported yet".into());
+            return Err("sharing app sessions requires encrypted synchronization, \
+                which is not supported yet"
+                .into());
         }
         let crate::store::BuildSelector::App { app } = &session.selector else {
             return Err("exact local sessions have no remote selection subscription".into());

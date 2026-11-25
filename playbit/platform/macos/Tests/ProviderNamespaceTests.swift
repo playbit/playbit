@@ -168,6 +168,24 @@ struct ProviderNamespaceTests {
         precondition(absent[identity(1)] == retired[identity(1)])
     }
 
+    static func channelIsolation(root: URL) throws {
+        // Independent catalogs for a single account key retain only their own
+        // exposed folders. A checkpoint from one cannot resume the other.
+        let backend = Backend([volumeItem(1)])
+        let production = enumerator(backend, root: root)
+        let testingDomain = DriveIdentity(channel: .testing, account: identity(200))!.domain(profile: "/test/profile")
+        let testing = ProviderEnumerator(client: ProviderClient(Backend([volumeItem(2)]).call),
+            domain: testingDomain, container: .workingSet, storage: root)
+        let prodFolders = try awaitResult(production.catalog)
+        let testFolders = try awaitResult(testing.catalog)
+        precondition(Set(prodFolders.keys) == [identity(1)] && Set(testFolders.keys) == [identity(2)])
+        let anchor = try production.save(ProviderEnumerator.Manifest(folders: prodFolders, components: [:]))
+        let testingLatest = try testing.latest()
+        precondition(testingLatest == nil)
+        let productionManifest = try production.load(anchor)
+        precondition(productionManifest.folders == prodFolders)
+    }
+
     static func globalExposureLimit(root: URL) throws {
         let firstBackend = Backend((1...128).map { volumeItem(UInt8($0)) })
         let first = enumerator(firstBackend, root: root)
@@ -406,6 +424,7 @@ struct ProviderNamespaceTests {
         defer { try? FileManager.default.removeItem(at: root) }
         try identitiesAndCapabilities()
         try exposureSurvivesRemoval(root: root.appendingPathComponent("retirement"))
+        try channelIsolation(root: root.appendingPathComponent("channels"))
         try globalExposureLimit(root: root.appendingPathComponent("capacity"))
         try reservationAdmission(root: root.appendingPathComponent("reservations"))
         try invalidDomainCannotChangeExposure(root: root.appendingPathComponent("invalid-domain"))

@@ -26,10 +26,11 @@ final class ProviderClient {
     let uploads = ProviderUploads()
     static let admissions = DispatchSemaphore(value: 8)
     let connection: NSXPCConnection
-    let account: String
     let profile: String
-    init(account: String, profile: String) {
-        self.account = account; self.profile = profile
+    let identity: DriveIdentity?
+    init(domain: NSFileProviderDomain) {
+        identity = DriveIdentity(domain.identifier)
+        profile = domain.userInfo?["profile"] as? String ?? ""
         let service = Bundle.main.object(forInfoDictionaryKey: "PlaybitProviderService") as? String ?? ""
         connection = NSXPCConnection(serviceName: service)
         if let requirement = Bundle.main.object(forInfoDictionaryKey: "PlaybitProviderServiceRequirement") as? String {
@@ -41,7 +42,7 @@ final class ProviderClient {
     deinit { connection.invalidate() }
     func invalidate() { uploads.invalidate(); connection.invalidate() }
     func call(_ fields: [String: Any], completion: @escaping (Result<[String: Any], Error>) -> Void) {
-        guard Identifier.valid(account) else {
+        guard let identity else {
             completion(.failure(NSFileProviderError(.noSuchItem))); return
         }
         guard Self.admissions.wait(timeout: .now()) == .success else {
@@ -53,8 +54,9 @@ final class ProviderClient {
             completion(result)
         }
         var request = fields
-        request["account"] = account
+        request["account"] = identity.account
         request["profile"] = profile
+        request["channel"] = identity.channel.rawValue
         do {
             if let path = request.removeValue(forKey: "path") as? String {
                 let fetching = request["op"] as? String == "fetch"

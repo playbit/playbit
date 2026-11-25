@@ -66,12 +66,13 @@ fn run() -> Result<()> {
     let command = args[0].as_str();
     #[cfg(target_os = "macos")]
     if command == "engine-service" {
-        let start = match args.get(1).map(String::as_str) {
-            Some("start") if args.len() == 2 => true,
-            Some("unregister") if args.len() == 2 => false,
+        use playbit::engine::launch_agent::{ServiceAction, control};
+        let action = match args.get(1).map(String::as_str) {
+            Some("start") if args.len() == 2 => ServiceAction::Start,
+            Some("unregister") if args.len() == 2 => ServiceAction::Unregister,
             _ => return Err(usage_error("expected pb engine-service start or unregister")),
         };
-        return playbit::engine::launch_agent::control(start);
+        return control(action, playbit::engine::profile::resolve_environment()?.1);
     }
     if matches!(command, "version" | "--version") {
         if args.len() != 1 {

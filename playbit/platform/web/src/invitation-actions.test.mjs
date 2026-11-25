@@ -16,9 +16,10 @@ function page(states, failure) {
     const error = {}, saved = [], copied = [], failures = [];
     let requests = 0, reads = 0, headers = 0, opens = 0, terminated = 0, status;
     const context = vm.createContext({ encodeId, decodeId, validId, replicaCapability,
-        document: { createElement: tag => ({ tag }) }, navigator: { clipboard: { writeText: async text => copied.push(text) } },
+        document: { createElement: tag => ({ tag }), body: { classList: { remove() {} } } },
+        navigator: { clipboard: { writeText: async text => copied.push(text) } },
         onboarding, error, console: { error: (...args) => failures.push(args) }, status: text => { status = text; },
-        recoveryListAccount: undefined, joining: false, paused: false, opened: false, canJoin: true, attempt: 0, syncTimer: undefined,
+        renderedScene: undefined, surfaceDelivery: undefined, retireCanvasPresses() {}, recoveryListAccount: undefined, joining: false, paused: false, opened: false, canJoin: true, attempt: 0, syncTimer: undefined,
         invitation: { url: "https://playbit.app/s#example", uri: "playbit:session:public:example", session_id: "session", privateKey: {},
             invitation: { session: { id: "session" }, root: { id: "root", share_key_with_service: false, personal: false }} },
         enrollment: { account: "bob-account" }, personalCatalog: [], runtimeVersion: undefined,
@@ -32,7 +33,7 @@ function page(states, failure) {
         recoveryClient: { catalog: async () => ({}) }, personalVolumes: async () => [],
         sessionProof: async () => [1, 2, 3], crypto,
         worker: { terminate: () => { terminated++; } }, createWorker() {},
-        call: async method => { assert.equal(method, "open"); opens++; throw new Error(failure); },
+        call: async method => { assert.equal(method, "open"); opens++; throw failure instanceof Error ? failure : new Error(failure); },
         pending: new Map(), streams: new Set(), clearTimeout,
         localStorage: { setItem: (_, value) => saved.push(JSON.parse(value)) },
     });
@@ -45,6 +46,19 @@ function page(states, failure) {
     }, context, error, saved, copied, failures, text: () => onboarding.children.map(item => item.textContent).join(" "),
     status: () => status, requests: () => requests, reads: () => reads, headers: () => headers, opens: () => opens, terminated: () => terminated };
 }
+
+test("join delivers the recovered explicit User capability separately from the personal chooser", async () => {
+    const ui = page([{ kind: "ready" }]);
+    const override = { volume: { id: "other-root", personal: false }, credentials: { database_key: [1] } };
+    const scope = { kind: "session", id: "session", user_volume: "other-root", creation_build: "first" };
+    ui.context.recoveryClient.catalog = async () => ({ volumes: [override], scopes: [scope] });
+    let opening;
+    ui.context.call = async (_method, args) => { opening = args; throw Error("Stop after opening"); };
+    await ui.join();
+    assert.equal(opening.userVolume, override);
+    assert.equal(opening.creationScope, scope);
+    assert.equal(opening.personal.length, 0);
+});
 
 test("unsupported scene has author guidance and conditional installed-app action, retaining pause/resume", async () => {
     const ui = page([{ kind: "ready" }], "Unsupported guest view operation 11");
@@ -62,6 +76,36 @@ test("unsupported scene has author guidance and conditional installed-app action
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(ui.requests(), 2);
     assert.equal(ui.saved.at(-1).paused, false);
+});
+
+test("a blocked browser account can retain its data or explicitly start sign-in with the original invitation", async () => {
+    const ui = page([{ kind: "ready" }], Object.assign(Error("Incompatible data"), { code: "incompatible-storage-format" }));
+    const flags = new Map();
+    let confirmed = false, resets = 0, path;
+    Object.assign(ui.context, { window: { confirm: () => confirmed }, URL, SIGN_IN_AFTER_RESET: "sign-in", webTab: "tab",
+        history: { replaceState: (_, __, url) => { path = url; } },
+        sessionStorage: { setItem: (key, value) => flags.set(key, value) }, beginWebReset: async () => { resets++; } });
+    await ui.join();
+    const reset = ui.action("Clear local account data and sign in");
+    assert.match(ui.text(), /edits saved only in this browser will be lost/);
+    await reset.onclick();
+    assert.equal(resets, 0); assert.equal(flags.size, 0); assert.equal(path, undefined);
+    confirmed = true; await reset.onclick();
+    assert.equal(resets, 1); assert.equal(flags.get("sign-in"), "invitation"); assert.equal(path, "/s#example");
+});
+
+test("an incompatible installation explains how to keep or replace the browser installation", async () => {
+    const ui = page([{ kind: "ready" }], Object.assign(Error("Incompatible installation"), { code: "incompatible-installation-format" }));
+    await ui.join();
+    assert.match(ui.status(), /installation needs a different version/);
+    assert.match(ui.text(), /new browser profile/); assert.match(ui.text(), /site’s data in your browser settings/);
+});
+
+test("a package requiring a missing host feature offers the installed app", async () => {
+    const ui = page([{ kind: "ready" }], Object.assign(Error("Required host feature unavailable"), { code: "unsupported" }));
+    await ui.join();
+    assert.equal(ui.status(), "This app cannot run on the web");
+    assert.equal(ui.action("Try in Playbit").href, "playbit:session:public:example");
 });
 
 test("joining retires the recovery worker and its streams before checking invitation readiness", async () => {

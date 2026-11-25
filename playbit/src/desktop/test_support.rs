@@ -102,16 +102,24 @@ pub(crate) fn check_zoom_geometry(window: gpui::AnyWindowHandle, cx: &mut gpui::
                 zoom::set_scale(units, cx).expect("supported test scale");
             });
             cx.run_until_parked();
-            cx.update(|cx| window.update(cx, |_, window, _| {
-                assert!(window.accessibility_error().is_none());
-                for (id, node) in window.accessibility_nodes_for_test() {
-                    let Some((height, label)) = baseline.get(&id) else { continue };
-                    let bounds = node.bounds().expect("visible control bounds");
-                    let expected = height * f64::from(scale);
-                    assert!((bounds.y1 - bounds.y0 - expected).abs() <= 1.,
-                        "{label:?} height {:?} expected {expected} at {scale}x on {display}x display", bounds.y1 - bounds.y0);
-                }
-            }).unwrap());
+            cx.update(|cx| {
+                window
+                    .update(cx, |_, window, _| {
+                        assert!(window.accessibility_error().is_none());
+                        for (id, node) in window.accessibility_nodes_for_test() {
+                            let Some((height, label)) = baseline.get(&id) else { continue };
+                            let bounds = node.bounds().expect("visible control bounds");
+                            let expected = height * f64::from(scale);
+                            assert!(
+                                (bounds.y1 - bounds.y0 - expected).abs() <= 1.,
+                                "{label:?} height {:?} expected {expected} at \
+                                 {scale}x on {display}x display",
+                                bounds.y1 - bounds.y0
+                            );
+                        }
+                    })
+                    .unwrap()
+            });
         }
     }
     cx.update(zoom::actual_size);

@@ -14,6 +14,25 @@ struct ProviderPushTests {
         domain.userInfo = ["profile": profile]
         let current = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(account), displayName: "Playbit")
         current.userInfo = ["profile": profile]
+        // The same account key can exist on both services. Keep the original
+        // Public domain, mount Testing alongside it and sign each out alone.
+        let production = DriveIdentity(channel: .production, account: account)!
+        let testing = DriveIdentity(channel: .testing, account: account)!
+        let testProfile = profile + "-testing"
+        let add = DriveRegistration(current: [current], identity: testing, profile: testProfile, ready: true)
+        let testDrive = add.active!
+        precondition(add.remove.isEmpty && add.needsRegistration)
+        precondition(testDrive.identifier.rawValue == "testing-" + account && testDrive.displayName == "Playbit (testing)")
+        precondition(DriveIdentity(testDrive.identifier) == testing && DriveIdentity(current.identifier) == production)
+        for (identity, path, drive) in [(testing, testProfile, testDrive), (production, profile, current)] {
+            let both = [current, testDrive, domain]
+            let steady = DriveRegistration(current: both, identity: identity, profile: path, ready: true)
+            precondition(steady.remove.isEmpty && !steady.needsRegistration)
+            let match = try VolumeOpening.selection(profile: path, account: account, domains: both)
+            precondition(match === drive)
+            let signOut = DriveRegistration(current: both, identity: identity, profile: path, ready: false)
+            precondition(signOut.active == nil && signOut.remove.count == 1 && signOut.remove[0] === drive)
+        }
         let foreign = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(legacy), displayName: "Other Playbit")
         foreign.userInfo = ["profile": profile + "-other"]
         let malformed = [account, "", account + "-", "-" + volume, legacy + "-" + volume,

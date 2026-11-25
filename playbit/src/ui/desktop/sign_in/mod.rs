@@ -699,9 +699,16 @@ impl Render for SignIn {
         let sp = |value| zoom::pixels(window, value);
         let mut form = div().flex().flex_col().flex_shrink_0().gap(sp(12.));
         if step == Step::Replace {
-            form = div().flex().flex_col().flex_shrink_0().gap(sp(24.))
-                .child(self.text(3, "This computer contains existing data for a different account. Continuing with signing in will replace that information.")
-                    .text_size(sp(14.)).line_height(sp(16.)).text_color(gpui::rgba(0x000000e6)));
+            form = div().flex().flex_col().flex_shrink_0().gap(sp(24.)).child(
+                self.text(
+                    3,
+                    "This computer contains existing data for a different account. \
+                     Continuing with signing in will replace that information.",
+                )
+                .text_size(sp(14.))
+                .line_height(sp(16.))
+                .text_color(gpui::rgba(0x000000e6)),
+            );
         }
         if !failure {
             form = match step {
@@ -711,12 +718,14 @@ impl Render for SignIn {
                 Step::SaveKey if !self.flow.saved_key.is_empty() => {
                     form.child(self.saved.clone()).child(self.text(
                         3,
-                        "Save this key somewhere safe. You need it to unlock your private account data on a new device.",
+                        "Save this key somewhere safe. You need it to unlock your private \
+                         account data on a new device.",
                     ))
                 }
                 Step::Name => form.child(self.name.clone()).child(self.text(
                     3,
-                    "Please tell us what we should call you. You can change this later in settings.",
+                    "Please tell us what we should call you. \
+                     You can change this later in settings.",
                 )),
                 _ => form,
             };
@@ -778,7 +787,11 @@ impl Render for SignIn {
         }
         if step == Step::Entry && !self.flow.enrolled && !busy && !failure {
             if self.flow.error.is_empty() && self.flow.field_error.is_none() {
-                form = form.child(self.text(3, "Leave the key blank to get a code by email. We use your email for sign-in and account notices."));
+                form = form.child(self.text(
+                    3,
+                    "Leave the key blank to get a code by email. \
+                     We use your email for sign-in and account notices.",
+                ));
             }
             form = form.child(self.privacy.clone());
         }

@@ -28,7 +28,57 @@ const REQUIRES_APPROVAL: isize = 2;
 const MAX_ERROR_BYTES: usize = 4096;
 pub(super) const START_ERROR: &str = "Could not start Playbit's background service. Check Playbit in System Settings > General > Login Items & Extensions, then reopen Playbit.";
 
-fn app_for(executable: &Path) -> Option<&Path> {
+/// Finder can be served by either installed extension. Only the default
+/// profile's previously authenticated helper publishes its containing app.
+pub fn owner(profile: &Path) -> Result<Option<PathBuf>> {
+    let channel = super::file_provider::require_system_profile(profile)?;
+    let state = super::profile::default_runtime_path(&super::profile::credential_home()?, channel);
+    read_owner(&state)
+}
+
+pub(super) fn installed_owner(profile: &Path) -> Result<Option<PathBuf>> {
+    match owner(profile)? {
+        Some(app) if app.try_exists()? => Ok(Some(app)),
+        _ => Ok(None),
+    }
+}
+
+pub(super) fn read_owner(state: &Path) -> Result<Option<PathBuf>> {
+    use std::os::unix::ffi::OsStringExt;
+    let bytes = match installation::read(&state.join("agent-owner"), 4096) {
+        Ok(bytes) => bytes,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let path = PathBuf::from(std::ffi::OsString::from_vec(bytes));
+    if !path.is_absolute() || path.extension().is_none_or(|ext| ext != "app") {
+        return Err("Invalid Playbit background service owner".into());
+    }
+    Ok(Some(path))
+}
+
+fn service_lock(state: &Path) -> Result<fs::File> {
+    let lock = super::profile::private_file(&state.join("agent.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+// The service lock serializes registration, owner replacement and retirement.
+// Publish by rename so a concurrent Finder read always sees a complete path.
+fn record_owner(state: &Path, app: &Path) -> Result<()> {
+    if read_owner(state)?.as_deref() == Some(app) {
+        return Ok(());
+    }
+    super::profile::write_state(state, "agent-owner", app.as_os_str().as_encoded_bytes())
+}
+
+pub(super) fn app_for(executable: &Path) -> Option<&Path> {
     let app = executable.ancestors().nth(6)?;
     (app.extension().is_some_and(|extension| extension == "app")
         && app.join("Contents/Helpers/playbit-engine.app/Contents/MacOS/playbit-engine")
@@ -46,7 +96,10 @@ fn startup_command(
     let default_profile = super::profile::is_default_profile(profile, channel)?;
     let mut command = if default_profile {
         let mut command = Command::new(app.join("Contents/MacOS/pb"));
-        command.args(["engine-service", "start"]);
+        command
+            .args(["engine-service", "start"])
+            .env("PLAYBIT_CHANNEL", channel.name())
+            .env_remove("PLAYBIT_PROFILE");
         command
     } else if allow_isolated {
         let mut command = Command::new("/usr/bin/open");
@@ -77,6 +130,72 @@ pub(super) fn start(profile: &Path, executable: &Path, allow_isolated: bool) -> 
     else {
         return Ok(false);
     };
+    if default_profile
+        && let Some(owner) = installed_owner(profile)?
+        && Some(owner.as_path()) != app_for(&executable.canonicalize()?)
+    {
+        let engine = super::launch::executable_for(&owner.join("Contents/MacOS/Playbit"))?;
+        // A prepared guest's executable is its generated wrapper. The command
+        // was resolved from the originating engine in its signed descriptor.
+        start_registered(
+            profile,
+            &engine,
+            super::profile::for_profile(profile)?,
+            Path::new(command.get_program()),
+        )?;
+        return Ok(true);
+    }
+    launch_with_readiness(
+        profile,
+        ExpectedEngine::Build(executable),
+        &mut command,
+        default_profile,
+    )?;
+    Ok(true)
+}
+
+/// Wake the previously registered channel job from another installation.
+/// The recorded engine path authenticates the peer;
+/// launchctl uses the channel label from the caller's own signed bundle.
+pub(super) fn start_registered(
+    profile: &Path,
+    executable: &Path,
+    channel: ReleaseChannel,
+    controller: &Path,
+) -> Result<()> {
+    let mut command = registered_command(controller, channel)?;
+    launch_with_readiness(profile, ExpectedEngine::Owner(executable), &mut command, true)
+}
+
+fn registered_command(controller: &Path, channel: ReleaseChannel) -> Result<Command> {
+    if ad_hoc_signature(controller)? {
+        return Err(
+            "Open the Playbit app that owns this environment to start its background engine."
+                .into(),
+        );
+    }
+    let (contents, identifier) = service_bundle(controller)?;
+    let label = service_label(contents, &identifier, service_plist(channel)?.to_str()?)?;
+    let mut command = Command::new("/bin/launchctl");
+    command
+        .arg("kickstart")
+        .arg(format!("gui/{}/{label}", super::profile::current_uid()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null());
+    Ok(command)
+}
+
+enum ExpectedEngine<'a> {
+    Build(&'a Path),
+    Owner(&'a Path),
+}
+
+fn launch_with_readiness(
+    profile: &Path,
+    engine: ExpectedEngine<'_>,
+    command: &mut Command,
+    default_profile: bool,
+) -> Result<()> {
     let path = profile.join(READY_SOCKET);
     match fs::remove_file(&path) {
         Ok(()) => (),
@@ -98,21 +217,36 @@ pub(super) fn start(profile: &Path, executable: &Path, allow_isolated: bool) -> 
     }
     if !wait_readable(&listener, deadline)? {
         return Err(if default_profile {
-            "Playbit's background service did not become ready. Check Playbit in System Settings > General > Login Items & Extensions, then reopen Playbit."
+            "Playbit's background service did not become ready. \
+             Check Playbit in System Settings > General > Login Items & Extensions, \
+             then reopen Playbit."
         } else {
             "The background engine for this Playbit profile did not become ready."
         }
         .into());
     }
     let (mut ready, _) = listener.accept()?;
-    authenticate(&mut ready, executable, deadline)?;
-    super::launch::read_ready(&mut ready, deadline)?;
-    Ok(true)
+    authenticate(&mut ready, engine, deadline)?;
+    super::launch::read_ready(&mut ready, deadline)
 }
 
-fn authenticate(ready: &mut UnixStream, executable: &Path, deadline: Instant) -> Result<()> {
-    if !Peer::capture(ready)?.matches(executable)? {
-        return Err("Unexpected process connected to Playbit's background startup socket".into());
+fn authenticate(
+    ready: &mut UnixStream,
+    engine: ExpectedEngine<'_>,
+    deadline: Instant,
+) -> Result<()> {
+    match engine {
+        ExpectedEngine::Owner(path) => {
+            Peer::capture_at(ready, Some(path))?;
+        }
+        ExpectedEngine::Build(executable) => {
+            let path = executable.canonicalize()?;
+            if !Peer::capture_at(ready, Some(&path))?.matches(executable)? {
+                return Err(
+                    "Unexpected process connected to Playbit's background startup socket".into()
+                );
+            }
+        }
     }
     let remaining = deadline.checked_duration_since(Instant::now()).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::TimedOut, "engine authentication deadline expired")
@@ -153,12 +287,17 @@ impl Drop for ReadySocket {
 )]
 pub fn prepare_engine() -> Result<()> {
     let mut arguments = std::env::args_os().skip(1);
-    let isolated = match arguments.next().as_deref().and_then(std::ffi::OsStr::to_str) {
+    let (channel, isolated) = match arguments.next().as_deref().and_then(std::ffi::OsStr::to_str) {
         Some("--launch-agent") => {
+            let channel = match arguments.next() {
+                None => ReleaseChannel::Public,
+                Some(channel) if channel == "testing" => ReleaseChannel::Testing,
+                _ => return Err("Invalid background service channel".into()),
+            };
             if arguments.next().is_some() {
                 return Err("Invalid background service startup request".into());
             }
-            None
+            (channel, None)
         }
         Some("--launch-isolated-profile") => {
             let (Some(profile), Some(channel), None) =
@@ -170,7 +309,7 @@ pub fn prepare_engine() -> Result<()> {
                 return Err("Isolated background startup requires a packaged engine".into());
             }
             let channel = channel.to_str().ok_or("Invalid background engine channel")?;
-            Some((PathBuf::from(profile), ReleaseChannel::parse(channel)?))
+            (ReleaseChannel::parse(channel)?, Some(PathBuf::from(profile)))
         }
         _ => {
             if std::env::var_os("PLAYBIT_PROFILE").is_none()
@@ -183,15 +322,21 @@ pub fn prepare_engine() -> Result<()> {
             return Ok(());
         }
     };
-    super::profile::initialize_agent(
-        isolated.as_ref().map(|(path, channel)| (path.as_path(), *channel)),
-    )?;
+    super::profile::initialize_agent(channel, isolated.as_deref())?;
     let profile = super::profile_path();
     let mut ready = UnixStream::connect(profile.join(READY_SOCKET))?;
     ipc::verify_peer(&ready)?;
     // A failing initializer may exit immediately after writing its diagnostic.
     // Keep this process alive until the launcher has captured its kernel identity.
     wait_for_authentication(&mut ready, START_TIMEOUT)?;
+    if isolated.is_none() {
+        let home = dirs::home_dir().ok_or("Home directory is unavailable")?;
+        let state = super::profile::default_runtime_path(&home, channel);
+        let executable = std::env::current_exe()?.canonicalize()?;
+        let app = app_for(&executable).ok_or("Background service requires the packaged engine")?;
+        let _service = service_lock(&state)?;
+        record_owner(&state, app)?;
+    }
     crate::paths::private_directory(&profile, "logs")?;
     let log = OpenOptions::new()
         .create(true)
@@ -211,71 +356,168 @@ pub fn prepare_engine() -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ServiceAction {
+    Start,
+    RetireOwned,
+    Unregister,
+}
+
 /// Executed by the original installation's pb, including when a prepared guest
 /// requests startup. SMAppService resolves plists relative to the calling bundle.
-/// Unregistration is reserved for callers that have already drained the engines.
-pub fn control(start: bool) -> Result<()> {
+pub fn control(action: ServiceAction, channel: ReleaseChannel) -> Result<()> {
+    let start = action == ServiceAction::Start;
+    let plist_name = service_plist(channel)?;
     let executable = std::env::current_exe()?;
     let _installation = if start { installation::client_lease(&executable)? } else { None };
-    let contents = executable.parent().and_then(Path::parent).ok_or("Missing app bundle")?;
+    let (contents, identifier) = service_bundle(&executable)?;
     let app = contents.parent().ok_or("Missing app bundle")?;
-    let info = installation::plist(app)?;
-    let identifier = installation::string(&info, "CFBundleIdentifier")?;
-    if !["playbit.engine", "playbit.engine.debug"].contains(&identifier.as_str()) {
-        return Err("Background service control requires the original Playbit app bundle".into());
-    }
-    if ad_hoc_signature()? {
+    let ad_hoc = ad_hoc_signature(&executable)?;
+    if start && ad_hoc {
         // Ad-hoc signatures change with every rebuild. ServiceManagement can
         // retain the old hash even after unregistering. Launch Services starts
         // the background-only helper independently without a persistent job.
         // An isolated profile can already be using this bundle. The profile
         // lease still protects an initializing or draining default engine.
-        if start {
-            let status = Command::new("/usr/bin/open")
-                .args(["-n", "-g", "-j", "-a"])
-                .arg(contents.join("Helpers/playbit-engine.app"))
-                .args(["--args", "--launch-agent"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .status()?;
-            if !status.success() {
-                return Err("macOS could not launch Playbit's development engine".into());
-            }
+        let mut command = Command::new("/usr/bin/open");
+        command
+            .args(["-n", "-g", "-j", "-a"])
+            .arg(contents.join("Helpers/playbit-engine.app"))
+            .args(["--args", "--launch-agent"]);
+        if channel == ReleaseChannel::Testing {
+            command.arg(channel.name());
         }
-        // This launch path has no persistent registration to remove.
+        let status = command.stdin(Stdio::null()).stdout(Stdio::null()).status()?;
+        if !status.success() {
+            return Err("macOS could not launch Playbit's development engine".into());
+        }
         return Ok(());
     }
-    configure(start)?;
-    if start {
-        let target = format!(
-            "gui/{}/{}",
-            super::profile::current_uid(),
-            service_label(contents, &identifier)?
-        );
-        let status = Command::new("/bin/launchctl")
-            .args(["kickstart", &target])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Err("macOS could not launch Playbit's background service".into());
+    let home = dirs::home_dir().ok_or("Home directory is unavailable")?;
+    let state = super::profile::default_runtime_path(&home, channel);
+    if !start {
+        let legacy = action == ServiceAction::Unregister
+            && channel == ReleaseChannel::Public
+            && !ad_hoc
+            && identifier == "playbit.engine";
+        if legacy && home.canonicalize()? != super::profile::credential_home()?.canonicalize()? {
+            return Err("Use your login account's home directory to unregister \
+                the Public background service."
+                .into());
         }
+        if !legacy && !state.try_exists()? {
+            return Ok(());
+        }
+        super::profile::private_directory(&state)?;
+        let profile = super::profile::default_path(&home, channel);
+        return retire(&state, &profile, app, action, legacy, || {
+            if !ad_hoc {
+                configure(plist_name, None)?;
+            }
+            Ok(())
+        });
+    }
+    super::profile::private_directory(&state)?;
+    {
+        let _service = service_lock(&state)?;
+        configure(plist_name, Some((&state, app)))?;
+    }
+    let target = format!(
+        "gui/{}/{}",
+        super::profile::current_uid(),
+        service_label(contents, &identifier, plist_name.to_str()?)?
+    );
+    let status = Command::new("/bin/launchctl")
+        .args(["kickstart", &target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err("macOS could not launch Playbit's background service".into());
     }
     Ok(())
+}
+
+fn retire(
+    state: &Path,
+    profile: &Path,
+    app: &Path,
+    action: ServiceAction,
+    legacy: bool,
+    unregister: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let _service = service_lock(state)?;
+    let owner = read_owner(state)?;
+    let _legacy_users = match owner.as_deref() {
+        Some(owner) if owner == app => None,
+        Some(owner) if action == ServiceAction::Unregister => {
+            return Err(format!(
+                "{} manages this background service. Run its bundled pb to unregister it.",
+                owner.display()
+            )
+            .into());
+        }
+        None if action == ServiceAction::Unregister && legacy => {
+            // The single-job release used this lease for both ordinary channels.
+            // Keep new and old users out until ServiceManagement has finished.
+            let active = super::profile::private_file(&state.join("active.lock"))?;
+            match active.try_lock() {
+                Ok(()) => Some(active),
+                Err(fs::TryLockError::WouldBlock) => {
+                    return Err("Close the Public and Testing Playbit apps and commands and let \
+                        their engines exit before unregistering the previous background service."
+                        .into());
+                }
+                Err(fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+        _ => return Ok(()),
+    };
+    let _launch = super::launch::drained_service(profile)?;
+    unregister()?;
+    if owner.is_some() {
+        fs::remove_file(state.join("agent-owner"))?;
+        fs::File::open(state)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn service_plist(channel: ReleaseChannel) -> Result<&'static std::ffi::CStr> {
+    match channel {
+        ReleaseChannel::Public => Ok(c"playbit-engine.plist"),
+        ReleaseChannel::Testing => Ok(c"playbit-engine-testing.plist"),
+        #[cfg(test)]
+        _ => Err("Managed background services require a distribution channel".into()),
+    }
+}
+
+fn service_bundle(executable: &Path) -> Result<(&Path, String)> {
+    let contents = executable.parent().and_then(Path::parent).ok_or("Missing app bundle")?;
+    let app = contents.parent().ok_or("Missing app bundle")?;
+    Ok((contents, service_identifier(app)?))
+}
+
+pub(super) fn service_identifier(app: &Path) -> Result<String> {
+    let identifier = installation::string(&installation::plist(app)?, "CFBundleIdentifier")?;
+    if !["playbit.engine", "playbit.engine.debug"].contains(&identifier.as_str()) {
+        return Err("Background service control requires the original Playbit app bundle".into());
+    }
+    Ok(identifier)
 }
 
 #[allow(
     unsafe_code,
     reason = "Security returns an owned signing-information dictionary; its flags are type-checked before use."
 )]
-fn ad_hoc_signature() -> Result<bool> {
+fn ad_hoc_signature(executable: &Path) -> Result<bool> {
+    use core_foundation::url::CFURL;
     use core_foundation::{
         base::{CFType, TCFType},
         dictionary::{CFDictionary, CFDictionaryRef},
         number::CFNumber,
         string::{CFString, CFStringRef},
     };
-    use security_framework::os::macos::code_signing::{Flags, SecCode};
+    use security_framework::os::macos::code_signing::{Flags, SecStaticCode};
     use security_framework_sys::code_signing::SecStaticCodeRef;
     unsafe extern "C" {
         static kSecCodeInfoFlags: CFStringRef;
@@ -286,12 +528,13 @@ fn ad_hoc_signature() -> Result<bool> {
         ) -> i32;
     }
     const AD_HOC: i64 = 0x0002; // kSecCodeSignatureAdhoc, CSCommon.h.
-    let code = SecCode::for_self(Flags::empty())?;
+    let url =
+        CFURL::from_path(executable, false).ok_or("Invalid Playbit service controller path")?;
+    let code = SecStaticCode::from_path(&url, Flags::empty())?;
     let mut raw = std::ptr::null();
     // SAFETY: code is live, raw is writable, and default flags request only
-    // generic information. This API accepts either a Code or StaticCode object.
-    let status =
-        unsafe { SecCodeCopySigningInformation(code.as_concrete_TypeRef().cast(), 0, &mut raw) };
+    // generic information from the selected packaged executable.
+    let status = unsafe { SecCodeCopySigningInformation(code.as_concrete_TypeRef(), 0, &mut raw) };
     if status != 0 {
         return Err(security_framework::base::Error::from_code(status).into());
     }
@@ -314,7 +557,7 @@ fn ad_hoc_signature() -> Result<bool> {
     unsafe_code,
     reason = "Core Foundation returns an owned, type-checked dictionary from the bounded signed service plist."
 )]
-fn service_label(contents: &Path, identifier: &str) -> Result<String> {
+fn service_label(contents: &Path, identifier: &str, plist_name: &str) -> Result<String> {
     use core_foundation::{
         base::{CFType, TCFType},
         data::CFData,
@@ -323,7 +566,7 @@ fn service_label(contents: &Path, identifier: &str) -> Result<String> {
         string::CFString,
     };
     let bytes = installation::read(
-        &contents.join("Library/LaunchAgents/playbit-engine.plist"),
+        &contents.join("Library/LaunchAgents").join(plist_name),
         installation::MAX_PLIST,
     )?;
     let (raw, _) = propertylist::create_with_data(
@@ -364,7 +607,7 @@ unsafe extern "C" {}
     unsafe_code,
     reason = "SMAppService objects and NSError messages are used synchronously inside one autorelease pool."
 )]
-fn configure(start: bool) -> Result<()> {
+fn configure(plist_name: &std::ffi::CStr, registration: Option<(&Path, &Path)>) -> Result<()> {
     use objc::{
         class, msg_send,
         runtime::{BOOL, NO, Object},
@@ -372,7 +615,7 @@ fn configure(start: bool) -> Result<()> {
     };
     objc::rc::autoreleasepool(|| unsafe {
         let name: *mut Object =
-            msg_send![class!(NSString), stringWithUTF8String: c"playbit-engine.plist".as_ptr()];
+            msg_send![class!(NSString), stringWithUTF8String: plist_name.as_ptr()];
         let service: *mut Object = msg_send![class!(SMAppService), agentServiceWithPlistName: name];
         if service.is_null() {
             return Err("macOS could not configure Playbit's background service".into());
@@ -380,13 +623,15 @@ fn configure(start: bool) -> Result<()> {
         let state: isize = msg_send![service, status];
         // Never unregister/re-register a service the user disabled. Respect the
         // system approval state and surface an actionable startup failure.
-        if start && state == REQUIRES_APPROVAL {
-            return Err("Allow Playbit in System Settings > General > Login Items & Extensions, then reopen Playbit.".into());
+        if registration.is_some() && state == REQUIRES_APPROVAL {
+            return Err("Allow Playbit in System Settings > General > Login Items & Extensions, \
+                then reopen Playbit."
+                .into());
         }
         // An absent endpoint can mean slow initialization or a closed admission
         // listener while accepted work drains. Unregistering kills that process.
         // Updates retire their stopped job explicitly before replacing the bundle.
-        if start && state == ENABLED {
+        if registration.is_some() && state == ENABLED {
             return Ok(());
         }
         let mut error: *mut Object = std::ptr::null_mut();
@@ -396,14 +641,23 @@ fn configure(start: bool) -> Result<()> {
                 return Err(service_error(error).into());
             }
         }
-        if start {
+        if let Some((owner_state, app)) = registration {
             let ok: BOOL = msg_send![service, registerAndReturnError: &mut error];
             if ok == NO {
                 return Err(service_error(error).into());
             }
             let state: isize = msg_send![service, status];
+            // Approval can delay launch after this app successfully registered
+            // its job. Its updater must still be able to retire that job.
+            if matches!(state, ENABLED | REQUIRES_APPROVAL) {
+                record_owner(owner_state, app)?;
+            }
             if state != ENABLED {
-                return Err("Allow Playbit's background service in System Settings > General > Login Items & Extensions, then reopen Playbit.".into());
+                return Err(
+                    "Allow Playbit's background service in System Settings > General > Login \
+                     Items & Extensions, then reopen Playbit."
+                        .into(),
+                );
             }
         }
         Ok(())
@@ -457,7 +711,11 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let executable = std::env::current_exe().unwrap();
         let mut child = Command::new(&executable)
-            .args(["--exact", "engine::launch_agent::tests::startup_failure_survives_exit_after_peer_authentication"])
+            .args([
+                "--exact",
+                "engine::launch_agent::tests::startup_failure_survives_exit_after_peer_\
+                 authentication",
+            ])
             .env(CHILD, &path)
             .spawn()
             .unwrap();
@@ -467,12 +725,87 @@ mod tests {
         // Simulate the service controller returning after the helper connects.
         std::thread::sleep(Duration::from_millis(20));
         assert!(child.try_wait().unwrap().is_none());
-        authenticate(&mut ready, &executable, deadline).unwrap();
+        authenticate(&mut ready, ExpectedEngine::Build(&executable), deadline).unwrap();
         assert!(child.wait().unwrap().success());
         // The helper is gone, but its authenticated failure frame is buffered.
         let error = super::super::launch::read_ready(&mut ready, deadline).unwrap_err();
         assert_eq!(error.to_string(), ipc::CORRUPT_STORE_ERROR);
         assert!(super::super::restart::terminal(&error.to_string()));
+    }
+
+    #[test]
+    fn registered_app_persists_across_restart_and_updates_only_its_channel() {
+        let home = tempfile::tempdir().unwrap();
+        let public =
+            super::super::profile::default_runtime_path(home.path(), ReleaseChannel::Public);
+        let testing =
+            super::super::profile::default_runtime_path(home.path(), ReleaseChannel::Testing);
+        let app = home.path().join("Playbit.app");
+        let testing_app = home.path().join("Playbit (testing).app");
+        for (state, owner) in [(&public, &app), (&testing, &testing_app)] {
+            super::super::profile::private_directory(state).unwrap();
+            assert_eq!(read_owner(state).unwrap(), None);
+            let _service = service_lock(state).unwrap();
+            record_owner(state, owner).unwrap();
+            record_owner(state, owner).unwrap();
+        }
+        {
+            let _service = service_lock(&testing).unwrap();
+            record_owner(&testing, &app).unwrap();
+        }
+        assert_eq!(read_owner(&public).unwrap(), Some(app.clone()));
+        assert_eq!(read_owner(&testing).unwrap(), Some(app));
+    }
+
+    #[test]
+    fn legacy_public_unregistration_requires_explicit_request_and_quiescence() {
+        use super::super::profile::{private_directory, private_file};
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let app = home.path().join("Playbit.app");
+        let state = home.path().join(".playbit-runtime");
+        let profile = home.path().join(".playbit");
+        private_directory(&state).unwrap();
+        private_directory(&profile).unwrap();
+        let unexpected = || Err("unexpected service retirement".into());
+        retire(&state, &profile, &app, ServiceAction::RetireOwned, true, unexpected).unwrap();
+        retire(&state, &profile, &app, ServiceAction::Unregister, false, unexpected).unwrap();
+
+        let active = private_file(&state.join("active.lock")).unwrap();
+        active.lock_shared().unwrap(); // The previous Testing app used this same lease.
+        let explicit = ServiceAction::Unregister;
+        let error = retire(&state, &profile, &app, explicit, true, unexpected).unwrap_err();
+        assert!(error.to_string().contains("let their engines exit"));
+        active.unlock().unwrap();
+        let admission = super::super::launch::drained_service(&profile).unwrap().unwrap();
+        let error = retire(&state, &profile, &app, explicit, true, unexpected).unwrap_err();
+        assert!(error.to_string().contains("already starting"));
+        drop(admission);
+        let listener = UnixListener::bind(profile.join(crate::paths::ENGINE_SOCKET)).unwrap();
+        let error = retire(&state, &profile, &app, explicit, true, unexpected).unwrap_err();
+        assert!(error.to_string().contains("running Playbit engine"));
+        drop(listener);
+
+        let mut unregistered = false;
+        retire(&state, &profile, &app, explicit, true, || {
+            for path in [state.join("agent.lock"), profile.join("control/launch.lock")] {
+                assert!(matches!(
+                    private_file(&path)?.try_lock(),
+                    Err(fs::TryLockError::WouldBlock)
+                ));
+            }
+            assert!(matches!(active.try_lock_shared(), Err(fs::TryLockError::WouldBlock)));
+            unregistered = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(unregistered);
+
+        let foreign = home.path().join("Playbit (testing).app");
+        record_owner(&state, &foreign).unwrap();
+        let error = retire(&state, &profile, &app, explicit, true, unexpected).unwrap_err();
+        assert!(error.to_string().contains(foreign.to_str().unwrap()));
+        retire(&state, &profile, &app, ServiceAction::RetireOwned, false, unexpected).unwrap();
+        assert_eq!(read_owner(&state).unwrap(), Some(foreign));
     }
 
     #[test]
@@ -485,6 +818,37 @@ mod tests {
         let started = Instant::now();
         assert!(wait_for_authentication(&mut helper, timeout).is_err());
         assert!(started.elapsed() >= timeout);
+    }
+
+    #[test]
+    fn borrowed_cold_start_uses_the_originating_packaged_controller() {
+        // A generated guest has its own identifier and ad-hoc signature.
+        // Its descriptor points back into the packaged installation.
+        let directory = tempfile::tempdir().unwrap();
+        let contents = directory.path().join("Origin.app/Contents");
+        fs::create_dir_all(contents.join("MacOS")).unwrap();
+        fs::create_dir_all(contents.join("Library/LaunchAgents")).unwrap();
+        let controller = contents.join("MacOS/pb");
+        fs::copy("/bin/echo", &controller).unwrap(); // a certificate-signed test executable
+        fs::write(
+            contents.join("Info.plist"),
+            b"<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key>\
+              <string>playbit.engine.debug</string></dict></plist>",
+        )
+        .unwrap();
+        let label = "playbit.engine.debug.helper.testing.agent";
+        fs::write(
+            contents.join("Library/LaunchAgents/playbit-engine-testing.plist"),
+            format!(
+                "<plist version=\"1.0\"><dict><key>Label</key>\
+                 <string>{label}</string></dict></plist>"
+            ),
+        )
+        .unwrap();
+        let command = registered_command(&controller, ReleaseChannel::Testing).unwrap();
+        assert_eq!(command.get_program(), "/bin/launchctl");
+        let target = format!("gui/{}/{label}", super::super::profile::current_uid());
+        assert!(command.get_args().eq(["kickstart", target.as_str()]));
     }
 
     #[test]

@@ -188,7 +188,8 @@ mod tests {
     }
     #[test]
     fn native_sizes_preserve_straight_rgba_and_center_raster_and_vector() {
-        let svg = br#"<svg width="24" height="12"><rect width="24" height="12" fill="red" opacity="0.5"/></svg>"#;
+        let svg = b"<svg width=\"24\" height=\"12\"><rect width=\"24\" height=\"12\" \
+            fill=\"red\" opacity=\"0.5\"/></svg>";
         for side in [48, 120, 512] {
             for bytes in [svg.to_vec(), png(24, 12)] {
                 let image = decode(&bytes, side).unwrap();

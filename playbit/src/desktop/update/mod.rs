@@ -270,7 +270,9 @@ fn present(cx: &mut App) {
         ),
         State::Disabled(DisabledReason::Development) => (
             "Updates disabled",
-            "Updates are disabled for this development build.\n\nRelaunch Playbit with PLAYBIT_DEV_ENABLE_AUTOUPDATE=1 to enable updates.".into(),
+            "Updates are disabled for this development build.\n\n\
+             Relaunch Playbit with PLAYBIT_DEV_ENABLE_AUTOUPDATE=1 to enable updates."
+                .into(),
             false,
             false,
         ),

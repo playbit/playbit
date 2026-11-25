@@ -1,13 +1,13 @@
 // Messages exchanged between the page (app.ts) and the runtime worker
 // (runtime-worker.ts). Types only; both programs import from here.
-import type { SceneContainer } from "./scene.ts";
+import type { SceneNode, SceneWindow } from "./scene.ts";
 import type { ReplicationState } from "./live-replication.ts";
 import type { Invitation, ScopeAddresses, ScopeRequest } from "./invitation.ts";
-import type { CatalogVolume } from "./recovery.ts";
+import type { AppScope, CatalogVolume } from "./recovery.ts";
 import type { PersonalGrant } from "./personal.ts";
 
 // What the worker presents after every step: the scene root and any guest logs.
-export interface RuntimePresentation { scene: SceneContainer; logs: string[] }
+export interface RuntimePresentation { scene: SceneNode; window?: SceneWindow; logs: string[] }
 export interface RuntimeIdentity { account: string; root: string; shared?: string; session: string; version: string }
 export interface RuntimeTiming { databaseMs: number; launchMs: number }
 export interface OfflineEntry {
@@ -19,10 +19,10 @@ export interface RuntimeOpenResult extends RuntimePresentation { identity: Runti
 // account with its invitation and personal volume catalog (the worker reads
 // `account` only when `invitation` is present).
 export type RuntimeOpenArgs =
-    | { profile: string; app?: string; account?: undefined; invitation?: undefined; personal?: undefined }
-    | { profile: string; account: string; invitation: Invitation; personal?: CatalogVolume[]; app?: undefined };
+    | { profile: string; app?: string; account?: undefined; invitation?: undefined; personal?: undefined; userVolume?: undefined; creationScope?: undefined }
+    | { profile: string; account: string; invitation: Invitation; personal?: CatalogVolume[]; userVolume?: CatalogVolume; creationScope?: Extract<AppScope, {kind: "session"}>; app?: undefined };
 // `input`: one guest event for a scene control.
-export interface RuntimeInputArgs { kind: number; target: number; data: Uint8Array }
+export interface RuntimeInputArgs { kind: number; target: number; data: Uint8Array; menuRevision?: number }
 // `select_personal`: the chooser's grants for one session, with the catalog it chose from.
 export interface RuntimeSelectPersonalArgs { session: string; grants: PersonalGrant[]; personal: CatalogVolume[] }
 // `select_personal` replies `{}` once the grants apply, `{ canceled: true }` when canceled.
@@ -36,6 +36,7 @@ export interface RuntimeMethods {
     scope_addresses: { args: ScopeRequest; result: ScopeAddresses };
     open: { args: RuntimeOpenArgs; result: RuntimeOpenResult };
     input: { args: RuntimeInputArgs; result: RuntimePresentation };
+    surface: { args: Uint8Array; result: RuntimePresentation | undefined };
     retry_update: { args: undefined; result: Record<string, never> };
     close: { args: undefined; result: { closed: true } };
     reconnect: { args: undefined; result: Record<string, never> };
@@ -62,10 +63,11 @@ export interface RuntimeWorkerMessage {
     replication?: ReplicationState;
     accountNoticeFailed?: true;
     replicaScene?: RuntimePresentation;
+    surfaceReady?: true;
     guestFailure?: string | null;
     engineFailure?: string;
     update?: RuntimeUpdateState | null;
     adopted?: RuntimePresentation & { build_id: string };
     progress?: string;
-    id?: number; result?: unknown; error?: string; code?: "corrupt_store";
+    id?: number; result?: unknown; error?: string; code?: "corrupt_store" | "unsupported" | "incompatible-storage-format" | "incompatible-installation-format";
 }

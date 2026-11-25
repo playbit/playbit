@@ -315,8 +315,9 @@ test("web capability discovery advertises owned File operations", async () => {
     const database = await host(), a = adapter(undefined, database.exports);
     const data = new DataView(a.memory.buffer);
     initialize(a.memory, 16, 36);
-    data.setUint32(24, 128, true); data.setUint32(28, 64, true); data.setUint32(36, 16, true);
-    for (let i = 0; i < 64; i++) initialize(a.memory, 128 + i * 16, 16);
+    const nameCapacity = 96;
+    data.setUint32(24, 128, true); data.setUint32(28, nameCapacity, true); data.setUint32(36, 16, true);
+    for (let i = 0; i < nameCapacity; i++) initialize(a.memory, 128 + i * 16, 16);
     data.setUint32(40, 2048, true); data.setUint32(44, 2048, true);
     assert.equal(a.operations.pb_capabilities(16), 0);
     const names = Array.from({ length: data.getUint32(32, true) }, (_, i) => {

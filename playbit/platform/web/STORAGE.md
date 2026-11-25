@@ -152,11 +152,38 @@ Each sample registers three new databases; host instances rotate at the
 setup and Wasm compilation are outside these intervals. This component probe
 does not qualify UI admission, input, presentation, AP traffic or peak memory.
 
+## Automatic volumes in the browser
+
+Opening an invited app authenticates the session and opens its Shared replica.
+An app can enumerate all six automatic volume roles before it uses them. First
+access to a distinct World asks AP to open the publisher’s World for that
+session and signed build. With projection credentials, browser guests can read
+and can mutate ordinary KV entries under their effective Write or Append
+grants. The same capability ceiling applies to the publisher using that projection.
+A public Read volume can contain an explicitly writable KV.
+A root-backed invitation continues to use its existing replica credentials.
+Writable World KV backings can be resubmitted after reconnect. When an entry
+grants only Append, the browser uses the native `world-kv-append/` records in
+the local backing to offer each locally created value. AP checks the current
+policy before accepting changes.
+
+The four User and Local roles use browser storage. Each derived ID has one OPFS
+directory and one exclusive lock. A second tab receives Busy while the first
+holds that volume. The original signed initializer, database files, blob bodies
+and generation journal belong to that directory, so app-wide data can be
+reopened from another session. Session-specific roles use different IDs in each
+session. Local files stay on this browser.
+
 ## Web sign-out (R24)
+
+An incompatible saved account offers **Clear local account data and sign in**.
+Cancel keeps the saved data. Confirming removes the old account and reopens the
+current invitation at sign-in. The browser retains its installation identity
+and publisher trust history.
 
 Explicit sign-out and a fresh email sign-in discard the previous web account,
 including unsynchronized data. `web-account.ts` coordinates document-lifetime
-shared Web Locks, reloads tabs, and deletes Playbit IndexedDB databases, OPFS
+shared Web Locks, reloads tabs, and deletes Playbit account IndexedDB databases, OPFS
 profiles, Web Storage and Cache Storage. A non-secret cleanup marker survives an
 interrupted SharedWorker/reload; new pages resume cleanup before opening storage.
 Only the current invitation URL and the initiating email survive a fresh sign-in.

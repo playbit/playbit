@@ -1,9 +1,9 @@
 import { encodeId, validId } from './identifier.ts';
-import { openMetadata, watchMetadata } from './storage-format.ts';
+import { INSTALLATION_DATABASE, openMetadata, watchMetadata } from './storage-format.ts';
 // One durable origin identity per web browser installation, independent of accounts,
 // sessions and replica IDs. The creation transaction publishes the store and
 // identity atomically. Missing or damaged identities fail; they are never replaced.
-export const INSTALLATION_DATABASE = 'playbit-installation';
+
 
 export async function installationIdentity(): Promise<string> {
     const database = await openMetadata(INSTALLATION_DATABASE, 'identity', 'playbit.web.installation', store => {

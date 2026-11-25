@@ -1,4 +1,4 @@
-import { INSTALLATION_DATABASE } from './installation.ts';
+import { INSTALLATION_DATABASE } from './storage-format.ts';
 // All app pages hold this shared lock until unload. Cleanup holds it exclusively,
 // after asking pages to reload, so no old worker can recreate deleted storage.
 export const ACCOUNT_STORAGE_LOCK = 'playbit-web-storage';
@@ -19,7 +19,7 @@ export interface KeyValueStorage {
 export interface ResetMessage { tab: string }
 export interface ResetRequest { tab: string; resume?: boolean }
 // The AP worker's reply to resetState/resetWebAccount.
-export interface ResetState { error: string | null }
+export interface ResetState { error: string | null; code?: string }
 export interface WebAccountClient {
     resetState(token: string | null): Promise<ResetState>;
     resetWebAccount(tab: string, token: string): Promise<ResetState>;
@@ -55,7 +55,7 @@ export function reloadWebAccount({ tab }: ResetMessage, webTab: string): void {
     clearPlaybitStorage(localStorage, true); clearPlaybitStorage(sessionStorage);
     if (next) sessionStorage.setItem(SIGN_IN_HANDOFF, next);
     if (signIn) sessionStorage.setItem(SIGN_IN_AFTER_RESET, signIn);
-    if (!next) history.replaceState(null, '', '/s');
+    if (!next && signIn !== 'invitation') history.replaceState(null, '', '/s');
     // replace(location.href) can be a same-document navigation for invitation
     // fragments, leaving this document holding the lock cleanup needs. Always
     // reload the document, retaining only the initiating invitation and one-use sign-in form.

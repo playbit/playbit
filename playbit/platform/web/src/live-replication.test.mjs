@@ -18,7 +18,7 @@ function fixture(options = {}) {
     let nextHandle = 0;
     const ap = async (method, ...args) => {
         calls.push([method, ...args]);
-        if (method === 'subscribeReplica') { await options.subscribe?.(); const handle = ++nextHandle; sequences.set(handle, 0); return { handle, ack: { epoch: encodeId(new Uint8Array(16).fill(7)), sequence: 0n, policy_revision: 1n } }; }
+        if (method === 'subscribeReplica') { await options.subscribe?.(args[0]); const handle = ++nextHandle; sequences.set(handle, 0); return { handle, ack: { epoch: encodeId(new Uint8Array(16).fill(7)), sequence: 0n, policy_revision: 1n } }; }
         if (method === 'streamReplica') { assert(!readers.has(args[0]), 'one in-flight frame'); const read = deferred(); readers.set(args[0], read); return read.promise; }
         if (method === 'checkpointReplica') {
             if (options.checkpoint) return options.checkpoint(args[0]);
@@ -36,7 +36,7 @@ function fixture(options = {}) {
     const actor = new LiveReplication({ ap, operationId: () => encodeId(new Uint8Array(16).fill(0x04)), timeout: options.timeout ?? 1000,
         bootstrap: options.bootstrap ?? (async () => {}), state: state => states.push(state),
         local: { head: async () => heads[0], ack: async ticket => { assert.equal(heads[0].ticket, ticket); heads.shift(); },
-            published: options.published,
+            volumeCurrent: options.volumeCurrent, published: options.published, rejected: options.rejected,
             terminal: options.terminal ?? (async () => {}),
             apply: async (...args) => { applied.push(args.slice(0, 3)); await options.apply?.(...args); },
             catchUpLog: async (...args) => { calls.push(['catchUpLog', ...args.slice(0, 2)]); await options.catchUpLog?.(...args); } } });
@@ -102,6 +102,50 @@ test('file upload finishes before releasing its publication ticket while incomin
     upload.resolve(); await turn(); await turn();
     assert.equal(f.heads.length, 0);
     await f.actor.stop();
+});
+
+test('deleting a bound User during AP subscription or publication leaves Shared live', {timeout: 5000}, async () => {
+    const user = { ...scope, volume_id: encodeId(new Uint8Array(16).fill(0x19)), session_id: null, build_id: null };
+    for (const phase of ['subscribe', 'publish', 'rejected', 'handling-rejection', 'file']) {
+        let deleted = false;
+        const started = deferred(), release = deferred();
+        const held = async () => { started.resolve(); await release.promise; };
+        const f = fixture({
+            volumeCurrent: id => id !== user.volume_id || !deleted,
+            subscribe: op => { if (phase === 'subscribe' && op.volume_id === user.volume_id) return held(); },
+            publish: op => {
+                if (op.volume_id !== user.volume_id) return;
+                if (phase === 'handling-rejection') throw Object.assign(Error('Rejected'), {code:'ap-rejected'});
+                if (phase !== 'file') return held();
+            },
+            rejected: async () => { assert.equal(phase, 'handling-rejection'); await held(); return false; },
+            published: async (head, current) => {
+                if (head.source !== user.volume_id) return;
+                assert.equal(phase, 'file');
+                await held();
+                assert.equal(current(), false);
+                throw Error('Deleted volume');
+            },
+        });
+        const starting = f.actor.start([user, scope]);
+        if (phase !== 'subscribe') {
+            await starting; await turn(); await turn();
+            f.edit('index', user.volume_id);
+        }
+        await started.promise;
+        deleted = true;
+        f.actor.removeVolume(user.volume_id);
+        f.heads.length = 0; // The host tombstone discards this volume's pending tickets.
+        if (phase === 'rejected') release.reject(Object.assign(Error('Deleted volume'), {code:'ap-rejected'}));
+        else release.resolve();
+        await starting;
+        if (f.actor.run.publisher) await f.actor.run.publisher;
+        assert.equal(f.actor.run.active, true);
+        f.edit(); await turn(); await turn();
+        assert.equal(f.heads.length, 0, phase);
+        assert.equal(f.states.at(-1).kind, 'live', phase);
+        await f.actor.stop();
+    }
 });
 
 test('file upload failure retains the metadata ticket for recovery', async () => {
@@ -429,6 +473,62 @@ for (const cause of [1, 2]) test(`selected terminal ${cause} retains its volume/
     await f.actor.stop();
 });
 
+test('a failed first World capture keeps the shared session live and can be retried', async () => {
+    const world = { ...scope, volume_id: encodeId(new Uint8Array(16).fill(0x16)) };
+    const f = fixture();
+    try {
+        await f.actor.start([scope]); await turn(); await turn();
+        await assert.rejects(f.actor.add(world, async current => {
+            assert(current());
+            assert.equal(f.calls.at(-1)[0], 'subscribeReplica');
+            throw new Error('World capture failed');
+        }), /capture failed/);
+        assert.equal(f.actor.run.stopped, false);
+        f.send(1, 1, Uint8Array.of(9), named); await turn();
+        assert.equal(f.applied.length, 1);
+        await f.actor.add(world, async current => assert(current()));
+        assert.equal(f.readers.size, 2);
+    } finally { await f.actor.stop(); }
+});
+
+test('World publication rejection leaves Shared publishing and receiving, while a transport failure retains both tickets', async () => {
+    const world = { ...scope, volume_id: encodeId(new Uint8Array(16).fill(0x16)) };
+    for (const code of ['world-participant-revoked', 'ap-rejected', 'world-entry-rejected', 'ap-transport']) {
+        const rejected = [], receipts = [];
+        const f = fixture({
+            publish: async request => {
+                if (request.volume_id === world.volume_id) throw Object.assign(Error('publish failed'), { code });
+            },
+            rejected: async (head, cause, current) => {
+                assert(current()); rejected.push(cause);
+                assert.equal(head.source, world.volume_id);
+                f.heads.shift(); // The worker retires this transport ticket after a scoped refusal.
+                if (cause === 'world-participant-revoked') f.actor.removeVolume(world.volume_id);
+                else f.actor.recoverVolumeCatalog(world.volume_id);
+                return true;
+            },
+            published: async head => receipts.push(head.source),
+        });
+        try {
+            await f.actor.start([scope]); await f.actor.run.publisher;
+            await f.actor.add(world, async () => {});
+            f.edit(named, world.volume_id); f.edit();
+            await f.actor.run.publisher;
+            if (code === 'ap-transport') {
+                assert.equal(f.actor.run.stopped, true);
+                assert.equal(f.states.at(-1).kind, 'reconnecting');
+                assert.deepEqual(rejected, []); assert.deepEqual(receipts, []); assert.equal(f.heads.length, 2);
+            } else {
+                assert.equal(f.actor.run.stopped, false);
+                assert.deepEqual(rejected, [code]); assert.deepEqual(receipts, [scope.volume_id]);
+                assert.equal(f.heads.length, 0);
+                f.send(1, 1, Uint8Array.of(9), named); await turn();
+                assert.equal(f.applied[0][0], scope.volume_id);
+                if (code !== 'world-participant-revoked') assert(f.states.some(state => state.source === world.volume_id && state.code === 'replica-gap'));
+            }
+        } finally { await f.actor.stop(); }
+    }
+});
 test('adding and recovering one selected stream subscribes before capture without replacing siblings', async () => {
     const captured = deferred(); let current, bootstraps = 0;
     const f = fixture(); await f.actor.start([sibling]); await turn(); await turn();

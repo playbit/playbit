@@ -210,13 +210,16 @@ fn main() {
                 view.flow = sign_in::flow::Flow::new(true);
                 view.flow.account = playbit::store::Id::from_bytes([1; 16]).to_string();
                 view.flow.step = sign_in::flow::Step::Profile;
-                view.profile(&playbit::engine::reply::AccountProfile {
-                    agreement_required: true,
-                    replacement_required: false,
-                    display_name: None,
-                    unlocked: true,
-                    initialized: false,
-                }, cx);
+                view.profile(
+                    &playbit::engine::reply::AccountProfile {
+                        agreement_required: true,
+                        replacement_required: false,
+                        display_name: None,
+                        unlocked: true,
+                        initialized: false,
+                    },
+                    cx,
+                );
             });
         });
         let new_account = view.clone();
@@ -245,7 +248,11 @@ fn main() {
             setup_error.update(cx, |view, cx| {
                 view.flow = sign_in::flow::Flow::new(true);
                 view.flow.step = sign_in::flow::Step::Profile;
-                view.flow.initialization_failed("Playbit couldn’t check the user agreement with the sync service. Your account key is saved. Retry to continue setup.".into());
+                view.flow.initialization_failed(
+                    "Playbit couldn’t check the user agreement with the sync service. \
+                     Your account key is saved. Retry to continue setup."
+                        .into(),
+                );
                 cx.notify();
             });
         });

@@ -11,23 +11,8 @@ pub(crate) enum WorldReplicaRoute {
     CredentialedRoot,
 }
 
-const KV_APPEND: &[u8] = b"world-kv-append/";
-
-pub(super) fn kv_append_key(clock: kvdb::Clock) -> Vec<u8> {
-    [KV_APPEND, &clock.encode()].concat()
-}
-
-pub(super) fn kv_append_record(key: &[u8], value: &[u8]) -> Vec<u8> {
-    [kvdb::hash::entry_hash(&[0; 32], key, 0, value).as_slice(), key].concat()
-}
-
 #[cfg(feature = "connected-engine")]
-fn kv_append_parts(record: &[u8]) -> Result<(&[u8], &[u8])> {
-    let (digest, key) =
-        record.split_at_checked(32).ok_or(Error::corrupt("invalid World KV append digest"))?;
-    crate::store::key_value::validate_key(key)?;
-    Ok((digest, key))
-}
+use crate::store::key_value::{KV_APPEND, kv_append_key, kv_append_parts};
 
 #[cfg(feature = "connected-engine")]
 fn clear_world_append_markers(
@@ -221,31 +206,7 @@ impl LocalStore {
         bytes: &[u8],
     ) -> Result<bool> {
         let db = self.db(volume, database)?;
-        let snapshot = db.begin_read()?;
-        if !snapshot.next_local_key(KV_APPEND, false)?.is_some_and(|key| key.starts_with(KV_APPEND))
-        {
-            return Ok(false);
-        }
-        let mut records = Vec::new();
-        kvdb::sync::visit_delta(bytes, crate::store::MAX_REPLICA_DELTA_BYTES, |key, state| {
-            if let kvdb::sync::EntState::Present { clock, value } = state {
-                records.push((kv_append_key(clock), key, value));
-            }
-        })?;
-        let mut tx = db.begin_write(now_unix_secs())?;
-        let mut changed = false;
-        for (marker, key, value) in records {
-            if snapshot
-                .local_get(&marker)?
-                .is_some_and(|stored| stored.as_ref() == kv_append_record(key, value))
-            {
-                changed |= tx.local_indexes().del(&marker)?;
-            }
-        }
-        if changed {
-            tx.commit()?;
-        }
-        Ok(changed)
+        crate::store::key_value::acknowledge_appends(&db, bytes, now_unix_secs())
     }
 
     /// Authenticated World attachment can reuse a database with independent Root

@@ -143,7 +143,9 @@ impl Preparation {
     }
     fn pending_personal(&self, host: &Host) -> Result<bool> {
         let primary = host.volumes.borrow();
-        if primary.iter().any(|volume| volume.id == self.volume.id) {
+        if primary.iter().any(|volume| volume.id == self.volume.id)
+            || host.automatic_role(self.volume.id).is_some()
+        {
             return Ok(false);
         }
         let selection = self.selection.as_ref().ok_or(Error::AccessDenied)?;
@@ -305,6 +307,12 @@ impl Preparation {
             for volume in host.volumes.borrow().iter() {
                 policy.volume.admit(host.account, &self.session, volume.id).map_err(store_error)?;
             }
+        }
+        if self.volume.id != self.session.replica_volume()
+            && host.automatic_role(self.volume.id)
+                == Some(crate::package::AutomaticVolumeRole::Root)
+        {
+            policy.volume.admit_world(host.account, &self.session).map_err(store_error)?;
         }
         if self
             .volume
@@ -956,7 +964,7 @@ pub extern "C" fn pb_volume_rejected_page(length: usize) -> i32 {
             if stage.entry_scope.is_some_and(|(selected, _)| selected != entry.id) {
                 continue;
             }
-            if backings::rejected(&stage, host.actor(&stage.volume), entry.id)?
+            if backings::rejected(host, &stage, entry.id)?
                 || volume_index::rejected_sources(
                     &current,
                     &stage.accepted_index,
@@ -983,19 +991,18 @@ pub extern "C" fn pb_volume_publish() -> i32 {
         host.changes
             .borrow_mut()
             .retire_backings(stage.volume.id, &stage.archive.borrow().rejected_backings);
-        host.named.borrow_mut().retain(|named| named.address.volume != stage.volume.id);
-        host.named_failures.borrow_mut().retain(|(address, _)| address.volume != stage.volume.id);
+        host.update_override_rights(&stage.volume)?;
+        host.discard_named_backings(stage.volume.id);
         storage::invalidate();
         let mut primary = host.volumes.borrow_mut();
         if let Some(current) = primary.iter_mut().find(|volume| volume.id == stage.volume.id) {
             *current = stage.volume.clone();
-        } else {
-            let mut personal = host.personal.borrow_mut();
-            let current = personal
-                .iter_mut()
-                .find(|volume| volume.id == stage.volume.id)
-                .ok_or(Error::AccessDenied)?;
+        } else if let Some(current) =
+            host.personal.borrow_mut().iter_mut().find(|volume| volume.id == stage.volume.id)
+        {
             *current = stage.volume.clone();
+        } else if host.automatic_role(stage.volume.id).is_none() {
+            return Err(Error::AccessDenied);
         }
         host.volume_objects.borrow_mut().insert(stage.volume.id, stage.volume.clone());
         PREPARED.with(|cell| cell.borrow_mut().take());

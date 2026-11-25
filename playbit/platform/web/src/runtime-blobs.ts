@@ -5,13 +5,14 @@ export interface FileReference extends BlobReference { offset: number; limit: nu
 interface Ready { file: FileSystemSyncAccessHandle; blocks: string[]; pins: number; corrupt?: boolean }
 interface Loading { promise: Promise<Ready>; users: number }
 interface Lease { reference: FileReference; ready?: Ready; failed?: number; preparing: boolean; pending: boolean; loaded?: Promise<void> }
-interface Stage { name: string; file?: FileSystemSyncAccessHandle; closed: boolean; cleanupFailed: boolean }
+interface Stage { directory: FileSystemDirectoryHandle; name: string; file?: FileSystemSyncAccessHandle; closed: boolean; cleanupFailed: boolean }
 type OpenStage = Stage & { file: FileSystemSyncAccessHandle };
 class CacheCorruption extends Error {}
 export interface BlobServices {
     cache(request: Record<string, unknown>): { kind: 'done' | 'more' | 'remove'; digest?: string; bytes?: number } | undefined;
     failure(error: unknown): void;
     directory(): FileSystemDirectoryHandle;
+    privateDirectory?(volume: string): FileSystemDirectoryHandle | undefined;
     key(reference: FileReference): Uint8Array<ArrayBuffer>;
     hash: BlobHashFactory;
     ap: BlobTransport;
@@ -55,6 +56,7 @@ export class RuntimeBlobs {
         await this.cleanup();
     }
     retain(reference: FileReference): () => void {
+        if (this.services.privateDirectory?.(reference.volume)) return () => {};
         this.services.cache({ kind: 'pin', digest: reference.digest });
         return () => {
             this.services.cache({ kind: 'unpin', digest: reference.digest });
@@ -83,20 +85,20 @@ export class RuntimeBlobs {
     private releaseReady(ready: Ready): void {
         if (!ready.pins && ![...this.leases.values()].some(lease => lease.ready === ready)) ready.file.close();
     }
-    private async temporary(): Promise<OpenStage> {
+    private async temporary(directory = this.services.directory()): Promise<OpenStage> {
         if (++this.sequence > 0x7fffffff || this.stopped) throw new Error('File preparation retired');
         if (this.stages.size >= 6) throw Object.assign(new Error('File staging capacity exceeded'), { code: -9 });
-        const stage: Stage = { name: `blob-stage-${this.sequence}.tmp`, closed: false, cleanupFailed: false };
+        const stage: Stage = { directory, name: `blob-stage-${this.sequence}.tmp`, closed: false, cleanupFailed: false };
         this.stages.set(stage.name, stage);
         try {
-            stage.file = await (await this.services.directory().getFileHandle(stage.name, { create: true })).createSyncAccessHandle();
+            stage.file = await (await directory.getFileHandle(stage.name, { create: true })).createSyncAccessHandle();
             return stage as OpenStage;
         } catch (error) { await this.discard(stage); throw error; }
     }
     private async discard(stage: Stage): Promise<void> {
         try {
             if (stage.file && !stage.closed) { stage.file.close(); stage.closed = true; }
-            await this.services.directory().removeEntry(stage.name).catch(error => { if (error.name !== 'NotFoundError') throw error; });
+            await stage.directory.removeEntry(stage.name).catch(error => { if (error.name !== 'NotFoundError') throw error; });
             this.stages.delete(stage.name);
         } catch (error) { stage.cleanupFailed = true; throw error; }
     }
@@ -123,7 +125,7 @@ export class RuntimeBlobs {
                 const digest = next.digest!;
                 let success = false;
                 try {
-                    for (const [key, lease] of this.leases) if (lease.reference.digest === digest) {
+                    for (const [key, lease] of this.leases) if (this.contentKey(lease.reference) === digest) {
                         this.leases.delete(key); this.release(lease);
                     }
                     await this.services.directory().removeEntry(`blob-${digest}`).catch(error => { if (error.name !== 'NotFoundError') throw error; });
@@ -148,12 +150,20 @@ export class RuntimeBlobs {
             return blocks;
         } finally { whole.close(); }
     }
+    // Private automatic volumes keep their only copy under the scope's durable
+    // directory. The session cache may evict confirmed network-backed bodies.
+    private contentKey(reference: FileReference): string {
+        return this.services.privateDirectory?.(reference.volume) ? `${reference.volume}/${reference.digest}` : reference.digest;
+    }
     private async save(
         source: FileSystemSyncAccessHandle,
         reference: FileReference,
         receipt: (write: () => void) => void = write => write(),
     ): Promise<void> {
+        const scope = this.services.privateDirectory?.(reference.volume);
+        const directory = scope ?? this.services.directory();
         const saved = () => {
+            if (scope) { receipt(() => {}); return; }
             try {
                 receipt(() => this.services.cache({
                     kind: 'saved', digest: reference.digest, length: reference.len_bytes, confirmed: false,
@@ -165,23 +175,23 @@ export class RuntimeBlobs {
                 throw error;
             }
         };
-        const shared = [...this.leases.values()].find(lease => lease.ready && lease.reference.digest === reference.digest && lease.reference.len_bytes === reference.len_bytes)?.ready;
+        const shared = [...this.leases.values()].find(lease => lease.ready && this.contentKey(lease.reference) === this.contentKey(reference) && lease.reference.len_bytes === reference.len_bytes)?.ready;
         if (shared) {
             shared.pins++;
             try { await this.verify(shared.file, reference); saved(); return; }
             finally { shared.pins--; this.releaseReady(shared); }
         }
-        const existing = await openCachedBlob(this.services.directory(), reference.digest);
+        const existing = await openCachedBlob(directory, reference.digest);
         if (existing) {
             try {
-                this.services.cache({ kind: 'observe', digest: reference.digest, length: existing.getSize() });
+                if (!scope) this.services.cache({ kind: 'observe', digest: reference.digest, length: existing.getSize() });
                 await this.verify(existing, reference);
                 saved(); return;
             }
             catch (error) { if (!(error instanceof CacheCorruption)) throw error; }
             finally { existing.close(); }
         }
-        const stage = await this.temporary();
+        const stage = await this.temporary(directory);
         const target = stage.file;
         try {
             const bytes = new Uint8Array(BLOB_CHUNK);
@@ -191,7 +201,7 @@ export class RuntimeBlobs {
                 if (source.read(part, { at: offset }) !== part.length || target.write(part, { at: offset }) !== part.length) throw new Error('Could not retain file');
             }
             target.truncate(reference.len_bytes); target.flush(); target.close(); stage.closed = true;
-            const handle = await this.services.directory().getFileHandle(stage.name) as FileSystemFileHandle & { move(name: string): Promise<void> };
+            const handle = await directory.getFileHandle(stage.name) as FileSystemFileHandle & { move(name: string): Promise<void> };
             if (typeof handle.move !== 'function') throw new Error('Atomic file publication is unavailable on this web browser');
             if (this.stopped) throw new Error('File preparation retired');
             await handle.move(`blob-${reference.digest}`);
@@ -239,22 +249,23 @@ export class RuntimeBlobs {
     }
     private async load(reference: FileReference): Promise<Ready> {
         this.reserve(); let file: FileSystemSyncAccessHandle | null = null;
+        const scope = this.services.privateDirectory?.(reference.volume);
         try {
-            file = await openCachedBlob(this.services.directory(), reference.digest);
+            file = await openCachedBlob(scope ?? this.services.directory(), reference.digest);
             if (file) {
                 const cached = file;
                 try {
-                    this.services.cache({ kind: 'observe', digest: reference.digest, length: cached.getSize() });
+                    if (!scope) this.services.cache({ kind: 'observe', digest: reference.digest, length: cached.getSize() });
                     const blocks = await this.verify(cached, reference);
                     if (this.stopped) throw new Error('File preparation retired');
                     const ready = { file: cached, blocks, pins: 0 }; file = null; return ready;
                 } catch (error) {
-                    if (!(error instanceof CacheCorruption) || !this.services.managed()) throw error;
+                    if (!(error instanceof CacheCorruption) || scope || !this.services.managed()) throw error;
                     cached.close(); file = null;
                 }
             }
             if (!file) {
-                if (!this.services.managed()) throw new Error('File content is unavailable');
+                if (scope || !this.services.managed()) throw new Error('File content is unavailable');
                 this.services.authorize(reference, false, true);
                 const encrypted = await this.temporary();
                 try {
@@ -277,7 +288,7 @@ export class RuntimeBlobs {
         } finally { file?.close(); this.active--; }
     }
     private async hydrate(lease: Lease, loaded: () => void): Promise<void> {
-        const key = lease.reference.digest; let ready: Ready | undefined;
+        const key = this.contentKey(lease.reference); let ready: Ready | undefined;
         let loading = this.loading.get(key);
         if (!loading) { loading = { promise: this.load(lease.reference), users: 0 }; this.loading.set(key, loading); }
         loading.users++;
@@ -306,7 +317,7 @@ export class RuntimeBlobs {
             const key = identity(reference); let lease = this.leases.get(key);
             if (!lease) {
                 this.room();
-                const shared = [...this.leases.values()].find(other => other.ready && other.reference.digest === reference.digest && other.reference.len_bytes === reference.len_bytes);
+                const shared = [...this.leases.values()].find(other => other.ready && this.contentKey(other.reference) === this.contentKey(reference) && other.reference.len_bytes === reference.len_bytes);
                 lease = { reference, ready: shared?.ready, preparing: !shared, pending: false };
                 this.leases.set(key, lease);
                 if (!shared) {
@@ -387,20 +398,29 @@ export class RuntimeBlobs {
         } catch (error) { return code(error); }
         finally { release?.(); }
     }
-    async upload(volumes: string[]): Promise<void> {
+    async upload(volumes: string[], current = (_volume: string) => true): Promise<void> {
         for (const volume of volumes) {
             let after: [string, string] | null = null;
-            do {
-                const [references, next] = this.services.pending(volume, after); after = next;
-                for (const reference of references) await this.uploadVersion(reference);
-            } while (after);
+            try {
+                do {
+                    if (!current(volume)) break;
+                    const [references, next] = this.services.pending(volume, after); after = next;
+                    for (const reference of references) {
+                        if (!current(volume)) break;
+                        await this.uploadVersion(reference);
+                    }
+                } while (after);
+            } catch (error) {
+                if (current(volume)) throw error;
+            }
         }
     }
     async uploadVersion(reference: FileReference): Promise<void> {
+        if (this.services.privateDirectory?.(reference.volume)) throw Object.assign(new Error('This file is local to the browser'), { code: -2 });
         this.services.authorize(reference, true, true);
         const release = this.reserveContent(reference);
         let plain: FileSystemSyncAccessHandle | null = null;
-        const shared = [...this.leases.values()].find(lease => lease.ready && lease.reference.digest === reference.digest && lease.reference.len_bytes === reference.len_bytes)?.ready;
+        const shared = [...this.leases.values()].find(lease => lease.ready && this.contentKey(lease.reference) === this.contentKey(reference) && lease.reference.len_bytes === reference.len_bytes)?.ready;
         if (shared) shared.pins++;
         try {
             plain = shared?.file ?? await openCachedBlob(this.services.directory(), reference.digest);

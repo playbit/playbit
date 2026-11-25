@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 
@@ -322,7 +322,43 @@ fn writable(path: &Path) -> bool {
 }
 
 pub fn client_lease(executable: &Path) -> Result<Option<Lease>> {
-    Installation::for_executable(executable)?.map(|installation| installation.lease()).transpose()
+    let home = super::profile::credential_home()?.canonicalize()?;
+    client_lease_at(executable, &home)
+}
+
+fn client_lease_at(executable: &Path, home: &Path) -> Result<Option<Lease>> {
+    let Some(installation) = Installation::for_executable_at(executable, home)? else {
+        return Ok(None);
+    };
+    let profile = home.join(".playbit");
+    if installation.state.parent() == Some(profile.join("updates").as_path()) {
+        repair_legacy_profile(&profile)?;
+    }
+    installation.lease().map(Some)
+}
+
+/// Older apps created ~/.playbit with ordinary directory permissions. Tighten
+/// read/search access only when the owner already has exclusive write access.
+fn repair_legacy_profile(path: &Path) -> Result<()> {
+    let directory = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata = directory.metadata()?;
+    let mode = metadata.mode() & 0o7777;
+    if metadata.uid() == current_uid()
+        && mode & !0o055 == 0o700
+        && mode != 0o700
+        && super::files::privacy::acl::empty(&directory)?
+    {
+        directory.set_permissions(fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 pub fn private_directory(path: &Path) -> Result<()> {
@@ -344,7 +380,10 @@ fn current_uid() -> u32 {
 }
 
 pub fn read(path: &Path, max: u64) -> Result<Vec<u8>> {
-    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
     if !file.metadata()?.is_file() || file.metadata()?.len() > max {
         return Err("Invalid or oversized update file".into());
     }
@@ -393,17 +432,26 @@ mod tests {
         fs::create_dir(&applications).unwrap();
         let installed = applications.join("Playbit.app");
         fs::rename(&installation.app, &installed).unwrap();
-        assert!(Installation::for_executable_at(
-            &installed.join("Contents/MacOS/Playbit"), root.path(),
-        ).is_err());
+        let executable = installed.join("Contents/MacOS/Playbit");
+        assert!(Installation::for_executable_at(&executable, root.path()).is_err());
     }
 
     fn fixture(root: &Path) -> Installation {
         let app = root.join("Playbit.app");
         fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
         fs::write(app.join("Contents/MacOS/Playbit"), b"executable fixture").unwrap();
-        fs::write(app.join("Contents/Info.plist"), format!(
-            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>CFBundleIdentifier</key><string>playbit.engine</string><key>PlaybitVersion</key><string>{}</string><key>PlaybitReleaseSequence</key><string>{}</string></dict></plist>", crate::RELEASE_VERSION, crate::RELEASE_SEQUENCE)).unwrap();
+        fs::write(
+            app.join("Contents/Info.plist"),
+            format!(
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>\
+                 CFBundleIdentifier</key><string>playbit.engine</string><key>\
+                 PlaybitVersion</key><string>{}</string><key>PlaybitReleaseSequence</key>\
+                 <string>{}</string></dict></plist>",
+                crate::RELEASE_VERSION,
+                crate::RELEASE_SEQUENCE
+            ),
+        )
+        .unwrap();
         Installation { app, state: root.join("state") }
     }
 
@@ -440,6 +488,35 @@ mod tests {
     }
 
     #[test]
+    fn client_lease_repairs_legacy_profile_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap();
+        let executable = fixture(&home).app.join("Contents/MacOS/Playbit");
+        let profile = home.join(".playbit");
+        fs::create_dir(&profile).unwrap();
+        fs::write(profile.join("legacy-data"), b"preserved").unwrap();
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let _lease = client_lease_at(&executable, &home).unwrap().unwrap();
+        assert_eq!(fs::metadata(&profile).unwrap().mode() & 0o7777, 0o700);
+        assert_eq!(fs::read(profile.join("legacy-data")).unwrap(), b"preserved");
+
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(client_lease_at(&executable, &home).is_err());
+        assert_eq!(fs::metadata(&profile).unwrap().mode() & 0o7777, 0o775);
+
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o755)).unwrap();
+        let status = std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow add_file"])
+            .arg(&profile)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(client_lease_at(&executable, &home).is_err());
+        assert_eq!(fs::metadata(&profile).unwrap().mode() & 0o7777, 0o755);
+    }
+
+    #[test]
     fn relocated_default_profile_keeps_one_updater_namespace() {
         use std::os::unix::fs::symlink;
         let root = tempfile::tempdir().unwrap();
@@ -461,6 +538,9 @@ mod tests {
             profile.canonicalize().unwrap().join("updates")
         );
         discovered.open().unwrap();
+        fs::set_permissions(&profile, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(client_lease_at(&installation.app.join("Contents/MacOS/Playbit"), &home).is_err());
+        assert_eq!(fs::metadata(&profile).unwrap().mode() & 0o7777, 0o755);
     }
 
     #[test]
@@ -477,11 +557,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let installation = fixture(root.path());
         let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "engine::installation::tests::updater_state_ignores_environment_home_and_profile_overrides"])
+            .args([
+                "--exact",
+                "engine::installation::tests::updater_state_ignores_environment_home_and_\
+                 profile_overrides",
+            ])
             .env(CHILD, installation.app.join("Contents/MacOS/Playbit"))
             .env("HOME", root.path().join("overridden-home"))
             .env("PLAYBIT_PROFILE", root.path().join("custom-profile"))
-            .status().unwrap();
+            .status()
+            .unwrap();
         assert!(status.success());
     }
 

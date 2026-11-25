@@ -1,6 +1,12 @@
+const WASM_PAGE_BYTES = 64 * 1024;
+export function guestMemoryLimit(pixelCanvas: boolean): number {
+    return (pixelCanvas ? 32 : 16) * 1024 * 1024;
+}
+
 // The web browser engine does not accept an external memory limiter for a module's
 // own memory. Bound that declaration before compilation, preserving all code.
-export function boundedGuest(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+export function boundedGuest(bytes: Uint8Array, pixelCanvas = false): Uint8Array<ArrayBuffer> {
+    const pageLimit = guestMemoryLimit(pixelCanvas) / WASM_PAGE_BYTES;
     const expected = [0, 97, 115, 109, 1, 0, 0, 0];
     if (bytes.length < 8 || expected.some((byte, i) => bytes[i] !== byte)) throw new Error("Invalid Wasm module header");
     let offset = 8, memories = 0;
@@ -29,9 +35,9 @@ export function boundedGuest(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
             if (memories++ || u32() !== 1) throw new Error("Guest must declare one memory");
             const flags = u32();
             if (flags > 1) throw new Error("Shared and 64-bit guest memory are unsupported");
-            const minimum = u32(), maximum = flags ? u32() : 256;
-            if (offset !== end || minimum > 256 || maximum < minimum) throw new Error("Guest memory exceeds 16 MiB");
-            const memory = [1, 1, ...encode(minimum), ...encode(Math.min(maximum, 256))];
+            const minimum = u32(), maximum = flags ? u32() : pageLimit;
+            if (offset !== end || minimum > pageLimit || maximum < minimum) throw new Error(`Guest memory exceeds ${pixelCanvas ? 32 : 16} MiB`);
+            const memory = [1, 1, ...encode(minimum), ...encode(Math.min(maximum, pageLimit))];
             parts.push(Uint8Array.from([5, ...encode(memory.length), ...memory]));
         } else parts.push(bytes.subarray(start, end));
         offset = end;

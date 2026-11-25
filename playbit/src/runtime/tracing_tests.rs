@@ -8,11 +8,34 @@ fn context() -> GuestContext {
     GuestContext {
         app_name: "Private fixture".into(),
         app_build: None,
-        identity: Identity { display_name: String::new(), account_id: [1; 16], device_id: [2; 16], instance_id: [3; 16], session_id: None, is_service: false },
-        volumes: vec![AvailableVolume { backing: playbit_api::abi::data::VOLUME_PLAYBIT, source_epoch: [0; 16], id: [4; 16], name: "Root".into(), tags: vec![], rights: VolumeRights::READ, is_root: true, role: 0 }],
+        identity: Identity {
+            display_name: String::new(),
+            account_id: [1; 16],
+            device_id: [2; 16],
+            instance_id: [3; 16],
+            session_id: None,
+            is_service: false,
+        },
+        volumes: vec![AvailableVolume {
+            backing: playbit_api::abi::data::VOLUME_PLAYBIT,
+            source_epoch: [0; 16],
+            id: [4; 16],
+            name: "Root".into(),
+            tags: vec![],
+            rights: VolumeRights::READ,
+            is_root: true,
+            role: 0,
+        }],
         startup_arguments: BTreeMap::new(),
-        trace_catalog: Some(std::sync::Arc::from(br#"{"version":1,"names":[{"name":"app.turn","kind":"span","description":"Fixture stage"},{"name":"app.inner","kind":"span","description":"Fixture stage"},{"name":"app.rows","kind":"mark","description":"Fixture value"}]}"#.as_slice())),
-        required_capabilities: Default::default(), participants: vec![],
+        trace_catalog: Some(std::sync::Arc::from(
+            b"{\"version\":1,\"names\":[{\"name\":\"app.turn\",\"kind\":\"span\",\
+              \"description\":\"Fixture stage\"},{\"name\":\"app.inner\",\"kind\":\"span\",\
+              \"description\":\"Fixture stage\"},{\"name\":\"app.rows\",\"kind\":\"mark\",\
+              \"description\":\"Fixture value\"}]}"
+                .as_slice(),
+        )),
+        required_capabilities: Default::default(),
+        participants: vec![],
     }
 }
 
@@ -82,8 +105,10 @@ unsafe extern "C" fn turn(raw: *mut abi::Context, state: *mut c_void) -> i32 {
 fn wasm() -> Vec<u8> {
     let escaped =
         |bytes: Vec<u8>| bytes.iter().map(|byte| format!("\\{byte:02x}")).collect::<String>();
-    wat::parse_str(format!(r#"(module
-      (import "playbit" "pb_syscall" (func $call (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+    wat::parse_str(format!(
+        r#"(module
+      (import "playbit" "pb_syscall" (func $call (param i32 i64 i64 i64 i64 i64 i64)
+          (result i64)))
       (memory (export "memory") 1)
       (global $step (mut i32) (i32.const 0))
       (global $generation (mut i64) (i64.const 0))
@@ -91,16 +116,26 @@ fn wasm() -> Vec<u8> {
       (func (export "pb_main") (local $pointer i32) (local $result i64)
         (i32.store (i32.const 64) (i32.const 24))
         (block $done (loop $poll
-          (local.set $result (call $call (i32.const 4) (i64.const 64) (i64.const 128) (i64.const 16) (i64.const 0) (i64.const 0) (i64.const 0)))
+          (local.set $result (call $call (i32.const 4) (i64.const 64) (i64.const 128)
+              (i64.const 16) (i64.const 0) (i64.const 0) (i64.const 0)))
           (br_if $done (i64.eq (local.get $result) (i64.const -6)))
           (if (i64.lt_s (local.get $result) (i64.const 0)) (then unreachable))
-          (if (i32.eq (i32.load (i32.const 80)) (i32.const 20)) (then (global.set $generation (i64.load (i32.const 128)))))
+          (if (i32.eq (i32.load (i32.const 80)) (i32.const 20)) (then (global.set
+              $generation (i64.load (i32.const 128)))))
           (br $poll)))
-        (local.set $pointer (select (i32.const 512) (i32.const 1024) (i32.eqz (global.get $step))))
-        (if (i64.eq (call $call (i32.const 16) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const 0)) (then unreachable))
-        (if (i64.ne (call $call (i32.const 15) (i64.extend_i32_u (local.get $pointer)) (i64.const {}) (global.get $generation) (i64.const 1) (i64.const 0) (i64.const 0)) (i64.const 0)) (then unreachable))
+        (local.set $pointer (select (i32.const 512) (i32.const 1024) (i32.eqz (global.get
+            $step))))
+        (if (i64.eq (call $call (i32.const 16) (i64.const 0) (i64.const 0) (i64.const 0)
+            (i64.const 0) (i64.const 0) (i64.const 0)) (i64.const 0)) (then unreachable))
+        (if (i64.ne (call $call (i32.const 15) (i64.extend_i32_u (local.get $pointer))
+            (i64.const {}) (global.get $generation) (i64.const 1) (i64.const 0) (i64.const
+            0)) (i64.const 0)) (then unreachable))
         (global.set $step (i32.add (global.get $step) (i32.const 1)))))"#,
-        escaped(events(0)),escaped(events(1)),events(0).len())).expect("fixture wasm")
+        escaped(events(0)),
+        escaped(events(1)),
+        events(0).len()
+    ))
+    .expect("fixture wasm")
 }
 #[test]
 fn adapters_keep_out_of_order_endpoints_and_host_attribution() {
@@ -310,15 +345,20 @@ fn event_emission_cost() {
     }
     instance.pump().expect("cost callback");
     // Measure the actual Wasm clock import separately from SDK encoding/copying.
-    let clock_module=wat::parse_str(r#"(module
-        (import "playbit" "pb_syscall" (func $call (param i32 i64 i64 i64 i64 i64 i64) (result i64)))
+    let clock_module = wat::parse_str(
+        r#"(module
+        (import "playbit" "pb_syscall" (func $call (param i32 i64 i64 i64 i64 i64 i64)
+            (result i64)))
         (memory (export "memory") 1)
         (func (export "pb_main") (local $remaining i32)
             (local.set $remaining (i32.const 10000))
             (loop $sample
-                (drop (call $call (i32.const 16) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0) (i64.const 0)))
+                (drop (call $call (i32.const 16) (i64.const 0) (i64.const 0) (i64.const 0)
+                    (i64.const 0) (i64.const 0) (i64.const 0)))
                 (local.set $remaining (i32.sub (local.get $remaining) (i32.const 1)))
-                (br_if $sample (local.get $remaining)))))"#).expect("clock loop");
+                (br_if $sample (local.get $remaining)))))"#,
+    )
+    .expect("clock loop");
     for backend in [ExecutionBackend::Native, ExecutionBackend::Pulley] {
         let runtime = Runtime::with_backend(backend).expect("clock runtime");
         let mut instance =

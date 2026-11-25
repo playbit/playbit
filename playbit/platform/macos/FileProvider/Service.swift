@@ -35,6 +35,11 @@ final class Service: NSObject, ProviderService, NSXPCListenerDelegate {
                     profile.hasPrefix("/"), profile.utf8.count <= 4096 else {
                     throw CocoaError(.fileReadInvalidFileName)
                 }
+                // Requests from the original account-only extension are Public.
+                let channel = fields.removeValue(forKey: "channel") ?? "public"
+                guard let channel = channel as? String, ["public", "testing"].contains(channel) else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
                 guard fields["path"] == nil else { throw CocoaError(.fileReadInvalidFileName) }
                 let fetching = fields["op"] as? String == "fetch"
                 if let content {
@@ -59,8 +64,10 @@ final class Service: NSObject, ProviderService, NSXPCListenerDelegate {
                 }
                 let process = Process()
                 process.executableURL = app.appendingPathComponent("Contents/MacOS/playbit-file-provider")
+                process.arguments = ["--domain", channel, profile]
                 var environment = ProcessInfo.processInfo.environment
-                environment["PLAYBIT_PROFILE"] = profile
+                environment.removeValue(forKey: "PLAYBIT_PROFILE")
+                environment.removeValue(forKey: "PLAYBIT_CHANNEL")
                 process.environment = environment
                 let input = Pipe(), output = Pipe()
                 process.standardInput = input; process.standardOutput = output

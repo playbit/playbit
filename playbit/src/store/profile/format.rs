@@ -3,7 +3,9 @@ use super::*;
 
 pub const KEY: &[u8] = b"logical-format";
 pub const MAX_BYTES: usize = 4096;
-pub const BASELINE: &[u8] = br#"{"format":"playbit.profile","revision":1,"required_read_features":[],"required_write_features":[]}"#;
+pub const BASELINE: &[u8] =
+    b"{\"format\":\"playbit.profile\",\"revision\":1,\"required_read_features\":[],\
+      \"required_write_features\":[]}";
 pub const LOCAL_APP_SCOPES: &str = "local-app-scopes.v1";
 pub const HOSTED_APP_SCOPES: &str = "hosted-app-scopes.v1";
 pub const WORLD_PROJECTION: &str = "world-projection.v1";
@@ -119,9 +121,13 @@ mod tests {
             .expect("hosted scope promotion is supported");
         assert!(validate(&hosted).is_ok());
         assert!(validate_supported(&hosted, &[LOCAL_APP_SCOPES]).is_err());
-        let unknown = br#"{"format":"playbit.profile","revision":1,"required_read_features":["future.authority"],"required_write_features":[]}"#;
+        let unknown = b"{\"format\":\"playbit.profile\",\"revision\":1,\
+            \"required_read_features\":[\"future.authority\"],\
+            \"required_write_features\":[]}";
         assert!(promote_local_app_scopes(unknown).is_err());
-        let duplicate = br#"{"format":"playbit.profile","revision":1,"required_read_features":["local-app-scopes.v1","local-app-scopes.v1"],"required_write_features":[]}"#;
+        let duplicate = b"{\"format\":\"playbit.profile\",\"revision\":1,\
+            \"required_read_features\":[\"local-app-scopes.v1\",\"local-app-scopes.v1\"],\
+            \"required_write_features\":[]}";
         assert!(promote_local_app_scopes(duplicate).is_err());
     }
     #[test]
@@ -150,11 +156,18 @@ mod tests {
     fn bounded_profile_requirements_refuse_before_body_interpretation() {
         assert!(validate(BASELINE).is_ok());
         for bytes in [
-            br#"{"format":"other","revision":1,"required_read_features":[],"required_write_features":[]}"#.as_slice(),
-            br#"{"format":"playbit.profile","revision":2,"required_read_features":[],"required_write_features":[]}"#,
-            br#"{"format":"playbit.profile","revision":1,"required_read_features":[],"required_write_features":["future.authority"]}"#,
-            br#"{"format":"playbit.profile","revision":1,"required_read_features":["future.authority"],"required_write_features":[]}"#,
-            br#"{"format":"playbit.profile","revision":1,"revision":1,"required_read_features":[],"required_write_features":[]}"#,
+            b"{\"format\":\"other\",\"revision\":1,\"required_read_features\":[],\
+              \"required_write_features\":[]}"
+                .as_slice(),
+            b"{\"format\":\"playbit.profile\",\"revision\":2,\"required_read_features\":[],\
+              \"required_write_features\":[]}",
+            b"{\"format\":\"playbit.profile\",\"revision\":1,\"required_read_features\":[],\
+              \"required_write_features\":[\"future.authority\"]}",
+            b"{\"format\":\"playbit.profile\",\"revision\":1,\
+              \"required_read_features\":[\"future.authority\"],\
+              \"required_write_features\":[]}",
+            b"{\"format\":\"playbit.profile\",\"revision\":1,\"revision\":1,\
+              \"required_read_features\":[],\"required_write_features\":[]}",
             b"{}",
         ] {
             assert!(validate(bytes).is_err());

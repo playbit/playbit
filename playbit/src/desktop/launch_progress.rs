@@ -66,21 +66,40 @@ impl Shell {
     ) {
         cx.spawn(async move |shell, cx| {
             if reveal {
-                cx.background_executor().timer(Duration::from_millis(200).saturating_sub(started.elapsed())).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(200).saturating_sub(started.elapsed()))
+                    .await;
                 let _ = shell.update(cx, |shell, cx| {
-                    if let Some(progress) = shell.launches.get_mut(&session).filter(|progress| progress.started == started) {
-                        progress.visible = true; cx.notify();
+                    if let Some(progress) = shell
+                        .launches
+                        .get_mut(&session)
+                        .filter(|progress| progress.started == started)
+                    {
+                        progress.visible = true;
+                        cx.notify();
                     }
                 });
             }
-            cx.background_executor().timer(Duration::from_secs(10).saturating_sub(started.elapsed())).await;
+            cx.background_executor()
+                .timer(Duration::from_secs(10).saturating_sub(started.elapsed()))
+                .await;
             let _ = shell.update(cx, |shell, cx| {
-                if shell.launches.get(&session).is_some_and(|progress| progress.started == started) {
-                    shell.finish_launch(&session, Some("The app has not confirmed that its window is ready. Check the session log before opening it again.".into()), cx);
+                if shell.launches.get(&session).is_some_and(|progress| progress.started == started)
+                {
+                    shell.finish_launch(
+                        &session,
+                        Some(
+                            "The app has not confirmed that its window is ready. \
+                             Check the session log before opening it again."
+                                .into(),
+                        ),
+                        cx,
+                    );
                     cx.notify();
                 }
             });
-        }).detach();
+        })
+        .detach();
     }
     pub(super) fn startup_changed(
         &mut self,

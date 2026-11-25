@@ -259,9 +259,9 @@ impl Owner {
         });
         Ok(())
     }
-    fn cancel_volume_changes(&mut self) -> Result<()> {
+    fn cancel_notification(&mut self, kind: u32) -> Result<()> {
         self.events.retain(|_, event| {
-            if event.kind == 17 {
+            if event.kind == kind {
                 self.event_bytes -= event.bytes + 20;
                 false
             } else {
@@ -410,7 +410,11 @@ pub extern "C" fn pb_web_guest_turn(begin: u32) -> i32 {
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_web_guest_cancel_volume_changes() -> i32 {
-    status(Owner::cancel_volume_changes)
+    status(|owner| owner.cancel_notification(17))
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn pb_web_guest_cancel_wake() -> i32 {
+    status(|owner| owner.cancel_notification(10))
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn pb_web_guest_deactivate() -> i32 {

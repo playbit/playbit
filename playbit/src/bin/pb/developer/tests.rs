@@ -47,8 +47,20 @@ fn sign_fixture(request: Request) -> Result<Reply> {
 }
 
 fn source_fixture(directory: &Path) {
-    fs::write(directory.join("playbit.toml"), "app_id='example'\nname='Example'\nbuild_cmd='sh build.sh debug'\nbuild_artifact='_build/debug/app.wasm'\n[files]\nprofile='profile'\n[release]\nbuild_cmd='sh build.sh release'\nbuild_artifact='_build/release/app.wasm'\n").unwrap();
-    fs::write(directory.join("build.sh"), "mkdir -p _build/$1\nprintf '\\000asm\\001\\000\\000\\000' > _build/$1/app.wasm\nprintf %s \"$1\" > profile\n").unwrap();
+    fs::write(
+        directory.join("playbit.toml"),
+        "app_id='example'\nname='Example'\nbuild_cmd='sh build.sh debug'\n\
+         build_artifact='_build/debug/app.wasm'\n[files]\nprofile='profile'\n\
+         [release]\nbuild_cmd='sh build.sh release'\n\
+         build_artifact='_build/release/app.wasm'\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("build.sh"),
+        "mkdir -p _build/$1\nprintf '\\000asm\\001\\000\\000\\000' > \
+         _build/$1/app.wasm\nprintf %s \"$1\" > profile\n",
+    )
+    .unwrap();
     fs::write(directory.join(playbit::package::VOLUME_INITIALIZERS_FILE), b"{}").unwrap();
 }
 

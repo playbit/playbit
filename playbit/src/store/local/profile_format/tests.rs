@@ -28,8 +28,11 @@ fn incompatible_and_markerless_profiles_refuse_before_any_retained_bytes_change(
     fs::create_dir(path.join("staging")).unwrap();
     fs::write(path.join("staging/unpublished"), b"retain until compatible admission").unwrap();
     for bytes in [
-        br#"{"format":"playbit.profile","revision":2,"required_read_features":[],"required_write_features":[]}"#.as_slice(),
-        br#"{"format":"playbit.profile","revision":1,"required_read_features":[],"required_write_features":["future.authority"]}"#,
+        b"{\"format\":\"playbit.profile\",\"revision\":2,\"required_read_features\":[],\
+          \"required_write_features\":[]}"
+            .as_slice(),
+        b"{\"format\":\"playbit.profile\",\"revision\":1,\"required_read_features\":[],\
+          \"required_write_features\":[\"future.authority\"]}",
         b"{",
     ] {
         fs::write(path.join(FILE), bytes).unwrap();

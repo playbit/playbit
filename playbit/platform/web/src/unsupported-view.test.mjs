@@ -51,6 +51,7 @@ async function worker(wasm = gallery, rejectPresentation = false) {
         globalThis.initialize = async () => { guest = await prepareGuest(wasm, operations); };
         open = async () => startGuest(guest);
         refreshPersonal = async () => {};
+        requestDatabases = async () => false; // This presentation fixture has no backing stores.
         scene = { controls: new Map([[1, { kind: "button", id: 1, disabled: false }]]) };
         globalThis.dispatch = request => handle(request, request.method === "input" ? acceptInput(request.args) : undefined);
     `, context);

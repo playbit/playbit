@@ -68,25 +68,37 @@ pub fn retain(result: Result<Option<Child>>, child: &mut Option<Child>) -> Resul
     }
 }
 
-fn endpoint(profile: &Path, executable: &Path, replace: bool) -> Result<Endpoint> {
+fn connect_endpoint(profile: &Path) -> Result<Option<UnixStream>> {
     let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
     socket.set_nonblocking(true)?;
     match socket.connect(&socket2::SockAddr::unix(profile.join(crate::paths::ENGINE_SOCKET))?) {
-        Ok(()) => probe(&mut socket.into(), executable, replace),
+        Ok(()) => Ok(Some(socket.into())),
         Err(error)
             if matches!(
                 error.kind(),
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
             ) =>
         {
-            Ok(Endpoint::Absent)
+            Ok(None)
         }
         Err(error) => Err(error.into()),
     }
 }
 
-fn probe(stream: &mut UnixStream, executable: &Path, replace: bool) -> Result<Endpoint> {
-    match identify(stream, executable, replace) {
+fn endpoint(profile: &Path, executable: &Path, replace: bool) -> Result<Endpoint> {
+    match connect_endpoint(profile)? {
+        Some(mut stream) => probe(&mut stream, profile, executable, replace),
+        None => Ok(Endpoint::Absent),
+    }
+}
+
+fn probe(
+    stream: &mut UnixStream,
+    profile: &Path,
+    executable: &Path,
+    replace: bool,
+) -> Result<Endpoint> {
+    match identify(stream, profile, executable, replace) {
         // The accepted process exited between connect and identification,
         // e.g. another launcher is replacing it. That is no endpoint, not a
         // failed launch; the launch lock in `ensure` decides who continues.
@@ -95,7 +107,14 @@ fn probe(stream: &mut UnixStream, executable: &Path, replace: bool) -> Result<En
     }
 }
 
-fn identify(stream: &mut UnixStream, executable: &Path, replace: bool) -> Result<Endpoint> {
+fn identify(
+    stream: &mut UnixStream,
+    profile: &Path,
+    executable: &Path,
+    replace: bool,
+) -> Result<Endpoint> {
+    #[cfg(not(target_os = "macos"))]
+    let _ = profile;
     ipc::verify_peer(stream)?;
     // Standalone tools can use an already-compatible engine without a
     // bundled helper, but cannot replace one with a missing executable.
@@ -114,7 +133,47 @@ fn identify(stream: &mut UnixStream, executable: &Path, replace: bool) -> Result
         protocol?;
         return Ok(Endpoint::Ready);
     }
+    #[cfg(target_os = "macos")]
+    if super::profile::is_default_profile(profile, super::profile::for_profile(profile)?)?
+        && borrowed_engine(
+            executable,
+            &peer,
+            super::launch_agent::installed_owner(profile)?.as_deref(),
+        )?
+    {
+        protocol?;
+        return Ok(Endpoint::Ready);
+    }
     Ok(Endpoint::Replace(peer))
+}
+
+/// A fresh installation can initially select another copy's environment.
+/// Use the kernel's executable path even when both copies have the same UUID.
+#[cfg(target_os = "macos")]
+fn borrowed_engine(executable: &Path, peer: &Peer, owner: Option<&Path>) -> Result<bool> {
+    let path = peer.engine_path()?;
+    let app = super::launch_agent::app_for(path);
+    if let Some(owner) = owner
+        && app != Some(owner)
+    {
+        return Err(
+            "The running Playbit engine does not match this environment’s registered owner.".into(),
+        );
+    }
+    if path == executable.canonicalize()? {
+        return Ok(false);
+    }
+    // Older installations have no owner record. Only recognize a foreign
+    // packaged helper whose mapped build still matches its executable.
+    let app = app.ok_or("The local engine does not belong to a Playbit app installation.")?;
+    super::launch_agent::service_identifier(app)?;
+    if !peer.matches(path)? {
+        return Err("The running Playbit engine no longer matches its installation.".into());
+    }
+    if owner.is_none() {
+        peer.verify_signing_identity(executable)?;
+    }
+    Ok(true)
 }
 
 // Peer credentials, identity options and the protocol reply fail this way once
@@ -184,26 +243,13 @@ fn start(profile: &Path, executable: &Path, replace: bool, desktop: bool) -> Res
     // Control resources may precede durable profile initialization. Only
     // launchers hold this lock, never the running engine.
     let paths = crate::paths::Paths::for_profile(profile)?;
-    crate::paths::private_directory(profile, "control")?;
-    let launch = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(&paths.launch_lock)?;
-    launch.set_permissions(fs::Permissions::from_mode(0o600))?;
-    match launch.try_lock() {
-        Ok(()) => (),
-        Err(TryLockError::WouldBlock) => {
-            if matches!(endpoint(profile, executable, replace)?, Endpoint::Ready) {
-                return Ok(None);
-            }
-            return Err("Playbit is already starting for this profile. Reopen the app when that launch finishes.".into());
+    let _launch = match try_launch_lock(profile, &paths)? {
+        Some(launch) => launch,
+        None if matches!(endpoint(profile, executable, replace)?, Endpoint::Ready) => {
+            return Ok(None);
         }
-        Err(TryLockError::Error(error)) => return Err(error.into()),
-    }
+        None => return Err(START_IN_PROGRESS.into()),
+    };
     // Recheck after acquiring the launch lock: another launcher may have
     // already replaced the process seen by the initial probe.
     match endpoint(profile, executable, replace)? {
@@ -224,32 +270,151 @@ fn start(profile: &Path, executable: &Path, replace: bool, desktop: bool) -> Res
     start_child(profile, executable, replace, &paths)
 }
 
-/// The caller has retired its IPC clients and owns reconfiguration admission.
-/// Stop only a kernel-authenticated helper from the selected build.
+const START_IN_PROGRESS: &str =
+    "Playbit is already starting for this profile. Reopen the app when that launch finishes.";
+
+fn try_launch_lock(profile: &Path, paths: &crate::paths::Paths) -> Result<Option<fs::File>> {
+    crate::paths::private_directory(profile, "control")?;
+    let launch = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&paths.launch_lock)?;
+    launch.set_permissions(fs::Permissions::from_mode(0o600))?;
+    match launch.try_lock() {
+        Ok(()) => Ok(Some(launch)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+/// A different installation's extension can serve Finder. Authenticate the
+/// domain owner's running engine or wake its already registered channel job.
+/// The stored engine path is used for identity comparison only.
+#[cfg(target_os = "macos")]
+pub fn recover_provider_owner(profile: &Path, owner_engine: &Path) -> Result<()> {
+    let channel = super::file_provider::require_system_profile(profile)?;
+    if provider_owner_running(profile, owner_engine)? {
+        return Ok(());
+    }
+    let paths = crate::paths::Paths::for_profile(profile)?;
+    let launch = try_launch_lock(profile, &paths)?;
+    if provider_owner_running(profile, owner_engine)? {
+        return Ok(());
+    }
+    let _launch = launch.ok_or(START_IN_PROGRESS)?;
+    super::launch_agent::start_registered(
+        profile,
+        owner_engine,
+        channel,
+        &std::env::current_exe()?,
+    )?;
+    if !provider_owner_running(profile, owner_engine)? {
+        return Err("Playbit's background service exited before accepting requests".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn provider_owner_running(profile: &Path, owner_engine: &Path) -> Result<bool> {
+    let Some(stream) = connect_endpoint(profile)? else { return Ok(false) };
+    Peer::capture_at(&stream, Some(owner_engine))?;
+    Ok(true)
+}
+
+/// Check the destination before an explicit switch stops the source engine.
 #[cfg(all(target_os = "macos", feature = "desktop"))]
-pub(crate) fn stop_for_reconfiguration(profile: &Path, executable: &Path) -> Result<()> {
-    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
-    socket.set_nonblocking(true)?;
-    match socket.connect(&socket2::SockAddr::unix(profile.join(crate::paths::ENGINE_SOCKET))?) {
-        Ok(()) => (),
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Ok(());
-        }
-        Err(error) => return Err(error.into()),
-    };
-    socket.set_nonblocking(false)?;
-    let mut stream: UnixStream = socket.into();
-    stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    ipc::verify_peer(&stream)?;
+pub(crate) fn check_switch_destination(
+    channel: crate::release_channel::ReleaseChannel,
+    executable: &Path,
+) -> Result<()> {
+    let home = dirs::home_dir().ok_or("Home directory is unavailable")?;
+    let destination = super::profile::default_path(&home, channel);
+    let state = super::profile::default_runtime_path(&home, channel);
+    check_switch_owner(&state, executable)?;
+    if let Some(stream) = connect_endpoint(&destination)? {
+        Peer::capture_at(&stream, Some(&executable.canonicalize()?))?;
+    }
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", any(feature = "desktop", test)))]
+fn check_switch_owner(state: &Path, executable: &Path) -> Result<()> {
+    if let Some(owner) = super::launch_agent::read_owner(state)?
+        && owner.try_exists()?
+        && executable_for(&owner.join("Contents/MacOS/Playbit"))? != executable.canonicalize()?
+    {
+        return Err(
+            "Another installation manages this environment. Open that Playbit app to use it."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// Hold startup admission while ServiceManagement retires a drained job. A
+/// foreign extension can request a cold launch without the updater's client
+/// lease, so the per-profile launch lock also covers this cutover.
+#[cfg(target_os = "macos")]
+pub(super) fn drained_service(profile: &Path) -> Result<Option<fs::File>> {
+    if !profile.try_exists()? {
+        return Ok(None);
+    }
+    let paths = crate::paths::Paths::for_profile(profile)?;
+    let lock = try_launch_lock(profile, &paths)?.ok_or(START_IN_PROGRESS)?;
+    if connect_endpoint(profile)?.is_some() {
+        return Err(
+            "Close the running Playbit engine before retiring its background service.".into()
+        );
+    }
+    Ok(Some(lock))
+}
+
+/// Drain only this installation's engines. Return whether the caller can
+/// retire a managed source job, subject to the job's own locked owner check.
+#[cfg(all(target_os = "macos", feature = "desktop"))]
+pub(crate) fn retire_profile_engine(
+    profile: &Path,
+    executable: &Path,
+    channel: crate::release_channel::ReleaseChannel,
+) -> Result<bool> {
+    let default = super::profile::is_default_profile(profile, channel)?;
+    let Some(stream) = connect_endpoint(profile)? else { return Ok(default) };
+    if default {
+        return retire_owned_engine(
+            stream,
+            executable,
+            super::launch_agent::installed_owner(profile)?.as_deref(),
+        );
+    }
+    let peer = Peer::capture_at(&stream, Some(&executable.canonicalize()?))?;
+    stop_reconfiguration_peer(stream, peer, executable)?;
+    Ok(false)
+}
+
+#[cfg(all(target_os = "macos", any(feature = "desktop", test)))]
+fn retire_owned_engine(
+    stream: UnixStream,
+    executable: &Path,
+    owner: Option<&Path>,
+) -> Result<bool> {
     let peer = Peer::capture(&stream)?;
+    if borrowed_engine(executable, &peer, owner)? {
+        return Ok(false);
+    }
+    stop_reconfiguration_peer(stream, peer, executable)?;
+    Ok(true)
+}
+
+#[cfg(all(target_os = "macos", any(feature = "desktop", test)))]
+fn stop_reconfiguration_peer(mut stream: UnixStream, peer: Peer, executable: &Path) -> Result<()> {
     if !peer.matches(executable)? {
-        return Err("Another Playbit build owns this profile. Close its apps and commands before reconfiguring Playbit.".into());
+        return Err("Another Playbit build owns this profile. \
+            Close its apps and commands before reconfiguring Playbit."
+            .into());
     }
     ipc::check_protocol(&mut stream)?;
     // This probe is not admitted work. Do not keep its connection alive
@@ -516,6 +681,111 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn explicit_switch_preserves_an_idle_owner_and_allows_a_relocated_app() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = directory.path().join("Playbit.app");
+        let executable = std::env::current_exe().unwrap();
+        fs::create_dir(&owner).unwrap();
+        super::super::profile::write_state(
+            directory.path(),
+            "agent-owner",
+            owner.as_os_str().as_encoded_bytes(),
+        )
+        .unwrap();
+        assert!(check_switch_owner(directory.path(), &executable).is_err());
+        fs::rename(&owner, directory.path().join("Relocated.app")).unwrap();
+        check_switch_owner(directory.path(), &executable).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn switching_a_borrowed_engine_leaves_the_recorded_and_legacy_owners_running() {
+        const SOCKET: &str = "PLAYBIT_BORROWED_ENGINE_TEST_SOCKET";
+        if let Some(socket) = std::env::var_os(SOCKET) {
+            let mut stream = UnixStream::connect(socket).unwrap();
+            // Even a legacy engine with an incompatible IPC protocol can
+            // remain running when a borrowed profile's client goes away.
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+            assert_eq!(std::io::stdin().read(&mut [0]).unwrap(), 0);
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let app = root.join("Playbit.app");
+        let engine = executable_for(&app.join("Contents/MacOS/Playbit")).unwrap();
+        fs::create_dir_all(engine.parent().unwrap()).unwrap();
+        fs::write(
+            app.join("Contents/Info.plist"),
+            b"<plist version=\"1.0\"><dict><key>CFBundleIdentifier</key>\
+              <string>playbit.engine</string></dict></plist>",
+        )
+        .unwrap();
+        let client = std::env::current_exe().unwrap();
+        fs::copy(&client, &engine).unwrap();
+        let socket = root.join("peer.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let other = root.join("Other.app");
+        for (owner, originating_engine, allowed) in [
+            (Some(app.as_path()), client.as_path(), true),
+            (None, client.as_path(), true),
+            (None, Path::new("/bin/echo"), false),
+            (Some(other.as_path()), client.as_path(), false),
+        ] {
+            let mut command = Command::new(&engine);
+            command
+                .args([
+                    "--exact",
+                    "engine::launch::tests::switching_a_borrowed_engine_\
+                     leaves_the_recorded_and_legacy_owners_running",
+                ])
+                .env(SOCKET, &socket)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null());
+            let mut child = command.spawn().unwrap();
+            assert!(
+                super::super::readiness::wait_readable(
+                    &listener,
+                    Instant::now() + Duration::from_secs(5)
+                )
+                .unwrap()
+            );
+            let (stream, _) = listener.accept().unwrap();
+            let result = retire_owned_engine(stream, originating_engine, owner);
+            if allowed {
+                assert!(!result.unwrap());
+            } else {
+                assert!(result.is_err());
+            }
+            assert!(child.try_wait().unwrap().is_none());
+            drop(child.stdin.take());
+            assert!(child.wait().unwrap().success());
+        }
+        let (client_stream, _server) = UnixStream::pair().unwrap();
+        assert!(retire_owned_engine(client_stream, &client, None).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn provider_recovery_recognizes_the_running_owner_without_a_wire_exchange() {
+        // The extension registered by macOS may come from another build.
+        // Compare kernel paths even when a second copy has the same build UUID.
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path();
+        crate::paths::private_directory(profile, "control").unwrap();
+        let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+        assert!(!provider_owner_running(profile, &executable).unwrap());
+        let _listener =
+            std::os::unix::net::UnixListener::bind(profile.join(crate::paths::ENGINE_SOCKET))
+                .unwrap();
+        assert!(provider_owner_running(profile, &executable).unwrap());
+        let other = profile.join("other-installation");
+        std::os::unix::fs::symlink(&executable, &other).unwrap();
+        assert!(provider_owner_running(profile, &other).is_err());
+    }
+
     #[test]
     fn a_peer_that_exits_during_the_probe_is_no_endpoint() {
         use std::os::unix::net::UnixListener;
@@ -530,7 +800,7 @@ mod tests {
         drop(listener.accept().unwrap());
         drop(listener);
         for executable in [Path::new("/nonexistent"), std::env::current_exe().unwrap().as_path()] {
-            match probe(&mut stream, executable, true) {
+            match probe(&mut stream, directory.path(), executable, true) {
                 Ok(Endpoint::Absent) => (),
                 Ok(_) => panic!("a closed peer is not an endpoint"),
                 Err(error) => panic!("closed peer reported as failure: {error}"),

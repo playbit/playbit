@@ -414,7 +414,8 @@ impl Shell {
             .child(self.host_text(HostText::InvitationRoot, details, cx))
             .child(self.host_text(
                 HostText::InvitationAuthority,
-                "This invitation gives the app access to its shared root and session data. Your personal volumes stay private.",
+                "This invitation gives the app access to its shared root and session data. \
+                 Your personal volumes stay private.",
                 cx,
             ));
         let state = self.join_status.clone();

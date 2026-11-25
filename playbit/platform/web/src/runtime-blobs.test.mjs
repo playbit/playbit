@@ -31,6 +31,44 @@ test('retained blob recovery verifies the envelope and persists shared content b
         assert.deepEqual(fs.readFileSync(retained), Buffer.from(content));
     } finally { source?.close(); f.close(); }
 });
+test('a private automatic volume retains its files across rooms without AP or the session cache', async () => {
+    const first = await fixture(), next = await fixture(), scope = await fixture();
+    try {
+        const content = Uint8Array.of(3, 4), reference = first.seed(first.file(1), content);
+        fs.unlinkSync(path.join(first.location, `blob-${reference.digest}`));
+        let network = 0;
+        for (const room of [first, next]) {
+            room.services.privateDirectory = id => id === reference.volume ? scope.services.directory() : undefined;
+            room.services.managed = () => true;
+            room.services.ap = async () => { network++; throw new Error('Unexpected transfer'); };
+        }
+        assert.equal(await first.blobs.initialize(reference, content, () => 0), 0);
+        assert.deepEqual(fs.readdirSync(first.location), []);
+        assert.deepEqual(fs.readdirSync(scope.location), [`blob-${reference.digest}`]);
+        assert.deepEqual((await next.blobs.readVersion({ ...reference, limit: 2 })).bytes, content);
+        await assert.rejects(next.blobs.uploadVersion(reference), { code: -2 });
+        const missing = { ...reference, digest: '00'.repeat(32), limit: 2 };
+        assert.equal((await next.blobs.readVersion(missing)).status, -5);
+        assert.equal(network, 0);
+    } finally { first.close(); next.close(); scope.close(); }
+});
+test('catch-up continues with Shared when an account deletion retires a pending User file', async () => {
+    const f = await fixture(), started = deferred(), release = deferred(), uploaded = [];
+    let current = true;
+    try {
+        f.services.pending = volume => [[{volume}, {volume}], null];
+        f.blobs.uploadVersion = async reference => {
+            uploaded.push(reference.volume);
+            if (reference.volume === 'user') {
+                started.resolve(); await release.promise; throw Error('Deleted file volume');
+            }
+        };
+        const catchUp = f.blobs.upload(['user', 'shared'], volume => volume !== 'user' || current);
+        await started.promise; current = false; release.resolve();
+        await catchUp;
+        assert.deepEqual(uploaded, ['user', 'shared', 'shared']);
+    } finally { f.close(); }
+});
 test('selected reads deduplicate asynchronous content verification and read at most two blocks', async () => {
     // Two selected identities share one pinned cache file while verification is suspended.
     const f = await fixture();

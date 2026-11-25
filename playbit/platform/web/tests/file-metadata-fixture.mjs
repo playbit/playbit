@@ -43,8 +43,9 @@ export function files(target) {
 
 // Metadata tests report physical I/O completion explicitly. Disk-backed tests
 // use FileBackend instead; this fixture never claims to persist actual bytes.
-export function prepareWriter(target, path, content) {
-    const api = files(target), [root] = api.roots();
+export function prepareWriter(target, path, content, rootIndex = 0) {
+    const api = files(target), roots = api.roots(), root = roots[rootIndex];
+    for (const other of roots) if (other !== root) assert.equal(api.host.pb_web_file_dispose(...other), 0);
     const token = api.begin(root, 23, { flags: 4, data: encoder.encode(path) });
     assert.equal(api.execute(token).kind, 'create_writer');
     assert.equal(api.host.pb_web_file_writer_ready(token), 0);

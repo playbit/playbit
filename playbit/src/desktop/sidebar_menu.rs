@@ -183,10 +183,21 @@ impl Shell {
         }
         let Some(row) = host.read(cx).volumes.iter().find(|row| row.id == volume) else { return };
         let title = format!("Delete “{}”?", row.name);
-        let response = owner.update(cx, |_, window, cx| window.prompt(
-            gpui::PromptLevel::Warning, &title,
-            Some("This deletes the volume from your account on all your devices. Apps using it will lose access. This can’t be undone."),
-            &[gpui::PromptButton::Cancel("Cancel".into()), gpui::PromptButton::Ok("Delete".into())], cx));
+        let response = owner.update(cx, |_, window, cx| {
+            window.prompt(
+                gpui::PromptLevel::Warning,
+                &title,
+                Some(
+                    "This deletes the volume from your account on all your devices. \
+                     Apps using it will lose access. This can’t be undone.",
+                ),
+                &[
+                    gpui::PromptButton::Cancel("Cancel".into()),
+                    gpui::PromptButton::Ok("Delete".into()),
+                ],
+                cx,
+            )
+        });
         let Ok(response) = response else { return };
         host.update(cx, |host, _| host.delete_volume_prompt = true);
         let host = host.downgrade();

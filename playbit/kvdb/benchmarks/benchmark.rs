@@ -1147,10 +1147,15 @@ mod native {
             && (args.is_empty()
                 || args.first().is_some_and(|arg| arg == "all" || arg.starts_with("raw_redb")))
         {
-            return Err("--diagnostic-storage requires one explicit kvdb_plain/kvdb_syncable/kvdb_delta case".into());
+            return Err("--diagnostic-storage requires one explicit \
+                kvdb_plain/kvdb_syncable/kvdb_delta case"
+                .into());
         }
         if args.len() > 2 {
-            return Err("usage: benchmark [--diagnostic-storage] [--samples N] [--pause-ms N] [CASE|all] [32|10000]; CASE is raw_redb|kvdb_plain|kvdb_syncable|kvdb_delta plus _file_fullfsync|_file_fsync|_memory".into());
+            return Err("usage: benchmark [--diagnostic-storage] [--samples N] [--pause-ms N] \
+                [CASE|all] [32|10000]; CASE is raw_redb|kvdb_plain|kvdb_syncable|kvdb_delta \
+                plus _file_fullfsync|_file_fsync|_memory"
+                .into());
         }
         let selected_keys = args.get(1).map(|value| value.parse::<usize>()).transpose()?;
         if selected_keys.is_some_and(|keys| keys != 32 && keys != 10_000) {

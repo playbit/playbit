@@ -222,7 +222,8 @@ impl TryFrom<&'_ str> for Rgba {
                 let g = u8::from_str_radix(
                     hex.get(2..4).with_context(|| {
                         format!(
-                            "{INVALID_UNICODE}: g component of #rrggbb/#rrggbbaa for value: '{value}'"
+                            "{INVALID_UNICODE}: g component of #rrggbb/#rrggbbaa for value: \
+                             '{value}'"
                         )
                     })?,
                     16,
@@ -230,7 +231,8 @@ impl TryFrom<&'_ str> for Rgba {
                 let b = u8::from_str_radix(
                     hex.get(4..6).with_context(|| {
                         format!(
-                            "{INVALID_UNICODE}: b component of #rrggbb/#rrggbbaa for value: '{value}'"
+                            "{INVALID_UNICODE}: b component of #rrggbb/#rrggbbaa for value: \
+                             '{value}'"
                         )
                     })?,
                     16,

@@ -4,6 +4,7 @@ import { AbiError } from "./guest-memory.ts";
 import { SessionChannels, displayNameBytes } from "./session-channels.ts";
 import { encodeId, decodeId, validId } from './identifier.ts';
 import { installationIdentity, admitPublisherStatus } from "./installation.ts";
+import { openAutomaticStorage } from './automatic-storage.ts';
 import { admitWebProfile } from './profile-format.ts';
 import { observeStorageFormat, incompatibleStorage, storageFormatAvailable, requireStorageFormat } from './storage-format.ts';
 import { corruptStoreOpenMessage, failure, retryable } from "./errors.ts";
@@ -14,7 +15,7 @@ import type { ScopeRequest, ScopeAddresses, InvitationSession, InvitationVolume,
 import { OpfsStore, OpfsResources } from "./opfs-store.ts";
 import { createStorageBridge } from "./opfs-bridge.ts";
 import type { OpfsStorageBridge } from "./opfs-bridge.ts";
-import { decodeScene, validateInput } from "./scene.ts";
+import { decodeScene, validateInput, validateSurface } from "./scene.ts";
 import type { Scene } from "./scene.ts";
 import { guestOperations } from "./guest-operations.ts";
 import { operationSupported } from "./guest-imports.ts";
@@ -66,6 +67,12 @@ type HostCall = (...args: number[]) => number;
 interface HostExports extends ObjectHost, WorkExports {
     memory: WebAssembly.Memory;
     pb_input: (length: number) => number;
+    pb_automatic_needed: () => number;
+    pb_automatic_register: (length: number) => number;
+    pb_automatic_world_denied: (length: number) => number;
+    pb_automatic_user_deleted: (length: number) => number;
+    pb_automatic_ready: (length: number) => number;
+    pb_automatic_failed: (length: number) => number;
     pb_scope_addresses: (length: number) => number;
     pb_web_validate_text_input: (length: number) => number;
     pb_output: () => number;
@@ -139,6 +146,10 @@ interface HostExports extends ObjectHost, WorkExports {
     pb_volume_log_validate: () => number;
     pb_catalog_page: (length: number) => number;
     pb_upload_catalog_page: (length: number) => number;
+    pb_world_append_catalog_page: (length: number) => number;
+    pb_world_append_next: (length: number) => number;
+    pb_world_append_ack: (length: number) => number;
+    pb_world_append_published: (slot: number, length: number) => number;
     pb_validate_selection: (length: number) => number;
     pb_select_personal: (length: number) => number;
     pb_register_personal: (length: number) => number;
@@ -152,7 +163,7 @@ interface HostExports extends ObjectHost, WorkExports {
     pb_package_discard: (slot: number) => number;
     pb_initialize: (length: number) => number;
     pb_account_open: (length: number) => number;
-    pb_live_rebase: () => number;
+    pb_live_rebase: (gapOnly: number) => number;
     pb_live_peek: () => number;
     pb_live_ack: (ticket: bigint) => number;
     pb_live_apply: (length: number) => number;
@@ -186,9 +197,20 @@ interface AcceptedInput { root: bigint; event: GuestEvent }
 interface PersonalTask { id: number; canceled: boolean; committing: boolean; replied: boolean }
 interface ApPending { method: string; advisory?: AdvisoryOperation; resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
 // Runs one host operation: directly, or on the local queue while replication owns the turn.
-type Step = <T>(callback: () => T, cleanup?: boolean) => T | Promise<T>;
+interface Step {
+    <T>(callback: () => T, cleanup?: boolean): T | Promise<T>;
+    replicaCurrent?: () => boolean;
+}
+function replicaStep(current: () => boolean): Step {
+    const step: Step = (callback, cleanup = false) => localStep(() => {
+        if (!cleanup && !current()) throw failure('replica-gap', 'Replica synchronization retired');
+        return callback();
+    });
+    step.replicaCurrent = current;
+    return step;
+}
 // A publication ticket: the host's live-log position, or the account outbox record it came from.
-type VolumeTicket = bigint & { account?: undefined };
+type VolumeTicket = { sequence: bigint; world?: AutomaticMount; account?: undefined };
 type LiveTicket = VolumeTicket | { account: AccountOutboxRecord };
 // File access failures carry the host's numeric status in `code`.
 type FileFailure = Error & { code?: number };
@@ -198,6 +220,8 @@ let guestFailure: Error | undefined;
 let engineFailure: Error | undefined;
 let apSequence = 0, updateTask: Promise<void> | null | undefined, retryPending = false, closed = false;
 let replicas: LiveReplication<LiveTicket> | undefined, replicationTask: Promise<void> | null | undefined, recoveryTimer: number | undefined;
+// First-use mounts outside this run's initial set attach after Shared is live.
+let startingReplicas: { volumes: string[]; ready: Promise<void> } | undefined;
 let accountReplica: AccountReplica | undefined, accountOpening: Promise<boolean> | undefined, accountTurn = false;
 let recoveryList: { account: string; stop: AbortController; task: Promise<void> } | undefined;
 interface AccountNamePublication {
@@ -208,6 +232,47 @@ let recoveryPending = false, recoveryDelay = 250, replicationBlocked = false, cl
 let selections: PersonalSelections = {}, personalCatalog: PersonalCatalogEntry[] = [], activeGrants: PersonalSelection[] = [];
 let personalTask: PersonalTask | undefined, personalRetirement: Promise<void> | undefined;
 const personalSlots = new Map<string, number>();
+// All secondary mounts share the host's 30 control pairs below named slot 64.
+interface ScopeStorage { directory: FileSystemDirectoryHandle; publication: VolumePublication }
+interface AutomaticMount { base: number; volume: InvitationVolume; preparing: boolean; credentials?: VolumeCredentials; storage?: ScopeStorage; release?: () => void }
+const automaticSlots = new Map<string, AutomaticMount>();
+// Remember a requested World across temporary opening failures and authority changes.
+let unmountedWorld: string | undefined;
+function storageFor(volume: string): ScopeStorage {
+    return automaticSlots.get(volume)?.storage ?? { directory, publication: publication! };
+}
+
+const openingMounts = new Map<string, {base: number; finished: Promise<void>}>();
+function secondaryBase(): number {
+    const inUse = new Set([...personalSlots.values(), ...Array.from(automaticSlots.values(), item => item.base),
+        ...Array.from(openingMounts.values(), item => item.base)]);
+    for (let base = 2; base <= 60; base += 2) if (!inUse.has(base) && !stores.has(base + 1) && !stores.has(base + 2)) return base;
+    throw new Error("Volume capacity exceeded");
+}
+// Personal selection and automatic first use can acquire controls concurrently.
+// Reserve the pair before the first await and serialize two opens of the same volume.
+async function withSecondaryMount(id: string, open: (base: number) => Promise<void>): Promise<void> {
+    while (openingMounts.has(id)) await openingMounts.get(id)!.finished;
+    if (closed || closing) throw new Error('Volume preparation retired');
+    const base = personalSlots.get(id) ?? automaticSlots.get(id)?.base ?? secondaryBase();
+    let release!: () => void;
+    const finished = new Promise<void>(resolve => { release = resolve; });
+    openingMounts.set(id, {base, finished});
+    try { await open(base); }
+    finally { openingMounts.delete(id); release(); }
+}
+function projectedWorld(volume: string | undefined): boolean {
+    return volume !== undefined && volume === profile?.session.root_volume && volume !== profile.root.id
+        && automaticSlots.has(volume) && !automaticSlots.get(volume)!.credentials;
+}
+// The recovered capability is withdrawn permanently for this runtime when the
+// signed-in account deletes its explicit User volume.
+function replicaVolumeCurrent(id: string): boolean {
+    return id !== creationScope?.user_volume || boundUser !== undefined;
+}
+function personalReplica(id: string): boolean {
+    return personalSlots.has(id) || (id === creationScope?.user_volume && automaticSlots.has(id));
+}
 const namedSlots = new Map<string, number>();
 // Guest preparation and incoming replication can request the same backing.
 // OPFS permits one exclusive handle. The runtime owns the shared opening;
@@ -215,10 +280,14 @@ const namedSlots = new Map<string, number>();
 const openingDatabases = new Map<string, Promise<number>>();
 const preparingDatabases = new Map<string, Promise<void>>();
 let databasePreparations = Promise.resolve();
-const entryRecoveries = new Map<string, 'retry' | 'blocked'>();
+const scopeRecoveries = new Map<string, 'retry' | 'blocked'>();
 // Desired subscriptions, not an entry catalog. Each address also consumes one
 // of LiveReplication's 32 slots; retire interests with their volume exposure.
 const entrySubscriptions = new Set<string>();
+let preparingScopes: Promise<boolean> | undefined;
+let boundUser: CatalogVolume | undefined;
+let creationScope: Extract<import("./recovery.ts").AppScope, {kind: "session"}> | undefined;
+
 let nextNamedSlot = 64;
 let blobs: RuntimeBlobs;
 let files: FileBackend;
@@ -241,6 +310,17 @@ function ap(method: "accountChanged", account: string): Promise<undefined>;
 function ap(method: string, ...args: unknown[]): Promise<unknown>;
 function ap(method: string, ...args: unknown[]): Promise<unknown> {
     if (accountAuthority() && method !== 'streamClose' && method !== 'channelConsumed' && method !== 'accountChanged') return Promise.reject(unsupportedAccount());
+    if (method === 'begin' || method === 'subscribeReplica' || method === 'publishReplica') {
+        const op = args[0] as ApOperation;
+        if (projectedWorld(op.volume_id as string | undefined)) {
+            if (op.session_id !== profile.session.id || typeof op.build_id !== 'string') throw new Error("World replication requires its admitted session and build");
+            const request = op.op === 'sync_database' ? { kind: 'sync', database_id: op.database_id, direction: op.direction, entry_scope: op.entry_scope }
+                : op.op === 'subscribe_replica' ? { kind: 'subscribe', entry_scope: op.entry_scope }
+                : op.op === 'publish_replica' ? { kind: 'publish', database_id: op.database_id } : undefined;
+            if (request) args[0] = { op: 'world_replica', operation_id: op.operation_id, session_id: op.session_id,
+                build_id: op.build_id, volume_id: op.volume_id, request };
+        }
+    }
     const advisory = advisoryOperation(method, args[0] as ApOperation | undefined);
     if (advisory && advisoryPending.has(advisory)) return Promise.reject(failure('ap-capacity', 'An advisory AP request is already pending'));
     if (!advisory && apPending.size - advisoryPending.size >= 64 && method !== 'channelConsumed') return Promise.reject(new Error("Runtime AP request capacity exceeded"));
@@ -282,8 +362,10 @@ let storageResources: OpfsResources | undefined, storageBridge: OpfsStorageBridg
 const events: QueuedEvent[] = [], logs: string[] = [];
 const guestWork = new GuestWork(events, () => host.exports);
 let publication: VolumePublication | undefined;
-let preparingVolume = false;
-let volumePreparations = Promise.resolve(), waitingVolumePreparations = 0;
+// Capturing a volume uses the same host transaction and scratch files as an
+// ordinary database transfer, from admission through publication or abort.
+let databaseTransfers = Promise.resolve(), pendingDatabaseTransfers = 0;
+let activeDatabaseStream: { current(): boolean; close(): Promise<unknown> } | undefined;
 let preparationReady: MessageChannel | undefined;
 let preparationContinuation: { resume(): void; promise: Promise<void> } | undefined;
 function yieldPreparation(): Promise<void> {
@@ -353,6 +435,7 @@ async function enterGuest() {
     if (guestFailure) throw guestFailure;
     const current = guest;
     if (!current) throw new Error("The app is stopped; reload the page to restart it");
+    operations.queueWake();
     if (current.deadline && !current.deadline.canEnter(events.length !== 0)) return;
     guestWork.beginTurn();
     try {
@@ -361,6 +444,7 @@ async function enterGuest() {
     }
     catch (cause) {
         if (engineFailure) throw engineFailure;
+        operations.cancelWake();
         // Same retained-session distinction as engine/developer.rs: only the
         // creator's exact-version session accepts developer code replacement.
         const developer = profile.session.creator === profile.account && profile.session.selector.kind === "exact";
@@ -466,7 +550,7 @@ const operations = guestOperations({
     events,
     work: guestWork,
     log: text => { logs.push(text); if (logs.length > 256) logs.shift(); },
-    submit: bytes => { scene = decodeScene(bytes); },
+    submit: bytes => { scene = decodeScene(bytes, scene); },
     files: () => files,
     fileFailure: error => { logs.push(String(error).slice(0, 512)); if (logs.length > 256) logs.shift(); self.postMessage({ guestFailure: 'Private file cleanup failed. Reload to retry cleanup.' }); },
     execute: async callback => {
@@ -494,7 +578,7 @@ async function appendLog(prepared: Uint8Array<ArrayBuffer>, appendId: Uint8Array
         if (host.exports.pb_live_peek() !== 0) throw new AbiError(-5);
     });
     const volume = encodeId(prepared.subarray(0, 16)), log = encodeId(prepared.subarray(16, 31));
-    const personal = personalSlots.has(volume);
+    const personal = personalReplica(volume);
     const operation = { op: 'publish_bloblog', operation_id: encodeId(random(16)), append_id: encodeId(appendId),
         session_id: personal ? null : profile.session.id, build_id: personal ? null : profile.session.resolved_build_id,
         volume_id: volume, log_id: log, required_features: ['bloblog-append-v1'] };
@@ -533,7 +617,7 @@ async function readLog(entry: Uint8Array<ArrayBuffer>, read: () => Promise<Uint8
     });
     for (;;) {
         if (Date.now() >= expires) throw new AbiError(-5);
-        const personal = personalSlots.has(volume);
+        const personal = personalReplica(volume);
         const response = await ap('request', { op: 'get_bloblog', operation_id: encodeId(random(16)),
             session_id: personal ? null : profile.session.id, build_id: personal ? null : profile.session.resolved_build_id,
             volume_id: volume, log_id: database, cursor, required_features: ['bloblog-append-v1'] }, status.connectionCount).catch(() => { throw new AbiError(-5); });
@@ -555,7 +639,7 @@ function operationsReady() {
         dataTurnOwner = undefined;
         if (guest !== owner || guestFailure || engineFailure) return;
         // An earlier input can consume the wait before this notification runs.
-        if (owner.deadline && !events.length) {
+        if (owner.deadline && !events.length && !operations.wakeDue) {
             if (guestWork.draining || !owner.deadline.parked || !owner.deadline.canEnter(false)) return;
         }
         await enterGuest();
@@ -569,6 +653,7 @@ async function drainGuest(accepted: Promise<unknown>) {
     await accepted;
     if (managed) await requireAccountAuthority(profile.account);
     await localStep(() => {
+        operations.cancelWake();
         guestWork.deactivate();
         guest?.deadline?.deactivate();
     });
@@ -602,7 +687,7 @@ function hostInput(bytes: Uint8Array) {
 }
 function blobKey(volume: string) {
     const keys = volume === profile.root.id ? profile.root_credentials
-        : personalCatalog.find(item => item.volume.id === volume)?.credentials;
+        : automaticSlots.get(volume)?.credentials ?? personalCatalog.find(item => item.volume.id === volume)?.credentials;
     if (!keys?.blob_key || keys.blob_key.length !== 32) throw new Error('Recover this volume’s private credentials to open files');
     return Uint8Array.from(keys.blob_key);
 }
@@ -629,7 +714,7 @@ function initializeBlobs(): RuntimeBlobs {
     const json = (operation: (length: number) => number, value: unknown) => {
         const bytes = encoder.encode(JSON.stringify(value)); hostInput(bytes); return blobOutput(operation(bytes.length));
     };
-    return new RuntimeBlobs({ directory: () => directory, managed: () => managed, ap, hash: blobHash,
+    return new RuntimeBlobs({ directory: () => directory, privateDirectory: volume => automaticSlots.get(volume)?.storage?.directory, managed: () => managed, ap, hash: blobHash,
         cache: request => {
             const bytes = json(host.exports.pb_blob_cache, request);
             return bytes.length ? JSON.parse(decoder.decode(bytes)) : undefined;
@@ -640,14 +725,18 @@ function initializeBlobs(): RuntimeBlobs {
             hostInput(material); return blobOutput(host.exports.pb_blob_cipher_key());
         },
         operation(reference, upload) {
-            const personal = personalSlots.has(reference.volume);
+            const personal = personalReplica(reference.volume);
             return { op: upload ? 'upload_blob' : 'download_blob', operation_id: encodeId(random(16)), session_id: personal ? null : profile.session.id,
                 build_id: personal ? null : profile.session.resolved_build_id,
                 version: { address: { volume: reference.volume, entry: reference.entry }, revision: reference.revision,
                     len_bytes: reference.len_bytes, digest: Array.from(unhex(reference.digest)), encrypted_key: Array.from(unhex(reference.encrypted_key)) },
                 ...(upload ? { content_length: envelopeLength(reference) } : {}) };
         },
-        authorize: (reference, write, service) => { json(host.exports.pb_blob_authorize, { reference, write, service }); },
+        authorize: (reference, write, service) => {
+            // The scoped World protocol grants database access without delivering the blob key.
+            if (projectedWorld(reference.volume)) throw Object.assign(new Error('World file credentials are unavailable'), { code: -2 });
+            json(host.exports.pb_blob_authorize, { reference, write, service });
+        },
         pending: (volume, after) => JSON.parse(decoder.decode(json(host.exports.pb_blob_pending, { volume, after }))),
         acknowledge: reference => { json(host.exports.pb_blob_acknowledge, reference); },
         yield: () => new Promise<void>(resolve => {
@@ -669,16 +758,24 @@ function fileYield(): Promise<void> {
     const promise = new Promise<void>(resolve => { resume = resolve; });
     fileContinuation = { promise, resume }; fileReady.port2.postMessage(0); return promise;
 }
-async function uploadBlobs() { if (managed) await blobs.upload([profile.root.id, ...activeGrants.filter(grant => grant.write).map(grant => grant.volume)]); }
-async function openVolumeControls(volume: string, base: number): Promise<PreparedVolume | undefined> {
-    const selected = publication!.current(volume), initial = selected ? undefined : publication!.prepare(volume);
+async function uploadBlobs() {
+    if (!managed) return;
+    const volumes = new Set([profile.root.id, ...activeGrants.filter(grant => grant.write).map(grant => grant.volume)]);
+    const user = creationScope?.user_volume;
+    const mount = user && automaticSlots.get(user);
+    if (mount && !mount.preparing) volumes.add(mount.volume.id);
+    await blobs.upload([...volumes], replicaVolumeCurrent);
+}
+async function openVolumeControls(volume: string, base: number, storage = storageFor(volume)): Promise<PreparedVolume | undefined> {
+    const { directory, publication } = storage;
+    const selected = publication.current(volume), initial = selected ? undefined : publication.prepare(volume);
     const generation = selected ?? initial!.generation;
     try {
-        if (initial) await publication!.create(directory, initial);
+        if (initial) await publication.create(directory, initial);
         for (const [offset, database] of ['index', 'revocations'].entries()) {
-            const file = await (await publication!.file(directory, volume, generation, database, !selected)).createSyncAccessHandle();
+            const file = await (await publication.file(directory, volume, generation, database, !selected)).createSyncAccessHandle();
             if (!selected && file.getSize()) { file.close(); throw new Error('Fresh volume generation already exists'); }
-            stores.set(base + offset + 1, await openStore(file, publication!.epoch(volume)));
+            stores.set(base + offset + 1, await openStore(file, publication.epoch(volume)));
         }
         return initial;
     } catch (error) {
@@ -688,12 +785,14 @@ async function openVolumeControls(volume: string, base: number): Promise<Prepare
 }
 function finishInitialVolume(initial: PreparedVolume | undefined): void {
     if (!initial) return;
+    const { publication } = storageFor(initial.volume);
     // New controls are initialized before guest admission. No received source
     // facts exist here; capture their completed initialization, then select it.
-    publication!.publish({ ...initial, revision: initial.epoch.capture() }, () => {}, () => {});
+    publication.publish({ ...initial, revision: initial.epoch.capture() }, () => {}, () => {});
 }
 async function reclaimVolume(volume: string): Promise<void> {
-    await publication!.reclaim(directory, volume, (database, generation) => {
+    const { directory, publication } = storageFor(volume);
+    await publication.reclaim(directory, volume, (database, generation) => {
         if (closed || closing) throw new Error('Volume cleanup retired');
         const input = encoder.encode(JSON.stringify({ volume, database })); hostInput(input);
         const retained: unknown = JSON.parse(decoder.decode(hostOutput(host.exports.pb_database_retained_generation(input.length))));
@@ -713,13 +812,14 @@ async function openNamed(volume: InvitationVolume, database: DatabaseId): Promis
     return opening;
 }
 async function openNamedBacking(volume: InvitationVolume, database: DatabaseId, identity: string): Promise<number> {
+    const { directory, publication } = storageFor(volume.id);
     // Initial open already owns the local queue. Later openings use that queue
     // independently of any replication run, with storage waits outside it.
     const step: Step = initializing ? callback => callback() : localStep;
     await step(() => hostOutput(host.exports.pb_database_make_room()));
     if (++nextNamedSlot > 0x7fffffff) throw new Error('Database handle identity exhausted');
     const slot = nextNamedSlot;
-    const controlsGeneration = publication!.current(volume.id);
+    const controlsGeneration = publication.current(volume.id);
     if (!controlsGeneration) throw new Error('Volume backing generation is unavailable');
     const backing: { ready: boolean; generation: string | null } = await step(() => {
         const bytes = encoder.encode(JSON.stringify({ volume: volume.id, database })); hostInput(bytes);
@@ -727,13 +827,13 @@ async function openNamedBacking(volume: InvitationVolume, database: DatabaseId, 
     });
     if (typeof backing.ready !== 'boolean' || backing.generation !== null && !validId(backing.generation, 16)) throw new Error('Invalid backing location');
     const generation = backing.generation ?? controlsGeneration;
-    const file = await (await publication!.file(directory, volume.id, generation, database, !backing.ready)).createSyncAccessHandle();
+    const file = await (await publication.file(directory, volume.id, generation, database, !backing.ready)).createSyncAccessHandle();
     if (closing || closed) { file.close(); throw new Error('Database preparation retired'); }
-    if (publication!.current(volume.id) !== controlsGeneration) { file.close(); throw new LocalVolumeChanged(); }
-    stores.set(slot, await openStore(file, publication!.epoch(volume.id)));
+    if (publication.current(volume.id) !== controlsGeneration) { file.close(); throw new LocalVolumeChanged(); }
+    stores.set(slot, await openStore(file, publication.epoch(volume.id)));
     try {
         await step(() => {
-            if (publication!.current(volume.id) !== controlsGeneration) throw new LocalVolumeChanged();
+            if (publication.current(volume.id) !== controlsGeneration) throw new LocalVolumeChanged();
             const bytes = encoder.encode(JSON.stringify({ address: { volume: volume.id, database }, slot, replica_id: replicaId(), generation }));
             hostInput(bytes); hostOutput(host.exports.pb_register_database(bytes.length)); namedSlots.set(identity, slot);
         });
@@ -741,8 +841,228 @@ async function openNamedBacking(volume: InvitationVolume, database: DatabaseId, 
     } catch (error) { stores.get(slot)?.close(); stores.delete(slot); throw error; }
 }
 function replicaId(): number { let id = 0; while (!id) id = new DataView(random(4).buffer).getUint32(0, true); return id; }
+type AutomaticRole = "root" | "session" | "user" | "user-session" | "local" | "local-session";
+interface AutomaticAddress { role: AutomaticRole; volume: string }
+interface ScopeInitializer { databases: { id: string }[]; blobs: { id: string; bytes: number[] }[] }
+function automaticCall(operation: "pb_automatic_register" | "pb_automatic_ready" | "pb_automatic_failed" | "pb_automatic_world_denied" | "pb_automatic_user_deleted", input: unknown) {
+    const bytes = encoder.encode(JSON.stringify(input)); hostInput(bytes);
+    return hostOutput(host.exports[operation](bytes.length));
+}
+async function publisherWorld(id: string): Promise<InvitationVolume | null> {
+    if (!managed || id !== profile.session.root_volume || id === profile.root.id) throw new AbiError(-2);
+    const result = await ap("request", { op: "world_replica", operation_id: encodeId(random(16)),
+        session_id: profile.session.id, build_id: profile.session.resolved_build_id, volume_id: id, request: { kind: "open" } });
+    const record = (result.data as { volume?: InvitationVolume | null })?.volume;
+    if (record === null) return null;
+    if (!record || record.id !== id || record.owner !== profile.session.app.publisher || record.personal !== false
+        || record.share_key_with_service !== true) throw new Error('Invalid publisher World descriptor');
+    return record;
+}
+function prepareAutomatic(address: AutomaticAddress, reopening = false): Promise<void> {
+    return withSecondaryMount(address.volume, base => openAutomatic(address, base, reopening));
+}
+async function openAutomatic(address: AutomaticAddress, base: number, reopening: boolean): Promise<void> {
+    const id = address.volume, role = address.role;
+    if (automaticSlots.has(id)) return; // Another opener completed while this caller waited.
+    let creationBuild: string | undefined, retained: Awaited<ReturnType<typeof openAutomaticStorage>> | undefined;
+    let credentials: VolumeCredentials | undefined, volume: InvitationVolume;
+    let ids: number[];
+    if (role === "root") {
+        // A distinct World has no credentials in the Shared invitation. AP performs
+        // the publisher, build and account ACL checks before returning its descriptor.
+        let record: InvitationVolume | null;
+        try { record = await publisherWorld(id); }
+        catch (error) {
+            if ((error as Failure).code !== 'world-participant-revoked') throw error;
+            unmountedWorld = id; throw new AbiError(-2);
+        }
+        if (!record) { unmountedWorld = id; throw new AbiError(-2); }
+        volume = record;
+        ids = [replicaId(), replicaId()];
+    } else if (role === "user" && creationScope?.user_volume === id) {
+        if (boundUser?.volume.id !== id) throw new AbiError(-2);
+        volume = boundUser.volume; credentials = boundUser.credentials;
+        profile.personal_replicas ??= {};
+        ids = profile.personal_replicas[id] ??= [replicaId(), replicaId()];
+    } else {
+        const names = {session: "Shared", user: "User", "user-session": "User", local: "Local", "local-session": "Local session"};
+        const build = role === "session" || role === "user-session" || role === "local-session"
+            ? creationScope?.creation_build ?? profile.session.resolved_build_id : profile.session.resolved_build_id;
+        retained = await openAutomaticStorage(id, profile.account, build, storageResources!, yieldPreparation);
+        volume = {id, owner: profile.account, name: names[role], personal: false, share_key_with_service: false};
+        credentials = retained.credentials; ids = retained.replica_ids;
+        creationBuild = retained.creation_build;
+    }
+    let creationSlot: number | undefined, registered = false, standalone = false;
+    const mount: AutomaticMount = { base, volume, credentials, storage: retained, release: retained?.close, preparing: true };
+    try {
+        if (closed || closing) throw new AbiError(-5);
+        const storage = retained ?? storageFor(id);
+        const { publication } = storage;
+        const initial = personalSlots.has(id) ? undefined : await openVolumeControls(id, base, storage);
+        const journal = creationBuild ? publication.initialization(id) : undefined;
+        if (journal && (journal.build !== creationBuild || initial && journal.complete)) throw new Error("Saved scope initializer differs from its original build");
+        if (creationBuild && !journal?.complete && creationBuild !== profile.session.resolved_build_id) {
+            if (!managed) throw new Error("Original scope initializer requires its signed app package");
+            const original = await downloadVersion({...profile.session, resolved_build_id: creationBuild});
+            creationSlot = guestBundles.get(original.instance);
+            if (creationSlot === undefined) throw new Error("Original scope package is unavailable");
+        }
+        if (creationBuild && !journal) publication.beginInitialization(id, creationBuild, creationSlot === undefined ? 0 : bundleStorage.get(creationSlot)!);
+        const result = await localStep(() => {
+            const result = automaticCall("pb_automatic_register", {
+                role, volume, base, replica_ids: ids, key: credentials?.database_key,
+                creation_build: journal?.complete ? undefined : creationBuild, creation_slot: creationSlot,
+            });
+            registered = true;
+            automaticSlots.set(id, mount);
+            finishInitialVolume(initial);
+            return result;
+        });
+        await reclaimVolume(id);
+        if (creationBuild && !journal?.complete) {
+            const initializer = JSON.parse(decoder.decode(result)) as ScopeInitializer | null;
+            for (const seed of initializer?.databases ?? []) {
+                await openNamed(volume, seed.id);
+                await localStep(() => {
+                    const bytes = encoder.encode(JSON.stringify({ volume: id, seed })); hostInput(bytes); hostOutput(host.exports.pb_seed_database(bytes.length));
+                });
+            }
+            for (const seed of initializer?.blobs ?? []) {
+                const reference: FileReference | null = await localStep(() => {
+                    const bytes = encoder.encode(JSON.stringify({ volume: id, entry: seed.id })); hostInput(bytes);
+                    return JSON.parse(decoder.decode(hostOutput(host.exports.pb_seed_blob_reference(bytes.length))));
+                });
+                if (reference) hostOutput(await blobs.initialize(reference, Uint8Array.from(seed.bytes), prepared => {
+                    const bytes = encoder.encode(JSON.stringify(prepared)); hostInput(bytes); return host.exports.pb_seed_blob(bytes.length);
+                }));
+            }
+        } else if (!creationBuild) {
+            standalone = !await captureAutomaticCatalog(volume, false, Boolean(initial));
+        }
+        await localStep(() => {
+            automaticCall("pb_automatic_ready", address);
+            mount.preparing = false;
+        });
+        if (role === 'root') unmountedWorld = undefined;
+        if (creationBuild && !journal?.complete) publication.finishInitialization(id, creationBuild);
+    } catch (error) {
+        if (registered && reopening && automaticSlots.has(id) && !closed && !closing) {
+            await localStep(() => withdrawWorld(id, (error as Failure).code === 'world-participant-revoked'));
+        }
+        // Registered stores belong to Rust; their last reference closes the JS handle.
+        if (!registered && !personalSlots.has(id)) {
+            for (const [address, slot] of namedSlots) {
+                if (!address.startsWith(id + "/")) continue;
+                stores.get(slot)?.close(); stores.delete(slot); namedSlots.delete(address);
+            }
+            for (const slot of [base + 1, base + 2]) { stores.get(slot)?.close(); stores.delete(slot); }
+        }
+        automaticSlots.delete(id); scopeRecoveries.delete(id); await retained?.close();
+        throw error;
+    } finally { if (creationSlot !== undefined) host.exports.pb_package_discard(creationSlot); }
+    // A connection can start during a detached first capture. Subscribe and
+    // capture the intervening changes if its initial plan missed this mount.
+    if (standalone) {
+        const starting = startingReplicas;
+        await starting?.ready;
+        if (!starting?.volumes.includes(id) && automaticSlots.get(id) === mount && replicas?.run?.active && !replicas.run.stopped) {
+            try { await captureAutomaticCatalog(volume); } catch (error) { catalogRecoveryFailed(id, error); }
+        }
+    }
+}
+// Subscribe before capture whenever a live connection exists. An initial local
+// opening can precede that connection; attaching then captures the intervening edits.
+async function captureAutomaticCatalog(volume: InvitationVolume, renew = true, newControls = false): Promise<boolean> {
+    const world = projectedWorld(volume.id);
+    if (world && renew) await renewWorld(volume.id);
+    const synchronizeCatalog = async (step: Step, current = () => !closed && !closing) => {
+        if (!world) {
+            await synchronizeOrdinaryVolume(volume, volume.name, !newControls, step, () => current() && replicaVolumeCurrent(volume.id));
+            if (!newControls) await blobs.upload([volume.id], replicaVolumeCurrent);
+            return;
+        }
+        await pullVolumeSnapshot(volume, volume.name, step, undefined, undefined, current);
+        if (!projectedWorld(volume.id)) return;
+        // The pull first adopts current ACLs and quarantines rejected edits.
+        // Only the admitted named KV backings can be submitted on this route.
+        for await (const { database, blind } of databaseCatalog(volume, step)) {
+            await syncDatabase(volume, database, 'push', undefined, step, current, blind ? database : undefined);
+        }
+        for await (const { database } of databaseCatalog(volume, step, undefined, host.exports.pb_world_append_catalog_page)) {
+            await publishWorldAppends(volume, database, step);
+        }
+    };
+    if (!replicas?.run?.active && startingReplicas) await startingReplicas.ready;
+    if (!replicas?.run || replicas.run.stopped) {
+        await synchronizeCatalog(localStep);
+        return false;
+    }
+    const personal = personalReplica(volume.id);
+    try { await replicas.add({ kind: 'volume', volume_id: volume.id,
+        session_id: personal ? null : profile.session.id, build_id: personal ? null : profile.session.resolved_build_id },
+        current => synchronizeCatalog(replicaStep(current), current)); }
+    catch (error) {
+        // Permissions may change between Open and subscription admission.
+        if (world && renew) {
+            if ((error as Failure).code === 'world-participant-revoked') await localStep(() => withdrawWorld(volume.id, true));
+            else if ((error as Failure).code === 'ap-rejected') await renewWorld(volume.id);
+        }
+        throw error;
+    }
+    return true;
+}
+async function renewWorld(id: string): Promise<void> {
+    try {
+        if (await publisherWorld(id)) return;
+    } catch (error) {
+        if ((error as Failure).code === 'world-participant-revoked') await localStep(() => withdrawWorld(id, true));
+        throw error;
+    }
+    await localStep(() => withdrawWorld(id, false));
+    throw new AbiError(-2);
+}
+// Run in the same local turn as an authenticated terminal or Open response.
+function withdrawWorld(id: string, revoked: boolean): void {
+    if (!projectedWorld(id)) return;
+    automaticCall('pb_automatic_world_denied', { volume: id, revoked });
+    removeAutomaticReplica(id);
+    unmountedWorld = id;
+}
+function removeAutomaticReplica(id: string): void {
+    replicas?.removeVolume(id);
+    for (const key of namedSlots.keys()) if (key.startsWith(id + '/')) namedSlots.delete(key);
+    for (const source of entrySubscriptions) if (source.startsWith(id + '/')) {
+        entrySubscriptions.delete(source); scopeRecoveries.delete(source);
+    }
+    automaticSlots.delete(id); scopeRecoveries.delete(id);
+}
+async function requestAutomaticScopes(): Promise<boolean> {
+    if (preparingScopes) return preparingScopes;
+    const requests: AutomaticAddress[] = JSON.parse(decoder.decode(hostOutput(host.exports.pb_automatic_needed())));
+    if (!requests.length) return false;
+    preparingScopes = (async () => {
+        for (const address of requests) {
+            try { await prepareAutomatic(address); }
+            catch (error) {
+                if (!closing && !closed) {
+                    await localStep(() => automaticCall("pb_automatic_failed", {
+                        ...address, status: error instanceof AbiError ? error.status : (error as {hostStatus?: number}).hostStatus ?? -5,
+                    }));
+                    if (address.role === 'root' && retryable(error)) {
+                        unmountedWorld = address.volume;
+                        catalogRecoveryFailed(address.volume, error);
+                    }
+                }
+            }
+        }
+        return true;
+    })().finally(() => { preparingScopes = undefined; });
+    return preparingScopes;
+}
 async function requestDatabases(): Promise<boolean> {
     if (!host || closing || closed) return false;
+    const scopesPrepared = await requestAutomaticScopes();
     const needed: { volume: string; database: DatabaseId }[] = JSON.parse(decoder.decode(hostOutput(host.exports.pb_database_needed())));
     const waiting: Promise<void>[] = [];
     for (const address of needed) {
@@ -750,8 +1070,7 @@ async function requestDatabases(): Promise<boolean> {
         const existing = preparingDatabases.get(identity);
         if (existing) { waiting.push(existing); continue; }
         if (preparingDatabases.size === 27) throw new Error('Database preparation capacity exceeded');
-        const volume = [profile.root, ...personalCatalog.map(item => item.volume)].find(volume => volume.id === address.volume);
-        if (!volume) throw new Error('Unknown database volume');
+        const volume = replicaRecord(address.volume);
         const task = databasePreparations.catch(() => {}).then(async () => {
             const preparation = await localStep(() => {
                 const bytes = encoder.encode(JSON.stringify(address)); hostInput(bytes);
@@ -777,12 +1096,12 @@ async function requestDatabases(): Promise<boolean> {
         databasePreparations = task; preparingDatabases.set(identity, task); waiting.push(task);
     }
     await Promise.all(waiting);
-    return waiting.length !== 0;
+    return scopesPrepared || waiting.length !== 0;
 }
 
 function entryScope(volume: InvitationVolume, entry: DatabaseId): Extract<ReplicaScope, { kind: 'entry' }> {
     if (entry === 'index' || entry === 'revocations') throw new Error('Expected an entry identity');
-    const personal = personalSlots.has(volume.id);
+    const personal = personalReplica(volume.id);
     return { kind: 'entry', volume_id: volume.id, entry_scope: entry,
         session_id: personal ? null : profile.session.id, build_id: personal ? null : profile.session.resolved_build_id };
 }
@@ -795,34 +1114,31 @@ async function connectEntry(volume: InvitationVolume, entry: DatabaseId): Promis
     entrySubscriptions.add(source);
     try {
         await replicas.add(scope, async current => {
-            const step: Step = (callback, cleanup = false) => localStep(() => {
-                if (!cleanup && !current()) throw new Error('Selected replica capture retired');
-                return callback();
-            });
-            await pullVolumeSnapshot(volume, volume.name || 'shared entry', step, undefined, scope.entry_scope);
+            const step = replicaStep(current);
+            await pullVolumeSnapshot(volume, volume.name || 'shared entry', step, undefined, scope.entry_scope, current);
         });
     } finally {
         if (!retained && !replicas.run?.streams.some(stream => stream.source === source)) {
-            entrySubscriptions.delete(source); entryRecoveries.delete(source);
+            entrySubscriptions.delete(source); scopeRecoveries.delete(source);
         }
     }
 }
 async function restoreEntrySubscriptions(): Promise<void> {
-    const volumes = new Set([profile.root.id, ...activeGrants.map(grant => grant.volume)]);
+    const volumes = new Set(replicatedVolumeIds());
     for (const source of entrySubscriptions) {
         const address = replicaAddress(source);
         if (!volumes.has(address.volume)) {
-            entrySubscriptions.delete(source); entryRecoveries.delete(source); continue;
+            entrySubscriptions.delete(source); scopeRecoveries.delete(source); continue;
         }
-        if (entryRecoveries.get(source) === 'blocked') continue;
+        if (scopeRecoveries.get(source) === 'blocked') continue;
         if (!replicas?.run || replicas.run.stopped || closed || closing) return;
         try {
             await connectEntry(replicaRecord(address.volume), address.entry!);
         } catch (error) {
-            if (entrySubscriptions.has(source)) entryRecoveries.set(source, retryable(error) ? 'retry' : 'blocked');
+            if (entrySubscriptions.has(source)) scopeRecoveries.set(source, retryable(error) ? 'retry' : 'blocked');
         }
     }
-    recoveryPending = [...entryRecoveries.values()].includes('retry');
+    recoveryPending = [...scopeRecoveries.values()].includes('retry');
 }
 async function saveProfile() {
     requireStorageFormat();
@@ -834,21 +1150,45 @@ async function saveProfile() {
         file.truncate(bytes.length); file.flush();
     } finally { file.close(); }
 }
-async function syncDatabase(volume: InvitationVolume | null, database: DatabaseId, direction: "pull" | "push", version = volume ? profile.session.resolved_build_id : undefined, step: Step = callback => callback(), current = () => !closed && !closing, preparedSlot?: number, entry_scope?: string) {
-    const personal = volume && personalSlots.has(volume.id);
+async function syncDatabase(volume: InvitationVolume | null, database: DatabaseId, direction: "pull" | "push", version = volume ? profile.session.resolved_build_id : undefined, step: Step = callback => callback(), current = () => !closed && !closing, entry_scope?: string) {
+    return withDatabaseTransfer(() => transferDatabase(volume, database, direction, version, step, current, undefined, entry_scope), current);
+}
+async function withDatabaseTransfer<T>(operation: () => Promise<T>, current = () => true): Promise<T> {
+    if (pendingDatabaseTransfers >= 32) throw failure('ap-capacity', 'Database synchronization is busy');
+    pendingDatabaseTransfers++;
+    const transfer = databaseTransfers.then(() => {
+        requireCurrentTransfer(current);
+        return operation();
+    });
+    databaseTransfers = transfer.then(() => {}, () => {});
+    try { return await transfer; } finally { pendingDatabaseTransfers--; }
+}
+function requireCurrentTransfer(current: () => boolean): void {
+    if (closed || closing || !current()) throw failure('replica-gap', 'Database synchronization retired');
+}
+async function transferDatabase(volume: InvitationVolume | null, database: DatabaseId, direction: "pull" | "push",
+    version: string | undefined, step: Step, current: () => boolean, preparedSlot?: number, entry_scope?: string) {
+    requireCurrentTransfer(current);
+    const personal = volume && personalReplica(volume.id);
     const operation = volume ? { op: "sync_database", operation_id: encodeId(random(16)), session_id: personal ? null : profile.session.id,
         build_id: personal ? null : version, volume_id: volume.id, database_id: database, direction, entry_scope }
         : { op: "sync_account", operation_id: encodeId(random(16)), direction };
     const handle = await ap("begin", operation);
+    // The transfer queue owns one AP stream. Retirement can close that stream
+    // to wake its pending read. Its transfer still owns Wasm abort and cleanup.
+    let closeRequest: Promise<unknown> | undefined;
+    const close = () => closeRequest ??= ap("streamClose", handle).catch(() => {});
+    if (step.replicaCurrent) activeDatabaseStream = { current: step.replicaCurrent, close };
     let started = false;
     try {
+        requireCurrentTransfer(current);
         await ap("streamResponse", handle);
-        const base = !volume || volume.id === profile.root.id ? 0 : personalSlots.get(volume.id);
+        const base = !volume || volume.id === profile.root.id ? 0 : personalSlots.get(volume.id) ?? automaticSlots.get(volume.id)?.base;
         if (base === undefined) throw new Error('Unknown volume');
         const slot = preparedSlot ?? (!volume ? 0 : database === 'index' ? base + 1 : database === 'revocations' ? base + 2 : await openNamed(volume, database));
         if (preparedSlot !== undefined && (!volume || direction !== 'pull')) throw new Error('Invalid prepared transfer');
         let output = await step(() => hostOutput(preparedSlot === undefined
-            ? host.exports.pb_sync_begin(slot, direction === "pull" ? 0 : 1) : host.exports.pb_volume_sync_begin(slot)));
+            ? host.exports.pb_sync_begin(slot, direction === 'pull' ? 0 : entry_scope ? 2 : 1) : host.exports.pb_volume_sync_begin(slot)));
         started = true;
         const writeOutput = async (initial: Uint8Array) => {
             let wrote = false, bytes = initial;
@@ -905,7 +1245,7 @@ async function syncDatabase(volume: InvitationVolume | null, database: DatabaseI
     } finally {
         try {
             if (started) await step(() => host.exports.pb_sync_finish(0), true);
-        } finally { await ap("streamClose", handle).catch(() => {}); }
+        } finally { activeDatabaseStream = undefined; await close(); }
     }
 }
 async function openSession(session: InvitationSession, step: Step = callback => callback()): Promise<void> {
@@ -923,69 +1263,71 @@ async function openSession(session: InvitationSession, step: Step = callback => 
 }
 async function catalogReplicaAllowed(volume: string, step: Step = callback => callback()): Promise<boolean> {
     return step(() => {
+        if (!replicaVolumeCurrent(volume)) return false;
         const input = encoder.encode(JSON.stringify(volume)); hostInput(input);
         const allowed = JSON.parse(decoder.decode(hostOutput(host.exports.pb_replica_catalog_allowed(input.length))));
         if (typeof allowed !== 'boolean') throw new Error('Invalid catalog replication admission');
         return allowed;
     });
 }
-async function synchronize(bootstrap = false, step: Step = callback => callback()) {
-    const sync = (volume: InvitationVolume, database: DatabaseId, direction: "pull" | "push") => syncDatabase(volume, database, direction, undefined, step);
+async function synchronize(bootstrap = false, step: Step = callback => callback(), plannedVolumes?: string[], current = () => !closed && !closing) {
     if (!managed) return;
     progress("Connecting to Playbit…");
     await ap("connect");
     progress("Checking session access…");
     await openSession(profile.session, step);
-    const grants = selections[profile.session.id] ?? [];
-    // Every selected slot names a catalog entry: preparePersonal registered it from that catalog.
-    const volumes = [profile.root, ...[...personalSlots].filter(([id]) => grants.some(grant => grant.volume === id))
-        .map(([id]) => personalCatalog.find(item => item.volume.id === id)!.volume)];
-    for (let index = 0; index < volumes.length; index++) {
-        const volume = volumes[index];
-        if (!await catalogReplicaAllowed(volume.id, step)) continue;
-        if (!volume.share_key_with_service) throw new Error(`The key for ${volume.name || 'this volume'} is not shared with AP. Catch-up requires an authorized online peer; web peer catch-up is not available yet`);
-        const fenced = await step(() => {
-            const bytes = encoder.encode(JSON.stringify(volume.id)); hostInput(bytes);
-            return JSON.parse(decoder.decode(hostOutput(host.exports.pb_authority_refresh_required(bytes.length))));
-        });
-        if (fenced) await pullVolumeSnapshot(volume, volume.name || "shared data", step);
-        if (!bootstrap) {
-            // Publish local inputs before capturing the remote cut. A push
-            // between snapshot pulls would invalidate its shared write epoch.
-            await sync(volume, "index", "pull");
-            await sync(volume, "revocations", "pull");
-            await sync(volume, "index", "push");
-            await sync(volume, "index", "pull");
-            for await (const database of databaseCatalog(volume, step)) await sync(volume, database, "push");
+    const volumes = (plannedVolumes ?? replicatedVolumeIds()).filter(id => !projectedWorld(id));
+    for (const [index, id] of volumes.entries()) {
+        if (!await catalogReplicaAllowed(id, step) || !replicaVolumeCurrent(id)) continue;
+        const volume = replicaRecord(id);
+        const admitted = () => current() && replicaVolumeCurrent(id);
+        try {
+            await synchronizeOrdinaryVolume(volume, `${volume.name || "shared data"} (${index + 1}/${volumes.length})`, !bootstrap, step, admitted);
+        } catch (error) {
+            if (replicaVolumeCurrent(id)) throw error;
         }
-        await pullVolumeSnapshot(volume, `${volume.name || "shared data"} (${index + 1}/${volumes.length})`, step);
     }
     progress("Saving pending app files…");
     await uploadBlobs();
     progress("Saving session data…");
     await saveProfile();
 }
+async function synchronizeOrdinaryVolume(volume: InvitationVolume, label: string, push: boolean, step: Step, current = () => !closed && !closing): Promise<void> {
+    const sync = (database: DatabaseId, direction: "pull" | "push") => syncDatabase(volume, database, direction, undefined, step, current);
+    if (!volume.share_key_with_service) throw new Error(`The key for ${volume.name || 'this volume'} is not shared with AP. Catch-up requires an authorized online peer; web peer catch-up is not available yet`);
+    const fenced = await step(() => {
+        const bytes = encoder.encode(JSON.stringify(volume.id)); hostInput(bytes);
+        return JSON.parse(decoder.decode(hostOutput(host.exports.pb_authority_refresh_required(bytes.length))));
+    });
+    if (fenced && push) await pullVolumeSnapshot(volume, volume.name || "shared data", step, undefined, undefined, current);
+    if (push) {
+        // Publish local inputs before capturing the remote cut. A push
+        // between snapshot pulls would invalidate its shared write epoch.
+        await sync("index", "pull");
+        await sync("revocations", "pull");
+        await sync("index", "push");
+        await sync("index", "pull");
+        for await (const { database } of databaseCatalog(volume, step)) await sync(database, "push");
+    }
+    await pullVolumeSnapshot(volume, label, step, undefined, undefined, current);
+}
 async function pullVolumeSnapshot(volume: InvitationVolume, label: string, step: Step,
-    selection?: { session: InvitationSession; grants: PersonalGrant[] }, entry_scope?: string): Promise<void> {
-    if (waitingVolumePreparations === 32) throw new Error('Volume preparation capacity exceeded');
-    const previous = volumePreparations;
-    let release!: () => void;
-    volumePreparations = new Promise<void>(resolve => { release = resolve; });
-    waitingVolumePreparations++;
-    try {
-    await previous;
-    if (closed || closing) throw new Error('Volume preparation retired');
-    preparingVolume = true;
+    selection?: { session: InvitationSession; grants: PersonalGrant[] }, entry_scope?: string, current = () => !closed && !closing): Promise<void> {
+    await withDatabaseTransfer(() => captureVolumeSnapshot(volume, label, step, selection, entry_scope, current), current);
+}
+async function captureVolumeSnapshot(volume: InvitationVolume, label: string, step: Step,
+    selection: { session: InvitationSession; grants: PersonalGrant[] } | undefined, entry_scope: string | undefined, current: () => boolean): Promise<void> {
+    const { directory, publication } = storageFor(volume.id);
     await reclaimVolume(volume.id);
     for (let attempt = 0; attempt < 3; attempt++) {
         let prepared: PreparedVolume | undefined, slots: number[] = [];
         try {
-            prepared = publication!.prepare(volume.id);
-            await publication!.create(directory, prepared);
+            prepared = publication.prepare(volume.id);
+            await publication.create(directory, prepared);
             const base = allocateBackingSlots(3); slots = [base, base + 1, base + 2];
             await prepareVolumeInputs(volume, prepared, slots, step, selection, entry_scope);
             const pull = async (database: DatabaseId, slot: number) => {
-                const receipt = await syncDatabase(volume, database, 'pull', undefined, step, undefined, slot, entry_scope);
+                const receipt = await transferDatabase(volume, database, 'pull', profile.session.resolved_build_id, step, current, slot, entry_scope);
                 await step(() => {
                     const bytes = encoder.encode(replicaJSON({ slot, receipt })); hostInput(bytes);
                     hostOutput(host.exports.pb_volume_receipt(bytes.length));
@@ -1013,7 +1355,7 @@ async function pullVolumeSnapshot(volume: InvitationVolume, label: string, step:
                     if ((error as { code?: string }).code !== 'ap-rejected'
                         || !/(?:^|: )entry not found$/.test(message) && message !== 'waiting for initial database synchronization') throw error;
                     localFallback = true;
-                    publication!.check(prepared);
+                    publication.check(prepared);
                     await step(() => {
                         const bytes = encoder.encode(JSON.stringify(database)); hostInput(bytes);
                         hostOutput(host.exports.pb_volume_local_backing(bytes.length));
@@ -1037,14 +1379,14 @@ async function pullVolumeSnapshot(volume: InvitationVolume, label: string, step:
                     pb_volume_local_location: host.exports.pb_volume_local_location,
                 };
                 await retainRejectedCut(directory, publication!, prepared, (name, value) => step(() => {
-                    publication!.check(prepared!);
+                    publication.check(prepared!);
                     if (!Object.hasOwn(operations, name)) throw new Error('Unknown recovery operation');
                     const bytes = encoder.encode(JSON.stringify(value)); hostInput(bytes);
                     const output = hostOutput(operations[name as keyof typeof operations](bytes.length));
                     return output.length ? JSON.parse(decoder.decode(output)) : undefined;
                 }), blobHash, yieldPreparation);
             }
-            await step(() => publication!.publish(prepared!,
+            await step(() => publication.publish(prepared!,
                 () => { hostOutput(host.exports.pb_volume_validate()); }, () => {
                     for (const slot of slots) stores.get(slot)!.attachFence(prepared!.epoch);
                     hostOutput(host.exports.pb_volume_publish());
@@ -1062,11 +1404,10 @@ async function pullVolumeSnapshot(volume: InvitationVolume, label: string, step:
             try { if (!closed) await step(() => host.exports.pb_volume_abort(), true); }
             finally {
                 for (const slot of slots) { stores.get(slot)?.close(); stores.delete(slot); }
-                if (prepared && !closed) await publication!.discard(directory, prepared.volume, prepared.generation);
+                if (prepared && !closed) await publication.discard(directory, prepared.volume, prepared.generation);
             }
         }
     }
-    } finally { preparingVolume = false; waitingVolumePreparations--; release(); }
 }
 async function prepareVolumeInputs(volume: InvitationVolume, prepared: PreparedVolume, slots: readonly number[], step: Step,
     selection?: { session: InvitationSession; grants: PersonalGrant[] }, entry_scope?: string): Promise<void> {
@@ -1091,7 +1432,7 @@ async function pullPreparedLog(volume: InvitationVolume, log: DatabaseId, step: 
     }
     let cursor: string | null = null;
     for (;;) {
-        const personal = personalSlots.has(volume.id);
+        const personal = personalReplica(volume.id);
         const response = await ap('request', { op: 'get_bloblog', operation_id: encodeId(random(16)),
             session_id: personal ? null : profile.session.id, build_id: personal ? null : profile.session.resolved_build_id,
             volume_id: volume.id, log_id: log, cursor });
@@ -1114,8 +1455,13 @@ async function validatePreparedLog(step: Step): Promise<void> {
         await yieldPreparation();
     }
 }
+function replicatedVolumeIds(): string[] {
+    const volumes = new Set([profile.root.id, ...activeGrants.map(grant => grant.volume)]);
+    for (const [id, mount] of automaticSlots) if (!mount.storage && !mount.preparing) volumes.add(id);
+    return [...volumes];
+}
 function replicaRecord(volume: string): InvitationVolume {
-    const record = [profile.root, ...personalCatalog.map(item => item.volume)].find(item => item.id === volume);
+    const record = automaticSlots.get(volume)?.volume ?? [profile.root, ...personalCatalog.map(item => item.volume)].find(item => item.id === volume);
     if (!record) throw new Error('Unknown replica volume'); return record;
 }
 async function catchUpLog(volume: string, database: DatabaseId, current: () => boolean): Promise<void> {
@@ -1134,7 +1480,7 @@ async function catchUpLog(volume: string, database: DatabaseId, current: () => b
         throw error;
     }
     for (;;) {
-        const personal = personalSlots.has(volume);
+        const personal = personalReplica(volume);
         const response = await ap('request', { op: 'get_bloblog', operation_id: encodeId(random(16)),
             session_id: personal ? null : profile.session.id, build_id: personal ? null : profile.session.resolved_build_id,
             volume_id: volume, log_id: database, cursor });
@@ -1153,9 +1499,10 @@ function allocateBackingSlots(count: number): number {
     const first = nextNamedSlot + 1; nextNamedSlot += count; return first;
 }
 async function copyPreparedBacking(prepared: PreparedVolume, database: DatabaseId, slot: number | undefined, required: boolean, step: Step, acceptedIndex = false): Promise<void> {
-    publication!.check(prepared);
-    const targetFile = acceptedIndex ? await publication!.acceptedIndex(directory, prepared)
-        : await publication!.file(directory, prepared.volume, prepared.generation, database, true);
+    const { directory, publication } = storageFor(prepared.volume);
+    publication.check(prepared);
+    const targetFile = acceptedIndex ? await publication.acceptedIndex(directory, prepared)
+        : await publication.file(directory, prepared.volume, prepared.generation, database, true);
     const target = await targetFile.createSyncAccessHandle();
     try {
         if (target.getSize()) throw new Error('Fresh backing generation already exists');
@@ -1165,7 +1512,7 @@ async function copyPreparedBacking(prepared: PreparedVolume, database: DatabaseI
                 return JSON.parse(decoder.decode(hostOutput(host.exports.pb_volume_local_location(bytes.length)))) ?? prepared.previous;
             });
             let source: File | undefined;
-            try { source = await (await publication!.file(directory, prepared.volume, sourceGeneration, database, false)).getFile(); }
+            try { source = await (await publication.file(directory, prepared.volume, sourceGeneration, database, false)).getFile(); }
             catch (error) { if (required || (error as DOMException).name !== 'NotFoundError') throw error; }
             if (source) {
                 await copyVolumeBacking(prepared, source, target, yieldPreparation);
@@ -1180,8 +1527,9 @@ async function copyPreparedBacking(prepared: PreparedVolume, database: DatabaseI
     target.close();
 }
 async function openPreparedBacking(prepared: PreparedVolume, database: DatabaseId, slot: number): Promise<void> {
-    publication!.check(prepared);
-    const file = await (await publication!.file(directory, prepared.volume, prepared.generation, database, true)).createSyncAccessHandle();
+    const { directory, publication } = storageFor(prepared.volume);
+    publication.check(prepared);
+    const file = await (await publication.file(directory, prepared.volume, prepared.generation, database, true)).createSyncAccessHandle();
     if (closing || closed) { file.close(); throw new Error('Volume preparation retired'); }
     stores.set(slot, await openStore(file));
 }
@@ -1210,16 +1558,19 @@ function selectPersonal(session: string, grants: PersonalSelection[]) {
     hostInput(bytes); hostOutput(host.exports.pb_select_personal(bytes.length));
     if (session === profile.session.id) activeGrants = structuredClone(grants);
 }
-async function* databaseCatalog(volume: InvitationVolume, step: Step, selection?: { session: InvitationSession; grants: PersonalGrant[] }): AsyncGenerator<DatabaseId> {
+async function* databaseCatalog(volume: InvitationVolume, step: Step,
+    selection?: { session: InvitationSession; grants: PersonalGrant[] },
+    page = host.exports.pb_upload_catalog_page): AsyncGenerator<{ database: DatabaseId; blind: boolean }> {
     let after: string | null = null, root: number[] | null = null;
-    const page = host.exports.pb_upload_catalog_page;
     do {
-        const result: { databases: DatabaseId[]; next: string | null; root: number[] } = await step(() => {
+        const result: { databases: DatabaseId[]; blind?: string[]; next: string | null; root: number[] } = await step(() => {
             const bytes = encoder.encode(JSON.stringify({ volume: volume.id, after, expected_root: root, selection }));
             hostInput(bytes); return JSON.parse(decoder.decode(hostOutput(page(bytes.length))));
         });
         root = result.root; after = result.next;
-        for (const database of result.databases) if (database !== 'index' && database !== 'revocations') yield database;
+        for (const database of result.databases) if (database !== 'index' && database !== 'revocations') {
+            yield { database, blind: result.blind?.includes(database) ?? false };
+        }
     } while (after);
     // Recheck the source root after the final suspended backing transfer too.
     await step(() => {
@@ -1227,34 +1578,78 @@ async function* databaseCatalog(volume: InvitationVolume, step: Step, selection?
         hostInput(bytes); hostOutput(page(bytes.length));
     });
 }
+async function publishWorldAppends(volume: InvitationVolume, database: DatabaseId, step: Step): Promise<void> {
+    let after: number[] | undefined, through: number[] | undefined;
+    await openNamed(volume, database);
+    for (;;) {
+        const batch = await step(() => {
+            const input = encoder.encode(JSON.stringify({ volume: volume.id, database, after, through }));
+            hostInput(input);
+            return hostOutput(host.exports.pb_world_append_next(input.length));
+        });
+        if (!batch.length) return;
+        if (batch.length < 16 || batch.length > 16 + 65536) throw new Error('Invalid pending World append');
+        through ??= Array.from(batch.subarray(0, 8));
+        const clock = Array.from(batch.subarray(8, 16));
+        if (batch.length > 16) {
+            try {
+                await ap('publishReplica', { op: 'publish_replica', operation_id: encodeId(random(16)), session_id: profile.session.id,
+                    build_id: profile.session.resolved_build_id, volume_id: volume.id, database_id: database }, batch.subarray(16));
+            } catch (error) {
+                if ((error as Failure).code !== 'world-entry-rejected') throw error;
+                // Keep the refused birth for reconciliation and offer later keys.
+                after = clock;
+                continue;
+            }
+        }
+        // A header-only result identifies a stale local birth. A submitted birth
+        // keeps its durable marker until AP acknowledges this exact publication.
+        await step(() => {
+            const input = encoder.encode(JSON.stringify({ volume: volume.id, database, clock })); hostInput(input);
+            hostOutput(host.exports.pb_world_append_ack(input.length));
+        });
+        after = clock;
+    }
+}
+async function settleWorldReceipt(mount: AutomaticMount, database: DatabaseId, bytes: Uint8Array, current: () => boolean): Promise<void> {
+    const volume = mount.volume.id, address = `${volume}/${database}`;
+    const active = () => current() && automaticSlots.get(volume) === mount;
+    // Snapshot installation can retire all named slots while an AP receipt waits
+    // for the local queue. Resolve the backing and apply the receipt in one turn.
+    const settle = () => localStep(() => {
+        if (!active()) return true;
+        const slot = namedSlots.get(address);
+        if (slot === undefined || !stores.has(slot)) return false;
+        hostInput(bytes);
+        const status = host.exports.pb_world_append_published(slot, bytes.length);
+        if (status === -1) return false;
+        hostOutput(status);
+        return true;
+    });
+    if (await settle()) return;
+    try {
+        await openNamed(mount.volume, database);
+        if (await settle()) return;
+    } catch (error) {
+        if (!active()) return;
+        if (!(error instanceof LocalVolumeChanged)) {
+            catalogRecoveryFailed(volume, error);
+            return;
+        }
+    }
+    // A second replacement can race the reopen. Keep the birth for this
+    // World’s scoped replay and let Shared continue draining its publications.
+    if (active() && !scopeRecoveries.has(volume)) replicas?.recoverVolumeCatalog(volume);
+}
 function validateCandidate(session: InvitationSession, grants: PersonalGrant[]): void {
     const bytes = encoder.encode(JSON.stringify({ session, grants }));
     hostInput(bytes); hostOutput(host.exports.pb_validate_selection(bytes.length));
 }
 async function preparePersonal(session: InvitationSession, grants: PersonalGrant[], step: Step = callback => callback()) {
     grants = validateSelection(grants, personalCatalog);
-    profile.personal_replicas ??= {};
     for (const grant of grants) {
         if (personalSlots.has(grant.volume)) continue;
-        const entry = personalCatalog.find(item => item.volume.id === grant.volume)!; // validateSelection matched every grant.
-        const base = 2 + personalSlots.size * 2;
-        if (personalSlots.size >= MAX_PERSONAL_VOLUMES) throw new Error("Personal volume capacity exceeded");
-        const replica_ids = profile.personal_replicas[grant.volume] ??= Array.from({ length: 2 }, replicaId);
-        try {
-            const initial = await openVolumeControls(grant.volume, base);
-            await step(() => {
-                const bytes = encoder.encode(JSON.stringify({ volume: entry.volume, key: entry.credentials.database_key, replica_ids }));
-                hostInput(bytes); hostOutput(host.exports.pb_register_personal(bytes.length));
-                personalSlots.set(grant.volume, base);
-                finishInitialVolume(initial);
-            });
-            await reclaimVolume(grant.volume);
-        } catch (error) {
-            for (let database = 1; database <= 2; database++) {
-                stores.get(base + database)?.close(); stores.delete(base + database);
-            }
-            throw error;
-        }
+        await withSecondaryMount(grant.volume, base => openPersonalMount(grant.volume, base, step));
     }
     // Record the user's admitted selection before preparing its files. Every
     // preparation captures this consent revision before suspended copying.
@@ -1264,6 +1659,29 @@ async function preparePersonal(session: InvitationSession, grants: PersonalGrant
     });
     await step(() => selectPersonal(session.id, prepared));
     await pullPersonal(session, grants, step);
+}
+async function openPersonalMount(id: string, base: number, step: Step): Promise<void> {
+    if (personalSlots.has(id)) return;
+    const entry = personalCatalog.find(item => item.volume.id === id)!; // validateSelection matched every grant.
+    const automatic = automaticSlots.get(id);
+    if (personalSlots.size >= MAX_PERSONAL_VOLUMES) throw new Error("Personal volume capacity exceeded");
+    profile.personal_replicas ??= {};
+    const replica_ids = profile.personal_replicas[id] ??= Array.from({ length: 2 }, replicaId);
+    try {
+        const initial = automatic ? undefined : await openVolumeControls(id, base);
+        await step(() => {
+            const bytes = encoder.encode(JSON.stringify({ volume: entry.volume, key: entry.credentials.database_key, replica_ids, base }));
+            hostInput(bytes); hostOutput(host.exports.pb_register_personal(bytes.length));
+            personalSlots.set(id, base);
+            finishInitialVolume(initial);
+        });
+        await reclaimVolume(id);
+    } catch (error) {
+        if (!automatic && !personalSlots.has(id)) for (let database = 1; database <= 2; database++) {
+            stores.get(base + database)?.close(); stores.delete(base + database);
+        }
+        throw error;
+    }
 }
 async function pullPersonal(session: InvitationSession, grants: PersonalGrant[], step: Step) {
     grants = validateSelection(grants, personalCatalog);
@@ -1284,6 +1702,14 @@ async function pullPersonal(session: InvitationSession, grants: PersonalGrant[],
 async function refreshAccountProfile(): Promise<Set<string>> {
     const snapshot = await accountReplica?.profile();
     if (!snapshot) return new Set();
+    const user = boundUser?.volume.id;
+    if (user && snapshot.deletedVolumes.has(user) && !closed && !closing) {
+        automaticCall("pb_automatic_user_deleted", user);
+        boundUser = undefined;
+        personalSlots.delete(user);
+        personalCatalog = personalCatalog.filter(item => item.volume.id !== user);
+        removeAutomaticReplica(user);
+    }
     if (snapshot.revision > accountProfileRevision && !closed && !closing) {
         if (displayName !== snapshot.displayName) {
             displayNameBytes(snapshot.displayName);
@@ -1315,6 +1741,8 @@ async function refreshPersonal(latest?: PersonalSelections) {
     }
     selections = latest;
 }
+let surface: Uint8Array | undefined, surfaceDeferred = false;
+
 async function startGuest(candidate: GuestInstance) {
     channelClient?.close();channelClient=undefined;localIdentity=undefined;
     operations.reset();
@@ -1329,6 +1757,7 @@ async function startGuest(candidate: GuestInstance) {
     operations.refreshVolumes();
     guest = candidate; guestFailure = undefined; scene = null;
     guestWork.queue({ kind: 1, target: 0, data: new Uint8Array() });
+    if (surface) guestWork.queue({ kind: 15, target: 0, data: surface });
     if(managed)operations.pb_session?.();
     await enterGuest();
     if (!scene && candidate.deadline?.parked) {
@@ -1430,14 +1859,14 @@ async function prepareBundle(source: AsyncIterable<Uint8Array> | undefined, sess
         }
         if (metadata.unsupported_host_features.length) {
             unsupported = true;
-            throw new Error(`This app needs an unsupported host feature: ${metadata.unsupported_host_features[0]}. Its package is retained`);
+            throw failure("unsupported", `This app needs an unsupported host feature: ${metadata.unsupported_host_features[0]}. Its package is retained`);
         }
         if (!Number.isSafeInteger(metadata.length) || metadata.length < 0 || metadata.length > MAX_PACKAGE_WASM_BYTES) throw new Error('Wasm executable exceeds 64 MiB');
         const identity = await authenticateBundle(slot, metadata, sessionId, expectedApp, admission);
         const wasm = new Uint8Array(metadata.length);
         if (handle.read(wasm, { at: metadata.offset }) !== wasm.length) throw new Error("Incomplete executable read");
-        const instance = await prepareGuest(wasm, operations,
-            metadata.required_host_features?.includes("event.poll.deadline") === true);
+        // The feature list belongs to the same package authenticated above.
+        const instance = await prepareGuest(wasm, operations, metadata.required_host_features);
         guestBundles.set(instance, slot);
         return { instance, app: identity.app as InvitationSession["app"], world: identity.world as string,
             shared: identity.shared as string | null, name: metadata.name, build: metadata.build_id,
@@ -1530,7 +1959,13 @@ function checkUpdate(retry = false) {
             const slot = preparedInstance && guestBundles.get(preparedInstance);
             if (slot !== undefined) { host.exports.pb_package_discard(slot); guestBundles.delete(preparedInstance!); }
         }
-    })().finally(() => { guestUpdating = false; }).catch(failure => { if (!closed) updateState({ kind: "failed", message: `Update state could not be saved: ${failure.message}` }); })
+    })().finally(() => {
+        guestUpdating = false;
+        if (surfaceDeferred) {
+            surfaceDeferred = false;
+            if (!closed && !closing) self.postMessage({ surfaceReady: true });
+        }
+    }).catch(failure => { if (!closed) updateState({ kind: "failed", message: `Update state could not be saved: ${failure.message}` }); })
         .finally(() => {
             updateTask = null;
             if ((resumeReplication || recoveryPending) && !closed) void connectReplication();
@@ -1620,6 +2055,8 @@ async function open(args: RuntimeOpenArgs) {
     managed = Boolean(args.invitation);
     if (profile && managed !== Boolean(profile.seed)) throw new Error("This profile belongs to a different session");
     personalCatalog = args.personal ?? [];
+    creationScope = args.creationScope;
+    boundUser = args.userVolume;
     let local;
     if (managed) {
         // `managed` is the invitation's presence, which names `args.account`; retainedInvitation always sets `parsed.invitation`.
@@ -1696,7 +2133,7 @@ async function open(args: RuntimeOpenArgs) {
         profile.session = resolvedSession(profile.session, resolution, profile.resolution);
         profile.resolution = resolution;
     }
-    const bytes = encoder.encode(JSON.stringify({ ...profile, installation, local }));
+    const bytes = encoder.encode(JSON.stringify({ ...profile, installation, local, user_volume: creationScope?.user_volume, creation_build: creationScope?.creation_build }));
     hostInput(bytes); hostOutput(host.exports.pb_initialize(bytes.length));
     if(managed){const status=await ap("connect");channelDevice=Uint8Array.from(status.instanceId??[]);}
     finishInitialVolume(initialRoot);
@@ -1734,10 +2171,10 @@ async function open(args: RuntimeOpenArgs) {
     if (managed) {
         progress("Restoring selected personal volumes…");
         selections = await personalSelections(profile.account);
-        const grants = selections[profile.session.id] ?? [];
+        const deleted = await refreshAccountProfile();
+        const grants = (selections[profile.session.id] ?? []).filter(grant => !deleted.has(grant.volume));
         await preparePersonal(profile.session, grants);
         selectPersonal(profile.session.id, grants);
-        await refreshAccountProfile();
     }
     const initialized = performance.now();
     progress(`Opening ${profile.app_name || "app"}…`);
@@ -1971,40 +2408,54 @@ function scheduleRecovery() {
     recoveryDelay = Math.min(recoveryDelay * 2, 30000);
     recoveryTimer = setTimeout(() => {
         recoveryTimer = undefined;
-        if (replicas?.run && !replicas.run.stopped) void recoverEntries();
+        if (replicas?.run && !replicas.run.stopped) void recoverSubscriptions();
         else void connectReplication();
     }, delay);
 }
-async function recoverEntries(): Promise<void> {
-    for (const [source, state] of entryRecoveries) {
+// Open can fail before a subscription exists to report its own failure.
+function catalogRecoveryFailed(id: string, error: unknown): void {
+    if (closing || closed) return;
+    const message = String(error).slice(0, 512);
+    logs.push(message); if (logs.length > 256) logs.shift();
+    if (retryable(error) || automaticSlots.has(id)) {
+        replicationState({source: id, kind: retryable(error) ? 'reconnecting' : 'failed',
+            code: (error as Failure).code, message, stage: 'subscription'});
+    }
+}
+async function recoverSubscriptions(): Promise<void> {
+    for (const [source, state] of [...scopeRecoveries]) {
         if (state !== 'retry' || closed || closing || replicationBlocked) continue;
         const { volume, entry } = replicaAddress(source);
-        if (!entry) throw new Error('Invalid selected recovery source');
+        if (openingMounts.has(volume)) continue;
         try {
-            await connectEntry(replicaRecord(volume), entry);
-            entryRecoveries.delete(source);
+            if (entry) await connectEntry(replicaRecord(volume), entry);
+            else if (automaticSlots.has(volume)) await captureAutomaticCatalog(replicaRecord(volume));
+            else if (volume === unmountedWorld) await prepareAutomatic({role: 'root', volume}, true);
+            else { scopeRecoveries.delete(source); continue; }
+            scopeRecoveries.delete(source);
             await localStep(refreshScene);
         } catch (error) {
-            entryRecoveries.set(source, retryable(error) ? 'retry' : 'blocked');
+            if (!entrySubscriptions.has(source) && !automaticSlots.has(source) && !(source === unmountedWorld && retryable(error))) scopeRecoveries.delete(source);
+            else scopeRecoveries.set(source, retryable(error) ? 'retry' : 'blocked');
         }
     }
-    recoveryPending = [...entryRecoveries.values()].includes('retry');
+    recoveryPending = [...scopeRecoveries.values()].includes('retry');
     scheduleRecovery();
 }
 function replicationState(value: ReplicationState) {
     if (closed || closing) return;
     if (value.source) {
-        if (!entrySubscriptions.has(value.source)) return;
-        if (value.kind === 'live') entryRecoveries.delete(value.source);
-        else entryRecoveries.set(value.source, value.kind === 'reconnecting' ? 'retry' : 'blocked');
-        recoveryPending = [...entryRecoveries.values()].includes('retry');
+        if (!entrySubscriptions.has(value.source) && !automaticSlots.has(value.source) && value.source !== unmountedWorld) return;
+        if (value.kind === 'live') scopeRecoveries.delete(value.source);
+        else scopeRecoveries.set(value.source, value.kind === 'reconnecting' ? 'retry' : 'blocked');
+        recoveryPending = [...scopeRecoveries.values()].includes('retry');
         if (recoveryPending) scheduleRecovery();
         self.postMessage({ replication: value });
         return;
     }
     if (value.kind === 'live') {
-        recoveryDelay = 250; recoveryPending = [...entryRecoveries.values()].includes('retry');
-        if (entryRecoveries.size) value = { ...value, kind: 'catching_up' };
+        recoveryDelay = 250; recoveryPending = [...scopeRecoveries.values()].includes('retry');
+        if (scopeRecoveries.size) value = { ...value, kind: 'catching_up' };
     }
     if (value.kind === 'reconnecting') { recoveryPending = true; scheduleRecovery(); }
     if (value.kind === 'failed' || value.kind === 'action_required') {
@@ -2064,6 +2515,9 @@ function connectReplication() {
     if (replicationTask || updateTask || personalTask) { recoveryPending = true; return replicationTask; }
     if (replicas?.run && !replicas.run.stopped) return;
     clearTimeout(recoveryTimer); recoveryTimer = undefined; recoveryPending = false;
+    let ready!: () => void;
+    const starting = { volumes: [] as string[], ready: new Promise<void>(resolve => { ready = resolve; }) };
+    startingReplicas = starting;
     replicationTask = (async () => {
         const connection=await ap("connect");
         if (closed || closing) return;
@@ -2074,7 +2528,7 @@ function connectReplication() {
         replicas ??= new LiveReplication<LiveTicket>({ ap, operationId: () => encodeId(random(16)),
             state: replicationState,
             bootstrap: async current => {
-                const step: Step = (callback, cleanup = false) => localStep(() => { if (!cleanup && !current()) throw new Error("Replica bootstrap retired"); return callback(); });
+                const step = replicaStep(current);
                 if (recoveryList) {
                     await syncDatabase(null, "index", 'pull', undefined, step, current);
                     await accountReplica!.adoptTree(current);
@@ -2085,13 +2539,18 @@ function connectReplication() {
                 await localStep(() => {
                     hostOutput(host.exports.pb_database_retry()); blobs.retry();
                 });
-                const volumes = [profile.root.id, ...activeGrants.map(grant => grant.volume)];
+                const volumes = startingReplicas!.volumes;
+                const hasWorld = volumes.some(projectedWorld);
                 let complete = true;
-                for (const volume of volumes) complete = await catalogReplicaAllowed(volume, step) && complete;
-                // Only full outgoing snapshots can cover a discarded feed.
-                // Partial readers retain their queued writes and explicit gaps.
-                if (complete) await step(() => hostOutput(host.exports.pb_live_rebase()));
-                await synchronize(false, step);
+                for (const volume of volumes) {
+                    if (projectedWorld(volume)) continue;
+                    if (!await catalogReplicaAllowed(volume, step) && replicaVolumeCurrent(volume)) complete = false;
+                }
+                // Keep healthy World tickets. An overflow has already emptied the feed;
+                // start tracking new edits before snapshots and the subscribed World
+                // catch-up replay the durable pre-gap sources through their own routes.
+                if (complete) await step(() => hostOutput(host.exports.pb_live_rebase(Number(hasWorld))));
+                await synchronize(false, step, volumes, current);
                 if (accountReplica) {
                     await syncDatabase(null, "index", 'pull', undefined, step, current);
                     await accountReplica.adoptTree(current);
@@ -2104,10 +2563,18 @@ function connectReplication() {
             },
             local: {
                 catchUpLog,
-                retired: () => { clearTimeout(accountNamePublication?.retry); accountNamePublication = undefined; },
+                volumeCurrent: replicaVolumeCurrent,
+                retired: () => {
+                    clearTimeout(accountNamePublication?.retry); accountNamePublication = undefined;
+                    if (activeDatabaseStream && !activeDatabaseStream.current()) void activeDatabaseStream.close();
+                },
                 terminal: (source, terminal, current) => localStep(() => {
                     if (!current()) return;
                     const { volume, entry } = replicaAddress(source), offset = entry ? 31 : 16;
+                    if (projectedWorld(volume) && terminal.volume === volume && terminal.cause === 2) {
+                        withdrawWorld(volume, true);
+                        return;
+                    }
                     const bytes = new Uint8Array(offset + 17);
                     bytes.set(decodeId(volume));
                     if (entry) bytes.set(decodeId(entry, 15), 16);
@@ -2129,18 +2596,28 @@ function connectReplication() {
                         if (!length) return null;
                         const bytes = liveOutput(length), view = new DataView(bytes.buffer);
                         const source = encodeId(bytes.subarray(0, 16));
-                        if (bytes.length < 41 || bytes[40] !== 0) throw new Error('Invalid local publication frame');
+                        const world = projectedWorld(source) ? automaticSlots.get(source) : undefined;
+                        if (bytes.length < 41 || bytes[40] !== 0 && !(bytes[40] === 1 && world && bytes.length === 41)) {
+                            throw new Error('Invalid local publication frame');
+                        }
+                        if (bytes[40] === 1 && !scopeRecoveries.has(source)) replicas!.recoverVolumeCatalog(source);
                         const kind = 'volume' as const;
                         return { source, publication: { kind, volume_id: source,
-                            session_id: profile.session.id, build_id: profile.session.resolved_build_id },
+                            session_id: personalReplica(source) ? null : profile.session.id, build_id: personalReplica(source) ? null : profile.session.resolved_build_id },
                             database: databaseIdentity(bytes.subarray(16, 32)),
-                            ticket: view.getBigUint64(32, true) as VolumeTicket, bytes: bytes.subarray(41) };
+                            ticket: { sequence: view.getBigUint64(32, true), world }, bytes: bytes.subarray(41) };
                     });
                     return head ?? (accountTurn ? null : accountReplica?.head(current));
                 },
                 published: async (head, current) => {
-                    if (head.publication.kind !== 'volume' || head.database !== 'index') return;
+                    if (head.publication.kind !== 'volume') return;
                     const volume = head.publication.volume_id;
+                    if (head.database !== 'index') {
+                        const mount = !head.ticket.account && head.ticket.world;
+                        if (!mount || head.database === 'revocations' || !current() || automaticSlots.get(volume) !== mount) return;
+                        await settleWorldReceipt(mount, head.database, head.bytes, current);
+                        return;
+                    }
                     const versions: FileReference[] = await localStep(() => {
                         if (!current()) throw new Error('File publication retired');
                         const bytes = new Uint8Array(16 + head.bytes.length);
@@ -2153,8 +2630,28 @@ function connectReplication() {
                         await blobs.uploadVersion(version);
                     }
                 },
+                rejected: (head, code, current) => localStep(() => {
+                    const ticket = head.ticket;
+                    if (ticket.account || !ticket.world) return false;
+                    const world = ticket.world.volume.id;
+                    if (!current() || automaticSlots.get(world) !== ticket.world) return true;
+                    if (code === 'world-participant-revoked') {
+                        withdrawWorld(world, true);
+                    } else {
+                        // Only named KV changes have a durable snapshot or append-birth
+                        // replay. Discard this RAM ticket, then capture the current ACL.
+                        if (head.database === 'index' || head.database === 'revocations') return false;
+                        liveOutput(host.exports.pb_live_ack(ticket.sequence));
+                        if (!scopeRecoveries.has(world)) replicas!.recoverVolumeCatalog(world);
+                    }
+                    return true;
+                }),
                 ack: (ticket, current) => ticket.account ? accountReplica!.acknowledge(ticket.account, current)
-                    : localStep(() => { if (current()) return liveOutput(host.exports.pb_live_ack(ticket)); }),
+                    : localStep(() => {
+                        if (current() && (!ticket.world || automaticSlots.get(ticket.world.volume.id) === ticket.world)) {
+                            return liveOutput(host.exports.pb_live_ack(ticket.sequence));
+                        }
+                    }),
                 apply: async (source, database, delta, current, evidence) => {
                     if (source === 'account') {
                         const foundName = await accountReplica!.apply(delta, current);
@@ -2196,13 +2693,30 @@ function connectReplication() {
                 },
             },
         });
-        const volumes = recoveryList ? [] : [profile.root.id, ...activeGrants.map(grant => grant.volume)];
+        const volumes = recoveryList ? [] : replicatedVolumeIds();
+        starting.volumes = volumes;
         const catalogs = [];
-        for (const volume of volumes) if (await catalogReplicaAllowed(volume, localStep)) catalogs.push(volume);
-        await replicas.start([...(accountReplica ? [{ kind: 'account' } satisfies ReplicaScope] : []), ...catalogs.map((volume): ReplicaScope => ({ kind: 'volume', volume_id: volume,
-            session_id: personalSlots.has(volume) ? null : profile.session.id,
-            build_id: personalSlots.has(volume) ? null : profile.session.resolved_build_id }))]);
+        for (const volume of volumes) {
+            if (projectedWorld(volume)) continue;
+            if (await catalogReplicaAllowed(volume, localStep)) catalogs.push(volume);
+        }
+        await replicas.start([...(accountReplica ? [{ kind: 'account' } satisfies ReplicaScope] : []), ...catalogs.filter(replicaVolumeCurrent).map((volume): ReplicaScope => ({ kind: 'volume', volume_id: volume,
+            session_id: personalReplica(volume) ? null : profile.session.id,
+            build_id: personalReplica(volume) ? null : profile.session.resolved_build_id }))]);
+        ready();
         if (recoveryList) return;
+        const reopening = unmountedWorld;
+        if (reopening && !openingMounts.has(reopening) && replicas?.run?.active && !replicas.run.stopped) {
+            try { await prepareAutomatic({ role: 'root', volume: reopening }, true); }
+            catch (error) { catalogRecoveryFailed(reopening, error); }
+        }
+        for (const id of volumes) {
+            const mount = automaticSlots.get(id);
+            if (mount && !mount.preparing && id !== reopening && !catalogs.includes(id) && !mount.storage && !personalSlots.has(id) && replicas?.run?.active && !replicas.run.stopped) {
+                try { await captureAutomaticCatalog(mount.volume); }
+                catch (error) { catalogRecoveryFailed(id, error); }
+            }
+        }
         await restoreEntrySubscriptions();
         if (accountReplica) {
             void ap("onboarding", 6).then(() => ap("onboarding", 7)).catch(() => {});
@@ -2210,7 +2724,7 @@ function connectReplication() {
     })().catch(error => replicationState({ kind: retryable(error) ? 'reconnecting'
         : ['authentication-required', 'ap-rejected', 'access-revoked'].includes(error.code) ? 'action_required' : 'failed',
         message: String(error.message ?? error).slice(0, 512), code: error.code, stage: 'subscription' }))
-        .finally(() => { replicationTask = null; scheduleRecovery(); });
+        .finally(() => { ready(); startingReplicas = undefined; replicationTask = null; scheduleRecovery(); });
     return replicationTask;
 }
 
@@ -2324,9 +2838,10 @@ async function retireFiles(): Promise<void> {
     await files.cleanup(); await blobs.cleanup();
 }
 function closeStorage() {
+    operations.cancelWake();
     guest?.deadline?.retire();
     channelClient?.close();channelClient=undefined;
-    entrySubscriptions.clear(); entryRecoveries.clear();
+    entrySubscriptions.clear(); scopeRecoveries.clear();
     accountSignal.close();
     accountReplica?.close();
     blobs?.close();
@@ -2338,12 +2853,16 @@ function closeStorage() {
     if (host) { host.exports.pb_recovery_abort(); host.exports.pb_sync_finish(0); }
     storageBridge?.close(); storageBridge = undefined;
     for (const store of stores.values()) store.close(); stores.clear();
+    for (const mount of automaticSlots.values()) mount.release?.();
+    automaticSlots.clear();
     publication?.close(); publication = undefined;
     storageResources?.close(); storageResources = undefined;
     releaseLock?.(); releaseLock = undefined;
 }
 // Only called once startGuest has verified that the guest produced a scene.
-function presentation() { return { scene: scene!.root, logs: logs.splice(0) }; }
+function presentation() {
+    return { scene: scene!.root, ...(scene!.window ? { window: scene!.window } : {}), logs: logs.splice(0) };
+}
 let work: Promise<unknown> = Promise.resolve(), controls: Promise<unknown> = Promise.resolve();
 let initializing = false;
 self.onmessage = ({ data }: MessageEvent<RuntimePageMessage>) => {
@@ -2421,7 +2940,7 @@ function acceptInput(args: Extract<RuntimeRequest, { method: "input" }>["args"])
     if (!guest || !scene) throw new Error("The app is stopped; reload the page to restart it");
     if (args.data.length > MAX_TEXT_EVENT_BYTES) throw new Error("Guest input exceeds the event limit");
     const data = new Uint8Array(args.data);
-    validateInput(scene.controls, args.kind, args.target, data, validateNativeText);
+    validateInput(scene.controls, args.kind, args.target, data, validateNativeText, args.menuRevision);
 
     return { root: guestWork.input(data.length), event: { kind: args.kind, target: args.target, data } };
 }
@@ -2438,12 +2957,21 @@ async function handle({ id, method, args }: RuntimeRequest, accepted?: AcceptedI
             initializing = true;
             try { result = await open(args); }
             finally { initializing = false; }
+        } else if (method === "surface") {
+            if (!guest || !scene || guestFailure || guestUpdating || closing || guestWork.draining) {
+                if (guestUpdating && !closing) surfaceDeferred = true;
+                self.postMessage({ id }); return;
+            }
+            validateSurface(args);
+            guestWork.queue({ kind: 15, target: 0, data: args });
+            surface = args;
+            await enterGuest(); result = presentation();
         } else if (method === "input") {
             if (guestFailure) throw guestFailure;
             await refreshPersonal();
             operations.refreshVolumes();
             if (!accepted) throw new Error("Input requires an accepted session-instance root");
-            validateInput(scene!.controls, accepted.event.kind, accepted.event.target, accepted.event.data, validateNativeText);
+            validateInput(scene!.controls, accepted.event.kind, accepted.event.target, accepted.event.data, validateNativeText, args.menuRevision);
             guestWork.queueAccepted(accepted.root, accepted.event); queued = true;
             await enterGuest(); result = presentation();
         } else if (method === "retry_update") {
@@ -2459,8 +2987,9 @@ async function handle({ id, method, args }: RuntimeRequest, accepted?: AcceptedI
         if (accepted && !queued) guestWork.reject(accepted.root);
         if (method === "open") { closed = true; try { closeStorage(); } catch (cleanup) { logs.push(String(cleanup).slice(0, 512)); } }
         const message = String((error as Error).message ?? error);
-        const code = method === "open" && corruptStoreOpenMessage(message)
-            ? "corrupt_store" : undefined;
+        const cause = (error as { code?: unknown })?.code;
+        const code = cause === 'unsupported' || cause === 'incompatible-storage-format' || cause === 'incompatible-installation-format' ? cause
+            : method === "open" && corruptStoreOpenMessage(message) ? "corrupt_store" : undefined;
         self.postMessage({ id, error: message, code });
     } finally {
         if (!engineFailure && method === "input") replicas?.notify();
