@@ -437,6 +437,31 @@ fn ordinary_launch_waits_for_account_status_before_opening_a_window(cx: &mut gpu
 }
 
 #[gpui::test]
+fn engine_startup_timeout_shows_a_dialog_without_an_account_window(cx: &mut gpui::TestAppContext) {
+    use crate::ui::desktop::alert::{self, Kind};
+
+    let (send, _requests, errors) = worker_queue::channel();
+    let (responses, receive) = async_channel::bounded(1);
+    let (_urls, receive_urls) = async_channel::bounded(4);
+    let _host = cx.update(|cx| Shell::launch((send, receive, errors), receive_urls, true, cx));
+    let error = crate::engine::launch_agent::START_TIMEOUT_ERROR;
+    let mut response = WorkerResponse::new(Err(error.into()));
+    response.engine_lost = true;
+    response.recovery_started =
+        Some(std::time::Instant::now() - crate::engine::restart::NOTICE_AFTER);
+    responses.try_send(response).unwrap();
+    cx.run_until_parked();
+
+    assert!(cx.update(|cx| cx.windows().is_empty()));
+    assert_eq!(cx.update(alert::take_presented), [(Kind::EngineStartup, error.into())]);
+    let (title, body) =
+        alert::message(Kind::EngineStartup, error, std::path::Path::new("/profile"));
+    assert_eq!(title, "Playbit couldn’t start its background engine");
+    assert!(body.contains("startup timed out"));
+    assert!(body.contains("Login Items & Extensions"));
+}
+
+#[gpui::test]
 fn failed_recovery_waits_for_automatic_restart_and_success_clears_it(
     cx: &mut gpui::TestAppContext,
 ) {

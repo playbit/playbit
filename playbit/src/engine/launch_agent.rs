@@ -27,6 +27,7 @@ const ENABLED: isize = 1;
 const REQUIRES_APPROVAL: isize = 2;
 const MAX_ERROR_BYTES: usize = 4096;
 pub(super) const START_ERROR: &str = "Could not start Playbit's background service. Check Playbit in System Settings > General > Login Items & Extensions, then reopen Playbit.";
+pub(crate) const START_TIMEOUT_ERROR: &str = "Playbit's background service did not become ready. Check Playbit in System Settings > General > Login Items & Extensions, then reopen Playbit.";
 
 /// Finder can be served by either installed extension. Only the default
 /// profile's previously authenticated helper publishes its containing app.
@@ -217,9 +218,7 @@ fn launch_with_readiness(
     }
     if !wait_readable(&listener, deadline)? {
         return Err(if default_profile {
-            "Playbit's background service did not become ready. \
-             Check Playbit in System Settings > General > Login Items & Extensions, \
-             then reopen Playbit."
+            START_TIMEOUT_ERROR
         } else {
             "The background engine for this Playbit profile did not become ready."
         }

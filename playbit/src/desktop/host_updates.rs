@@ -334,15 +334,25 @@ impl Shell {
             let age =
                 response.recovery_started.map_or(std::time::Duration::ZERO, |at| at.elapsed());
             let delay = crate::engine::restart::NOTICE_AFTER.saturating_sub(age);
+            let startup_error =
+                response.recovery_started.and(response.result.as_ref().err()).cloned();
             self.recovery_notice = Some(cx.spawn(async move |shell, cx| {
                 cx.background_executor().timer(delay).await;
                 let _ = shell.update(cx, |shell, cx| {
+                    use crate::ui::desktop::alert::{self, Kind};
                     if shell.engine_recovering {
-                        crate::ui::desktop::alert::show(
-                            crate::ui::desktop::alert::Kind::RecoverySlow,
-                            "Playbit is still trying to reconnect to its background process.",
-                            cx,
-                        );
+                        if let Some(error) = &startup_error
+                            && shell.enrolled.is_none()
+                            && cx.windows().is_empty()
+                        {
+                            alert::show(Kind::EngineStartup, error, cx);
+                        } else {
+                            alert::show(
+                                Kind::RecoverySlow,
+                                "Playbit is still trying to reconnect to its background process.",
+                                cx,
+                            );
+                        }
                     }
                 });
             }));

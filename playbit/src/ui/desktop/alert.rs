@@ -25,12 +25,14 @@ pub enum Kind {
     AppContextUnavailable,
     FinderOpen,
     Critical,
+    EngineStartup,
     RecoverySlow,
 }
 impl Kind {
     fn modal_button(self) -> Option<&'static str> {
         match self {
             Self::Critical => Some("Quit"),
+            Self::EngineStartup => Some("OK"),
             // A local draft can be the only copy of an unsaved edit.
             Self::LocalDraft => Some("Dismiss"),
             Self::Recoverable
@@ -203,6 +205,25 @@ fn unscoped_message(kind: Kind, details: &str, profile: &Path) -> (&'static str,
         Kind::RecoverySlow => (
             "Playbit is still recovering",
             "Playbit is reconnecting to its background process. Please wait a moment. (#1003)"
+                .into(),
+        ),
+        #[cfg(feature = "process")]
+        Kind::EngineStartup if details == crate::engine::launch_agent::START_TIMEOUT_ERROR => (
+            "Playbit couldn’t start its background engine",
+            "The background service did not respond before startup timed out. \
+             Check that Playbit is allowed in System Settings > General > Login Items & Extensions. \
+             Then quit and reopen Playbit. (#1021)"
+                .into(),
+        ),
+        Kind::EngineStartup => (
+            "Playbit couldn’t start its background engine",
+            "Quit and reopen Playbit to try again. (#1021)".into(),
+        ),
+        #[cfg(feature = "app-host")]
+        Kind::Critical if details == crate::engine::ipc::INCOMPATIBLE_ENGINE => (
+            "Playbit can’t use the running background engine",
+            "The background engine is from an incompatible Playbit build. \
+             Reopen Playbit after that engine has stopped. (#1022)"
                 .into(),
         ),
         Kind::Critical => (
@@ -949,7 +970,18 @@ mod tests {
     #[test]
     fn errors_offer_only_the_action_appropriate_to_their_severity() {
         assert_eq!(Kind::Critical.modal_button(), Some("Quit"));
+        assert_eq!(Kind::EngineStartup.modal_button(), Some("OK"));
         assert_eq!(Kind::LocalDraft.modal_button(), Some("Dismiss"));
+        #[cfg(feature = "app-host")]
+        {
+            let (title, body) = message(
+                Kind::Critical,
+                crate::engine::ipc::INCOMPATIBLE_ENGINE,
+                Path::new("/profile"),
+            );
+            assert_eq!(title, "Playbit can’t use the running background engine");
+            assert!(body.contains("incompatible Playbit build"));
+        }
         for kind in [
             Kind::Recoverable,
             Kind::InputRejected,
