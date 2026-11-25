@@ -408,11 +408,14 @@ impl Control {
 
     fn popup_surface(&self, surface: gpui::Div, appearance: &Appearance) -> gpui::Div {
         let sp = |logical| appearance.pixels(logical);
+        let compact_identity =
+            self.popup_context.as_ref().is_some_and(|context| context.abbreviate);
         surface
             .h(sp(24.))
             .min_w(sp(86.))
-            .px(sp(12.))
-            .gap(sp(6.))
+            .pl(sp(if compact_identity { 10. } else { 12. }))
+            .pr(sp(if compact_identity { 6. } else { 12. }))
+            .gap(sp(if compact_identity { 2. } else { 6. }))
             .flex()
             .items_center()
             .font_weight(gpui::FontWeight::MEDIUM)
@@ -441,18 +444,24 @@ impl Control {
             .when_some(
                 self.popup_context.as_ref().filter(|context| !context.detail.is_empty()),
                 |v, context| {
+                    let detail = if context.abbreviate {
+                        context.detail.get(..6).unwrap_or(&context.detail).to_owned().into()
+                    } else {
+                        context.detail.clone()
+                    };
                     v.child(
                         typography::tabular_numerals(div())
                             .debug_selector(|| "popup-context-detail".into())
                             .min_w_0()
                             .max_w(gpui::relative(0.4))
                             .text_ellipsis()
+                            .when(compact_identity, |detail| detail.text_size(sp(10.)))
                             .text_color(self.color(Role::Text).alpha(if self.disabled {
                                 0.2
                             } else {
                                 0.4
                             }))
-                            .child(context.detail.clone()),
+                            .child(detail),
                     )
                 },
             )
@@ -1144,7 +1153,7 @@ mod tests {
         cx.update(zoom::install);
         for scale in [10_000, 20_000] {
             cx.update(|cx| zoom::set_scale(scale, cx).expect("supported scale"));
-            for presentation in 0..3 {
+            for presentation in 0..4 {
                 let window = cx.add_window(|window, cx| {
                     zoom::apply(window, cx);
                     let mut control = Control::new(
@@ -1162,6 +1171,9 @@ mod tests {
                     match presentation {
                         1 => control.set_popup_context(Some("permission-person-popup"), DETAIL, cx),
                         2 => control.set_popup_context(None, "", cx),
+                        3 => {
+                            control.set_popup_identity(Some("permission-person-popup"), DETAIL, cx)
+                        }
                         _ => {}
                     }
                     control
@@ -1172,7 +1184,10 @@ mod tests {
                         let node = control.accessibility_node(Bounds::default());
                         assert_eq!(node.role(), gpui::accesskit::Role::ComboBox);
                         assert_eq!(node.label(), Some(control.label.as_ref()));
-                        assert_eq!(node.description(), (presentation == 1).then_some(DETAIL));
+                        assert_eq!(
+                            node.description(),
+                            matches!(presentation, 1 | 3).then_some(DETAIL)
+                        );
                     })
                     .expect("popup identity");
                 let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
@@ -1197,7 +1212,7 @@ mod tests {
                 );
                 assert_eq!(glyph.size.height, px(16. * factor));
                 assert_eq!(glyph.left(), slot.left());
-                if presentation == 1 {
+                if matches!(presentation, 1 | 3) {
                     let icon = visual.debug_bounds("popup-context-icon").expect("subject glyph");
                     let icon_slot =
                         visual.debug_bounds("popup-context-icon-slot").expect("subject slot");

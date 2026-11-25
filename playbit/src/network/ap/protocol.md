@@ -1390,6 +1390,15 @@ different committed entry even when the new source's clock is lower. A successfu
 response has no data. Clients can publish an already-synchronized name when
 they connect, including after upgrading a profile that has no pending account writes.
 
+APs advertising `account-display-names.v1` support the authenticated
+`get_account_display_names` operation. Its `account_ids` array contains 1–17
+distinct canonical 16-byte account IDs. Any signed-in caller can look up an
+exact ID in the connection's AP namespace. Success data is an array of
+`{"account_id": "...", "display_name": "..."}` objects in request order. It
+omits accounts without a published name and unknown IDs in the same way. The
+response body is limited to 24 KiB. Names follow the same 256-byte UTF-8 rules
+as publication and serve only as display labels.
+
 The account kvdb's public hash key is BLAKE3 derive-key with context
 `app.playbit.account.tree.v1` and the 16-byte account ID as input. This is a tree
 hashing parameter, not an encryption key. Clients derive two 32-byte keys with

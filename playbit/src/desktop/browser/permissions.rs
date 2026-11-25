@@ -1,10 +1,41 @@
 //! Permission drafts replace volume defaults only after an explicit save.
 use super::*;
+use crate::network::ap::operation::{ACCOUNT_DISPLAY_NAMES_MAX, AccountDisplayName};
 use crate::ui::desktop::typography::tabular_numerals;
 use crate::ui::desktop::zoom::length as ui;
 
 const FULL_ACCESS: [Permission; 4] =
     [Permission::Read, Permission::Write, Permission::Append, Permission::ManagePermissions];
+const GRANTS_PER_PAGE: usize = ACCOUNT_DISPLAY_NAMES_MAX - 1;
+
+#[derive(Default)]
+pub(super) struct Names {
+    pub(super) rendered: bool,
+    online: bool,
+    scope: Option<Option<EntryId>>,
+    visible: Vec<Id>,
+    participants: Arc<BTreeMap<Id, String>>,
+    resolved: BTreeMap<Id, Option<String>>,
+    failed: Vec<Id>,
+    pending: Option<(u64, Vec<Id>)>,
+}
+
+impl Names {
+    pub(super) fn reset_account(&mut self) {
+        self.participants = Default::default();
+        self.resolved.clear();
+        self.failed.clear();
+        self.pending = None;
+    }
+
+    pub(super) fn finish_render(&mut self) {
+        if !self.rendered {
+            self.scope = None;
+            self.visible.clear();
+            self.failed.clear();
+        }
+    }
+}
 
 fn preset_permissions(preset: u32) -> Option<Vec<Permission>> {
     match preset {
@@ -58,6 +89,114 @@ fn permission_choice(
 }
 
 impl Browser {
+    pub(in crate::desktop) fn set_permission_names_online(
+        &mut self,
+        online: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.permission_names.online == online {
+            return;
+        }
+        self.permission_names.online = online;
+        if online {
+            self.permission_names.resolved.retain(|_, name| name.is_some());
+            self.permission_names.failed.clear();
+        } else {
+            self.permission_names.pending = None;
+        }
+        cx.notify();
+    }
+
+    pub(in crate::desktop) fn set_permission_participant_names(
+        &mut self,
+        names: &Arc<BTreeMap<Id, String>>,
+        cx: &mut Context<Self>,
+    ) {
+        let state = &mut self.permission_names;
+        if Arc::ptr_eq(&state.participants, names) {
+            return;
+        }
+        // A participant observation supersedes the cached and in-flight AP labels.
+        state.resolved.retain(|id, _| !names.contains_key(id));
+        state.failed.retain(|id| !names.contains_key(id));
+        if let Some((_, requested)) = &mut state.pending {
+            requested.retain(|id| !names.contains_key(id));
+        }
+        state.participants = names.clone();
+        cx.notify();
+    }
+
+    pub(in crate::desktop) fn receive_permission_names(
+        &mut self,
+        admission: u64,
+        names: Option<Vec<AccountDisplayName>>,
+        cx: &mut Context<Self>,
+    ) {
+        let state = &mut self.permission_names;
+        let Some((_, mut requested)) = state.pending.take_if(|(id, _)| *id == admission) else {
+            return;
+        };
+        requested.retain(|id| state.visible.contains(id));
+        if let Some(names) = names {
+            for &id in &requested {
+                state.resolved.entry(id).or_insert(None);
+            }
+            for name in names {
+                if requested.contains(&name.account_id) {
+                    state.resolved.insert(name.account_id, Some(name.display_name));
+                }
+            }
+        } else {
+            // Reopening these rows or returning online permits another attempt.
+            state.failed.extend(requested);
+        }
+        cx.notify();
+    }
+
+    fn request_permission_names(&mut self, grants: &[(usize, Grant)]) {
+        let state = &mut self.permission_names;
+        state.rendered = true;
+        if state.scope.replace(self.selected) != Some(self.selected) {
+            state.resolved.retain(|_, name| name.is_some());
+            state.failed.clear();
+        }
+        state.visible.clear();
+        state.visible.push(self.volume.owner);
+        for (_, grant) in grants {
+            if let Subject::Principal(Principal::Human(id)) = grant.subject
+                && !state.visible.contains(&id)
+            {
+                state.visible.push(id);
+            }
+        }
+        state.resolved.retain(|id, _| state.visible.contains(id));
+        state.failed.retain(|id| state.visible.contains(id));
+        let Some(account) = self.signed_in_account else { return };
+        if !state.online || state.pending.is_some() {
+            return;
+        }
+        let account_ids: Vec<_> = state
+            .visible
+            .iter()
+            .copied()
+            .filter(|id| {
+                *id != account
+                    && !state.participants.contains_key(id)
+                    && !state.resolved.contains_key(id)
+                    && !state.failed.contains(id)
+            })
+            .collect();
+        if !account_ids.is_empty() {
+            match self.send.enqueue(Request::GetAccountDisplayNames {
+                account,
+                account_ids: account_ids.clone(),
+            }) {
+                Ok(admission) => state.pending = Some((admission, account_ids)),
+                Err(_) => state.failed.extend(account_ids),
+            }
+        }
+    }
+
     pub(in crate::desktop) fn set_session_shared_volumes(
         &mut self,
         sessions: &[crate::store::Session],
@@ -179,16 +318,18 @@ impl Browser {
             .find(|(_, grant)| grant.subject == owner)
             .map(|(index, grant)| (index, grant.clone()));
         let count = acl.grants.iter().filter(|grant| grant.subject != owner).count();
-        self.permission_offset = self.permission_offset.min(count.saturating_sub(1) / 16 * 16);
+        self.permission_offset =
+            self.permission_offset.min(count.saturating_sub(1) / GRANTS_PER_PAGE * GRANTS_PER_PAGE);
         let grants: Vec<_> = acl
             .grants
             .iter()
             .enumerate()
             .filter(|(_, grant)| grant.subject != owner)
             .skip(self.permission_offset)
-            .take(16)
+            .take(GRANTS_PER_PAGE)
             .map(|(index, grant)| (index, grant.clone()))
             .collect();
+        self.request_permission_names(&grants);
         let mut rows = div()
             .flex()
             .flex_col()
@@ -199,7 +340,7 @@ impl Browser {
         for (index, grant) in grants {
             rows = rows.child(self.grant_row(index, &grant, disabled, cx));
         }
-        if count > 16 {
+        if count > GRANTS_PER_PAGE {
             rows = rows.child(self.grant_navigation(count, cx));
         }
         if self.adding_grant {
@@ -270,8 +411,9 @@ impl Browser {
             .h(ui(24.))
             .flex()
             .items_center()
-            .gap(ui(5.))
-            .px(ui(8.))
+            .gap(ui(3.))
+            .pl(ui(8.))
+            .pr(ui(6.))
             .rounded(ui(6.))
             .border_1()
             .border_color(rgba(0x0000001a))
@@ -292,13 +434,19 @@ impl Browser {
                     .text_color(rgba(0x000000e6)),
             )
             .child(
-                tabular_numerals(self.text("permission-owner-id", owner, cx))
-                    .min_w_0()
-                    .max_w(gpui::relative(0.4))
-                    .truncate()
-                    .text_size(ui(11.))
-                    .line_height(ui(24.))
-                    .text_color(rgba(0x00000080)),
+                tabular_numerals(host_text::element_with_value(
+                    owner[..6].to_owned().into(),
+                    owner.into(),
+                    self.text_id("permission-owner-id", cx),
+                    false,
+                    false,
+                ))
+                .min_w_0()
+                .max_w(gpui::relative(0.4))
+                .truncate()
+                .text_size(ui(11.))
+                .line_height(ui(24.))
+                .text_color(rgba(0x00000080)),
             );
         div()
             .h(ui(24.))
@@ -373,6 +521,13 @@ impl Browser {
             self.signed_in_name
                 .as_ref()
                 .map_or_else(|| "You".into(), |name| format!("{name} (You)"))
+        } else if let Some(name) = self
+            .permission_names
+            .participants
+            .get(&account)
+            .or_else(|| self.permission_names.resolved.get(&account).and_then(Option::as_ref))
+        {
+            name.clone()
         } else if account == self.volume.owner {
             self.owner_name.clone().unwrap_or_else(|| "Owner".into())
         } else {
@@ -628,8 +783,9 @@ impl Browser {
                     acl.grants.remove(index);
                     let owner = Subject::Principal(Principal::Human(this.volume.owner));
                     let count = acl.grants.iter().filter(|grant| grant.subject != owner).count();
-                    this.permission_offset =
-                        this.permission_offset.min(count.saturating_sub(1) / 16 * 16);
+                    this.permission_offset = this
+                        .permission_offset
+                        .min(count.saturating_sub(1) / GRANTS_PER_PAGE * GRANTS_PER_PAGE);
                     this.dirty = true;
                     this.did_change_draft(cx);
                 }
@@ -780,7 +936,11 @@ impl Browser {
             cx,
         );
         popup.update(cx, |control, cx| {
-            control.set_popup_context(icon, &detail, cx);
+            if detail.is_empty() {
+                control.set_popup_context(icon, "", cx);
+            } else {
+                control.set_popup_identity(icon, &detail, cx);
+            }
         });
         popup
     }
@@ -790,7 +950,7 @@ impl Browser {
     }
 
     fn grant_navigation(&mut self, count: usize, cx: &mut Context<Self>) -> gpui::Div {
-        if count <= 16 {
+        if count <= GRANTS_PER_PAGE {
             return div();
         }
         let offset = self.permission_offset;
@@ -798,14 +958,16 @@ impl Browser {
             "grants-previous",
             "Previous permissions",
             offset == 0,
-            |this, _| this.permission_offset = this.permission_offset.saturating_sub(16),
+            |this, _| {
+                this.permission_offset = this.permission_offset.saturating_sub(GRANTS_PER_PAGE)
+            },
             cx,
         );
         let next = self.button(
             "grants-next",
             "Next permissions",
-            offset + 16 >= count,
-            |this, _| this.permission_offset += 16,
+            offset + GRANTS_PER_PAGE >= count,
+            |this, _| this.permission_offset += GRANTS_PER_PAGE,
             cx,
         );
         div().flex().gap(ui(8.)).child(previous).child(next)
@@ -914,7 +1076,7 @@ impl Browser {
             acl.grants.push(Grant { subject, permissions: vec![Permission::Read] });
             let owner = Subject::Principal(Principal::Human(self.volume.owner));
             let count = acl.grants.iter().filter(|grant| grant.subject != owner).count();
-            self.permission_offset = count.saturating_sub(1) / 16 * 16;
+            self.permission_offset = count.saturating_sub(1) / GRANTS_PER_PAGE * GRANTS_PER_PAGE;
         }
         self.dirty = true;
         self.did_change_draft(cx);

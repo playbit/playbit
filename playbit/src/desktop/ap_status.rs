@@ -35,6 +35,10 @@ impl Indicator {
         self.status.is_some()
     }
 
+    pub(super) fn live(&self) -> bool {
+        self.status.as_ref().is_some_and(|status| status.state == ApConnectionState::Live)
+    }
+
     pub(super) fn hostname(&self) -> Option<&str> {
         self.status.as_ref().map(|status| status.hostname.as_str())
     }

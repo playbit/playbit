@@ -325,6 +325,8 @@ impl Worker {
             }
             let action = worker_recovery::Action::of(&queued.request);
             let sign_in = queued.sign_in;
+            let permission_names = matches!(queued.request, Request::GetAccountDisplayNames { .. });
+            let admission = queued.credit.as_ref().map(worker_queue::Credit::admission);
             let sent = if automatic {
                 self.recovery.send_automatic_status(queued)
             } else {
@@ -333,6 +335,11 @@ impl Worker {
             return match sent {
                 Ok(()) => true,
                 Err(_) if automatic => true,
+                Err(_) if permission_names => {
+                    let mut response = WorkerResponse::new(Ok(()));
+                    response.permission_names = admission.map(|id| (id, None));
+                    self.respond(response)
+                }
                 Err(error) => {
                     let mut response = WorkerResponse::new(Err(error.into()));
                     response.recovery_action = action;
@@ -590,6 +597,11 @@ pub(super) fn retired_response(queued: QueuedRequest) -> WorkerResponse {
     // Return the original identity and credit so the UI can finish this admission
     // without replaying it. Moving the strings adds no retained allocation.
     match queued.request {
+        Request::GetAccountDisplayNames { .. } => {
+            response.result = Ok(());
+            response.permission_names =
+                queued.credit.as_ref().map(|credit| (credit.admission(), None));
+        }
         Request::LabelVolume { volume, .. } => response.volume_label = Some(volume),
         Request::SelectPersonalVolumes { session, .. } => {
             response.personal_session = Some(session);

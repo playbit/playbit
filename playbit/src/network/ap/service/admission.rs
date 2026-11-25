@@ -1,7 +1,7 @@
 //! Admit the bounded support envelope before decoding operation semantics.
 //! Raw values borrow the input; unsupported operations never allocate a Value tree.
 use super::PROTOCOL;
-use crate::network::ap::operation::ServiceRequest;
+use crate::network::ap::operation::{DisplayNameIds, ServiceRequest};
 use serde::{
     Deserialize,
     de::{self, MapAccess, SeqAccess, Visitor},
@@ -51,6 +51,7 @@ pub const OPERATION_NAMES: &[&str] = &[
     "subscribe_account",
     "publish_account",
     "put_account_display_name",
+    "get_account_display_names",
     "sync_database",
     "world_replica",
     "subscribe_replica",
@@ -245,6 +246,21 @@ pub fn admit_request(
             "unsupported_feature",
             "unsupported required AP feature",
         ));
+    }
+    if op == "get_account_display_names" {
+        // The internally tagged operation enum buffers payload fields before
+        // deserializing them. Read this one array directly from the envelope.
+        if fields.iter().any(|(key, _)| {
+            !matches!(key.as_str(), "op" | "operation_id" | "required_features" | "account_ids")
+        }) {
+            return Err(invalid());
+        }
+        let account_ids = field("account_ids").ok_or_else(invalid)?;
+        let DisplayNameIds(account_ids) =
+            serde_json::from_str(account_ids).map_err(|_| invalid())?;
+        crate::network::ap::operation::validate_display_name_ids(&account_ids)
+            .map_err(|_| invalid())?;
+        return Ok(ServiceRequest::GetAccountDisplayNames { operation_id: id, account_ids });
     }
     decode_payload(&fields, bytes.len(), &id)
 }

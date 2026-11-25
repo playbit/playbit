@@ -68,6 +68,7 @@ pub(super) struct State {
     selected_role: Option<Role>,
     scope_in_session: bool,
     activity: BTreeMap<String, inspector::Activity>,
+    pub(super) participant_names: Arc<BTreeMap<Id, String>>,
     app_slots: Vec<AutomaticVolumeSlot>,
     session_slots: Vec<AutomaticVolumeSlot>,
     slots_app: Option<AppIdentity>,

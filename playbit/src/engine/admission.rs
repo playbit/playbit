@@ -202,6 +202,7 @@ request_routes! {
     AuthenticatePackage { .. } => None, Network,
     ListApps { .. } => None, Network,
     GetAppDisplay { .. } => None, Network,
+    GetAccountDisplayNames { .. } => None, Network,
     SetAppEnabled { .. } => None, Network,
     DeleteApp { .. } => None, Network,
     PublishApp { .. } => None, Network,

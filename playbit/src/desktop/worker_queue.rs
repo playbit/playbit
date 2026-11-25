@@ -194,6 +194,17 @@ fn retained_bytes(request: &Request) -> Option<usize> {
         )?,
         Request::CreateSession { bundle, .. } => bundle.capacity(),
         Request::PayloadSize { .. } => SIZE_CANCELLATION_BYTES,
+        Request::GetAccountDisplayNames { account_ids, .. } => {
+            use crate::network::ap::operation::ACCOUNT_DISPLAY_NAMES_MAX;
+            if account_ids.is_empty() || account_ids.capacity() > ACCOUNT_DISPLAY_NAMES_MAX {
+                return None;
+            }
+            account_ids.capacity().checked_mul(
+                std::mem::size_of::<crate::store::Id>()
+                    + std::mem::size_of::<crate::network::ap::operation::AccountDisplayName>()
+                    + playbit_api::abi::environment::DISPLAY_NAME_BYTES,
+            )?
+        }
         Request::SavedAccount
         | Request::AcceptAgreement { .. }
         | Request::RetryAccountKeyBackup
@@ -504,7 +515,8 @@ impl RequestSender {
         join_dialog: bool,
         draft_erasure: Option<super::drafts::ErasureHold>,
     ) -> Result<u64, &'static str> {
-        let optional_read = cancelled.is_some();
+        let optional_read =
+            cancelled.is_some() || matches!(request, Request::GetAccountDisplayNames { .. });
         let result = (|| {
             let epoch = self.0.gate.admission()?;
             let bytes = retained_bytes(&request)

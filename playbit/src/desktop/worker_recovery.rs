@@ -60,7 +60,8 @@ pub struct Worker {
 pub fn handles(request: &Request) -> bool {
     matches!(
         request,
-        Request::SetDisplayName { .. }
+        Request::GetAccountDisplayNames { .. }
+            | Request::SetDisplayName { .. }
             | Request::AcceptAgreement { .. }
             | Request::SavedAccount
             | Request::RetryAccountKeyBackup
@@ -138,7 +139,7 @@ impl Worker {
             .name("playbit-recovery-ipc".into())
             .stack_size(2 * 1024 * 1024)
             .spawn(move || {
-                while let Ok(Work { queued, automatic_generation }) = receive.recv() {
+                while let Ok(Work { mut queued, automatic_generation }) = receive.recv() {
                     if automatic_generation.is_some_and(|generation| {
                         let state = worker_state.lock().expect("mutex is not poisoned");
                         state.offline || state.mode_generation != generation
@@ -169,7 +170,23 @@ impl Worker {
                     {
                         continue;
                     }
-                    let mut response = WorkerResponse::from_reply(result);
+                    let mut response =
+                        if matches!(queued.request, Request::GetAccountDisplayNames { .. }) {
+                            use crate::engine::reply::DeveloperReply;
+                            let names = match result {
+                                Ok(Reply::Developer(DeveloperReply::AccountDisplayNames {
+                                    names,
+                                })) => Some(names),
+                                _ => None,
+                            };
+                            let mut response = WorkerResponse::new(Ok(()));
+                            response.permission_names =
+                                queued.credit.as_ref().map(|credit| (credit.admission(), names));
+                            response.credit = queued.credit.take();
+                            response
+                        } else {
+                            WorkerResponse::from_reply(result)
+                        };
                     // The change observer alone owns engine recovery state.
                     response.sign_in = queued.sign_in;
                     response.recovery_epoch = Some(queued.epoch);
@@ -241,6 +258,9 @@ impl Worker {
                 email.capacity().saturating_add(account_key.capacity())
             }
             Request::SetDisplayName { name } => name.capacity(),
+            Request::GetAccountDisplayNames { account_ids, .. } => {
+                account_ids.capacity() * std::mem::size_of::<crate::store::Id>()
+            }
             Request::RecoverCredentials { secret } => secret.capacity(),
             Request::SavedAccount
             | Request::AcceptAgreement { .. }

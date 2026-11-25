@@ -45,13 +45,23 @@ pub(super) fn element(
     heading: bool,
     live: bool,
 ) -> gpui::Div {
-    div().relative().child(text.clone()).child(
+    element_with_value(text.clone(), text, id, heading, live)
+}
+
+pub(super) fn element_with_value(
+    text: SharedString,
+    value: SharedString,
+    id: gpui::accesskit::NodeId,
+    heading: bool,
+    live: bool,
+) -> gpui::Div {
+    div().relative().child(text).child(
         gpui::canvas(
             move |bounds, window, _| {
-                if text.is_empty() {
+                if value.is_empty() {
                     return;
                 }
-                let mut node = text_accessibility_node(&text, heading, bounds);
+                let mut node = text_accessibility_node(&value, heading, bounds);
                 if live {
                     node.set_live(gpui::accesskit::Live::Polite);
                 }

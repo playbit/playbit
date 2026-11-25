@@ -199,6 +199,8 @@ fn standard_window_copies_from_the_system_titlebar(cx: &mut gpui::TestAppContext
     let (handle, inputs) = retained_handle(profile.path(), 1, session);
     let scene = |style| ViewNode::Theme {
         window_style: Some(style),
+        window_input: None,
+        legacy_canvas: 0,
         window_size_constraints: None,
         window_background_specified: true,
         theme: Theme::light(),

@@ -258,6 +258,9 @@ pub enum DeveloperReply {
         update: Option<super::UpdateStatus>,
         resolved_build_id: Option<String>,
     },
+    AccountDisplayNames {
+        names: Vec<crate::network::ap::operation::AccountDisplayName>,
+    },
 }
 
 #[cfg(feature = "app-host")]
@@ -665,7 +668,7 @@ impl ArchivedReply {
             request @ (Q::GrantVolume { .. }
             | Q::SetAppEnabled { .. } | Q::DeleteApp { .. }
             | Q::PublishApp { .. } | Q::ListApps { .. }
-            | Q::GetAppDisplay { .. } | Q::UpdateSession { .. }
+            | Q::GetAppDisplay { .. } | Q::GetAccountDisplayNames { .. } | Q::UpdateSession { .. }
             | Q::CreateAppSession { .. } | Q::CreateBuildSession { .. }
             | Q::PrepareApp { .. } | Q::SignPackage { .. } | Q::AuthenticatePackage { .. } | Q::CreateSession { .. }) => {
                 self.matches_developer(request)
@@ -955,6 +958,14 @@ impl ArchivedReply {
             }
             Q::GetAppDisplay { .. } => {
                 matches!(self, Self::Developer(reply) if matches!(reply.as_ref(), D::Display { .. }))
+            }
+            Q::GetAccountDisplayNames { account_ids, .. } => {
+                matches!(self, Self::Developer(reply) if matches!(reply.as_ref(),
+                D::AccountDisplayNames { names }
+                if names.len() <= account_ids.len() && names.iter().all(|name|
+                    account_ids.iter().any(|id| id.as_bytes() == &name.account_id.0)
+                    && crate::store::account::validate_display_name(name.display_name.as_str()).is_ok()
+                )))
             }
             Q::UpdateSession { .. } => {
                 matches!(self, Self::Developer(reply) if matches!(reply.as_ref(), D::Updated { .. }))

@@ -394,7 +394,7 @@ impl Engine {
             Request::GrantVolume { .. }
             | Request::PublishApp { .. } | Request::ListApps { .. }
             | Request::SetAppEnabled { .. } | Request::DeleteApp { .. }
-            | Request::GetAppDisplay { .. } | Request::CreateAppSession { .. }
+            | Request::GetAppDisplay { .. } | Request::GetAccountDisplayNames { .. } | Request::CreateAppSession { .. }
             | Request::UpdateSession { .. } | Request::PrepareApp { .. } | Request::SignPackage { .. } | Request::AuthenticatePackage { .. } | Request::CreateSession { .. }
             | Request::CreateBuildSession { .. } => {
                 return Err("developer operations require asynchronous owner admission".into());

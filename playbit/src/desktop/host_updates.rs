@@ -274,6 +274,7 @@ impl Shell {
             browser.update(cx, |browser, cx| {
                 browser.retire_history();
                 browser.retire_payload_size();
+                browser.set_permission_names_online(false, cx);
                 cx.notify();
             });
         }
@@ -960,6 +961,14 @@ impl Shell {
             return;
         }
         let _timing = crate::trace::Span::new("ui.apply_response");
+        if let Some((admission, names)) = response.permission_names.take() {
+            if let Some(browser) = &self.browser {
+                browser.update(cx, |browser, cx| {
+                    browser.receive_permission_names(admission, names, cx)
+                });
+            }
+            return;
+        }
         if let Some(status) = response.status_ap_connection.take() {
             self.ap_status.update(cx, |indicator, cx| indicator.set(Some(status), cx));
         }
@@ -1017,6 +1026,18 @@ impl Shell {
         }
         if let Some(sessions) = response.application_catalog.take() {
             self.apply_application_catalog(sessions, cx);
+        }
+        if let Some(browser) = &self.browser {
+            let online = self.ap_status.read(cx).live();
+            browser.update(cx, |browser, cx| {
+                if browser
+                    .set_account(self.account.id, self.account_profile.display_name.as_deref())
+                {
+                    cx.notify();
+                }
+                browser.set_permission_names_online(online, cx);
+                browser.set_permission_participant_names(&self.applications.participant_names, cx);
+            });
         }
         if viewing_app_volume && !self.applications.root_open && self.prepare_browser_navigation(cx)
         {

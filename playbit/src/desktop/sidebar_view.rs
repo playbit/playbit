@@ -658,6 +658,8 @@ impl Shell {
         let browser = cx.new(|cx| {
             let mut browser = browser::Browser::new(volume, self.send.for_browser(session), cx);
             browser.set_account(self.account.id, self.account_profile.display_name.as_deref());
+            browser.set_permission_names_online(self.ap_status.read(cx).live(), cx);
+            browser.set_permission_participant_names(&self.applications.participant_names, cx);
             self.set_browser_volumes(&mut browser);
             browser.set_session_shared_volumes(self.applications.sessions());
             browser

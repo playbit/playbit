@@ -440,6 +440,7 @@ struct TableCells {
 struct PopupContext {
     icon: Option<&'static str>,
     detail: SharedString,
+    abbreviate: bool,
 }
 impl Control {
     /// Inspector popups retain the ordinary menu activation and accessible identity.
@@ -449,12 +450,33 @@ impl Control {
         detail: &str,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .popup_context
-            .as_ref()
-            .is_none_or(|context| context.icon != icon || context.detail.as_ref() != detail)
-        {
-            self.popup_context = Some(PopupContext { icon, detail: detail.to_owned().into() });
+        self.set_popup_detail(icon, detail, false, cx);
+    }
+
+    #[cfg(any(feature = "desktop", test))]
+    pub(crate) fn set_popup_identity(
+        &mut self,
+        icon: Option<&'static str>,
+        canonical_id: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_popup_detail(icon, canonical_id, true, cx);
+    }
+
+    fn set_popup_detail(
+        &mut self,
+        icon: Option<&'static str>,
+        detail: &str,
+        abbreviate: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.popup_context.as_ref().is_none_or(|context| {
+            context.icon != icon
+                || context.detail.as_ref() != detail
+                || context.abbreviate != abbreviate
+        }) {
+            self.popup_context =
+                Some(PopupContext { icon, detail: detail.to_owned().into(), abbreviate });
             cx.notify();
         }
     }

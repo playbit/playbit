@@ -112,14 +112,16 @@ pub async fn request(
         .await
         .map_err(|_| crate::network::ap::ClientError::ResponseTimeout)?;
     }
-    if matches!(request, ServiceRequest::GetAppDisplay { .. }) {
+    let limit = match request {
+        ServiceRequest::GetAppDisplay { .. } => Some(BUILD_DISPLAY_LIMIT),
+        ServiceRequest::GetAccountDisplayNames { .. } => Some(ACCOUNT_DISPLAY_NAMES_RESPONSE_BYTES),
+        _ => None,
+    };
+    if let Some(limit) = limit {
         return tokio::time::timeout(connection.response_timeout(), async {
             let mut stream = begin(connection, request).await?;
             stream.finish()?;
-            service::response(
-                stream.receive_with_body_limit(BUILD_DISPLAY_LIMIT).await?,
-                request.operation_id(),
-            )
+            service::response(stream.receive_with_body_limit(limit).await?, request.operation_id())
         })
         .await
         .map_err(|_| crate::network::ap::ClientError::ResponseTimeout)?;

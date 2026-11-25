@@ -48,6 +48,7 @@ pub(crate) fn is_request(request: &Request) -> bool {
             | Request::SetAppEnabled { .. }
             | Request::DeleteApp { .. }
             | Request::GetAppDisplay { .. }
+            | Request::GetAccountDisplayNames { .. }
             | Request::CreateAppSession { .. }
             | Request::PrepareApp { .. }
             | Request::SignPackage { .. }
@@ -60,6 +61,9 @@ pub(crate) fn is_request(request: &Request) -> bool {
 
 pub(super) fn validate(request: &Request) -> Result<()> {
     match request {
+        Request::GetAccountDisplayNames { account_ids, .. } => {
+            crate::network::ap::operation::validate_display_name_ids(account_ids)?;
+        }
         Request::CreateBuildSession { build, .. } | Request::GetAppDisplay { build, .. }
             if !crate::identifier::valid(build, 32) =>
         {
@@ -356,6 +360,14 @@ pub(super) fn execute(
                 build_id: display.build_id,
                 name: display.name,
                 icon_error: display.icon_error,
+            }
+        }
+        Request::GetAccountDisplayNames { account, account_ids } => {
+            if store.account().id != account {
+                return Err("Display-name lookup belongs to another account".into());
+            }
+            DeveloperReply::AccountDisplayNames {
+                names: remote.get_account_display_names(store, account_ids)?,
             }
         }
         Request::SetAppEnabled { app, enabled } => {

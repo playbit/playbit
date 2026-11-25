@@ -7,7 +7,7 @@ fn all_operation_requests_keep_the_same_validated_wire_shape() {
     // Existing independent operation fixtures cover every supported request.
     let fixtures: Vec<serde_json::Value> =
         serde_json::from_str(include_str!("../../../../tests/fixtures/ap-requests.json")).unwrap();
-    assert_eq!(fixtures.len(), 52);
+    assert_eq!(fixtures.len(), 53);
     for fixture in fixtures {
         let typed: ServiceRequest = serde_json::from_value(fixture.clone()).unwrap();
         let frame = request(&typed).unwrap();
@@ -24,6 +24,59 @@ fn all_operation_requests_keep_the_same_validated_wire_shape() {
         invalid["operation_id"] = serde_json::json!("invalid");
         assert!(request(&serde_json::from_value(invalid).unwrap()).is_err());
     }
+}
+
+#[test]
+fn display_name_lookup_requires_the_feature_and_bounded_distinct_ids() {
+    use crate::network::ap::operation::ACCOUNT_DISPLAY_NAMES_MAX;
+    use crate::store::Id;
+    let id = Id::from_bytes([1; 16]);
+    let operation = id.to_string();
+    let lookup = |account_ids| ServiceRequest::GetAccountDisplayNames {
+        operation_id: operation.clone(),
+        account_ids,
+    };
+    let valid = (0..ACCOUNT_DISPLAY_NAMES_MAX as u8)
+        .map(|byte| Id::from_bytes([byte; 16]))
+        .collect::<Vec<_>>();
+    let frame = request(&lookup(valid.clone())).unwrap();
+    assert!(admit_request(PROTOCOL, &frame.body, &[]).is_err());
+    assert!(admit_request(PROTOCOL, &frame.body, &[ACCOUNT_DISPLAY_NAMES]).is_ok());
+    for invalid in [vec![], vec![id, id], [valid.clone(), vec![Id::from_bytes([99; 16])]].concat()]
+    {
+        assert!(request(&lookup(invalid)).is_err());
+    }
+    let mut oversized = serde_json::to_value(lookup(valid)).unwrap();
+    // The extra value is not an ID. The sequence bound must win before decoding it.
+    oversized["account_ids"].as_array_mut().unwrap().push(serde_json::json!("0"));
+    let bytes = serde_json::to_vec(&oversized).unwrap();
+    let refusal = admit_request(PROTOCOL, &bytes, &[ACCOUNT_DISPLAY_NAMES]).unwrap_err();
+    assert_eq!(refusal.code, "invalid_request");
+    assert_eq!(refusal.operation_id.as_deref(), Some(operation.as_str()));
+    assert!(
+        serde_json::from_value::<ServiceRequest>(oversized)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid account display-name batch size")
+    );
+    let mut unexpected_field: serde_json::Value = serde_json::from_slice(&frame.body).unwrap();
+    unexpected_field["other"] = serde_json::json!(true);
+    assert!(
+        admit_request(
+            PROTOCOL,
+            &serde_json::to_vec(&unexpected_field).unwrap(),
+            &[ACCOUNT_DISPLAY_NAMES]
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ServiceRequest>(serde_json::json!({
+            "op": "get_account_display_names",
+            "operation_id": operation,
+            "account_ids": ["0"]
+        }))
+        .is_err()
+    );
 }
 fn reply(ok: bool, operation_id: &str, error: Option<&str>) -> Frame {
     Frame::new(

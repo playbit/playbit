@@ -61,6 +61,7 @@ pub struct Browser {
     finder_volume: bool,
     signed_in_account: Option<Id>,
     signed_in_name: Option<String>,
+    permission_names: permissions::Names,
     open_target: Option<values::Target>,
     send: RequestSender,
     catalog: namespace::Catalog,
@@ -145,6 +146,7 @@ impl Browser {
             shared_volume_owners: BTreeMap::new(),
             signed_in_account: None,
             signed_in_name: None,
+            permission_names: Default::default(),
             open_target: None,
             volume,
             volume_details: None,
@@ -237,10 +239,18 @@ impl Browser {
         cx.notify();
     }
 
-    pub(super) fn set_account(&mut self, account: Id, display_name: Option<&str>) {
+    pub(super) fn set_account(&mut self, account: Id, display_name: Option<&str>) -> bool {
+        let display_name = display_name.map(str::trim).filter(|name| !name.is_empty());
+        if self.signed_in_account == Some(account) && self.signed_in_name.as_deref() == display_name
+        {
+            return false;
+        }
+        if self.signed_in_account != Some(account) {
+            self.permission_names.reset_account();
+        }
         self.signed_in_account = Some(account);
-        self.signed_in_name =
-            display_name.map(str::trim).filter(|name| !name.is_empty()).map(str::to_owned);
+        self.signed_in_name = display_name.map(str::to_owned);
+        true
     }
 
     fn request_session(&self) -> Option<Box<[u8; 32]>> {
@@ -730,14 +740,13 @@ impl Browser {
         value: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        host_text::element(value.into(), self.text_id(key, cx), false, false)
+    }
+
+    fn text_id(&mut self, key: &str, cx: &mut Context<Self>) -> gpui::accesskit::NodeId {
         self.rendered_text.insert(key.to_owned());
         let identity = self.text_ids.entry(key.to_owned()).or_insert_with(|| cx.new(|_| ()));
-        host_text::element(
-            value.into(),
-            text_editor::accessibility_text_ids(identity.entity_id()).0,
-            false,
-            false,
-        )
+        text_editor::accessibility_text_ids(identity.entity_id()).0
     }
 
     fn control(
@@ -824,7 +833,9 @@ impl Render for Browser {
             self.start_detail_loading(cx);
         }
         self.request_payload_size();
+        self.permission_names.rendered = false;
         let panes = self.panes(window, cx);
+        self.permission_names.finish_render();
         self.focus_kv_editor(window, cx);
         self.focus_rename(window, cx);
         if self.error.is_empty() {

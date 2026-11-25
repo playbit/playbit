@@ -13,6 +13,9 @@ pub use denial::{MAX_DENIAL_BYTES, ServiceDenial};
 
 pub const SERVICE_DESTINATION: &[u8] = b"service";
 pub const BUILD_DISPLAY_LIMIT: usize = 132 * 1024;
+/// At most one inspector page, including its owner row.
+pub const ACCOUNT_DISPLAY_NAMES_MAX: usize = 17;
+pub const ACCOUNT_DISPLAY_NAMES_RESPONSE_BYTES: usize = 24 * 1024;
 /// Decoded bound of a registered invitation envelope; the store seals within it.
 pub const INVITATION_ENVELOPE_LIMIT: usize = 4096;
 
@@ -51,6 +54,67 @@ pub fn volume_invitation_key_message(account: Id, public_key: &[u8; 32]) -> Vec<
     bytes.extend_from_slice(account.as_bytes());
     bytes.extend_from_slice(public_key);
     bytes
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "app-host", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+pub struct AccountDisplayName {
+    pub account_id: crate::store::Id,
+    pub display_name: String,
+}
+
+pub(crate) fn validate_display_name_ids(ids: &[crate::store::Id]) -> Result<(), &'static str> {
+    if ids.is_empty() || ids.len() > ACCOUNT_DISPLAY_NAMES_MAX {
+        return Err("invalid account display-name batch size");
+    }
+    if ids.iter().enumerate().any(|(index, id)| ids[..index].contains(id)) {
+        return Err("duplicate account ID in display-name batch");
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub(super) struct DisplayNameIds(
+    #[serde(deserialize_with = "deserialize_display_name_ids")] pub(super) Vec<crate::store::Id>,
+);
+
+fn deserialize_display_name_ids<'de, D>(deserializer: D) -> Result<Vec<crate::store::Id>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{DeserializeSeed, Error, SeqAccess, Visitor};
+
+    struct AccountIds;
+    struct Excess;
+
+    impl<'de> DeserializeSeed<'de> for Excess {
+        type Value = ();
+
+        fn deserialize<D: serde::Deserializer<'de>>(self, _: D) -> Result<(), D::Error> {
+            Err(D::Error::custom("invalid account display-name batch size"))
+        }
+    }
+
+    impl<'de> Visitor<'de> for AccountIds {
+        type Value = Vec<crate::store::Id>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "at most {ACCOUNT_DISPLAY_NAMES_MAX} account IDs")
+        }
+
+        fn visit_seq<S: SeqAccess<'de>>(self, mut sequence: S) -> Result<Self::Value, S::Error> {
+            let mut ids = Vec::new();
+            for _ in 0..ACCOUNT_DISPLAY_NAMES_MAX {
+                let Some(id) = sequence.next_element()? else { return Ok(ids) };
+                ids.push(id);
+            }
+            sequence.next_element_seed(Excess)?;
+            Ok(ids)
+        }
+    }
+
+    deserializer.deserialize_seq(AccountIds)
 }
 
 /// The account replica orders concurrent writes by clock, then by the original
@@ -375,6 +439,11 @@ pub enum ServiceRequest {
         clock: String,
         ciphertext: String,
     },
+    GetAccountDisplayNames {
+        operation_id: String,
+        #[serde(deserialize_with = "deserialize_display_name_ids")]
+        account_ids: Vec<crate::store::Id>,
+    },
     /// None uses direct account authority; Some requires session admission on
     /// this connection. Catalog maintenance requires the owner. Named backing
     /// reads check their entry permission independently of catalog Read.
@@ -532,6 +601,7 @@ impl ServiceRequest {
             | Self::SubscribeAccount { operation_id }
             | Self::PublishAccount { operation_id }
             | Self::PutAccountDisplayName { operation_id, .. }
+            | Self::GetAccountDisplayNames { operation_id, .. }
             | Self::SyncDatabase { operation_id, .. }
             | Self::WorldReplica { operation_id, .. }
             | Self::SubscribeReplica { operation_id, .. }
@@ -562,6 +632,9 @@ impl ServiceRequest {
             | Self::VolumePeerListen { .. }
             | Self::VolumePeerSubscribe { .. }
             | Self::VolumePeerRequest { .. } => Ok(()),
+            Self::GetAccountDisplayNames { account_ids, .. } => {
+                validate_display_name_ids(account_ids)
+            }
             Self::PutAccountDisplayName { name, record_key, clock, ciphertext, .. } => {
                 validate_id32(record_key, "invalid display name record key")?;
                 display_name_version(name, clock, ciphertext).map(|_| ())
@@ -1220,7 +1293,7 @@ mod tests {
         // Exercise every wire operation with valid fields, then corrupt each identity.
         let fixtures: Vec<serde_json::Value> =
             serde_json::from_str(include_str!("../../../tests/fixtures/ap-requests.json")).unwrap();
-        assert_eq!(fixtures.len(), 52);
+        assert_eq!(fixtures.len(), 53);
         for fixture in fixtures {
             let request: ServiceRequest = serde_json::from_value(fixture.clone()).unwrap();
             assert_eq!(request.validate(), Ok(()), "{}", fixture["op"]);

@@ -20,7 +20,9 @@ pub const OPTIONAL_FEATURES: &[&str] = &[
     WORLD_REPLICA,
     VOLUME_INVITATIONS,
     super::channel::DISPLAY_NAMES_FEATURE,
+    ACCOUNT_DISPLAY_NAMES,
 ];
+pub const ACCOUNT_DISPLAY_NAMES: &str = "account-display-names.v1";
 pub const WORLD_REPLICA: &str = "world-replica.v1";
 pub const VOLUME_INVITATIONS: &str = "volume-invitations.v1";
 const SHARED_SESSION: &str = "shared-session.v1";
@@ -105,6 +107,7 @@ pub(super) fn required_features(request: &ServiceRequest) -> &'static [&'static 
         | ServiceRequest::VolumePeerListen { .. }
         | ServiceRequest::VolumePeerSubscribe { .. }
         | ServiceRequest::VolumePeerRequest { .. } => &[VOLUME_INVITATIONS],
+        ServiceRequest::GetAccountDisplayNames { .. } => &[ACCOUNT_DISPLAY_NAMES],
         ServiceRequest::WorldReplica { .. } => &[WORLD_REPLICA],
         ServiceRequest::PublishBloblog { .. } | ServiceRequest::GetBloblog { .. } => {
             &["bloblog-append-v1"]

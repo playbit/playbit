@@ -776,6 +776,10 @@ pub enum Request {
         confirmed: bool,
         delete_local_data: bool,
     },
+    GetAccountDisplayNames {
+        account: Id,
+        account_ids: Vec<Id>,
+    },
 }
 /// A process-generation cursor for observing local state, never an authority.
 #[cfg(feature = "app-host")]

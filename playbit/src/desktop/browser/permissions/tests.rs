@@ -25,6 +25,183 @@ fn set_current(browser: &mut Browser, current: EntryDetails) {
     browser.details = Some(Arc::new(current));
 }
 
+#[gpui::test]
+fn permission_names_update_buttons_by_account_without_editing_the_acl(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (send, requests, _) = worker_queue::channel();
+    let source = volume(1);
+    let peer = Id::from_bytes([2; 16]);
+    let other = Id::from_bytes([3; 16]);
+    let browser = cx.new(|cx| Browser::new(source.clone(), send, cx));
+    browser.update(cx, |browser, cx| {
+        browser.set_account(source.owner, Some("Alice"));
+        browser.set_permission_names_online(true, cx);
+        let mut acl = configured(2);
+        acl.grants.extend(configured(3).grants);
+        let current = details(1, EntryAcl::Replace(acl.clone()));
+        set_current(browser, current.clone());
+        while requests.try_recv().is_ok() {}
+        assert_eq!(browser.permission_human_label(peer), "Account");
+        browser.permissions_panel(&current, true, cx);
+        browser.permissions_panel(&current, true, cx);
+        let Message::Request(queued) = requests.try_recv().unwrap() else { panic!("name lookup") };
+        assert!(matches!(
+            queued.request,
+            Request::GetAccountDisplayNames { account, account_ids }
+                if account == source.owner && account_ids == [peer, other]
+        ));
+        assert!(requests.try_recv().is_err());
+        let admission = queued.credit.unwrap().admission();
+
+        browser.receive_permission_names(
+            admission,
+            Some(vec![
+                AccountDisplayName { account_id: peer, display_name: "Zoë 小雨".into() },
+                AccountDisplayName { account_id: other, display_name: "Zoë 小雨".into() },
+            ]),
+            cx,
+        );
+        browser.permissions_panel(&current, true, cx);
+        assert_eq!(browser.permission_human_label(source.owner), "Alice (You)");
+        for (index, id) in [peer, other].into_iter().enumerate() {
+            let (items, _, _) =
+                browser.controls[&format!("grant-subject-{index}")].read(cx).popup_for_test();
+            let full_title = format!("Zoë 小雨 {id}");
+            assert!(matches!(&items[0], crate::runtime::MenuEntry::Action { label, .. }
+                if label == &full_title));
+        }
+        assert_eq!(browser.permissions, EntryAcl::Replace(acl));
+        assert!(!browser.dirty);
+        assert!(requests.try_recv().is_err());
+        browser.set_account(other, None);
+        browser.receive_permission_names(
+            admission,
+            Some(vec![AccountDisplayName { account_id: peer, display_name: "Old reply".into() }]),
+            cx,
+        );
+        assert_eq!(browser.permission_human_label(other), "You");
+        assert_eq!(browser.permission_human_label(peer), "Account");
+    });
+}
+
+#[gpui::test]
+fn lookup_follows_navigation_and_uses_the_local_name_when_it_arrives(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (send, requests, _) = worker_queue::channel();
+    let source = volume(1);
+    let viewer = Id::from_bytes([4; 16]);
+    let previous = Id::from_bytes([2; 16]);
+    let current = Id::from_bytes([3; 16]);
+    let browser = cx.new(|cx| Browser::new(source.clone(), send, cx));
+    browser.update(cx, |browser, cx| {
+        browser.set_account(viewer, Some("Robin"));
+        browser.set_permission_names_online(true, cx);
+        while requests.try_recv().is_ok() {}
+        let first = details(1, EntryAcl::Replace(configured(2)));
+        set_current(browser, first.clone());
+        browser.permissions_panel(&first, true, cx);
+        let Message::Request(first_lookup) = requests.try_recv().unwrap() else {
+            panic!("first name lookup");
+        };
+        let second = details(2, EntryAcl::Replace(configured(3)));
+        set_current(browser, second.clone());
+        browser.permissions_panel(&second, true, cx);
+        assert!(requests.try_recv().is_err());
+        browser.receive_permission_names(
+            first_lookup.credit.unwrap().admission(),
+            Some(vec![
+                AccountDisplayName { account_id: previous, display_name: "Previous".into() },
+                AccountDisplayName { account_id: source.owner, display_name: "Owner Alice".into() },
+            ]),
+            cx,
+        );
+        browser.permissions_panel(&second, true, cx);
+        assert_eq!(browser.permission_human_label(previous), "Account");
+        assert_eq!(browser.permission_human_label(source.owner), "Owner Alice");
+        let Message::Request(second_lookup) = requests.try_recv().unwrap() else {
+            panic!("second name lookup");
+        };
+        assert!(matches!(second_lookup.request,
+            Request::GetAccountDisplayNames { account_ids, .. } if account_ids == [current]));
+        browser.receive_permission_names(
+            second_lookup.credit.unwrap().admission(),
+            Some(vec![]),
+            cx,
+        );
+        browser.permissions_panel(&second, true, cx);
+        assert!(requests.try_recv().is_err());
+        browser.set_permission_names_online(false, cx);
+        browser.set_permission_names_online(true, cx);
+        browser.permissions_panel(&second, true, cx);
+        assert!(matches!(requests.try_recv().unwrap(), Message::Request(QueuedRequest {
+            request: Request::GetAccountDisplayNames { account_ids, .. }, ..
+        }) if account_ids == [current]));
+        let known = Arc::new(BTreeMap::from([(current, "Session name".into())]));
+        browser.set_permission_participant_names(&known, cx);
+        assert_eq!(browser.permission_human_label(current), "Session name");
+    });
+}
+
+#[gpui::test]
+fn lookup_recovers_on_readiness_and_cannot_restore_a_superseded_name(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (send, requests, _) = worker_queue::channel();
+    let source = volume(1);
+    let peer = Id::from_bytes([2; 16]);
+    let browser = cx.new(|cx| Browser::new(source.clone(), send, cx));
+    let next_admission = || {
+        let Message::Request(queued) = requests.try_recv().unwrap() else {
+            panic!("name lookup");
+        };
+        assert!(matches!(queued.request, Request::GetAccountDisplayNames { account_ids, .. }
+            if account_ids == [peer]));
+        queued.credit.unwrap().admission()
+    };
+    browser.update(cx, |browser, cx| {
+        browser.set_account(source.owner, Some("Alice"));
+        browser.set_permission_names_online(true, cx);
+        let current = details(1, EntryAcl::Replace(configured(2)));
+        set_current(browser, current.clone());
+        while requests.try_recv().is_ok() {}
+        browser.permissions_panel(&current, true, cx);
+        browser.receive_permission_names(next_admission(), None, cx);
+        assert!(!browser.permission_names.resolved.contains_key(&peer));
+        for _ in 0..4 {
+            browser.permissions_panel(&current, true, cx);
+        }
+        assert!(requests.try_recv().is_err(), "rendering does not retry failed calls");
+
+        browser.set_permission_names_online(false, cx);
+        browser.set_permission_names_online(true, cx);
+        browser.permissions_panel(&current, true, cx);
+        let labels = |name: &str| {
+            Some(vec![AccountDisplayName { account_id: peer, display_name: name.into() }])
+        };
+        browser.receive_permission_names(next_admission(), labels("Ann"), cx);
+        assert_eq!(browser.permission_human_label(peer), "Ann");
+
+        let observed = Arc::new(BTreeMap::from([(peer, "Anne".into())]));
+        let empty = Arc::new(BTreeMap::new());
+        browser.set_permission_participant_names(&observed, cx);
+        assert_eq!(browser.permission_human_label(peer), "Anne");
+        browser.set_permission_participant_names(&empty, cx);
+        assert_eq!(browser.permission_human_label(peer), "Account");
+        browser.permissions_panel(&current, true, cx);
+        let superseded = next_admission();
+        browser.set_permission_participant_names(&observed, cx);
+        browser.set_permission_participant_names(&empty, cx);
+        browser.receive_permission_names(superseded, labels("Ann"), cx);
+        assert_eq!(browser.permission_human_label(peer), "Account");
+
+        browser.permissions_panel(&current, true, cx);
+        browser.receive_permission_names(next_admission(), labels("Anne"), cx);
+        assert_eq!(browser.permission_human_label(peer), "Anne");
+    });
+}
+
 fn receipt(
     browser: &mut Browser,
     queued: QueuedRequest,

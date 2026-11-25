@@ -67,7 +67,7 @@ pub(crate) struct Transfer {
 }
 
 impl Transfer {
-    fn reads_app_display(&self) -> bool {
+    fn reads_display_metadata(&self) -> bool {
         self.developer && self.diagnostic_read
     }
 }
@@ -672,7 +672,9 @@ impl Engine {
             work,
             NetworkWork::Diagnostic(
                 Request::RejectedEntries { .. } | Request::Usage { .. } | Request::FileRead { .. }
-            ) | NetworkWork::Developer(Request::GetAppDisplay { .. })
+            ) | NetworkWork::Developer(
+                Request::GetAppDisplay { .. } | Request::GetAccountDisplayNames { .. }
+            )
         );
         let selection_only = matches!(
             work,
@@ -1042,7 +1044,7 @@ impl Engine {
             },
         );
         if transfer.kind == TransferKind::Running
-            && self.background.as_ref().is_some_and(|work| !work.reads_app_display())
+            && self.background.as_ref().is_some_and(|work| !work.reads_display_metadata())
             && let Some(progress) = self.network.progress.snapshot()
         {
             transfer.message = Some(progress.message());
@@ -1079,7 +1081,7 @@ impl Engine {
             if let Some(session) = &transfer.session {
                 self.services.store.pause_invitation(session, true)?;
             }
-            if transfer.reads_app_display() {
+            if transfer.reads_display_metadata() {
                 return Ok(());
             }
             self.transfer_result = TransferStatus {

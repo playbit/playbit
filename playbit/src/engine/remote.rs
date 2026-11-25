@@ -755,6 +755,35 @@ impl Remote {
         Id::parse(result["account_id"].as_str().ok_or("invalid recipient account response")?)
             .map_err(Into::into)
     }
+    #[cfg(feature = "app-host")]
+    pub(crate) fn get_account_display_names(
+        &mut self,
+        store: &LocalStore,
+        account_ids: Vec<Id>,
+    ) -> Result<Vec<crate::network::ap::operation::AccountDisplayName>> {
+        use crate::network::ap::operation::AccountDisplayName;
+        let request = ServiceRequest::GetAccountDisplayNames {
+            operation_id: Id::generate()?.to_string(),
+            account_ids,
+        };
+        let data = self.service_data(store, &request)?;
+        let ServiceRequest::GetAccountDisplayNames { account_ids, .. } = request else {
+            unreachable!("request constructed above");
+        };
+        let names: Vec<AccountDisplayName> = serde_json::from_value(data)?;
+        if names.len() > account_ids.len() {
+            return Err("too many account display names in reply".into());
+        }
+        for (index, name) in names.iter().enumerate() {
+            if !account_ids.contains(&name.account_id)
+                || names[..index].iter().any(|prior| prior.account_id == name.account_id)
+            {
+                return Err("unexpected account ID in display-name reply".into());
+            }
+            crate::store::account::validate_display_name(&name.display_name)?;
+        }
+        Ok(names)
+    }
     pub fn get_app(
         &mut self,
         store: &LocalStore,

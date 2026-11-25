@@ -344,7 +344,12 @@ pub(super) fn exchange_archive(
     }
     let bytes = {
         let _timing = crate::trace::Span::new("ipc.response_read");
-        codec::read(stream, codec::MAX_ARCHIVE)?
+        let limit = if matches!(request, Request::GetAccountDisplayNames { .. }) {
+            crate::network::ap::operation::ACCOUNT_DISPLAY_NAMES_RESPONSE_BYTES
+        } else {
+            codec::MAX_ARCHIVE
+        };
+        codec::read(stream, limit)?
     };
     let _timing = crate::trace::Span::new("ipc.response_decode");
     let response = Response::new(bytes)?;

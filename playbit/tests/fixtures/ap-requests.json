@@ -707,6 +707,11 @@
     "operation_id": "NCX9PNbvZtwyXe5YjATFzi"
   },
   {
+    "op": "get_account_display_names",
+    "operation_id": "1111111111111111",
+    "account_ids": ["1111111111111111", "NCX9PNbvZtwyXe5YjATFzi"]
+  },
+  {
     "op": "put_account_display_name",
     "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
     "name": "Zoë",

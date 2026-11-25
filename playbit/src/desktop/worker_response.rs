@@ -76,6 +76,8 @@ pub(super) struct WorkerResponse {
     pub(super) erased_app_volumes: Vec<crate::store::Id>,
     pub(super) volume_label: Option<crate::store::Id>,
     pub(super) browser_reply: Option<Reply>,
+    pub(super) permission_names:
+        Option<(u64, Option<Vec<crate::network::ap::operation::AccountDisplayName>>)>,
     pub(super) data_reply: Option<worker_data::DataReply>,
     pub(super) browser_failure: Option<browser::Failure>,
     pub(super) status_account: Option<crate::store::Account>,
@@ -619,6 +621,7 @@ impl WorkerResponse {
             erased_app_volumes: Vec::new(),
             volume_label: None,
             browser_reply: None,
+            permission_names: None,
             data_reply: None,
             browser_failure: None,
             status_account: None,

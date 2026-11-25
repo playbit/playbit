@@ -542,6 +542,14 @@ pub fn required(request: &R) -> Result<usize> {
             b.payloads(&[old_key.len(), new_key.len(), value.len()])?;
         }
         R::UpdateSession { session, bundle } => b.payloads(&[session.len(), bundle.len()])?,
+        R::GetAccountDisplayNames { account_ids, .. } => {
+            if account_ids.is_empty()
+                || account_ids.len() > crate::network::ap::operation::ACCOUNT_DISPLAY_NAMES_MAX
+            {
+                return Err("invalid account display-name batch size".into());
+            }
+            b.add(std::mem::size_of_val(account_ids.as_slice()))?;
+        }
         R::SelectPersonalVolumes { session: version, grants }
         | R::AddPersonalVolumes { session: version, grants } => {
             b.personal_volumes(version, grants.len())?

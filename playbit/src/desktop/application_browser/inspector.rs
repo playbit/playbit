@@ -27,6 +27,21 @@ impl State {
         account: Id,
         display_name: Option<&str>,
     ) {
+        let mut observed_names: BTreeMap<Id, (u64, &str)> = BTreeMap::new();
+        for visitor in activity.values().flat_map(|activity| &activity.participants) {
+            let observed = observed_names.entry(visitor.account).or_insert((0, ""));
+            if visitor.last_seen >= observed.0 {
+                *observed = (visitor.last_seen, &visitor.name);
+            }
+        }
+        let names: BTreeMap<_, _> = observed_names
+            .into_iter()
+            .filter(|(_, (_, name))| !name.is_empty())
+            .map(|(id, (_, name))| (id, name.to_owned()))
+            .collect();
+        if *self.participant_names != names {
+            self.participant_names = Arc::new(names);
+        }
         self.activity = sessions
             .iter()
             .map(|session| {
