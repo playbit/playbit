@@ -144,10 +144,11 @@ pub enum Key {
     VolumeUp = 125,
     VolumeDown = 126,
     Mute = 127,
+    Fn = 128,
 }
 
 impl Key {
-    pub const COUNT: usize = 128;
+    pub const COUNT: usize = 129;
 
     pub fn from_code(code: u16) -> Option<Self> {
         KEYS.get(usize::from(code)).copied()
@@ -291,6 +292,7 @@ const KEYS: [Key; Key::COUNT] = [
     Key::VolumeUp,
     Key::VolumeDown,
     Key::Mute,
+    Key::Fn,
 ];
 
 pub const KEY_NAMES: [&str; Key::COUNT] = [
@@ -422,6 +424,7 @@ pub const KEY_NAMES: [&str; Key::COUNT] = [
     "VolumeUp",
     "VolumeDown",
     "Mute",
+    "Fn",
 ];
 
 pub const SHIFT: u16 = 1;

@@ -429,7 +429,8 @@ typedef enum PBKey {
     PB_KEY_VolumeUp = 125,
     PB_KEY_VolumeDown = 126,
     PB_KEY_Mute = 127,
-    PB_KEY_COUNT = 128,
+    PB_KEY_Fn = 128,
+    PB_KEY_COUNT = 129,
 } PBKey;
 
 // Window metadata command 29 takes one little-endian mask word.

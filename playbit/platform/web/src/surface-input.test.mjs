@@ -6,12 +6,14 @@ import { combineSurfaceMotion, encodeKey, legacyCanvasEvent, observeSurface } fr
 test("logical keys, physical keys, and the C SDK share dense key assignments", () => {
     const header = readFileSync(new URL("../../../../playbit-api/include/playbit/sys/abi.h", import.meta.url), "utf8");
     const values = Object.fromEntries(Array.from(header.matchAll(/PB_KEY_(\w+) = (\d+)/g), ([, name, value]) => [name, Number(value)]));
-    assert.deepEqual(Object.values(values).sort((a, b) => a - b), Array.from({ length: 129 }, (_, i) => i));
+    const { COUNT, ...codes } = values;
+    assert.deepEqual(Object.values(codes).sort((a, b) => a - b), Array.from({ length: COUNT }, (_, i) => i));
     assert.deepEqual(encodeKey("KeyQ", "a"), [values.A, values.Q]);
     assert.deepEqual(encodeKey("ArrowRight", "ArrowRight"), [values.Right, values.Right]);
     assert.deepEqual(encodeKey("F24", "F24"), [values.F24, values.F24]);
     assert.deepEqual(encodeKey("NumpadEnter", "Enter"), [values.Enter, values.NumpadEnter]);
     assert.deepEqual(encodeKey("Unidentified", "あ"), [values.None, values.None]);
+    assert.deepEqual(encodeKey("Fn", "Fn"), [values.Fn, values.Fn]);
 });
 
 function surface(accept = () => true) {
@@ -49,6 +51,26 @@ function surface(accept = () => true) {
     });
     return { emit, delivered, input, canvas, root, control, Canvas };
 }
+
+test("Fn chords preserve logical keys, reported physical codes, and modifier state", () => {
+    const { emit, delivered, input, control } = surface();
+    input.configure(2);
+    for (const [code, physical] of [["Fn", 128], ["", 0], ["Unidentified", 0], ["ControlLeft", 65]]) {
+        const fnHeld = key => key === "Fn";
+        const arrowCode = code && code !== "Unidentified" ? "ArrowRight" : code;
+        const arrow = { key: "ArrowRight", code: arrowCode, getModifierState: fnHeld };
+        emit("keydown", control, { key: "Fn", code, getModifierState: fnHeld });
+        emit("keydown", control, arrow);
+        emit("keyup", control, arrow);
+        emit("keyup", control, { key: "Fn", code });
+        assert.deepEqual(delivered.splice(0).map(({ view, reservation }) => [
+            view.getUint16(20, true), view.getUint16(22, true), view.getUint16(16, true), view.getUint8(24), reservation,
+        ]), [
+            [128, physical, 32, 1, 1], [...encodeKey(arrowCode, arrow.key), 32, 1, 1],
+            [...encodeKey(arrowCode, arrow.key), 32, 0, -1], [128, physical, 0, 0, -1],
+        ]);
+    }
+});
 
 test("a guest window observes control input and reserves terminal edges for held input", () => {
     const { emit, delivered, input, canvas, root, control, Canvas } = surface();

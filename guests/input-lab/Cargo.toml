@@ -1,0 +1,17 @@
+[package]
+name = "input-lab"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+playbit-api = { path = "../../playbit-api", features = ["guest"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+playbit = { path = "../../playbit", default-features = false, features = ["native-runtime"] }
+
+[lints.rust]
+unsafe_code = "warn"

@@ -1,5 +1,5 @@
 // The key order is the dense PBKey enum in playbit/sys/abi.h.
-const keyNames = "None Space Quote Comma Minus Period Slash 0 1 2 3 4 5 6 7 8 9 Semicolon Equal A B C D E F G H I J K L M N O P Q R S T U V W X Y Z LeftBracket Backslash RightBracket Grave Escape Enter Tab Backspace Insert Delete Left Right Down Up PageUp PageDown Home End CapsLock LeftShift LeftCtrl LeftAlt LeftSuper MediaNext MediaPrev MediaPlay MediaStop World1 World2 ScrollLock NumLock PrintScreen Pause F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 Numpad0 Numpad1 Numpad2 Numpad3 Numpad4 Numpad5 Numpad6 Numpad7 Numpad8 Numpad9 NumpadDot NumpadDivide NumpadMultiply NumpadSubtract NumpadAdd NumpadEnter NumpadEquals NumpadClear RightShift RightCtrl RightAlt RightSuper Menu VolumeUp VolumeDown Mute".split(" ");
+const keyNames = "None Space Quote Comma Minus Period Slash 0 1 2 3 4 5 6 7 8 9 Semicolon Equal A B C D E F G H I J K L M N O P Q R S T U V W X Y Z LeftBracket Backslash RightBracket Grave Escape Enter Tab Backspace Insert Delete Left Right Down Up PageUp PageDown Home End CapsLock LeftShift LeftCtrl LeftAlt LeftSuper MediaNext MediaPrev MediaPlay MediaStop World1 World2 ScrollLock NumLock PrintScreen Pause F1 F2 F3 F4 F5 F6 F7 F8 F9 F10 F11 F12 F13 F14 F15 F16 F17 F18 F19 F20 F21 F22 F23 F24 Numpad0 Numpad1 Numpad2 Numpad3 Numpad4 Numpad5 Numpad6 Numpad7 Numpad8 Numpad9 NumpadDot NumpadDivide NumpadMultiply NumpadSubtract NumpadAdd NumpadEnter NumpadEquals NumpadClear RightShift RightCtrl RightAlt RightSuper Menu VolumeUp VolumeDown Mute Fn".split(" ");
 const keys = new Map(keyNames.map((name, index) => [name, index]));
 const legacyKeys = new Map(["Left", "Right", "Up", "Down", "Space"].map((key, i) => [keys.get(key)!, i + 1]));
 
@@ -201,7 +201,10 @@ export function observeSurface(
     const canvasTarget = (owner: EventTarget | null) => owner instanceof HTMLCanvasElement ? Number(owner.dataset.control ?? 0) : 0;
     function keyboard(event: KeyboardEvent, pressed: boolean) {
         if (!(mask & 2)) return;
-        const old = heldKeys.get(event.code);
+        // A browser can name Fn while reporting no physical code for either key in a chord.
+        const unknownCode = !event.code || event.code === "Unidentified";
+        const keyId = unknownCode && event.key === "Fn" ? "Fn" : event.code;
+        const old = heldKeys.get(keyId);
         const target = old?.target ?? (legacyKeyboard ? canvasTarget(event.target) : 0);
         const shortcut = event.altKey || event.ctrlKey || event.metaKey;
         if (pressed && ((!belongs(event) && event.target !== document.body) || event.isComposing)) return;
@@ -213,8 +216,8 @@ export function observeSurface(
         if (keyboardPacket(key, target, pressed, event.timeStamp, modifiers(event), text, pressed && !!old)) {
             if ((!legacyKeyboard || !shortcut) && event.target instanceof HTMLCanvasElement
                 && (event.code.startsWith("Arrow") || event.code === "Space")) event.preventDefault();
-            if (pressed && heldKeys.size < keyNames.length) heldKeys.set(event.code, { key, target });
-            if (!pressed) heldKeys.delete(event.code);
+            if (pressed && heldKeys.size < keyNames.length) heldKeys.set(keyId, { key, target });
+            if (!pressed) heldKeys.delete(keyId);
         }
     }
     function finishKeys(time: number, target?: number) {

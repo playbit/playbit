@@ -329,7 +329,10 @@ the canvas or window content.
 | WindowGesture | 48 | Kind, phase, two reserved zero bytes, then center x/y, pan dx/dy, relative scale and relative clockwise rotation in radians. |
 | WindowGamepad | 36 | Phase, reserved zero, `u16` control, scalar value and paired x/y. Axes are normalized to [-1, 1] with up positive. Buttons and triggers use [0, 1]. |
 
-Keyboard codes are consecutive from `None = 0` through `Mute = 127`.
+Keyboard codes are consecutive from `None = 0` through `Fn = 128`.
+On keyboards that report a standalone Fn transition, the event identifies
+the Fn key on both press and release. The source modifier mask describes
+which modifiers are held at the time of the event.
 Use `Key::COUNT` or `PB_KEY_COUNT` when indexing a table. Use committed
 `TextChanged` for editor drafts. Platform and device capabilities determine
 which raw details can be observed. The SDK types define the flags and phases.

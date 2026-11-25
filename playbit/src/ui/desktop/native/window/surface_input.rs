@@ -173,11 +173,11 @@ impl Observer {
             }
             let block = ConcreteBlock::new(move |event: *mut Object| {
                 let Ok(mut state) = state.try_borrow_mut() else { return event };
-                if state.mask != 0 && !super::popup::is_modal_active() {
-                    let from: *mut Object = msg_send![event, window];
-                    if from == native {
-                        state.event(event, view);
-                    }
+                if state.mask != 0
+                    && !super::popup::is_modal_active()
+                    && Self::targets_window(event, native)
+                {
+                    state.event(event, view);
                 }
                 event
             })
@@ -191,6 +191,23 @@ impl Observer {
             let view = msg_send![view, retain];
             let window = msg_send![native, retain];
             Some(Self { token: observer, view, window })
+        }
+    }
+
+    fn targets_window(event: *mut Object, window: *mut Object) -> bool {
+        unsafe {
+            let from: *mut Object = msg_send![event, window];
+            if !from.is_null() {
+                return from == window;
+            }
+            // AppKit can deliver Fn/Globe flags to the local monitor without a window number.
+            let kind: usize = msg_send![event, type];
+            if kind != 12 {
+                return false;
+            }
+            let code: u16 = msg_send![event, keyCode];
+            let is_key: BOOL = msg_send![window, isKeyWindow];
+            code == keys::FN_KEY_CODE && is_key == YES
         }
     }
 }
@@ -419,15 +436,18 @@ impl State {
         unsafe {
             let code: u16 = msg_send![event, keyCode];
             let device_key = physical(code);
-            if device_key == Key::None && kind == 12 {
-                return;
-            }
-            let pressed = kind == 10 || (kind == 12 && !self.held.contains_key(&code));
-            if !pressed && !self.held.contains_key(&code) {
+            let held = self.held.contains_key(&code);
+            let pressed = match (device_key, kind) {
+                (Key::Fn, 12) => source.modifiers & abi::FN != 0,
+                (Key::Fn, _) | (Key::None, 12) => return,
+                (_, 12) => !held,
+                _ => kind == 10,
+            };
+            if (!pressed && !held) || (device_key == Key::Fn && pressed == held) {
                 return;
             }
             let repeat: BOOL = if kind == 10 { msg_send![event, isARepeat] } else { false };
-            if repeat == YES && !self.held.contains_key(&code) {
+            if repeat == YES && !held {
                 return;
             }
             let mut key = device_key;
@@ -465,7 +485,7 @@ impl State {
                 if let Some((_, release)) = self.held.remove(&code) {
                     self.release(source, 0, input, release);
                 }
-            } else if repeat == YES || self.held.contains_key(&code) {
+            } else if repeat == YES || held {
                 self.send(source, 0, input, true);
             } else if let Some(release) = self.handle.as_ref().and_then(Handle::reserve_release)
                 && self.send(source, 0, input, false)
@@ -698,6 +718,44 @@ mod tests {
     use super::*;
     use playbit_api::abi::syscall::EventKind;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn fn_modifier_delivers_one_edge_per_flags_change() {
+        // Send AppKit flags to the collector without posting events to the user's keyboard.
+        let (handle, events) = Handle::fixture(1);
+        handle.object_id.store(11, Ordering::Release);
+        let mut state = State { handle: Some(handle), mask: abi::KEYBOARD, ..State::default() };
+        let send = |state: &mut State, code: u16, flags: usize| unsafe {
+            let empty: *mut Object = msg_send![class!(NSString), string];
+            let event: *mut Object = msg_send![class!(NSEvent), keyEventWithType: 12usize
+                location: NSPoint::new(0., 0.) modifierFlags: flags timestamp: 1f64
+                windowNumber: 0isize context: std::ptr::null_mut::<Object>() characters: empty
+                charactersIgnoringModifiers: empty isARepeat: false keyCode: code];
+            assert!(!event.is_null());
+            state.event(event, std::ptr::null_mut());
+        };
+        let take = || {
+            let event = events.try_recv().unwrap().input;
+            let (source, Input::Keyboard(key)) = Input::decode(event.kind, &event.data).unwrap()
+            else {
+                panic!("expected a keyboard event")
+            };
+            assert!(!key.repeat && key.text_len == 0);
+            (key.key, key.device_key, key.pressed, source.modifiers)
+        };
+        const FUNCTION: usize = 1 << 23;
+        const SHIFT: usize = 1 << 17;
+        send(&mut state, 0x3f, 0);
+        send(&mut state, 0x3f, FUNCTION);
+        send(&mut state, 0x3f, FUNCTION);
+        send(&mut state, 56, FUNCTION | SHIFT);
+        send(&mut state, 0x3f, SHIFT);
+        send(&mut state, 0x3f, SHIFT);
+        assert_eq!(take(), (Key::Fn, Key::Fn, true, abi::FN));
+        assert_eq!(take(), (Key::LeftShift, Key::LeftShift, true, abi::FN | abi::SHIFT));
+        assert_eq!(take(), (Key::Fn, Key::Fn, false, abi::SHIFT));
+        assert!(events.try_recv().is_err());
+    }
 
     #[test]
     fn mouse_edges_keep_their_buttons_and_canvas_across_layout_and_menu_changes() {

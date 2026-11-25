@@ -1,6 +1,8 @@
 //! Translate AppKit virtual key codes and logical characters.
 use playbit_api::abi::input::Key;
 
+pub(super) const FN_KEY_CODE: u16 = 0x3f; // AppKit kVK_Function (Fn/Globe).
+
 pub(super) fn physical(code: u16) -> Key {
     match code {
         0 => Key::A,
@@ -64,6 +66,7 @@ pub(super) fn physical(code: u16) -> Key {
         60 => Key::RightShift,
         61 => Key::RightAlt,
         62 => Key::RightCtrl,
+        FN_KEY_CODE => Key::Fn,
         64 => Key::F17,
         65 => Key::NumpadDot,
         67 => Key::NumpadMultiply,

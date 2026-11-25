@@ -757,15 +757,6 @@ impl Render for AppWindow {
                 }));
             }
         }
-        #[cfg(target_os = "macos")]
-        let content = content.when(mask != 0, |content| {
-            let top = if chrome.full_size_content && chrome.transparent_titlebar && !session_bar {
-                window.macos_titlebar_height()
-            } else {
-                px(0.)
-            };
-            content.child(self.raw_input.element(top))
-        });
         let content = div()
             .relative()
             .flex_1()
@@ -776,6 +767,16 @@ impl Render for AppWindow {
             .when(!viewport_canvas, |element| {
                 element.child(crate::ui::desktop::scrollbar::Scrollbars::overlay(&self.scrollbars))
             });
+        // Measure raw window coordinates against the viewport, outside the scrolling document.
+        #[cfg(target_os = "macos")]
+        let content = content.when(mask != 0, |content| {
+            let top = if chrome.full_size_content && chrome.transparent_titlebar && !session_bar {
+                window.macos_titlebar_height()
+            } else {
+                px(0.)
+            };
+            content.child(self.raw_input.element(top))
+        });
         root = if chrome.full_size_content && chrome.transparent_titlebar && !session_bar {
             let strip = div()
                 .absolute()
@@ -1981,44 +1982,49 @@ mod tests {
                 color: Color(0x277582ff),
             })],
         };
-        let with_menu = |child| ViewNode::Theme {
-            theme: Theme::light(),
-            window_background_specified: false,
-            window_style: None,
-            window_input: None,
-            legacy_canvas: 0,
-            window_size_constraints: None,
-            child: Box::new(ViewNode::ContextMenu {
-                items: vec![MenuEntry::Action {
-                    id: 2,
-                    label: "Pass".into(),
-                    icon: None,
-                    checked: None,
-                    disabled: false,
-                    destructive: false,
-                }],
-                child: Box::new(child),
-            }),
+        let with_menu = |child| ViewNode::ContextMenu {
+            items: vec![MenuEntry::Action {
+                id: 2,
+                label: "Pass".into(),
+                icon: None,
+                checked: None,
+                disabled: false,
+                destructive: false,
+            }],
+            child: Box::new(child),
         };
         for extent in [CanvasExtent::Inline, CanvasExtent::Viewport, CanvasExtent::Window] {
             let viewport = extent != CanvasExtent::Inline;
-            let window =
-                cx.add_window(|_, cx| AppWindow::new(None, Some(with_menu(canvas(extent))), cx));
+            let child = canvas(extent);
+            let view = ViewNode::Theme {
+                theme: Theme::light(),
+                window_background_specified: false,
+                window_style: None,
+                window_input: Some(playbit_api::abi::input::ALL),
+                legacy_canvas: 0,
+                window_size_constraints: None,
+                child: Box::new(if viewport { with_menu(child) } else { child }),
+            };
+            let window = cx.add_window(|_, cx| AppWindow::new(None, Some(view), cx));
             let visual = gpui::VisualTestContext::from_window(window.into(), cx);
-            visual.simulate_resize(gpui::size(px(640.), px(565.)));
+            visual.simulate_resize(gpui::size(px(900.), px(800.)));
             cx.run_until_parked();
             let handle =
                 window.update(cx, |owner, _, cx| owner.scrollbars.read(cx).handle()).unwrap();
             assert_eq!(handle.max_offset(), gpui::size(px(0.), px(0.)));
             // Resize repeatedly without delivering a replacement scene. A
             // document measures overflow, while the viewport canvas clips it.
-            for size in [gpui::size(px(420.), px(320.)), gpui::size(px(370.), px(260.))] {
-                visual.simulate_resize(size);
+            for (width, height, overflow_x, overflow_y) in [
+                (900., 320., false, true),
+                (420., 800., true, false),
+                (370., 260., true, true),
+                (900., 800., false, false),
+            ] {
+                visual.simulate_resize(gpui::size(px(width), px(height)));
                 cx.run_until_parked();
-                assert_eq!(handle.max_offset().height == px(0.), viewport);
-                if viewport {
-                    assert_eq!(handle.max_offset().width, px(0.));
-                }
+                let max = handle.max_offset();
+                assert_eq!(max.width > px(0.), !viewport && overflow_x);
+                assert_eq!(max.height > px(0.), !viewport && overflow_y);
             }
         }
     }
