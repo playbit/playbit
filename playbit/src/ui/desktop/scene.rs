@@ -1,4 +1,6 @@
 //! Reusable GPUI scene renderer. Owns controls/drafts; no engine, IPC or session.
+mod checkbox_list;
+
 use super::{
     UI_CONTROL_TRACKING, canvas::canvas_element, controls, segmented, text_accessibility_node,
     text_editor, zoom,
@@ -261,7 +263,9 @@ impl Scene {
                     })
                     .clone();
                 bars.update(cx, |bars, _| bars.set_complex_background(*complex_background));
-                let content = self.render_node(child, theme, window, cx, false);
+                let content = self
+                    .virtual_checkbox_column(child, theme, window, cx)
+                    .unwrap_or_else(|| self.render_node(child, theme, window, cx, false));
                 div()
                     .relative()
                     .flex_1()
@@ -1179,5 +1183,154 @@ mod rendering_tests {
                 assert_eq!(handle.offset(), gpui::point(px(0.), px(0.)));
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn virtual_checkboxes_keep_offscreen_tab_stops_and_accessibility_actions(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::accesskit::{Action, ActionRequest, Role, Toggled, TreeId};
+        use playbit_api::ui::CheckState;
+
+        let make_view = |count: u32| ViewNode::Scroll {
+            id: 1,
+            complex_background: false,
+            child: Box::new(ViewNode::Column(
+                (10..10 + count)
+                    .map(|id| ViewNode::Checkbox {
+                        id,
+                        label: format!("Task {id}"),
+                        state: if id == 72 { CheckState::Mixed } else { CheckState::Off },
+                        disabled: id == 11,
+                    })
+                    .collect(),
+            )),
+        };
+        let activated = Rc::new(Cell::new(None));
+        let log = activated.clone();
+        let window = cx.add_window(|window, _| {
+            window.activate_window();
+            TestScene {
+                scene: Scene::new(Arc::new(|_| true), Rc::new(move |id, _| log.set(Some(id)))),
+                view: make_view(192),
+            }
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.simulate_resize(gpui::size(px(400.), px(140.)));
+        visual.run_until_parked();
+        let (handle, target, retired) = window
+            .update(&mut visual, |owner, window, cx| {
+                let handle = owner.scene.scrolls[&1].read(cx).handle();
+                assert_eq!(handle.max_offset().height, px(192. * 36. - 12. - 140.));
+                let nodes: Vec<_> = window
+                    .accessibility_nodes_for_test()
+                    .filter(|(_, node)| node.role() == Role::CheckBox)
+                    .collect();
+                assert_eq!(nodes.len(), 192);
+                assert_eq!(nodes[0].1.label(), Some("Task 10"));
+                assert_eq!(nodes[191].1.label(), Some("Task 201"));
+                assert!(nodes[1].1.is_disabled());
+                assert!(nodes[0].1.bounds().unwrap().height() > 0.);
+                assert_eq!(nodes[62].1.bounds().unwrap().height(), 0.);
+                assert_eq!(nodes[62].1.toggled(), Some(Toggled::Mixed));
+                (handle, nodes[62].0, nodes[191].0)
+            })
+            .unwrap();
+        let ax = |action, target_node| ActionRequest {
+            action,
+            target_tree: TreeId::ROOT,
+            target_node,
+            data: None,
+        };
+        visual.simulate_accessibility_action(ax(Action::ScrollIntoView, target));
+        assert!(handle.offset().y < px(-2000.));
+        window
+            .update(&mut visual, |owner, window, cx| {
+                assert!(!owner.scene.controls[&72].read(cx).focused(window));
+                let (_, node) =
+                    window.accessibility_nodes_for_test().find(|(id, _)| *id == target).unwrap();
+                assert_eq!(node.label(), Some("Task 72"));
+                assert!(node.bounds().unwrap().height() > 0.);
+            })
+            .unwrap();
+
+        // An offscreen native focus action mounts the same control before the
+        // next key event. Both Tab directions must cross the viewport boundary.
+        visual.simulate_accessibility_action(ax(Action::Focus, retired));
+        window
+            .update(&mut visual, |owner, window, cx| {
+                assert!(owner.scene.controls[&201].read(cx).focused(window));
+                assert_eq!(handle.offset().y, -handle.max_offset().height);
+                window.focus_next();
+                owner.scene.update_keyboard_focus_after_tab(window, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        assert_eq!(handle.offset().y, px(0.));
+        window
+            .update(&mut visual, |owner, window, cx| {
+                assert!(owner.scene.controls[&10].read(cx).focused(window));
+                window.focus_next();
+                owner.scene.update_keyboard_focus_after_tab(window, cx);
+                assert!(owner.scene.controls[&12].read(cx).focused(window));
+                window.focus_prev();
+                window.focus_prev();
+                owner.scene.update_keyboard_focus_after_tab(window, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        assert_eq!(handle.offset().y, -handle.max_offset().height);
+        visual.simulate_keystrokes("space");
+        visual.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("space").unwrap(),
+        });
+        assert_eq!(activated.get(), Some(201));
+
+        // Manual scrolling can hide the keyboard target without changing it.
+        window
+            .update(&mut visual, |_, window, _| {
+                handle.set_offset(gpui::point(px(0.), px(0.)));
+                window.refresh();
+            })
+            .unwrap();
+        visual.run_until_parked();
+        assert_eq!(handle.offset().y, px(0.));
+        activated.set(None);
+        visual.simulate_keystrokes("space");
+        visual.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("space").unwrap(),
+        });
+        assert_eq!(activated.get(), Some(201));
+
+        // The first checkbox must receive its release even if it was scrolled
+        // away between press and release.
+        let position = gpui::point(px(8.), px(12.));
+        let wheel = |delta| gpui::ScrollWheelEvent {
+            position,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(delta))),
+            ..Default::default()
+        };
+        activated.set(None);
+        visual.simulate_mouse_down(position, MouseButton::Left, Default::default());
+        visual.simulate_event(wheel(-800.));
+        assert_eq!(handle.offset().y, px(-800.));
+        visual.simulate_mouse_up(position, MouseButton::Left, Default::default());
+        visual.simulate_event(wheel(800.));
+        visual.simulate_mouse_up(position, MouseButton::Left, Default::default());
+        assert_eq!(activated.get(), None);
+
+        window
+            .update(&mut visual, |owner, _, cx| {
+                owner.view = make_view(191);
+                owner.scene.apply(&owner.view, InputAck::default(), cx).unwrap();
+                cx.notify();
+            })
+            .unwrap();
+        visual.run_until_parked();
+        activated.set(None);
+        visual.simulate_accessibility_action(ax(Action::Click, retired));
+        assert_eq!(activated.get(), None);
+        visual.simulate_accessibility_action(ax(Action::Click, target));
+        assert_eq!(activated.get(), Some(72));
     }
 }

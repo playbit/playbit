@@ -834,3 +834,136 @@ fn vertical_column_rails_scroll_their_own_viewports(cx: &mut gpui::TestAppContex
         draw(&mut visual);
     }
 }
+
+#[gpui::test]
+fn offscreen_app_browser_rows_keep_keyboard_order_and_accessibility(cx: &mut gpui::TestAppContext) {
+    use gpui::accesskit::{Action, ActionRequest, NodeId, TreeId};
+
+    let (host, window, _requests) = scope(cx);
+    host.update(cx, |host, cx| {
+        let template = host.applications.catalog[0].clone();
+        let session_row = host.sessions[0].clone();
+        let sessions: Vec<_> = (1..=48)
+            .map(|index| Session {
+                id: crate::identifier::encode(&[index; 32]),
+                ..template.clone()
+            })
+            .collect();
+        host.sessions = sessions
+            .iter()
+            .enumerate()
+            .map(|(index, session)| SessionRow {
+                id: session.id.clone(),
+                reference: crate::identifier::encode(&[index as u8 + 1; 16]),
+                ..session_row.clone()
+            })
+            .collect();
+        let session = sessions[0].clone();
+        host.apply_application_catalog(sessions, cx);
+        assert!(host.select_application_target(Target::Session(session.id.clone()), cx));
+        host.applications.owners_session = Some(session.id.clone());
+        host.applications.owners = (1..=48)
+            .map(|index| {
+                let id = Id::from_bytes([index; 16]);
+                LaunchOwner {
+                    instance: crate::engine::session_instance::SessionInstance {
+                        id,
+                        launch_request: id,
+                        account: session.creator,
+                        session: session.id.clone(),
+                        build: session.resolved_build_id.clone(),
+                        root: session.root_volume,
+                        extra_volumes: Vec::new(),
+                        host_mounts: Box::new([]),
+                        restore_host_mounts: false,
+                        owner_generation: 1,
+                        state: InstanceState::Owned,
+                    },
+                    process: None,
+                    presentation: 1,
+                }
+            })
+            .collect();
+        cx.notify();
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.simulate_resize(gpui::size(px(1200.), px(520.)));
+    visual.update(|window, _| window.activate_window());
+    draw(&mut visual);
+    let ax = |action, target_node| ActionRequest {
+        action,
+        target_node,
+        target_tree: TreeId::ROOT,
+        data: None,
+    };
+
+    // Exercise instances first. Selecting another session subsequently replaces
+    // the instance column and must retire its accessibility actions.
+    let mut retired_instance = None;
+    for column in [2, 1] {
+        let (handle, controls) = host.read_with(&visual, |host, cx| {
+            let bars = if column == 2 {
+                &host.applications.instances_scrolling
+            } else {
+                &host.applications.sessions_scrolling
+            };
+            let controls: Vec<_> = host.applications.columns[column]
+                .iter()
+                .filter(|row| matches!(row.target, Target::Session(_) | Target::Instance(_)))
+                .map(|row| host.navigation_controls[&row.key].clone())
+                .collect();
+            assert_eq!(controls.len(), 48);
+            (bars.as_ref().expect("list viewport").read(cx).handle(), controls)
+        });
+        let node_id = |index: usize| NodeId(controls[index].entity_id().as_u64() * 2);
+        let frame_height = |visual: &mut gpui::VisualTestContext, index| {
+            visual.update(|window, _| {
+                window
+                    .accessibility_nodes_for_test()
+                    .find(|(id, _)| *id == node_id(index))
+                    .expect("row stays in accessibility tree")
+                    .1
+                    .bounds()
+                    .expect("row bounds")
+                    .height()
+            })
+        };
+        assert!(frame_height(&mut visual, 0) > 0.);
+        assert_eq!(frame_height(&mut visual, 30), 0.);
+        visual.simulate_accessibility_action(ax(Action::ScrollIntoView, node_id(30)));
+        draw(&mut visual);
+        assert!(handle.offset().y < px(-700.));
+        assert!(frame_height(&mut visual, 30) > 0.);
+        visual.update(|window, cx| assert!(!controls[30].read(cx).focused(window)));
+
+        handle.set_offset(gpui::Point::default());
+        draw(&mut visual);
+        assert_eq!(frame_height(&mut visual, 30), 0.);
+        visual.simulate_accessibility_action(ax(Action::Focus, node_id(30)));
+        draw(&mut visual);
+        visual.update(|window, cx| assert!(controls[30].read(cx).focused(window)));
+        assert!(frame_height(&mut visual, 30) > 0.);
+        for (key, index) in [("tab", 31), ("shift-tab", 30), ("down", 31)] {
+            handle.set_offset(gpui::Point::default());
+            draw(&mut visual);
+            assert_eq!(frame_height(&mut visual, index), 0.);
+            visual.simulate_keystrokes(key);
+            draw(&mut visual);
+            visual.update(|window, cx| assert!(controls[index].read(cx).focused(window)));
+            assert!(handle.offset().y < px(-700.));
+            assert!(frame_height(&mut visual, index) > 0.);
+        }
+        if column == 2 {
+            retired_instance = Some(node_id(31));
+        }
+    }
+    let retired_instance = retired_instance.expect("instance from the first session");
+    visual.update(|window, _| {
+        assert!(window.accessibility_nodes_for_test().all(|(id, _)| id != retired_instance))
+    });
+    visual.simulate_accessibility_action(ax(Action::Focus, retired_instance));
+    host.read_with(&visual, |host, _| {
+        assert_eq!(host.selected_session_id(), Some(crate::identifier::encode(&[32; 32]).as_str()));
+        assert!(host.applications.instance.is_none());
+    });
+}

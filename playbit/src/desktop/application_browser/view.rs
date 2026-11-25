@@ -1,7 +1,7 @@
 //! App, session, logical scope and instance columns reuse native controls and Browser.
 use super::scrolling::vertical_viewport;
 use super::*;
-use crate::ui::desktop::zoom::length as ui;
+use crate::ui::desktop::zoom::{length as ui, scaled};
 
 impl Shell {
     pub(super) fn application_text(
@@ -262,7 +262,8 @@ impl Shell {
             .when(!self.sidebar_volumes && app.can_open, |header| {
                 header.child(self.application_toggle(busy, cx))
             });
-        let mut sessions = list("application-sessions");
+        let row_height = scaled(window, 32.);
+        let mut session_rows = Vec::with_capacity(app.sessions.len() + app.invitations.len());
         for id in &app.sessions {
             let title = self.session_list_title(id, &app.sessions);
             let control = self.application_row(
@@ -302,7 +303,7 @@ impl Shell {
                     }));
                 });
             }
-            sessions = sessions.child(div().h(ui(32.)).child(control));
+            session_rows.push(control);
         }
         if !self.sidebar_volumes {
             for (session, root_name) in &app.invitations {
@@ -318,8 +319,15 @@ impl Shell {
                     false,
                     cx,
                 );
-                sessions = sessions.child(div().h(ui(32.)).child(control));
+                session_rows.push(control);
             }
+        }
+        let mut sessions = list("application-sessions");
+        if self.sidebar_volumes {
+            sessions =
+                sessions.children(session_rows.into_iter().map(|row| div().h(ui(32.)).child(row)));
+        } else if !session_rows.is_empty() {
+            sessions = sessions.child(controls::virtual_rows(session_rows, row_height, px(0.)));
         }
         if app.can_open {
             sessions =
@@ -393,7 +401,7 @@ impl Shell {
             Vec::new()
         };
         if !self.sidebar_volumes {
-            instances = self.instance_rows(instances, &session, &owners, cx);
+            instances = self.instance_rows(instances, &session, &owners, row_height, cx);
             instances = instances.child(self.application_section(
                 "application-session-data",
                 "Session data",
@@ -543,8 +551,10 @@ impl Shell {
         mut instances: gpui::Stateful<gpui::Div>,
         session: &Session,
         owners: &[LaunchOwner],
+        row_height: gpui::Pixels,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
+        let mut rows = Vec::with_capacity(owners.len());
         for (index, owner) in owners.iter().enumerate() {
             let id = owner.instance.id;
             let row = self.application_row(
@@ -573,9 +583,11 @@ impl Shell {
                     });
                 }));
             });
-            instances = instances.child(div().h(ui(32.)).child(row));
+            rows.push(row);
         }
-        if owners.is_empty() {
+        if !rows.is_empty() {
+            instances = instances.child(controls::virtual_rows(rows, row_height, px(0.)));
+        } else {
             let text = if let Some(error) = &self.applications.instance_error {
                 error.clone()
             } else if self.applications.refreshing {

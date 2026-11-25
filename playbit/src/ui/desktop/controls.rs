@@ -15,9 +15,13 @@ mod navigation;
 mod rename;
 mod render;
 mod session_placeholder;
+mod virtual_list;
+
+pub(crate) use virtual_list::virtual_rows;
 
 pub const MAX_CONTROLS: usize = 256;
 pub const MAX_LABEL_BYTES: usize = 1024 * 1024;
+const STANDARD_HEIGHT: f32 = 24.;
 pub(super) const UPDATE_GREEN: u32 = 0x15bd55;
 pub type Activate = Rc<dyn Fn(u32, &mut gpui::App)>;
 pub type ContextMenu = Rc<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut gpui::App)>;
@@ -63,9 +67,13 @@ pub fn element(
         lines.iter().fold(px(0.), |width, line| width.max(line.unwrapped_layout.width).ceil())
             + zoom::pixels(window, 24.);
     let mut layout =
-        div().w(width).min_w(zoom::pixels(window, 24.)).max_w_full().h(zoom::pixels(window, 24.));
+        div().w(width).min_w(zoom::pixels(window, 24.)).max_w_full().h(checkbox_height(window));
     layout.style().align_self = Some(gpui::AlignSelf::FlexStart);
     gpui::AnyView::from(control.clone()).cached(layout.style().clone()).into_any_element()
+}
+
+pub(super) fn checkbox_height(window: &Window) -> Pixels {
+    zoom::pixels(window, STANDARD_HEIGHT)
 }
 
 pub struct Assets;
@@ -750,6 +758,12 @@ impl Control {
     }
     pub fn focused(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
+    }
+    pub(super) fn has_pointer_press(&self) -> bool {
+        self.press.pointer
+    }
+    pub(super) fn register_tab_stop(&self, window: &mut Window) {
+        window.register_tab_stop(&self.focus);
     }
     #[cfg(any(test, feature = "desktop"))]
     pub(crate) fn keyboard_focus_visible(&self, window: &Window) -> bool {

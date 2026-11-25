@@ -849,6 +849,12 @@ impl VisualTestContext {
         self.background_executor.run_until_parked();
     }
 
+    /// Dispatch a native accessibility request to the completed window frame.
+    pub fn simulate_accessibility_action(&mut self, request: accesskit::ActionRequest) {
+        self.update(|window, cx| window.dispatch_accessibility_action(request, cx));
+        self.background_executor.run_until_parked();
+    }
+
     /// Simulates the user blurring the window.
     pub fn deactivate_window(&mut self) {
         if Some(self.window) == self.test_platform.active_window() {

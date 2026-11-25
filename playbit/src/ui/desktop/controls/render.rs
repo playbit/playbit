@@ -62,8 +62,9 @@ impl Render for Control {
             gpui::canvas(
                 move |bounds, window, cx| {
                     if let Some(entity) = entity.upgrade() {
-                        entity
-                            .update(cx, |this, cx| this.publish_accessibility(bounds, window, cx));
+                        entity.update(cx, |this, cx| {
+                            this.publish_accessibility(bounds, true, window, cx)
+                        });
                     }
                 },
                 |_, _, _, _| {},
@@ -723,7 +724,7 @@ impl Control {
                 } else if self.navigation.is_some() {
                     32.
                 } else {
-                    24.
+                    STANDARD_HEIGHT
                 },
                 |(_, height)| height,
             )))
@@ -994,6 +995,9 @@ impl Control {
         } else {
             node.add_action(Action::Click);
             node.add_action(Action::Focus);
+            if self.can_scroll_into_view() {
+                node.add_action(Action::ScrollIntoView);
+            }
         }
         node
     }
@@ -1019,15 +1023,22 @@ impl Control {
         }
     }
 
-    fn publish_accessibility(
+    pub(in crate::ui::desktop) fn publish_accessibility(
         &mut self,
         bounds: Bounds<Pixels>,
+        mounted: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         use gpui::accesskit::NodeId;
-        self.bounds = Some(bounds);
-        let node = self.accessibility_node(bounds);
+        self.bounds = mounted.then_some(bounds);
+        // Keep offscreen rows discoverable without giving them a hit target
+        // outside the scroll viewport. Reveal uses the actual row geometry.
+        let node = self.accessibility_node(if mounted {
+            bounds
+        } else {
+            Bounds::new(bounds.origin, Default::default())
+        });
         let focused = !self.disabled && self.focus.is_focused(window);
         if std::mem::take(&mut self.accessibility_scroll) {
             window.request_autoscroll(bounds.dilate(zoom::pixels(window, 8.)));
@@ -1064,8 +1075,16 @@ impl Control {
                 self.accessibility_scroll = true;
                 cx.notify();
             }
+            Action::ScrollIntoView if self.can_scroll_into_view() => {
+                self.accessibility_scroll = true;
+                cx.notify();
+            }
             _ => {}
         }
+    }
+
+    fn can_scroll_into_view(&self) -> bool {
+        matches!(self.kind, Kind::Checkbox(_)) || self.navigation.is_some()
     }
 }
 

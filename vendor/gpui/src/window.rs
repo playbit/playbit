@@ -1661,6 +1661,15 @@ impl Window {
         }
     }
 
+    /// Register a keyboard stop during paint, in traversal order. A virtual
+    /// list can register an unmounted row here and mount it when focused.
+    pub fn register_tab_stop(&mut self, handle: &FocusHandle) {
+        self.invalidator.debug_assert_paint();
+        if !self.input_disabled {
+            self.next_frame.tab_stops.insert(handle);
+        }
+    }
+
     /// Accessor for the text system.
     pub fn text_system(&self) -> &Arc<WindowTextSystem> {
         &self.text_system
