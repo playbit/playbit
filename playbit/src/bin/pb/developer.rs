@@ -962,7 +962,15 @@ fn source_watch(
         artifact.parent().and_then(Path::parent).and_then(Path::parent)
     }
     .ok_or("invalid build artifact path")?;
-    Ok(Some(crate::watch::SourceWatch::start(directory, &artifact, output_directory, profile)?))
+    let installation =
+        playbit::engine::installation::Installation::for_executable(&std::env::current_exe()?)?;
+    Ok(Some(crate::watch::SourceWatch::start(
+        directory,
+        &artifact,
+        output_directory,
+        profile,
+        installation.as_ref(),
+    )?))
 }
 
 #[cfg(target_os = "macos")]

@@ -1,16 +1,20 @@
 //! Native source notifications. The callback only coalesces bounded work; builds
 //! and service calls stay on the CLI thread, independent of the AppKit runloop.
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use playbit::engine::Result;
+use playbit::engine::{Result, installation::Installation};
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions, TryLockError},
     io::Read,
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex},
+    sync::{Arc, Mutex},
     time::Instant,
 };
+
+#[path = "watch_wake.rs"]
+mod wake;
+use wake::Wake;
 
 const SOURCE: u8 = 1;
 const ARTIFACT: u8 = 2;
@@ -30,7 +34,7 @@ struct Work {
 
 struct Pending {
     work: Mutex<Option<Work>>,
-    wake: Condvar,
+    wake: Wake,
 }
 impl Pending {
     fn signal(&self, flags: u8, paths: Option<Paths>) {
@@ -55,9 +59,11 @@ impl Pending {
                     pending.paths = None;
                 }
             }
-            None => *work = Some(Work { flags, received: Instant::now(), paths }),
+            None => {
+                *work = Some(Work { flags, received: Instant::now(), paths });
+                self.wake.source_ready();
+            }
         }
-        self.wake.notify_one();
     }
 }
 
@@ -141,6 +147,10 @@ pub(super) struct SourceWatch {
     artifact_state: Option<FileState>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Playbit is being updated")]
+pub(super) struct UpdateRequested;
+
 struct Lease(File);
 impl Drop for Lease {
     fn drop(&mut self) {
@@ -210,6 +220,7 @@ impl SourceWatch {
         artifact: &Path,
         output_directory: &Path,
         profile: &Path,
+        installation: Option<&Installation>,
     ) -> Result<Self> {
         let source = source.canonicalize()?;
         let artifact = std::path::absolute(artifact)?;
@@ -227,9 +238,10 @@ impl SourceWatch {
         let watch_source = source.clone();
         let watch_target = target.clone();
         let watch_artifact = artifact.clone();
-        let pending = Arc::new(Pending { work: Mutex::new(None), wake: Condvar::new() });
-        let signal = pending.clone();
         let lease = lease(profile)?;
+        let interrupt = installation.map(Installation::run_interrupt).transpose()?;
+        let pending = Arc::new(Pending { work: Mutex::new(None), wake: Wake::new(interrupt)? });
+        let signal = pending.clone();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<Event>| match event {
                 Ok(event) => {
@@ -255,14 +267,24 @@ impl SourceWatch {
         if !watch_target.starts_with(&watch_source) {
             watcher.watch(&watch_target, RecursiveMode::Recursive)?;
         }
-        Ok(Self {
+        let watch = Self {
             _watcher: watcher,
             _lease: lease,
             pending,
             source_state: SourceState::default(),
             artifact: watch_artifact,
             artifact_state: None,
-        })
+        };
+        // Check after subscribing so a concurrent installer cannot be missed.
+        watch.check_update()?;
+        Ok(watch)
+    }
+
+    fn check_update(&self) -> Result<()> {
+        if self.pending.wake.update_requested()? {
+            return Err(UpdateRequested.into());
+        }
+        Ok(())
     }
 
     pub fn record_artifact(&mut self) -> Result<()> {
@@ -273,16 +295,12 @@ impl SourceWatch {
 
     pub fn next(&mut self) -> Result<Change> {
         loop {
-            let mut work = self
-                .pending
-                .wake
-                .wait_while(self.pending.work.lock().expect("mutex is not poisoned"), |w| {
-                    w.is_none()
-                })
-                .expect("the pending-work mutex is not poisoned");
-            let Work { flags, received, paths } =
-                work.take().expect("the condition variable predicate requires pending work");
-            drop(work);
+            self.check_update()?;
+            let work = self.pending.work.lock().expect("mutex is not poisoned").take();
+            let Some(Work { flags, received, paths }) = work else {
+                self.pending.wake.wait(None)?;
+                continue;
+            };
             if flags & FAILED != 0 {
                 return Err("Source watching failed; the running app is retained. \
                     Run pb run again to resume watching."
@@ -344,7 +362,7 @@ mod tests {
 
     #[test]
     fn coalescing_retains_edits_during_a_build_and_overflow_requires_rescan() {
-        let pending = Pending { work: Mutex::new(None), wake: Condvar::new() };
+        let pending = Pending { work: Mutex::new(None), wake: Wake::new(None).unwrap() };
         let paths = || Paths::from([(PathBuf::from("app.ml"), false)]);
         pending.signal(SOURCE, Some(paths()));
         let first = pending.work.lock().unwrap().take().unwrap();
@@ -396,7 +414,7 @@ mod tests {
 
     #[test]
     fn edits_coalesce_and_watch_capacity_is_released_by_lease_drop() {
-        let pending = Pending { work: Mutex::new(None), wake: Condvar::new() };
+        let pending = Pending { work: Mutex::new(None), wake: Wake::new(None).unwrap() };
         for _ in 0..100 {
             pending.signal(SOURCE, None);
             pending.signal(ARTIFACT, Some(Paths::new()));
@@ -465,31 +483,70 @@ mod tests {
             &artifact,
             &directory.path().join("target"),
             &directory.path().join("profile"),
+            None,
         )
         .unwrap();
         let started = Instant::now();
         fs::write(source.join("edit.tmp"), "new source").unwrap();
         fs::rename(source.join("edit.tmp"), source.join("app.rs")).unwrap();
-        let (mut work, deadline) = watcher
-            .pending
-            .wake
-            .wait_timeout_while(watcher.pending.work.lock().unwrap(), Duration::from_secs(5), |w| {
-                w.is_none()
-            })
-            .expect("the pending-work mutex is not poisoned");
-        assert!(!deadline.timed_out(), "native source event was not delivered");
-        assert_ne!(work.take().unwrap().flags & SOURCE, 0);
-        drop(work);
+        let wait_for_work = |flags| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let work = watcher.pending.work.lock().unwrap().take();
+                if work.is_some_and(|work| work.flags & flags != 0) {
+                    break;
+                }
+                assert_eq!(
+                    watcher.pending.wake.wait(Some(deadline)).unwrap(),
+                    Some(libc::EVFILT_USER)
+                );
+            }
+        };
+        wait_for_work(SOURCE);
         playbit::diagnostic!("native atomic-save delivery_us={}", started.elapsed().as_micros());
         fs::write(&artifact, "external build").unwrap();
-        let (mut work, deadline) = watcher
-            .pending
-            .wake
-            .wait_timeout_while(watcher.pending.work.lock().unwrap(), Duration::from_secs(5), |w| {
-                w.as_ref().is_none_or(|work| work.flags & ARTIFACT == 0)
-            })
-            .unwrap();
-        assert!(!deadline.timed_out(), "external artifact event was not delivered");
-        assert_ne!(work.take().unwrap().flags & ARTIFACT, 0);
+        wait_for_work(ARTIFACT);
+    }
+
+    #[test]
+    fn installer_interrupts_an_idle_source_watch_and_allows_it_to_restart() {
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let source = root.join("source");
+        std::fs::create_dir(&source).unwrap();
+        let installation =
+            Installation { app: root.join("Playbit.app"), state: root.join("state") };
+        let start = || {
+            SourceWatch::start(
+                &source,
+                &source.join("app.wasm"),
+                &source,
+                &root.join("profile"),
+                Some(&installation),
+            )
+        };
+        let mut watcher = start().unwrap();
+        let request = installation.interrupt_runs().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match watcher.pending.wake.wait(Some(deadline)).unwrap() {
+                Some(libc::EVFILT_VNODE) => break,
+                Some(libc::EVFILT_USER) => continue,
+                _ => panic!("installer did not wake the idle watcher"),
+            }
+        }
+        let error = watcher.next().err().expect("watcher should stop for the update");
+        assert!(error.is::<UpdateRequested>());
+        assert_eq!(error.to_string(), "Playbit is being updated");
+        drop(watcher);
+
+        let error = start().err().expect("a watcher started during the update");
+        assert!(error.is::<UpdateRequested>());
+        drop(request);
+        // A left-behind pulse carries no authority after the installer releases
+        // the lock, including if the installer process stopped unexpectedly.
+        assert!(start().is_ok());
     }
 }

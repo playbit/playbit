@@ -267,7 +267,9 @@ fn wait_readable(fd: &impl std::os::fd::AsRawFd, timeout: Duration) -> Result<()
 }
 
 fn replace(installation: &Installation) -> Result<()> {
+    let interrupt = installation.interrupt_runs()?;
     let _exclusive = installation.exclusive()?;
+    drop(interrupt);
     let _operation = installation.operation()?;
     for profile in installation.profiles()? {
         let channel = crate::engine::profile::for_profile(&profile)?;

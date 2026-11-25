@@ -35,6 +35,11 @@ use std::{
 };
 fn main() {
     if let Err(error) = run() {
+        #[cfg(target_os = "macos")]
+        if error.is::<watch::UpdateRequested>() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
         playbit::diagnostic!(
             "pb: error: {}",
             playbit::engine::failure::cli_message(error.as_ref())

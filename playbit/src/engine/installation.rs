@@ -18,6 +18,7 @@ use std::{
 
 const MAX_PROFILES: usize = 64;
 const MAX_REGISTRY: u64 = 320 * 1024;
+const RUN_INTERRUPT: &str = "run-interrupt.lock";
 pub const MAX_PLIST: u64 = 64 * 1024;
 pub const LOCATION_ERROR: &str =
     "Automatic updates require a writable, user-owned app in /Applications or ~/Applications.";
@@ -30,6 +31,31 @@ pub struct Installation {
 
 pub struct Lease {
     _file: File,
+}
+
+pub struct RunInterrupt {
+    file: File,
+}
+
+impl std::os::fd::AsFd for RunInterrupt {
+    fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        std::os::fd::AsFd::as_fd(&self.file)
+    }
+}
+
+impl RunInterrupt {
+    pub fn requested(&self) -> Result<bool> {
+        // An installer owns the exclusive lock only while it is trying to cut
+        // over. A delayed file notification or installer crash is harmless.
+        match self.file.try_lock_shared() {
+            Ok(()) => {
+                self.file.unlock()?;
+                Ok(false)
+            }
+            Err(TryLockError::WouldBlock) => Ok(true),
+            Err(TryLockError::Error(error)) => Err(error.into()),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -219,6 +245,21 @@ impl Installation {
 
     pub fn try_installer(&self) -> Result<Option<Lease>> {
         self.lock("installer.lock", LockMode::TryExclusive)
+    }
+
+    pub fn run_interrupt(&self) -> Result<RunInterrupt> {
+        self.open()?;
+        Ok(RunInterrupt { file: self.file(RUN_INTERRUPT)? })
+    }
+
+    pub fn interrupt_runs(&self) -> Result<Lease> {
+        self.open()?;
+        let file = self.file(RUN_INTERRUPT)?;
+        file.lock()?;
+        // The metadata change wakes the vnode observer while this descriptor
+        // stays open. Only the lock carries state.
+        file.set_modified(std::time::SystemTime::now())?;
+        Ok(Lease { _file: file })
     }
 
     pub fn file(&self, name: &str) -> Result<File> {
