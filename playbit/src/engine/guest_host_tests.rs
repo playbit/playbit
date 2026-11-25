@@ -56,8 +56,14 @@ fn fixture() -> (tempfile::TempDir, UnixListener, GuestHost, Inbox, mpsc::Receiv
     (directory, listener, host, inbox, receive)
 }
 fn receive_request(listener: &UnixListener) -> (std::os::unix::net::UnixStream, Request) {
+    let timeout = Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + timeout;
+    assert!(
+        crate::engine::readiness::wait_readable(listener, deadline).unwrap(),
+        "guest IPC request timed out"
+    );
     let (mut stream, _) = listener.accept().unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.set_read_timeout(Some(timeout)).unwrap();
     let bytes = ipc::read(&mut stream).unwrap();
     let archived = codec::access::<ArchivedRequest>(&bytes).unwrap();
     let request = rkyv::api::low::deserialize::<Request, rkyv::rancor::Error>(archived).unwrap();
@@ -983,12 +989,6 @@ fn released_out_of_order_completions_cannot_exceed_the_engine_operation_window()
     assert!(shared.state.lock().unwrap().entries.is_empty());
     assert_eq!(host.begin_data(9, read()), Err(HostError::LimitExceeded));
     assert!(receive.try_recv().is_err());
-    shared.state.lock().unwrap().channel_receive =
-        super::super::service_call::CHANNEL_RECEIVE_BIT - 1;
-    assert_eq!(
-        host.begin_data(9, call(DataOperation::ChannelEvents { instance: [1; 16] })),
-        Err(HostError::LimitExceeded)
-    );
 }
 
 fn file_call(
@@ -1614,34 +1614,69 @@ fn rejected_close_keeps_its_source_credit_until_discard_acknowledgment() {
 }
 
 #[test]
-fn idle_channel_receive_does_not_hold_the_data_operation_window() {
+fn night_lobby_reads_saved_rows_while_the_channel_subscription_and_receive_are_pending() {
+    // Hold both channel replies on their IPC sockets while the guest loads its 104 saved rows.
+    use crate::store::key_value::{Chunk, Root};
     let (_directory, listener, mut host, inbox, wake) = fixture();
-    let (release, gate) = mpsc::channel();
-    let (entered, started) = mpsc::channel();
-    let server = std::thread::spawn(move || {
-        let (stream, request) = receive(&listener);
-        let Request::Syscall { operation, .. } = &request else { panic!("receive") };
-        assert_eq!(*operation, super::super::service_call::CHANNEL_RECEIVE_BIT | 1);
-        entered.send(()).unwrap();
-        for _ in 0..100 {
-            let (stream, request) = receive(&listener);
-            reply(stream, request, Err(HostError::AccessDenied));
-        }
-        gate.recv().unwrap();
-        reply(stream, request, Err(HostError::Unavailable));
-    });
-    let token =
-        host.begin_data(9, call(DataOperation::ChannelEvents { instance: [1; 16] })).unwrap();
-    started.recv_timeout(Duration::from_secs(5)).unwrap();
-    for _ in 0..100 {
-        let read = host.begin_data(9, read()).unwrap();
+    let (mut events, request) = receive_request(&listener);
+    assert!(matches!(request, Request::InstanceEvents { .. }));
+    notice(&mut events, 1, 1);
+    wait(&wake, &inbox, |state| state.revision.is_some());
+
+    let mut executor = crate::engine::service_call::executor::Executor::default();
+    let mut admit = || {
+        let (stream, request) = receive_request(&listener);
+        let Request::Syscall { context, operation, mutation, call } = &request else {
+            panic!("expected a guest syscall");
+        };
+        executor.record_request(*context, *operation, *mutation, call, |_| true).unwrap();
+        (stream, request)
+    };
+    let channel = |operation| Arc::new(DataCall { volume: [0; 16], operation });
+    let receive_token =
+        host.begin_data(9, channel(DataOperation::ChannelEvents { instance: [1; 16] })).unwrap();
+    let (receive_stream, receive_request) = admit();
+    let subscribe = host
+        .begin_data(
+            9,
+            channel(DataOperation::ChannelCommand {
+                instance: [1; 16],
+                action: 2,
+                name: "room".into(),
+                data: vec![],
+            }),
+        )
+        .unwrap();
+    let (subscribe_stream, subscribe_request) = admit();
+    let root = Root { level: 0, digest: [3; 32] };
+    for row in 0..104 {
+        let read = host
+            .begin_data(
+                9,
+                call(DataOperation::KvRead {
+                    entry_id: [5; 15],
+                    key: vec![row; 24],
+                    offset: 0,
+                    limit: 1234,
+                    root: Some(root),
+                }),
+            )
+            .unwrap();
+        let (stream, request) = admit();
+        let result =
+            DataResult::KvRead(Chunk { root, offset: 0, total_bytes: 1, bytes: vec![row] });
+        reply(stream, request, Ok(result.clone()));
         wait(&wake, &inbox, |state| state.data_entry(read).unwrap().result.is_some());
-        assert_eq!(host.peek_data(read), Err(HostError::AccessDenied));
+        assert_eq!(*host.peek_data(read).unwrap(), result);
         host.release_data(read);
     }
-    assert_eq!(host.peek_data(token), Err(HostError::WouldBlock));
-    release.send(()).unwrap();
-    wait(&wake, &inbox, |state| state.data_entry(token).unwrap().result.is_some());
-    host.release_data(token);
-    server.join().unwrap();
+    assert_eq!(host.peek_data(subscribe), Err(HostError::WouldBlock));
+    assert_eq!(host.peek_data(receive_token), Err(HostError::WouldBlock));
+    reply(subscribe_stream, subscribe_request, Ok(DataResult::ChannelCompleted));
+    wait(&wake, &inbox, |state| state.data_entry(subscribe).unwrap().result.is_some());
+    assert_eq!(*host.peek_data(subscribe).unwrap(), DataResult::ChannelCompleted);
+    host.release_data(subscribe);
+    reply(receive_stream, receive_request, Err(HostError::Unavailable));
+    wait(&wake, &inbox, |state| state.data_entry(receive_token).unwrap().result.is_some());
+    host.release_data(receive_token);
 }

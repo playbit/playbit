@@ -2282,7 +2282,7 @@ mod tests {
             .engine
             .begin_service(
                 context,
-                crate::engine::service_call::CHANNEL_RECEIVE_BIT | 1,
+                crate::engine::service_call::CHANNEL_BIT | 1,
                 0,
                 DataCall {
                     volume: [0; 16],

@@ -317,7 +317,7 @@ impl Drop for Pool {
 #[derive(Default)]
 struct Sequence {
     frontier: u64,
-    receiver: u64,
+    channels: super::ChannelSequences,
     ahead: BTreeSet<u64>,
     mutation: u64,
 }
@@ -447,18 +447,15 @@ impl Executor {
             }
         }
         let sequence = self.sequences.entry(context.key()).or_default();
-        if matches!(call.operation, DataOperation::ChannelEvents { .. }) {
-            let next = sequence.receiver.checked_add(1).ok_or(HostError::LimitExceeded)?;
-            if next >= super::CHANNEL_RECEIVE_BIT
-                || operation != (super::CHANNEL_RECEIVE_BIT | next)
-                || mutation != 0
-            {
+        if call.operation.network() {
+            let mut channels = sequence.channels;
+            if mutation != 0 || operation != channels.advance(call.operation.kind())? {
                 return Err(HostError::StaleHandle);
             }
-            sequence.receiver = next;
+            sequence.channels = channels;
             return Ok(());
         }
-        if operation >= super::CHANNEL_RECEIVE_BIT {
+        if operation >= super::CHANNEL_BIT {
             return Err(HostError::StaleHandle);
         }
         sequence.admit(operation, mutation, call.operation.is_mutation())
@@ -959,7 +956,8 @@ mod tests {
         }
     }
     #[test]
-    fn channel_receive_sequence_is_independent_and_rejects_replay_and_scope_switching() {
+    fn channel_sequences_reject_replay_and_scope_switching() {
+        // Interleave receives, commands and storage, then retry valid IDs after rejected calls.
         let mut executor = Executor::default();
         let context = context(Id::from_bytes([1; 16]));
         let receiver = DataCall {
@@ -970,8 +968,19 @@ mod tests {
             volume: [3; 16],
             operation: DataOperation::SchemaRead { entry_id: [5; 15] },
         };
-        let first = super::super::CHANNEL_RECEIVE_BIT | 1;
+        let command = DataCall {
+            volume: [0; 16],
+            operation: DataOperation::ChannelCommand {
+                instance: [1; 16],
+                name: "room".into(),
+                action: 2,
+                data: vec![],
+            },
+        };
+        let first = super::super::CHANNEL_BIT | 1;
+        let first_command = first | super::super::ChannelSequences::COMMAND_BIT;
         executor.record_request(context, first, 0, &receiver, |_| true).unwrap();
+        executor.record_request(context, first_command, 0, &command, |_| true).unwrap();
         for operation in 1..=100 {
             executor.record_request(context, operation, 0, &read, |_| true).unwrap();
         }
@@ -981,6 +990,13 @@ mod tests {
             (first + 1, 1, &receiver),
             (first + 1, 0, &read),
             (101, 0, &receiver),
+            (first_command, 0, &command),
+            (first_command + 2, 0, &command),
+            (first_command + 1, 1, &command),
+            (first_command + 1, 0, &read),
+            (first_command + 1, 0, &receiver),
+            (first + 1, 0, &command),
+            (101, 0, &command),
         ] {
             assert_eq!(
                 executor.record_request(context, operation, mutation, call, |_| true),
@@ -988,6 +1004,12 @@ mod tests {
             );
         }
         executor.record_request(context, first + 1, 0, &receiver, |_| true).unwrap();
+        executor.record_request(context, first_command + 1, 0, &command, |_| true).unwrap();
+
+        let channels =
+            &mut executor.sequences.get_mut(&Context::from(context).key()).unwrap().channels;
+        channels.receive = super::super::ChannelSequences::COMMAND_BIT - 1;
+        assert_eq!(channels.advance(DataKind::ChannelEvents), Err(HostError::LimitExceeded));
     }
     #[test]
     fn retired_contexts_do_not_exhaust_sequence_admission() {

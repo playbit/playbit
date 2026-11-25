@@ -67,7 +67,7 @@ struct Entry {
 struct State {
     generation: Option<u64>,
     operation: u64,
-    channel_receive: u64,
+    channels: super::service_call::ChannelSequences,
     mutation: u64,
     frontier: u64,
     acknowledged: BTreeSet<u64>,
@@ -455,29 +455,23 @@ impl Host for GuestHost {
         if !admits(state.entries.len(), state.bytes, bytes) {
             return Err(HostError::LimitExceeded);
         }
-        let receiving = matches!(call.operation, DataOperation::ChannelEvents { .. });
-        let operation = if receiving {
-            state
-                .channel_receive
-                .checked_add(1)
-                .filter(|next| *next < super::service_call::CHANNEL_RECEIVE_BIT)
-                .ok_or(HostError::LimitExceeded)?
-                | super::service_call::CHANNEL_RECEIVE_BIT
+        let kind = call.operation.kind();
+        let mut channels = state.channels;
+        let operation = if kind.network() {
+            channels.advance(kind)?
         } else {
-            state.operation.checked_add(1).ok_or(HostError::LimitExceeded)?
+            let next = state.operation.checked_add(1).ok_or(HostError::LimitExceeded)?;
+            if next >= super::service_call::CHANNEL_BIT || next - state.frontier > MAX_CALLS as u64
+            {
+                return Err(HostError::LimitExceeded);
+            }
+            next
         };
-        if !receiving
-            && (operation >= super::service_call::CHANNEL_RECEIVE_BIT
-                || operation - state.frontier > MAX_CALLS as u64)
-        {
-            return Err(HostError::LimitExceeded);
-        }
         let mutation = if call.operation.is_mutation() {
             state.mutation.checked_add(1).ok_or(HostError::LimitExceeded)?
         } else {
             0
         };
-        let kind = call.operation.kind();
         let mutating = call.operation.is_mutation();
         // The shared lock keeps an immediate completion from preceding insertion.
 
@@ -494,8 +488,8 @@ impl Host for GuestHost {
             return Err(error);
         }
         state.generation = Some(generation);
-        if receiving {
-            state.channel_receive = operation & !super::service_call::CHANNEL_RECEIVE_BIT;
+        if kind.network() {
+            state.channels = channels;
         } else {
             state.operation = operation;
         }
@@ -706,7 +700,7 @@ fn lane(
                 result = Err(HostError::Internal);
                 record_failure(&mut state, Failure::Exchange);
             }
-            if failure.is_none() && !frozen && !matches!(work.call.operation, DataOperation::ChannelEvents { .. }) {
+            if failure.is_none() && !frozen && !work.call.operation.network() {
                 state.acknowledged.insert(work.operation);
                 while let Some(next) = state.frontier.checked_add(1) {
                     if !state.acknowledged.remove(&next) {

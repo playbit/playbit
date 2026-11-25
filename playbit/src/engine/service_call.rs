@@ -3,9 +3,35 @@ use super::session_instance::Context as InstanceContext;
 use crate::runtime::host::{DataCall, DataResult, HostResult};
 use playbit_api::abi::syscall::Error as HostError;
 
-/// Long-lived receives have an independent ordered lane below file tokens.
+/// Channel calls use bit 62, below file tokens. Bit 61 distinguishes the two FIFO workers.
 #[cfg(all(not(target_os = "ios"), feature = "process"))]
-pub(crate) const CHANNEL_RECEIVE_BIT: u64 = 1 << 62;
+pub(super) const CHANNEL_BIT: u64 = 1 << 62;
+
+#[cfg(all(not(target_os = "ios"), feature = "process"))]
+#[derive(Clone, Copy, Default)]
+pub(super) struct ChannelSequences {
+    receive: u64,
+    command: u64,
+}
+
+#[cfg(all(not(target_os = "ios"), feature = "process"))]
+impl ChannelSequences {
+    const COMMAND_BIT: u64 = 1 << 61;
+
+    pub(super) fn advance(&mut self, kind: crate::runtime::host::DataKind) -> HostResult<u64> {
+        use crate::runtime::host::DataKind;
+        let (counter, prefix) = match kind {
+            DataKind::ChannelEvents => (&mut self.receive, CHANNEL_BIT),
+            DataKind::ChannelCommand => (&mut self.command, CHANNEL_BIT | Self::COMMAND_BIT),
+            _ => return Err(HostError::Internal),
+        };
+        if *counter >= Self::COMMAND_BIT - 1 {
+            return Err(HostError::LimitExceeded);
+        }
+        *counter += 1;
+        Ok(prefix | *counter)
+    }
+}
 
 /// Guest authority and trusted tool authority are established separately. Both
 /// then use the same owned data contract and bounded service executor.
@@ -927,10 +953,8 @@ mod tests {
             volume: [0; 16],
             operation: DataOperation::ChannelEvents { instance: *context.instance.as_bytes() },
         };
-        let receive = f
-            .engine
-            .begin_service(context, CHANNEL_RECEIVE_BIT | 1, 0, call.clone(), &f.peer)
-            .unwrap();
+        let receive =
+            f.engine.begin_service(context, CHANNEL_BIT | 1, 0, call.clone(), &f.peer).unwrap();
 
         // Close before either worker starts. Both callers still own their tickets.
         f.engine.dispatch_instance(Request::InstanceChannelsClose { context }, &f.peer).unwrap();
