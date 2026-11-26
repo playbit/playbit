@@ -45,7 +45,9 @@ pub(crate) fn is_request(request: &Request) -> bool {
         Request::GrantVolume { .. }
             | Request::PublishApp { .. }
             | Request::ListApps { .. }
+            | Request::ListAppBuilds { .. }
             | Request::SetAppEnabled { .. }
+            | Request::SetAppBuildNotes { .. }
             | Request::DeleteApp { .. }
             | Request::GetAppDisplay { .. }
             | Request::GetAccountDisplayNames { .. }
@@ -59,12 +61,17 @@ pub(crate) fn is_request(request: &Request) -> bool {
     )
 }
 
-pub(super) fn validate(request: &Request) -> Result<()> {
+pub(super) fn validate(request: &Request, store: &LocalStore) -> Result<()> {
     match request {
         Request::GetAccountDisplayNames { account_ids, .. } => {
             crate::network::ap::operation::validate_display_name_ids(account_ids)?;
         }
-        Request::CreateBuildSession { build, .. } | Request::GetAppDisplay { build, .. }
+        Request::SetAppBuildNotes { app, .. } if app.publisher != store.account().id => {
+            return Err("only the authenticated publisher may edit release notes".into());
+        }
+        Request::CreateBuildSession { build, .. }
+        | Request::GetAppDisplay { build, .. }
+        | Request::SetAppBuildNotes { build, .. }
             if !crate::identifier::valid(build, 32) =>
         {
             return Err("invalid build ID".into());
@@ -74,18 +81,25 @@ pub(super) fn validate(request: &Request) -> Result<()> {
         {
             return Err("invalid recipient email".into());
         }
-        Request::PublishApp { notes, .. }
+        Request::PublishApp { notes, .. } | Request::SetAppBuildNotes { notes, .. }
             if !crate::network::ap::operation::valid_app_notes(notes) =>
         {
-            return Err("publication notes exceed32KiB".into());
+            return Err("publication notes exceed 32 KiB of JSON-escaped text".into());
         }
         Request::UpdateSession { session, .. } if !crate::identifier::valid(session, 32) => {
             return Err("invalid session ID".into());
         }
         Request::GetAppDisplay { app, .. }
         | Request::SetAppEnabled { app, .. }
+        | Request::SetAppBuildNotes { app, .. }
         | Request::DeleteApp { app }
         | Request::CreateAppSession { app, .. } => app.validate()?,
+        Request::ListAppBuilds { app, after } => {
+            app.validate()?;
+            if after.as_ref().is_some_and(|cursor| !crate::identifier::valid(cursor, 32)) {
+                return Err("invalid app history cursor".into());
+            }
+        }
         _ => {}
     }
     let path = match request {
@@ -327,6 +341,41 @@ fn authenticate_package(
     remote.authenticate_public_package(store, Package::open(bundle)?)
 }
 
+fn set_build_notes(
+    remote: &mut remote::Remote,
+    store: &LocalStore,
+    app: crate::package::AppIdentity,
+    build: String,
+    notes: String,
+) -> Result<AppResponse> {
+    use crate::network::ap::operation::{AppState, valid_app_notes};
+    let before: AppResponse = serde_json::from_value(remote.get_app(store, &app)?)?;
+    let mut expected = before.app.ok_or("app is unavailable for editing")?;
+    if expected.identity != app
+        || expected.revision != before.revision
+        || expected.state == AppState::Deleted
+        || !crate::identifier::valid(&expected.build_id, 32)
+        || !valid_app_notes(&expected.notes)
+    {
+        return Err("invalid current app publication".into());
+    }
+    expected.revision = before.revision.checked_add(1).ok_or("app revision exhausted")?;
+    if expected.build_id == build {
+        expected.notes.clone_from(&notes);
+    }
+    let edited: AppResponse = serde_json::from_value(remote.set_app_build_notes(
+        store,
+        app,
+        build,
+        notes,
+        before.revision,
+    )?)?;
+    if edited.revision != expected.revision || edited.app.as_ref() != Some(&expected) {
+        return Err("release note reply differs from the expected publication".into());
+    }
+    Ok(edited)
+}
+
 pub(super) fn execute(
     request: Request,
     remote: &mut remote::Remote,
@@ -335,7 +384,7 @@ pub(super) fn execute(
     profile: &Path,
 ) -> Result<Outcome> {
     let _timing = crate::trace::Span::new("developer.execute");
-    validate(&request)?;
+    validate(&request, store)?;
     let value = match request {
         Request::GrantVolume { volume, email, write } => {
             if store.volume(volume)?.owner != store.account().id {
@@ -352,6 +401,9 @@ pub(super) fn execute(
         }
         Request::ListApps { after } => {
             DeveloperReply::Apps(serde_json::from_value(remote.list_apps(store, after)?)?)
+        }
+        Request::ListAppBuilds { app, after } => {
+            DeveloperReply::AppBuilds(remote.list_app_builds(store, &app, after.as_deref())?)
         }
         Request::GetAppDisplay { app, build } => {
             let display = remote.get_app_display(store, &app, &build)?;
@@ -378,6 +430,9 @@ pub(super) fn execute(
                 enabled,
                 current.revision,
             )?)?)
+        }
+        Request::SetAppBuildNotes { app, build, notes } => {
+            DeveloperReply::App(set_build_notes(remote, store, app, build, notes)?)
         }
         Request::DeleteApp { app } => {
             let current: AppResponse = serde_json::from_value(remote.get_app(store, &app)?)?;

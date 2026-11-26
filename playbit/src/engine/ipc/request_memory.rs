@@ -528,6 +528,15 @@ pub fn required(request: &R) -> Result<usize> {
         R::Schema { schema, .. } => b.schema(schema)?,
         R::CreateObject { fields, .. } | R::EditObject { fields, .. } => b.fields(fields)?,
         R::PublishApp { bundle, notes, .. } => b.payloads(&[bundle.len(), notes.len()])?,
+        R::SetAppBuildNotes { app, build, notes } => {
+            if !crate::package::valid_app_id(app.app_id.as_str())
+                || !crate::identifier::valid(build.as_str(), 32)
+                || !crate::network::ap::operation::valid_app_notes(notes.as_str())
+            {
+                return Err("invalid build ID, app ID or release notes".into());
+            }
+            b.payloads(&[app.app_id.len(), build.len(), notes.len()])?
+        }
         R::KvRename { mutation, .. } => {
             let (old_key, new_key, value) = (&mutation.old_key, &mutation.new_key, &mutation.value);
             b.add(std::mem::size_of::<crate::engine::KvRenameMutation>())?;
@@ -549,6 +558,13 @@ pub fn required(request: &R) -> Result<usize> {
                 return Err("invalid account display-name batch size".into());
             }
             b.add(std::mem::size_of_val(account_ids.as_slice()))?;
+        }
+        R::WatchAppBuilds { app } => b.add(app.app_id.len())?,
+        R::ListAppBuilds { app, after } => {
+            b.add(app.app_id.len())?;
+            if let Some(cursor) = after.as_ref() {
+                b.add(cursor.len())?;
+            }
         }
         R::SelectPersonalVolumes { session: version, grants }
         | R::AddPersonalVolumes { session: version, grants } => {

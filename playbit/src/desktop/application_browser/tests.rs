@@ -77,11 +77,18 @@ fn play_starts_a_session_for_an_app_and_resumes_the_selected_session(
     test_support::focus_button(window, "application-play", cx);
     test_support::press(window, "enter", cx);
     host.update(cx, |host, cx| {
-        // The disconnected engine leaves the creation unconfirmed. The existing
-        // session must still be available to resume, even after a catalog refresh.
+        // A failed connect sent no request, so Play is immediately available again.
+        assert!(!host.applications.creation_uncertain(&session.app));
+        assert!(host.error.contains("Could not contact the local engine"));
+        // If the socket broke after submission, a local status read cannot
+        // establish that the create has finished. Retained sessions still open.
+        let app = host.applications.apps[0].clone();
+        assert!(host.applications.register_uncertain_creation(app, false));
         host.apply_application_catalog(vec![session.clone()], cx);
-        assert!(host.applications.creation_uncertain(&host.applications.apps[0]));
+        assert!(host.applications.creation_uncertain(&session.app));
         assert!(host.selected_session_id().is_none());
+        assert!(host.select_application_target(Target::Application(session.app.clone()), cx));
+        assert!(requests.is_empty(), "a local Status cannot settle a broken creation socket");
         assert!(host.select_application_target(Target::Session(session.id.clone()), cx));
     });
     cx.run_until_parked();
@@ -94,7 +101,94 @@ fn play_starts_a_session_for_an_app_and_resumes_the_selected_session(
         let mut created = session.clone();
         created.id = crate::identifier::encode(&[9; 32]);
         host.apply_application_catalog(vec![session, created], cx);
-        assert!(host.applications.uncertain_creation.is_none());
+        assert!(host.applications.uncertain_creations.is_empty());
+    });
+}
+
+#[gpui::test]
+fn lost_create_reply_after_catalog_update_leaves_play_available(cx: &mut gpui::TestAppContext) {
+    let (host, _, requests) = scope(cx);
+    host.update(cx, |host, cx| {
+        let session = host.applications.catalog[0].clone();
+        let app = host.applications.apps[0].clone();
+        assert!(host.select_application_target(Target::Application(app.identity.clone()), cx));
+        let mut created = session.clone();
+        created.id = crate::identifier::encode(&[9; 32]);
+        host.apply_application_catalog(vec![session, created], cx);
+        assert!(!host.applications.register_uncertain_creation(app.clone(), false));
+        assert!(!host.applications.creation_uncertain(&app.identity));
+        assert!(host.selected_session_id().is_none());
+        while requests.try_recv().is_ok() {}
+        assert!(host.select_application_target(Target::Application(app.identity), cx));
+        assert!(requests.is_empty(), "the visible session settled the create");
+    });
+}
+
+#[gpui::test]
+fn creation_only_opens_the_new_session_from_its_initiating_view(cx: &mut gpui::TestAppContext) {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum View {
+        Overview,
+        User,
+        Entry(u8),
+    }
+    use View::*;
+    let (host, _, requests) = scope(cx);
+    host.update(cx, |host, cx| {
+        let app = host.applications.apps[0].clone();
+        let volume = host.scoped_volumes[0].id;
+        let navigate = |host: &mut Shell, view, cx: &mut Context<Shell>| {
+            if view == Overview {
+                let target = Target::Application(app.identity.clone());
+                assert!(host.select_application_target(target, cx));
+                return;
+            }
+            if !host.applications.root_open {
+                let target = Target::Scope { role: Role::User, volume, session: false };
+                assert!(host.select_application_target(target, cx));
+            }
+            if let Entry(byte) = view {
+                let id = crate::store::EntryId::from_bytes([byte; 15]).expect("nonzero entry ID");
+                let browser = host.browser.as_ref().expect("open app scope");
+                browser.update(cx, |browser, cx| browser.open_database(id, cx));
+            }
+        };
+        let cases: &[(View, &[View])] = &[
+            (Overview, &[]),
+            (Overview, &[User]),
+            (Overview, &[User, Overview]),
+            (User, &[Overview]),
+            (User, &[]),
+            (User, &[Entry(1)]),
+            (Entry(1), &[Entry(2)]),
+            (Entry(1), &[Entry(2), Entry(1)]),
+            (Entry(1), &[]),
+        ];
+        for (index, &(from, visits)) in cases.iter().enumerate() {
+            let mut created = host.applications.catalog[0].clone();
+            created.id = crate::identifier::encode(&[9 + index as u8; 32]);
+            navigate(host, Overview, cx);
+            if from != Overview {
+                navigate(host, from, cx);
+            }
+            let origin = host.application_creation_view(&app.identity, cx).expect("app view");
+            for &to in visits {
+                navigate(host, to, cx);
+            }
+            while requests.try_recv().is_ok() {}
+            host.open_created_application_session(app.clone(), created.clone(), origin, cx);
+            assert!(host.applications.catalog.iter().any(|s| s.id == created.id));
+            assert_eq!(
+                host.selected_session_id(),
+                visits.is_empty().then_some(created.id.as_str())
+            );
+            let opened = std::iter::from_fn(|| requests.try_recv().ok()).any(|message| {
+                matches!(message, Message::Request(QueuedRequest {
+                    request: Request::PrepareSession { session }, ..
+                }) if session == created.id)
+            });
+            assert_eq!(opened, visits.is_empty());
+        }
     });
 }
 
@@ -432,6 +526,54 @@ fn ready_shared_browser_keeps_session_only_on_the_selected_route(cx: &mut gpui::
         assert_ne!(host.browser.as_ref().expect("volume browser").entity_id(), scoped.entity_id());
         inspect(None);
     });
+}
+
+#[gpui::test]
+fn uncertain_fresh_session_requires_an_explicit_successful_catalog_check(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (host, _, requests) = scope(cx);
+    let (send, receive) = async_channel::bounded(1);
+    let session = host.update(cx, |host, cx| {
+        Shell::watch_responses(host.send.clone(), receive, cx);
+        let session = host.applications.catalog[0].clone();
+        assert!(host.select_application_target(Target::Application(session.app.clone()), cx));
+        while requests.try_recv().is_ok() {}
+        host.applications.action_busy = true;
+        host.toggle_application(cx);
+        host.applications.action_busy = false;
+        let app = host.applications.apps[0].clone();
+        assert!(host.applications.register_uncertain_creation(app, true));
+        host.apply_application_catalog(vec![session.clone()], cx);
+        host.toggle_application(cx);
+        assert!(host.selected_session_id().is_none());
+        assert!(requests.is_empty(), "a repeat click must not open an old session");
+        session
+    });
+    for succeeds in [false, true] {
+        host.update(cx, |host, cx| {
+            assert!(host.select_application_target(Target::Application(session.app.clone()), cx));
+            assert!(host.applications.creation_uncertain(&session.app));
+        });
+        let Message::Request(check) = requests.try_recv().expect("explicit catalog check") else {
+            panic!("expected status read");
+        };
+        assert!(matches!(check.request, Request::Status));
+        let mut reply = if succeeds {
+            let mut reply = WorkerResponse::new(Ok(()));
+            reply.application_catalog = Some(vec![session.clone()]);
+            reply
+        } else {
+            WorkerResponse::new(Err("Catalog check interrupted".into()))
+        };
+        reply.credit = check.credit;
+        send.try_send(reply).expect("send status reply");
+        cx.run_until_parked();
+        host.read_with(cx, |host, _| {
+            assert_eq!(host.applications.creation_uncertain(&session.app), !succeeds);
+            assert!(host.selected_session_id().is_none());
+        });
+    }
 }
 
 fn right_edges(visual: &mut gpui::VisualTestContext) -> [f64; 2] {
@@ -1058,4 +1200,180 @@ fn offscreen_app_browser_rows_keep_keyboard_order_and_accessibility(cx: &mut gpu
         assert_eq!(host.selected_session_id(), Some(crate::identifier::encode(&[32; 32]).as_str()));
         assert!(host.applications.instance.is_none());
     });
+}
+
+#[gpui::test]
+fn app_overview_keeps_data_and_release_notes_with_or_without_sessions(
+    cx: &mut gpui::TestAppContext,
+) {
+    use gpui::accesskit::{Action, Role as AxRole};
+
+    let (host, window, _requests) = scope(cx);
+    let (session, empty, session_label) = host.update(cx, |host, _| {
+        let session = host.applications.catalog[0].clone();
+        let empty = AppIdentity { publisher: host.account.id, app_id: "sketch".into() };
+        host.apply_imported_app_catalog(vec![crate::store::ImportedApp {
+            app: empty.clone(),
+            name: "Sketch".into(),
+            build_id: session.resolved_build_id.clone(),
+        }]);
+        let label = short_id(&session.id, std::slice::from_ref(&session.id), &host.sessions);
+        (session, empty, label)
+    });
+    let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+    visual.simulate_resize(gpui::size(px(1041.), px(640.)));
+    visual.update(|window, _| window.activate_window());
+    for app in [&empty, &session.app] {
+        host.update(&mut visual, |host, cx| {
+            assert!(host.select_application_target(Target::Application(app.clone()), cx));
+            host.applications.slots_app = Some(app.clone());
+            host.applications.app_slots = [Role::Root, Role::User, Role::Local]
+                .into_iter()
+                .map(|role| AutomaticVolumeSlot {
+                    role,
+                    volume: Id::from_bytes([role as u8 + 1; 16]),
+                    state: AutomaticVolumeState::Lazy,
+                    overridden: false,
+                })
+                .collect();
+            host.applications.details = details::Details::preview(
+                host.account.id,
+                app,
+                &session.resolved_build_id,
+                Some(1536),
+                details::History {
+                    updated: Some(1_793_229_420),
+                    notes: vec![details::ReleaseNote::new(
+                        session.resolved_build_id.clone(),
+                        "Supports pressure-sensitive input".into(),
+                        1_793_229_420,
+                    )],
+                },
+            );
+        });
+        draw(&mut visual);
+        visual.update(|window, _| {
+            let nodes: Vec<_> =
+                window.accessibility_nodes_for_test().map(|(_, node)| node).collect();
+            for text in [
+                "App",
+                "App data",
+                "Release notes",
+                "1.5 KiB",
+                "Robin",
+                "Supports pressure-sensitive input",
+            ] {
+                assert!(nodes.iter().any(|n| n.value() == Some(text)), "overview shows {text}");
+            }
+            for button in ["Start new session", "World", "User", "Local"] {
+                assert!(
+                    nodes.iter().any(|n| n.role() == AxRole::Button && n.label() == Some(button)),
+                    "overview exposes {button}"
+                );
+            }
+            for value in [app.publisher.to_string(), app.app_id.clone()] {
+                assert!(
+                    nodes.iter().any(|n| n.role() == AxRole::TextInput
+                        && n.value() == Some(&value)
+                        && n.is_read_only()
+                        && n.supports_action(Action::SetTextSelection)),
+                    "selectable identifier {value}"
+                );
+            }
+            assert_eq!(nodes.iter().any(|n| n.value() == Some("No sessions")), app == &empty);
+            assert!(window.accessibility_error().is_none());
+        });
+    }
+    let first_page = "New capability\n".repeat(12);
+    host.update(&mut visual, |host, cx| {
+        let Some(history) = host.applications.details.history.as_mut() else {
+            panic!("preview history is loaded");
+        };
+        history.notes.push(details::ReleaseNote::new(
+            crate::identifier::encode(&[18; 32]),
+            format!("{first_page}One more improvement"),
+            1_792_863_900,
+        ));
+        cx.notify();
+    });
+    draw(&mut visual);
+    for (label, expected) in
+        [("Next page", "One more improvement"), ("Previous page", first_page.as_str())]
+    {
+        let target_node = visual.update(|window, _| {
+            window
+                .accessibility_nodes_for_test()
+                .find(|(_, node)| {
+                    node.label() == Some(label) && node.supports_action(Action::Click)
+                })
+                .expect("accessible note page action")
+                .0
+        });
+        visual.simulate_accessibility_action(gpui::accesskit::ActionRequest {
+            action: Action::Click,
+            target_node,
+            target_tree: gpui::accesskit::TreeId::ROOT,
+            data: None,
+        });
+        draw(&mut visual);
+        visual.update(|window, _| {
+            assert!(window.accessibility_nodes_for_test().any(|(_, n)| n.value() == Some(expected)))
+        });
+        if label == "Next page" {
+            host.update(&mut visual, |host, cx| {
+                host.applications.details.history_error = Some("Connection interrupted".into());
+                cx.notify();
+            });
+            draw(&mut visual);
+            let updated = host.read_with(&visual, |host, _| {
+                text_editor::accessibility_text_ids(
+                    host.applications.texts["application-updated"].entity_id(),
+                )
+                .0
+            });
+            visual.update(|window, _| {
+                let nodes: Vec<_> = window.accessibility_nodes_for_test().collect();
+                let date = crate::desktop::session_log_view::formatted_time(
+                    1_793_229_420,
+                    c"%b %e, %Y at %H:%M",
+                );
+                assert!(
+                    nodes.iter().any(|(id, n)| *id == updated && n.value() == Some(date.as_str()))
+                );
+                for value in [
+                    "Supports pressure-sensitive input",
+                    "One more improvement",
+                    "Couldn’t load more release notes. Connection interrupted",
+                ] {
+                    assert!(nodes.iter().any(|(_, n)| n.value() == Some(value)));
+                }
+                assert!(
+                    nodes.iter().any(
+                        |(_, n)| n.label() == Some("Retry") && n.supports_action(Action::Click)
+                    )
+                );
+            });
+        }
+    }
+    let point = visual.update(|window, _| {
+        let bounds = window
+            .accessibility_nodes_for_test()
+            .find(|(_, node)| {
+                node.role() == AxRole::Button && node.label() == Some(session_label.as_str())
+            })
+            .expect("retained session row")
+            .1
+            .bounds()
+            .expect("visible session row");
+        gpui::point(
+            px(((bounds.x0 + bounds.x1) / 2.) as f32),
+            px(((bounds.y0 + bounds.y1) / 2.) as f32),
+        )
+    });
+    visual.simulate_click(point, Default::default());
+    draw(&mut visual);
+    host.read_with(&visual, |host, _| {
+        assert_eq!(host.selected_session_id(), Some(session.id.as_str()))
+    });
+    assert!(visual.debug_bounds("application-log-pane").is_some());
 }

@@ -162,6 +162,56 @@ fn template_native_combinations_fail_before_reading_or_building_source() {
 }
 
 #[test]
+fn release_note_edits_target_one_published_build_and_require_explicit_text() {
+    let publisher = Id::from_bytes([1; 16]);
+    let target = format!("{publisher}/my-app");
+    let build = playbit::identifier::encode(&[2; 32]);
+    for (options, expected) in [
+        (vec!["--notes", "Corrected\n第二版"], "Corrected\n第二版"),
+        (vec!["--notes="], ""),
+        (vec!["--notes", ""], ""),
+        (vec!["--notes", "help"], "help"),
+        (vec!["--notes=--literal"], "--literal"),
+    ] {
+        let mut args = vec![target.clone(), build.clone()];
+        args.extend(options.into_iter().map(str::to_owned));
+        let mut command = vec!["app".to_owned(), "set-notes".to_owned()];
+        command.extend_from_slice(&args);
+        assert!(crate::help::render(&command).is_none());
+        set_app_notes(&args, &|request| {
+            let Request::SetAppBuildNotes { app, build: got, notes } = request else {
+                panic!("expected a direct release note edit")
+            };
+            assert_eq!(app.publisher, publisher);
+            assert_eq!(app.app_id, "my-app");
+            assert_eq!(got, build);
+            assert_eq!(notes, expected);
+            Ok(Reply::Developer(DeveloperReply::App(playbit::engine::reply::AppResponse {
+                revision: 2,
+                app: Some(playbit::network::ap::operation::PublishedApp {
+                    identity: app,
+                    build_id: got,
+                    notes,
+                    state: playbit::network::ap::operation::AppState::Active,
+                    revision: 2,
+                }),
+            })))
+        })
+        .expect("valid note edit");
+    }
+    for args in [
+        vec![target.clone(), build.clone()],
+        vec![target.clone(), build.clone(), "--notes".into()],
+        vec![target.clone(), build.clone(), "--notes".into(), "\n".repeat(16_385)],
+        vec![target.clone(), publisher.to_string(), "--notes=".into()],
+        vec!["invalid/app".into(), build.clone(), "--notes=".into()],
+        vec![target, build, "--notes=one".into(), "--notes=two".into()],
+    ] {
+        assert!(set_app_notes(&args, &|_| panic!("invalid note edit reached the engine")).is_err());
+    }
+}
+
+#[test]
 fn publication_preserves_prebuilt_bytes_and_source_namespace_is_invocation_local() {
     // Publishing an exact package bypasses source compilation and cannot rewrite its identity.
     let source = tempfile::tempdir().unwrap();

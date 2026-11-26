@@ -802,8 +802,10 @@ impl Shell {
             self.recent_sessions.retain(|session| session != &id);
             self.recent_sessions.insert(0, id.clone());
             self.recent_sessions.truncate(256);
-            self.selected = Some(prepared);
-            self.refresh_logs(cx);
+            if self.opening.as_deref() == Some(&id) || self.selected_session_id() == Some(&id) {
+                self.selected = Some(prepared);
+                self.refresh_logs(cx);
+            }
             if self.opening.as_deref() == Some(&id) {
                 self.opening = None;
                 self.joining = false;
@@ -1026,6 +1028,11 @@ impl Shell {
         }
         if let Some(sessions) = response.application_catalog.take() {
             self.apply_application_catalog(sessions, cx);
+            if response.result.is_ok()
+                && let Some(credit) = &response.credit
+            {
+                self.applications.checked_creation_catalog(credit.admission());
+            }
         }
         if let Some(browser) = &self.browser {
             let online = self.ap_status.read(cx).live();
@@ -1292,12 +1299,20 @@ mod status_bar_tests {
                 )
             });
             host.select_sidebar_session(second.clone(), cx);
-            host.apply_prepared(Some(prepared), cx);
+            host.apply_prepared(Some(prepared.clone()), cx);
             assert_eq!(host.selected_session_id(), Some(second.as_str()));
             assert!(host.selected_details().is_none());
             assert_eq!(host.logs.read(cx).session.as_deref(), Some(second.as_str()));
             assert!(
                 !host.logs.read(cx).lines.iter().any(|line| line.message == "first-session log")
+            );
+            // Selecting an app overview clears both sources of session selection.
+            host.sidebar_session = None;
+            host.selected = None;
+            host.apply_prepared(Some(prepared), cx);
+            assert!(
+                host.selected_session_id().is_none(),
+                "late preparation keeps the app overview"
             );
         });
     }

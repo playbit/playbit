@@ -11,15 +11,24 @@ pub(super) struct AppReview {
     pub icon: Option<Arc<RenderImage>>,
 }
 
-impl AppReview {
-    pub(super) fn published_name(
-        &self,
-        channel: crate::release_channel::ReleaseChannel,
-    ) -> Option<&'static str> {
-        let app = self.app.as_ref()?;
-        let evidence = crate::package::bundled_examples::Evidence::for_build(&self.build)?;
-        evidence.identifies(channel, app).then_some("Playbit")
+impl Shell {
+    pub(in crate::desktop) fn app_publisher_name(&self, app: &AppIdentity, build: &str) -> String {
+        if crate::package::bundled_examples::Evidence::for_build(build)
+            .is_some_and(|evidence| evidence.identifies(self.channel, app))
+        {
+            return "Playbit".into();
+        }
+        if app.publisher == self.account.id
+            && let Some(name) =
+                self.account_profile.display_name.as_deref().filter(|s| !s.is_empty())
+        {
+            return name.to_owned();
+        }
+        app.publisher.to_string()
     }
+}
+
+impl AppReview {
     pub(super) fn from_package(package: &crate::package::Package) -> crate::engine::Result<Self> {
         use crate::package::codec::{ICON, MAX_ICON_BYTES};
         let icon = if package.index().entry(ICON).is_some() {
@@ -371,15 +380,7 @@ impl Form {
                 self.owner
                     .as_ref()
                     .and_then(gpui::WeakEntity::upgrade)
-                    .and_then(|owner| {
-                        let shell = owner.read(cx);
-                        if let Some(name) = review.published_name(shell.channel) {
-                            return Some(name.to_owned());
-                        }
-                        (app.publisher == shell.account.id)
-                            .then(|| shell.account_profile.display_name.clone())
-                            .flatten()
-                    })
+                    .map(|owner| owner.read(cx).app_publisher_name(app, &review.build))
                     .unwrap_or_else(|| app.publisher.to_string())
             });
             (

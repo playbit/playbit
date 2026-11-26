@@ -5,7 +5,7 @@ use crate::store::volume_index::EntryAddress;
 use std::path::PathBuf;
 
 /// Compact binary units promote above 1000 before rounding to one decimal.
-pub(super) fn format_byte_size(bytes: u64) -> String {
+pub(in crate::desktop) fn format_byte_size(bytes: u64) -> String {
     const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
     let bytes = u128::from(bytes);
     let mut divisor = 1;

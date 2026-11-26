@@ -780,6 +780,19 @@ pub enum Request {
         account: Id,
         account_ids: Vec<Id>,
     },
+    ListAppBuilds {
+        app: crate::package::AppIdentity,
+        after: Option<String>,
+    },
+    SetAppBuildNotes {
+        app: crate::package::AppIdentity,
+        build: String,
+        notes: String,
+    },
+    /// Keep an exact-app observer until the IPC client closes its socket.
+    WatchAppBuilds {
+        app: crate::package::AppIdentity,
+    },
 }
 /// A process-generation cursor for observing local state, never an authority.
 #[cfg(feature = "app-host")]

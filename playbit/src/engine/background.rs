@@ -30,6 +30,7 @@ impl Drop for NotifyCompletion {
 /// network work. Its completion signal releases retained result admission.
 pub(crate) struct NetworkTicket {
     abandoned: Arc<AtomicBool>,
+    history_read: Option<Arc<Canceled>>,
     completion: Arc<Wake>,
     armed: bool,
     control: bool,
@@ -37,6 +38,9 @@ pub(crate) struct NetworkTicket {
 impl Drop for NetworkTicket {
     fn drop(&mut self) {
         if self.armed {
+            if let Some(read) = &self.history_read {
+                read.raise();
+            }
             drop(NotifyCompletion(self.completion.clone(), self.abandoned.clone()));
         }
     }
@@ -55,6 +59,9 @@ pub(crate) struct Transfer {
     cancel: Arc<Mutex<Option<Arc<crate::network::ap::ApConnection>>>>,
     session: Option<String>,
     pub(super) canceled: Arc<Canceled>,
+    // Abandoning a history read interrupts Remote without canceling the transfer
+    // as a whole, which would disconnect the account's live replication.
+    history_read: Option<Arc<Canceled>>,
     disconnected: bool,
     enrolled: bool,
     replacement_required: bool,
@@ -67,6 +74,13 @@ pub(crate) struct Transfer {
 }
 
 impl Transfer {
+    fn cancel_work(&self) {
+        self.canceled.raise();
+        if let Some(read) = &self.history_read {
+            read.raise();
+        }
+    }
+
     fn reads_display_metadata(&self) -> bool {
         self.developer && self.diagnostic_read
     }
@@ -371,7 +385,7 @@ impl Engine {
             let action = enrollment::Action::prepare(request)?;
             NetworkWork::Enrollment(action)
         } else if developer::is_request(&request) {
-            developer::validate(&request)?;
+            developer::validate(&request, &self.services.store)?;
             NetworkWork::Developer(request)
         } else if diagnostics::is_request(&request) {
             NetworkWork::Diagnostic(request)
@@ -394,7 +408,14 @@ impl Engine {
     fn network_request_ticket(&mut self, control: bool) -> NetworkTicket {
         let abandoned = Arc::new(AtomicBool::new(false));
         self.network_request_waiter = Some(abandoned.clone());
-        NetworkTicket { abandoned, completion: self.completion.wake.clone(), armed: true, control }
+        let history_read = self.background.as_ref().and_then(|work| work.history_read.clone());
+        NetworkTicket {
+            abandoned,
+            history_read,
+            completion: self.completion.wake.clone(),
+            armed: true,
+            control,
+        }
     }
 
     pub(crate) fn network_request_complete(&self, ticket: &NetworkTicket) -> bool {
@@ -460,7 +481,7 @@ impl Engine {
         {
             // Cancel this download without cancel_all_creations(), which can
             // contain a different, already-local app being initialized.
-            work.canceled.raise();
+            work.cancel_work();
             if self.synchronization.is_none()
                 && let Some(connection) =
                     work.cancel.lock().map_err(|_| "connection lock poisoned")?.as_ref()
@@ -673,7 +694,9 @@ impl Engine {
             NetworkWork::Diagnostic(
                 Request::RejectedEntries { .. } | Request::Usage { .. } | Request::FileRead { .. }
             ) | NetworkWork::Developer(
-                Request::GetAppDisplay { .. } | Request::GetAccountDisplayNames { .. }
+                Request::GetAppDisplay { .. }
+                    | Request::GetAccountDisplayNames { .. }
+                    | Request::ListAppBuilds { .. }
             )
         );
         let selection_only = matches!(
@@ -706,11 +729,13 @@ impl Engine {
         let remaining_sessions = sessions.split_off(sessions.len().min(1));
         let canceled = Arc::new(Canceled::default());
         let worker_canceled = canceled.clone();
+        let history_read = matches!(work, NetworkWork::Developer(Request::ListAppBuilds { .. }))
+            .then(|| Arc::new(Canceled::default()));
         // Cancellation reaches this worker through the published transport,
         // which it may not have opened yet. Carry the signal too, so it neither
         // replaces a shut-down transport nor waits out an exchange that has no
         // transport to close.
-        remote.set_cancellation(Some(canceled.clone()));
+        remote.set_cancellation(Some(history_read.as_ref().unwrap_or(&canceled).clone()));
         let (send, receiver) = mpsc::sync_channel(1);
         let completion_wake = self.completion.wake.clone();
         let ready = Arc::new(AtomicBool::new(false));
@@ -743,6 +768,7 @@ impl Engine {
             cancel,
             session,
             canceled,
+            history_read,
             disconnected: false,
             enrolled,
             replacement_required,
@@ -835,7 +861,7 @@ impl Engine {
         {
             if self.synchronization.is_some() {
                 self.services.store.pause_invitation(session, true)?;
-                transfer.canceled.raise();
+                transfer.cancel_work();
                 self.transfer_result = TransferStatus {
                     kind: TransferKind::Canceling,
                     session: Some(session.into()),
@@ -963,7 +989,7 @@ impl Engine {
     pub fn poll_shutdown(&mut self) -> Result<bool> {
         let enrollment = self.background.as_ref().is_some_and(|transfer| transfer.enrollment);
         if enrollment {
-            self.background.as_ref().expect("enrollment owns a transfer").canceled.raise();
+            self.background.as_ref().expect("enrollment owns a transfer").cancel_work();
         }
         #[cfg(all(not(target_os = "ios"), feature = "process"))]
         let collect = enrollment || self.service_executor.pending();
@@ -996,7 +1022,7 @@ impl Engine {
         // Accepted data effects reach their own terminal result. Ordinary
         // background work can be cut to release the lane for queued effects.
         if !transfer.canceled.raised() {
-            transfer.canceled.raise();
+            transfer.cancel_work();
             if let Some(connection) =
                 transfer.cancel.lock().map_err(|_| "connection lock poisoned")?.as_ref()
             {
@@ -1072,7 +1098,7 @@ impl Engine {
             return Ok(());
         }
         if let Some(transfer) = &mut self.background {
-            transfer.canceled.raise();
+            transfer.cancel_work();
             if let Some(connection) =
                 transfer.cancel.lock().map_err(|_| "connection lock poisoned")?.as_ref()
             {
@@ -1790,6 +1816,7 @@ pub(crate) mod tests {
             cancel: remote.cancel_handle(),
             session: None,
             canceled: Arc::new(Canceled::default()),
+            history_read: None,
             disconnected: false,
             enrolled: remote.enrolled(),
             replacement_required: remote.replacement_required(),
@@ -2902,7 +2929,26 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn app_display_lookup_preserves_transfer_status_and_returns_its_error() {
+    fn foreign_release_note_edits_leave_transfer_status_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(directory.path()).unwrap();
+        let before = engine.transfer_status();
+        let app = crate::package::AppIdentity {
+            publisher: Id::generate().unwrap(),
+            app_id: "test-app".into(),
+        };
+        let request = Request::SetAppBuildNotes {
+            app,
+            build: crate::identifier::encode(&[1; 32]),
+            notes: "Updated notes".into(),
+        };
+        let result = engine.begin_network_request(request);
+        assert!(matches!(result, Err(error) if error.to_string().contains("publisher")));
+        assert_eq!(engine.transfer_status(), before);
+    }
+
+    #[test]
+    fn app_metadata_lookups_preserve_transfer_status_and_return_their_error() {
         let directory = tempfile::tempdir().unwrap();
         let mut engine = Engine::open(directory.path()).unwrap();
         // Reject the metadata read locally, without depending on an AP fixture.
@@ -2914,15 +2960,15 @@ pub(crate) mod tests {
             ..Default::default()
         };
         engine.transfer_result = transfer.clone();
-        let request = Request::GetAppDisplay {
-            app: crate::package::AppIdentity {
-                publisher: engine.services.store.account().id,
-                app_id: "test-app".into(),
-            },
-            build: crate::identifier::encode(&[1; 32]),
+        let app = crate::package::AppIdentity {
+            publisher: engine.services.store.account().id,
+            app_id: "test-app".into(),
         };
-        for cancel in [false, true] {
-            let ticket = engine.begin_network_request(request.clone()).unwrap();
+        let display =
+            Request::GetAppDisplay { app: app.clone(), build: crate::identifier::encode(&[1; 32]) };
+        let history = Request::ListAppBuilds { app, after: None };
+        for (request, cancel) in [(display.clone(), false), (display, true), (history, false)] {
+            let ticket = engine.begin_network_request(request).unwrap();
             engine.network.progress.set(
                 Some(reply::TransferProgress::Connecting { hostname: "example.invalid".into() }),
                 &engine.completion.wake,

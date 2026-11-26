@@ -109,12 +109,16 @@ Other common arguments:
 ```json
 {"op":"list-apps"}
 {"op":"set-app-enabled","app":{"publisher":"PUBLISHER_ID","app_id":"my-todo"},"enabled":false}
+{"op":"list-app-builds","app":{"publisher":"PUBLISHER_ID","app_id":"my-todo"}}
+{"op":"set-app-build-notes","app":{"publisher":"PUBLISHER_ID","app_id":"my-todo"},"build":"BUILD_ID","notes":"Corrected release notes"}
 {"op":"delete-app","app":{"publisher":"PUBLISHER_ID","app_id":"my-todo"}}
 {"op":"transfer-status"}
 {"op":"wait-changes"}
 ```
 
-Pass an app page's `next` value as `after` to read the next page. Only the
+Pass an app page's `next` value as `after` to read the next page. A publisher
+can use a `build_id` from `list-app-builds` to edit that build's release notes.
+Send an empty `notes` string to clear them. Only the
 publisher may publish, enable, disable or delete that app. Disable it before
 deleting it; neither operation deletes data or ends retained sessions. Public app
 code notifications use AP push without registering the local session or sharing

@@ -943,7 +943,7 @@ flowchart LR
 | Discovery | describe |
 | Registration/content | register_volume, register_session, upload_build, get_blob, resolve_volume_grantee, volume_usage |
 | Publisher signing | issue_publisher_certificate, get_publisher_key_status, revoke_publisher_key |
-| App publications | get_app, get_build_identity, get_app_display, list_apps, list_app_builds, set_app_enabled, delete_app, publish_app |
+| App publications | get_app, get_build_identity, get_app_display, list_apps, list_app_builds, set_app_build_notes, set_app_enabled, delete_app, publish_app |
 | Sessions/invitations | open_session, resolve_session, read_invitation, watch_invitation, advance_session |
 | Replicas | provision_replica, sync_database, subscribe_replica, publish_replica, sync_account, subscribe_account, publish_account |
 | Private peers | peer_listen, peer_request, peer_reply |
@@ -1097,10 +1097,18 @@ binding even when a retained receipt permits an expired certificate's exact buil
 same verified app identity and `expected_revision` (zero for first publication).
 The selected build, first-publication history and operation receipt commit
 atomically, fenced against the exact checked publisher-key state.
+`set_app_build_notes` takes the app identity, a published `build_id`, the current
+`expected_revision` and a required `notes` string. Only the authenticated
+publisher can correct a build's notes. An empty string clears them. The same
+32 KiB JSON-escaped text limit applies to publication and correction.
+The correction retains the build's original `published_at` and the app's
+current build selection. For the current build, `get_app` and
+`list_app_builds` both return the corrected text. A successful edit advances
+the app revision and notifies subscribers on its publication-history channel.
 `set_app_enabled` and `delete_app` also require the publisher and current revision;
 deletion requires a disabled app and is permanent. Retained sessions keep their
 bindings and data. New ordinary App-following registrations require an active
-publication and a build from its immutable history, with availability and signer
+publication and a previously published build, with availability and signer
 conditions checked atomically at registration.
 
 `list_apps` is publisher-account-scoped. App and history pages contain at most
@@ -1181,6 +1189,15 @@ length u32LE and app-ID UTF-8 bytes. The service routes this observer only to it
 internal `app` topic, with no session ID, possession proof, message key or
 membership. It forwards an empty acknowledgment and server-authored
 `UpdateAvailable` controls only. Further client input terminates the observer.
+
+An app overview subscribes in the same way to the publication-history address.
+Derive its 32 bytes with BLAKE3 `derive_key`, using the context
+`app.playbit.app-history.v1` and the app's raw 32-byte update hash as input.
+Publishing and changing availability notify both addresses. Editing notes
+notifies only the history address. On subscription acknowledgment and each
+notification, readers reconcile history through the visibility-checked service
+operations. Notifications carry no notes or build data.
+
 Local Exact selections need no remote observer. Local app instance joins, named
 channels and publications remain unsupported.
 

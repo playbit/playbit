@@ -423,13 +423,8 @@ async fn control_subscription(
             return Err("app update subscription differs from retained identity".into());
         }
         let destination = crate::network::ap::operation::app_update_channel(app)?;
-        crate::network::ap::Frame::new(
-            frame_type::SUBSCRIBE,
-            channel::SESSION,
-            [],
-            destination,
-            [],
-        )?
+        let (stream, destination) = subscribe_app_updates(connection, destination).await?;
+        return Ok((stream, destination, None));
     } else {
         let destination = crate::identifier::decode::<32>(&session.id)?;
         let proof = store.session_proof(&session.id, store.account().id)?;
@@ -464,6 +459,28 @@ async fn control_subscription(
     } else {
         None
     };
+    let (stream, destination) = open_control_subscription(connection, frame).await?;
+    Ok((stream, destination, display_names))
+}
+
+pub(super) async fn subscribe_app_updates(
+    connection: &ApConnection,
+    destination: [u8; 32],
+) -> Result<(ApStream, Vec<u8>)> {
+    let frame = crate::network::ap::Frame::new(
+        frame_type::SUBSCRIBE,
+        channel::SESSION,
+        [],
+        destination,
+        [],
+    )?;
+    open_control_subscription(connection, frame).await
+}
+
+async fn open_control_subscription(
+    connection: &ApConnection,
+    frame: crate::network::ap::Frame,
+) -> Result<(ApStream, Vec<u8>)> {
     let destination = frame.destination.clone();
     let mut stream = connection.open_stream().await?;
     stream.send(&frame).await?;
@@ -471,7 +488,7 @@ async fn control_subscription(
         tokio::time::timeout(connection.response_timeout(), stream.receive_with_body_limit(0))
             .await??;
     channel::acknowledgement(&ack, frame_type::SUBSCRIBE, &destination)?;
-    Ok((stream, destination, display_names))
+    Ok((stream, destination))
 }
 
 #[allow(

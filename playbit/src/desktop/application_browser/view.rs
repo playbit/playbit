@@ -229,25 +229,32 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Div> {
-        if !self.showing_application_path()
-            || self.inline_session_form(cx).is_some()
-            || self.personal.is_some()
-            || self.invitation.is_some() && !self.session_dialog_open(cx)
-        {
-            return None;
-        }
-        let app = self
-            .applications
-            .apps
-            .iter()
-            .find(|app| Some(&app.identity) == self.applications.selected.as_ref())?
-            .clone();
-        if self.sidebar_volumes && !app.can_open {
-            return None;
-        }
+        let browsing = self.showing_application_path()
+            && self.inline_session_form(cx).is_none()
+            && self.personal.is_none()
+            && (self.invitation.is_none() || self.session_dialog_open(cx));
+        let app = if browsing {
+            self.applications
+                .apps
+                .iter()
+                .find(|app| {
+                    Some(&app.identity) == self.applications.selected.as_ref()
+                        && (!self.sidebar_volumes || app.can_open)
+                })
+                .cloned()
+        } else {
+            None
+        };
         let selected = self.selected_session_id().map(str::to_owned);
+        let overview = !self.sidebar_volumes && selected.is_none() && !self.applications.root_open;
+        self.sync_application_details(
+            app.as_ref().filter(|_| overview).map(|app| (&app.identity, app.build.as_str())),
+            cx,
+        );
+        let app = app?;
         let busy = self.applications.action_busy
-            || selected.is_none() && self.applications.creation_uncertain(&app)
+            || self.applications.creating
+            || selected.is_none() && self.applications.creation_uncertain(&app.identity)
             || selected.as_ref().is_some_and(|id| self.launches.contains_key(id));
         let header = self
             .application_heading(
@@ -327,6 +334,16 @@ impl Shell {
                 sessions.children(session_rows.into_iter().map(|row| div().h(ui(32.)).child(row)));
         } else if !session_rows.is_empty() {
             sessions = sessions.child(controls::virtual_rows(session_rows, row_height, px(0.)));
+        } else if overview {
+            sessions = sessions.child(
+                self.application_text("application-no-sessions", "No sessions", cx)
+                    .h(ui(32.))
+                    .pl(ui(30.))
+                    .py(ui(6.))
+                    .text_size(ui(14.))
+                    .line_height(ui(20.))
+                    .text_color(rgba(0x00000066)),
+            );
         }
         if app.can_open {
             sessions =
@@ -364,6 +381,12 @@ impl Shell {
             .and_then(|id| self.applications.catalog.iter().find(|session| session.id == id))
             .cloned()
         else {
+            if overview {
+                let inspector = self.app_overview_inspector(&app, window, cx);
+                let upper =
+                    self.application_columns_viewport(content.child(column()).child(inspector), cx);
+                return Some(split_content(upper, self.app_release_notes(&app, window, cx)));
+            }
             return Some(self.application_columns_viewport(
                 content.child(div().flex_1().min_w_0().bg(rgb(0xececec))),
                 cx,
@@ -454,16 +477,7 @@ impl Shell {
             .cloned();
         let inspector = self.application_inspector(&session, owner.as_ref(), window, cx);
         let upper = self.application_columns_viewport(content.child(inspector), cx);
-        Some(
-            div()
-                .h_full()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(div().h(ui(286.)).max_h(gpui::relative(0.8)).flex_none().flex().child(upper))
-                .child(self.application_log(cx)),
-        )
+        Some(split_content(upper, self.application_log(cx)))
     }
 
     fn session_list_title(&self, id: &str, siblings: &[String]) -> String {
@@ -613,13 +627,12 @@ impl Shell {
         instances
     }
 
-    pub(super) fn application_metadata(
+    pub(super) fn selectable_metadata_value(
         &mut self,
         key: &'static str,
-        label: &str,
         value: &str,
         cx: &mut Context<Self>,
-    ) -> gpui::Div {
+    ) -> Entity<text_editor::TextEditor> {
         let editor = self
             .applications
             .identifiers
@@ -627,6 +640,17 @@ impl Shell {
             .or_insert_with(|| cx.new(|cx| text_editor::TextEditor::new(value, cx).selectable_id()))
             .clone();
         editor.update(cx, |editor, cx| editor.acknowledge(None, value, cx));
+        editor
+    }
+
+    pub(super) fn application_metadata(
+        &mut self,
+        key: &'static str,
+        label: &str,
+        value: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let editor = self.selectable_metadata_value(key, value, cx);
         div()
             .h(ui(24.))
             .flex_none()
@@ -678,6 +702,17 @@ fn column() -> gpui::Div {
         .border_r_1()
         .border_color(theme::column_divider_color())
         .horizontal_focus_reveal_scope()
+}
+
+fn split_content(upper: gpui::Div, lower: gpui::Div) -> gpui::Div {
+    div()
+        .h_full()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(div().h(ui(286.)).max_h(gpui::relative(0.8)).flex_none().flex().child(upper))
+        .child(lower)
 }
 
 fn list(key: &'static str) -> gpui::Stateful<gpui::Div> {

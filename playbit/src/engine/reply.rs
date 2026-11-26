@@ -217,6 +217,69 @@ pub struct AppPage {
 }
 
 #[cfg(feature = "app-host")]
+#[derive(
+    Debug,
+    Default,
+    serde::Deserialize,
+    serde::Serialize,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+)]
+pub struct AppBuildPage {
+    pub builds: Vec<crate::network::ap::operation::AppBuild>,
+    pub next: Option<String>,
+}
+
+#[cfg(feature = "app-host")]
+impl AppBuildPage {
+    // The AP pages through build IDs, with at most 128 KiB of build records per page.
+    const MAX_BUILDS: usize = 32;
+    const MAX_BYTES: usize = crate::network::ap::operation::APP_BUILD_PAGE_BYTES;
+
+    pub(super) fn from_ap(value: serde_json::Value, after: Option<&str>) -> super::Result<Self> {
+        let rows = value["builds"].as_array().ok_or("invalid app history page")?;
+        // AP charges the encoded rows individually, without array brackets or commas.
+        if rows.len() > Self::MAX_BUILDS
+            || value.get("next").is_none()
+            || serde_json::to_vec(rows)?.len() > Self::MAX_BYTES + 2 + rows.len().saturating_sub(1)
+        {
+            return Err("invalid app history page".into());
+        }
+        let page: Self = serde_json::from_value(value)?;
+        let rows = page.builds.iter().map(|row| (row.build_id.as_str(), row.notes.as_str()));
+        if !Self::valid_rows(rows, after, page.next.as_deref()) {
+            return Err("invalid app history records or cursor".into());
+        }
+        Ok(page)
+    }
+
+    fn valid_rows<'a>(
+        rows: impl ExactSizeIterator<Item = (&'a str, &'a str)>,
+        after: Option<&str>,
+        next: Option<&str>,
+    ) -> bool {
+        let count = rows.len();
+        if count > Self::MAX_BUILDS {
+            return false;
+        }
+        let mut prior = after;
+        let mut bytes = 0;
+        for (id, notes) in rows {
+            if !crate::identifier::valid(id, 32)
+                || prior.is_some_and(|last| id <= last)
+                || !crate::network::ap::operation::valid_app_notes(notes)
+            {
+                return false;
+            }
+            bytes += id.len() + notes.len();
+            prior = Some(id);
+        }
+        bytes <= Self::MAX_BYTES && (next.is_none() || count > 0 && next == prior)
+    }
+}
+
+#[cfg(feature = "app-host")]
 #[derive(Debug, serde::Serialize, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub enum VolumeAccess {
     #[serde(rename = "r")]
@@ -261,6 +324,7 @@ pub enum DeveloperReply {
     AccountDisplayNames {
         names: Vec<crate::network::ap::operation::AccountDisplayName>,
     },
+    AppBuilds(AppBuildPage),
 }
 
 #[cfg(feature = "app-host")]
@@ -578,6 +642,9 @@ pub enum Reply {
         impact: crate::store::AppRemovalImpact,
     },
     AppRemoved(crate::store::AppRemovalResult),
+    AppBuildsNotice {
+        error: Option<String>,
+    },
 }
 // Small controls share this root. Large payloads live out of line through
 // rkyv's AsBox adapter, without changing their owned Rust representation.
@@ -592,6 +659,8 @@ impl ArchivedReply {
     pub fn matches_request(&self, request: &super::Request) -> bool {
         use super::Request as Q;
         match request {
+            Q::WatchAppBuilds { .. } => matches!(self, Self::AppBuildsNotice { error }
+                if error.as_ref().is_none_or(|error| error.len() <= 512)),
             Q::AppRemovalImpact { .. } => matches!(self, Self::AppRemovalImpact { .. }),
             Q::RemoveApp { .. } => matches!(self, Self::AppRemoved(_)),
             Q::WorkOffline { enabled } => {
@@ -666,8 +735,8 @@ impl ArchivedReply {
             },
             #[rustfmt::skip]
             request @ (Q::GrantVolume { .. }
-            | Q::SetAppEnabled { .. } | Q::DeleteApp { .. }
-            | Q::PublishApp { .. } | Q::ListApps { .. }
+            | Q::SetAppEnabled { .. } | Q::SetAppBuildNotes { .. } | Q::DeleteApp { .. }
+            | Q::PublishApp { .. } | Q::ListApps { .. } | Q::ListAppBuilds { .. }
             | Q::GetAppDisplay { .. } | Q::GetAccountDisplayNames { .. } | Q::UpdateSession { .. }
             | Q::CreateAppSession { .. } | Q::CreateBuildSession { .. }
             | Q::PrepareApp { .. } | Q::SignPackage { .. } | Q::AuthenticatePackage { .. } | Q::CreateSession { .. }) => {
@@ -950,11 +1019,36 @@ impl ArchivedReply {
             Q::GrantVolume { .. } => {
                 matches!(self, Self::Developer(reply) if matches!(reply.as_ref(), D::VolumeGranted { .. }))
             }
+            Q::SetAppBuildNotes { app, build, notes } => {
+                let Self::Developer(reply) = self else { return false };
+                let D::App(response) = reply.as_ref() else { return false };
+                response.app.as_ref().is_some_and(|current| {
+                    current.identity.publisher.0 == *app.publisher.as_bytes()
+                        && current.identity.app_id.as_str() == app.app_id
+                        && current.revision == response.revision
+                        && !matches!(
+                            current.state,
+                            crate::network::ap::operation::ArchivedAppState::Deleted
+                        )
+                        && crate::identifier::valid(current.build_id.as_str(), 32)
+                        && crate::network::ap::operation::valid_app_notes(current.notes.as_str())
+                        && (current.build_id.as_str() != build || current.notes.as_str() == notes)
+                })
+            }
             Q::SetAppEnabled { .. } | Q::DeleteApp { .. } | Q::PublishApp { .. } => {
                 matches!(self, Self::Developer(reply) if matches!(reply.as_ref(), D::App(_)))
             }
             Q::ListApps { .. } => {
                 matches!(self, Self::Developer(reply) if matches!(reply.as_ref(), D::Apps(_)))
+            }
+            Q::ListAppBuilds { after, .. } => {
+                let Self::Developer(reply) = self else { return false };
+                let D::AppBuilds(page) = reply.as_ref() else { return false };
+                AppBuildPage::valid_rows(
+                    page.builds.iter().map(|row| (row.build_id.as_str(), row.notes.as_str())),
+                    after.as_deref(),
+                    page.next.as_ref().map(|next| next.as_str()),
+                )
             }
             Q::GetAppDisplay { .. } => {
                 matches!(self, Self::Developer(reply) if matches!(reply.as_ref(), D::Display { .. }))
@@ -1648,6 +1742,80 @@ mod tests {
         assert!(matches!(archived.transfer.kind, ArchivedTransferKind::Idle));
         let decoded = rkyv::api::low::from_bytes::<Status, rkyv::rancor::Error>(&bytes).unwrap();
         assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+    }
+
+    #[test]
+    fn app_build_page_validates_paging_before_materialization() {
+        let first = crate::identifier::encode(&[0; 32]);
+        let second = crate::identifier::encode(&[1; 32]);
+        let row = |id: &str, notes: &str| json!({"build_id":id, "published_at":17, "notes":notes});
+        let one = row(&first, "First release");
+        let two = row(&second, "Added colors");
+        let page = AppBuildPage::from_ap(json!({"builds":[one,two], "next":second}), None).unwrap();
+        let reply = Reply::Developer(DeveloperReply::AppBuilds(page));
+        let bytes = codec::encode(&reply, codec::MAX_ARCHIVE).unwrap();
+        let archived = codec::access::<ArchivedReply>(&bytes).unwrap();
+        let app = crate::package::AppIdentity {
+            publisher: Id::from_bytes([7; 16]),
+            app_id: "test".into(),
+        };
+        let request = |after| crate::engine::Request::ListAppBuilds { app: app.clone(), after };
+        assert!(archived.matches_request(&request(None)));
+        assert!(!archived.matches_request(&request(Some(first.clone()))));
+        assert!(AppBuildPage::from_ap(json!({"builds":[two], "next":null}), Some(&first)).is_ok());
+        assert!(AppBuildPage::from_ap(json!({"builds":[], "next":null}), None).is_ok());
+        let oversized = (0..5)
+            .map(|byte| row(&crate::identifier::encode(&[byte; 32]), &"x".repeat(32768)))
+            .collect::<Vec<_>>();
+        for invalid in [
+            json!({"builds":[one,one], "next":null}),
+            json!({"builds":[two,one], "next":null}),
+            json!({"builds":[two], "next":first}),
+            json!({"builds":[], "next":second}),
+            json!({"builds":[row("invalid", "")], "next":null}),
+            json!({"builds":[row(&first, &"\n".repeat(16385))], "next":null}),
+            json!({"builds":oversized, "next":null}),
+        ] {
+            assert!(AppBuildPage::from_ap(invalid, None).is_err());
+        }
+    }
+
+    #[test]
+    fn note_edit_reply_matches_the_publisher_and_keeps_the_current_build() {
+        let publisher = Id::from_bytes([7; 16]);
+        let build = crate::identifier::encode(&[3; 32]);
+        let reply = Reply::Developer(DeveloperReply::App(
+            serde_json::from_value(json!({
+                "revision":7, "app":{"identity":{"publisher":publisher,"app_id":"sketch"},
+                "build_id":build,"notes":"Current release","revision":7,"state":"disabled"}
+            }))
+            .unwrap(),
+        ));
+        let bytes = codec::encode(&reply, codec::MAX_ARCHIVE).unwrap();
+        let archived = codec::access::<ArchivedReply>(&bytes).unwrap();
+        let edit = |id: Id, app_id: &str, build: String, notes: &str| {
+            crate::engine::Request::SetAppBuildNotes {
+                app: crate::package::AppIdentity { publisher: id, app_id: app_id.to_owned() },
+                build,
+                notes: notes.to_owned(),
+            }
+        };
+        let old = crate::identifier::encode(&[2; 32]);
+        assert!(archived.matches_request(&edit(
+            publisher,
+            "sketch",
+            old.clone(),
+            "Earlier release"
+        )));
+        assert!(archived.matches_request(&edit(
+            publisher,
+            "sketch",
+            build.clone(),
+            "Current release"
+        )));
+        assert!(!archived.matches_request(&edit(publisher, "sketch", build, "Different text")));
+        assert!(!archived.matches_request(&edit(publisher, "other", old.clone(), "")));
+        assert!(!archived.matches_request(&edit(Id::from_bytes([9; 16]), "sketch", old, "")));
     }
 
     #[test]

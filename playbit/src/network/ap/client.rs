@@ -1030,7 +1030,7 @@ mod tests {
         let accepted_endpoint = endpoint.clone();
         let accepting =
             runtime.spawn(async move { accepted_endpoint.accept().await.unwrap().await.unwrap() });
-        let connection = connect_for_close_tests(&runtime, &config);
+        let connection = bare_connection(&runtime, &config);
         runtime.block_on(async {
             let peer = accepting.await.unwrap();
             assert!(connection.close_reason().is_none());
@@ -1190,18 +1190,15 @@ mod tests {
         });
     }
 
-    /// Connects a bare `ApConnection` (bypassing the AP authentication
-    /// handshake, which is irrelevant to closing a transport) to a server
-    /// that never answers anything, modeling a connected, idle AP peer.
-    fn connect_for_close_tests(
-        runtime: &tokio::runtime::Runtime,
-        config: &ClientConfig,
-    ) -> ApConnection {
+    /// Establish QUIC without opening an authentication or service stream.
+    fn bare_connection(runtime: &tokio::runtime::Runtime, config: &ClientConfig) -> ApConnection {
         runtime.block_on(async {
-            let authentication = open_authentication_connection(config, None).await.unwrap();
+            let endpoint = create_endpoint(config).unwrap();
+            let connecting = endpoint.connect(config.server_address, &config.server_name).unwrap();
+            let connection = timeout(config.connect_timeout, connecting).await.unwrap().unwrap();
             ApConnection {
-                endpoint: authentication.endpoint,
-                connection: authentication.connection,
+                endpoint,
+                connection,
                 discovery: Discovery::default(),
                 instance_id: vec![],
                 response_timeout: config.response_timeout,
@@ -1227,7 +1224,7 @@ mod tests {
                     .unwrap();
                 (endpoint, peer)
             });
-            let connection = connect_for_close_tests(&runtime, &config);
+            let connection = bare_connection(&runtime, &config);
             runtime.block_on(async {
                 let (_endpoint, peer) = accepting.await.unwrap();
                 peer.close(quinn::VarInt::from_u32(code), b"service restarting");
@@ -1315,7 +1312,7 @@ mod tests {
 
         let client_runtime =
             tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let connection = Arc::new(connect_for_close_tests(&client_runtime, &config));
+        let connection = Arc::new(bare_connection(&client_runtime, &config));
         let held = crate::network::ap::testing::hold_close_flush(&connection);
 
         // This mirrors `Remote::disconnect`: close locally, then spawn the
@@ -1381,7 +1378,7 @@ mod tests {
 
         let client_runtime =
             tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        let connection = connect_for_close_tests(&client_runtime, &config);
+        let connection = bare_connection(&client_runtime, &config);
         connection.shutdown();
         drop(connection);
         // Dropped immediately after the bare `shutdown()`, with no task ever
@@ -1474,6 +1471,104 @@ mod tests {
     }
 
     const TEST_OPERATION: &str = "operation";
+
+    #[test]
+    fn app_history_accepts_full_envelopes_and_rejects_oversized_headers() {
+        use crate::network::ap::{operation::*, service, service_client, timing};
+        use serde_json::json;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (endpoint, certificate) = server_endpoint(&runtime);
+        let mut config =
+            ClientConfig::new(endpoint.local_addr().unwrap(), "localhost", vec![certificate]);
+        config.response_timeout = Duration::from_secs(5);
+        let accepting = endpoint.clone();
+        let accepted =
+            runtime.spawn(async move { accepting.accept().await.unwrap().await.unwrap() });
+        let client = bare_connection(&runtime, &config);
+        let server = runtime.block_on(accepted).unwrap();
+        let app = crate::package::AppIdentity {
+            publisher: crate::store::Id::from_bytes([9; 16]),
+            app_id: "a".repeat(crate::package::MAX_APP_ID_BYTES),
+        };
+        let operation_id = app.publisher.to_string();
+        let rows: Vec<_> = (1..=4)
+            .map(|byte| {
+                let mut row = json!({"build_id":crate::identifier::encode(&[byte; 32]),
+                "notes":"", "published_at":u64::MAX});
+                // Fill the AP's entire 128 KiB row allowance with four valid records.
+                row["notes"] = "n"
+                    .repeat(APP_BUILD_PAGE_BYTES / 4 - serde_json::to_vec(&row).unwrap().len())
+                    .into();
+                row
+            })
+            .collect();
+        let get = ServiceRequest::GetApp { operation_id: operation_id.clone(), app: app.clone() };
+        let page = ServiceRequest::ListAppBuilds {
+            operation_id: operation_id.clone(),
+            app: app.clone(),
+            after: None,
+        };
+        let current = json!({"app":{"identity":app, "build_id":rows[3]["build_id"],
+            "state":"active", "notes":"n".repeat(MAX_APP_NOTES_BYTES), "revision":u64::MAX}, "revision":u64::MAX});
+        let history = json!({"builds":rows, "next":rows[3]["build_id"]});
+        let mut timings = timing::Timings::default();
+        for stage in timing::Stage::ALL {
+            timings.push(timing::Timing { stage, duration_ns: u64::MAX }).unwrap();
+        }
+        runtime.block_on(async {
+            for (request, data, max_body) in
+                [(get, current, 34 * 1024), (page, history, 130 * 1024)]
+            {
+                let answer = ServiceResponse {
+                    timing: timings.clone(),
+                    ok: true,
+                    operation_id: operation_id.clone(),
+                    error: None,
+                    code: None,
+                    denial: None,
+                    data: Some(data.clone()),
+                };
+                let body = serde_json::to_vec(&answer).unwrap();
+                let wire = Frame::new(
+                    frame_type::DIRECT,
+                    service::PROTOCOL,
+                    SERVICE_DESTINATION,
+                    b"instance",
+                    body,
+                )
+                .unwrap()
+                .encode()
+                .unwrap();
+                let mut header: [u8; super::super::HEADER_LEN] =
+                    wire[..super::super::HEADER_LEN].try_into().unwrap();
+                let offset =
+                    super::super::body_offset(SERVICE_DESTINATION.len(), b"instance".len());
+                header[..4]
+                    .copy_from_slice(&u32::try_from(offset + max_body + 1).unwrap().to_le_bytes());
+                for (oversized, bytes) in [(false, wire.as_slice()), (true, header.as_slice())] {
+                    let serve = async {
+                        let (mut send, mut receive) = server.accept_bi().await.unwrap();
+                        assert_eq!(
+                            receive_frame(&mut receive).await.unwrap(),
+                            service::request(&request).unwrap()
+                        );
+                        send.write_all(bytes).await.unwrap();
+                        send // Hold the stream open without sending the oversized body.
+                    };
+                    let (reply, _send) =
+                        tokio::join!(service_client::request(&client, &request), serve);
+                    if oversized {
+                        assert!(matches!(
+                            reply.unwrap_err().downcast_ref::<ClientError>(),
+                            Some(ClientError::Protocol(ProtocolError::FrameTooLarge))
+                        ));
+                    } else {
+                        assert_eq!(reply.unwrap().data.as_ref(), Some(&data));
+                    }
+                }
+            }
+        });
+    }
 
     fn silent_config(address: SocketAddr, certificate: CertificateDer<'static>) -> ClientConfig {
         let mut config = ClientConfig::new(address, "localhost", vec![certificate]);

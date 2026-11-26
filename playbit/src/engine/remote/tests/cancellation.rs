@@ -150,6 +150,137 @@ fn canceling_a_join_waiting_for_its_envelope_returns_remote_without_disconnect()
 }
 
 #[test]
+fn app_history_ipc_recovers_a_dropped_stream_without_a_session_and_delivers_later_edits() {
+    use crate::engine::{admission::AdmissionQueue, ipc, reply::ArchivedReply};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let directory = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open(directory.path()).unwrap();
+    let store = engine.services.store.clone();
+    let app =
+        crate::package::AppIdentity { publisher: store.account().id, app_id: "sketch".into() };
+    let destination = crate::network::ap::operation::app_history_channel(&app).unwrap();
+    assert_ne!(destination, app.update_channel_id().unwrap());
+    let (runtime, endpoint, config) = testing::loopback_ap();
+    let (interrupt, after_ack) = tokio::sync::oneshot::channel();
+    let (gap_seen, before_recovery) = tokio::sync::oneshot::channel();
+    let (update, after_recovery) = tokio::sync::oneshot::channel();
+    let (stopped, retired) = std::sync::mpsc::sync_channel(1);
+    let wake = engine.completion.wake.clone();
+    let server = std::thread::spawn(move || {
+        runtime.block_on(async {
+            tokio::time::timeout(RETURN_BY, async {
+                let connection = endpoint.accept().await.unwrap().await.unwrap();
+                let (mut hello, _receive) = connection.accept_bi().await.unwrap();
+                let ok = Frame::new(frame_type::HELLO, 0, [], [], []).unwrap();
+                hello.write_all(&testing::authentication_wire(ok)).await.unwrap();
+                let (mut send, _receive, subscribe) =
+                    testing::next_request_with_receipt(&connection).await.unwrap();
+                assert_eq!(subscribe.frame_type, frame_type::SUBSCRIBE);
+                assert_eq!(subscribe.destination.as_slice(), destination);
+                let ack = Frame::new(frame_type::SUBSCRIBE, 0, [], destination, []).unwrap();
+                send.write_all(&ack.encode().unwrap()).await.unwrap();
+                after_ack.await.unwrap();
+                // A routing worker failed. The authenticated QUIC transport and
+                // the open overview's local IPC socket both stay connected.
+                send.reset(quinn::VarInt::from_u32(0)).unwrap();
+                let (mut send, _receive, subscribe) =
+                    testing::next_request_with_receipt(&connection).await.unwrap();
+                assert_eq!(subscribe.frame_type, frame_type::SUBSCRIBE);
+                assert_eq!(subscribe.destination.as_slice(), destination);
+                before_recovery.await.unwrap();
+                send.write_all(&ack.encode().unwrap()).await.unwrap();
+                after_recovery.await.unwrap();
+                let event = Frame::new(
+                    frame_type::PUBLISH,
+                    0,
+                    [],
+                    destination,
+                    serde_json::to_vec(&crate::network::ap::channel::Control::UpdateAvailable)
+                        .unwrap(),
+                )
+                .unwrap();
+                send.write_all(&event.encode().unwrap()).await.unwrap();
+                send.stopped().await.unwrap();
+                stopped.send(()).unwrap();
+                wake.notify();
+                connection.closed().await;
+            })
+            .await
+            .unwrap();
+        })
+    });
+    let remote = engine.remote.as_mut().unwrap();
+    remote.identity = preissued_identity(&store);
+    remote.set_test_transport(config);
+    remote.connect(&store).unwrap();
+    let connection = remote.connection.clone().unwrap();
+    let path = directory.path().join("client.sock");
+    let mut queue = AdmissionQueue::new(UnixListener::bind(&path).unwrap(), &engine).unwrap();
+    let client = std::thread::spawn(move || {
+        let mut client = UnixStream::connect(path).unwrap();
+        client.set_read_timeout(Some(RETURN_BY)).unwrap();
+        let request = Request::WatchAppBuilds { app };
+        ipc::write(&mut client, &ipc::codec::encode(&request, 1024).unwrap()).unwrap();
+        let mut interrupted = || {
+            let notice = ipc::Response::new(ipc::read(&mut client).unwrap()).unwrap();
+            assert!(notice.archived().matches_request(&request));
+            let ArchivedReply::AppBuildsNotice { error } = notice.archived() else {
+                panic!("history observer notice")
+            };
+            error.is_some()
+        };
+        assert!(!interrupted(), "subscription ACK");
+        interrupt.send(()).unwrap();
+        assert!(interrupted(), "interrupted subscription is observable");
+        gap_seen.send(()).unwrap();
+        assert!(!interrupted(), "reconnected subscription ACK");
+        update.send(()).unwrap();
+        assert!(!interrupted(), "a later edit reaches the original IPC client");
+    });
+    let deadline = Instant::now() + RETURN_BY;
+    while retired.try_recv().is_err() {
+        assert!(Instant::now() < deadline, "history observer was not retired");
+        queue.run_until(&mut engine, Some(deadline)).unwrap();
+    }
+    client.join().unwrap();
+    assert!(!connection.is_closed());
+    engine.disconnect_network().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn abandoning_a_held_app_history_read_releases_the_lane_and_preserves_live_replication() {
+    // The first page checks visibility. A later page goes straight to ListAppBuilds.
+    for after in [None, Some(crate::identifier::encode(&[1; 32]))] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut engine = Engine::open(directory.path()).unwrap();
+        let store = engine.services.store.clone();
+        let ap = testing::silent_authenticating_server();
+        let remote = engine.remote.as_mut().unwrap();
+        remote.set_test_transport(ap.config);
+        remote.identity = preissued_identity(&store);
+        remote.connect(&store).unwrap();
+        remote.ensure_live(&store).unwrap();
+        let connection = remote.connection.clone().unwrap();
+        let publisher = remote.live.as_ref().unwrap().publisher();
+        let app = crate::package::AppIdentity {
+            publisher: store.account().id,
+            app_id: "test-app".into(),
+        };
+        let ticket = engine.begin_network_request(Request::ListAppBuilds { app, after }).unwrap();
+        ap.request_held.recv_timeout(RETURN_BY).unwrap();
+        drop(ticket);
+        collect_until(&mut engine, Engine::network_request_ready);
+        let remote = engine.remote.as_ref().unwrap();
+        assert!(Arc::ptr_eq(remote.connection.as_ref().unwrap(), &connection));
+        assert!(Arc::ptr_eq(&publisher, &remote.live.as_ref().unwrap().publisher()));
+        assert!(!connection.is_closed());
+        engine.disconnect_network().unwrap();
+        assert!(ap.closed.recv_timeout(RETURN_BY).unwrap());
+    }
+}
+
+#[test]
 fn canceled_bootstrap_admission_preserves_existing_live_state_and_transport() {
     // This fixture represents an already registered owner. Hold only the next
     // admission read, which can be canceled without closing live replication.

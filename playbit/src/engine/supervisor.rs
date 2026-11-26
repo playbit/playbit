@@ -312,6 +312,7 @@ impl Engine {
                 | Request::BrowserDrafts { .. }
                 | Request::LocalProtocol
                 | Request::WaitChanges { .. }
+                | Request::WatchAppBuilds { .. }
                 | Request::Status
                 | Request::TransferStatus
                 | Request::Invitation { .. }
@@ -359,7 +360,7 @@ impl Engine {
             Request::FileCall { .. } => {
                 return Err("File calls require authenticated IPC admission".into());
             }
-            Request::WaitChanges { .. } => {
+            Request::WaitChanges { .. } | Request::WatchAppBuilds { .. } => {
                 return Err("change waits require local IPC admission".into());
             }
             #[rustfmt::skip]
@@ -392,8 +393,8 @@ impl Engine {
             }
             #[rustfmt::skip]
             Request::GrantVolume { .. }
-            | Request::PublishApp { .. } | Request::ListApps { .. }
-            | Request::SetAppEnabled { .. } | Request::DeleteApp { .. }
+            | Request::PublishApp { .. } | Request::ListApps { .. } | Request::ListAppBuilds { .. }
+            | Request::SetAppEnabled { .. } | Request::SetAppBuildNotes { .. } | Request::DeleteApp { .. }
             | Request::GetAppDisplay { .. } | Request::GetAccountDisplayNames { .. } | Request::CreateAppSession { .. }
             | Request::UpdateSession { .. } | Request::PrepareApp { .. } | Request::SignPackage { .. } | Request::AuthenticatePackage { .. } | Request::CreateSession { .. }
             | Request::CreateBuildSession { .. } => {

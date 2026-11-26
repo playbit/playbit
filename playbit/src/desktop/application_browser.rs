@@ -8,8 +8,10 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 
 mod actions;
+mod details;
 mod inspector;
 mod navigation;
+mod overview;
 #[cfg(feature = "desktop-qualification")]
 mod preview;
 mod queries;
@@ -47,8 +49,33 @@ struct Row {
     selected: bool,
 }
 
+struct UncertainCreation {
+    app: AppIdentity,
+    previous_sessions: BTreeSet<String>,
+    settled: bool,
+    catalog_check: Option<u64>,
+}
+
+impl UncertainCreation {
+    fn awaits_catalog_change(&self, apps: &[Application]) -> bool {
+        apps.iter().any(|app| {
+            app.can_open
+                && app.identity == self.app
+                && app.sessions.iter().all(|id| self.previous_sessions.contains(id))
+        })
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct CreationView {
+    navigation_revision: u64,
+    scope: Option<(Role, gpui::EntityId, u64)>,
+}
+
 #[derive(Default)]
 pub(super) struct State {
+    details: details::Details,
+    notes_scrolling: Option<Entity<crate::ui::desktop::scrollbar::Scrollbars>>,
     removal: Option<removal::Pending>,
     removal_dialog: Option<removal::Dialog>,
     catalog: Vec<Session>,
@@ -62,8 +89,10 @@ pub(super) struct State {
     pub(super) refresh_needed: bool,
     instance_error: Option<String>,
     action_busy: bool,
+    creating: bool,
+    navigation_revision: u64,
     pending_scope: Option<(Role, Id, bool)>,
-    uncertain_creation: Option<(AppIdentity, BTreeSet<String>)>,
+    uncertain_creations: Vec<UncertainCreation>,
     pub(super) root_open: bool,
     selected_role: Option<Role>,
     scope_in_session: bool,
@@ -88,13 +117,6 @@ pub(super) struct State {
 }
 
 impl State {
-    fn creation_uncertain(&self, app: &Application) -> bool {
-        self.uncertain_creation.as_ref().is_some_and(|(identity, previous_sessions)| {
-            identity == &app.identity
-                && app.sessions.iter().all(|id| previous_sessions.contains(id))
-        })
-    }
-
     pub(super) fn highlighted_instance(&self) -> Option<&LaunchOwner> {
         match self.instance {
             Some(id) => self.owners.iter().find(|owner| owner.instance.id == id),
@@ -128,6 +150,29 @@ impl State {
         self.selected.is_some()
     }
 
+    fn creation_uncertain(&self, app: &AppIdentity) -> bool {
+        self.uncertain_creations.iter().any(|pending| &pending.app == app)
+    }
+
+    fn register_uncertain_creation(&mut self, app: Application, settled: bool) -> bool {
+        let pending = UncertainCreation {
+            app: app.identity,
+            previous_sessions: app.sessions.into_iter().collect(),
+            settled,
+            catalog_check: None,
+        };
+        // Status may already show the new session before the create socket returns.
+        if !pending.awaits_catalog_change(&self.apps) {
+            return false;
+        }
+        self.uncertain_creations.push(pending);
+        true
+    }
+
+    pub(in crate::desktop) fn checked_creation_catalog(&mut self, admission: u64) {
+        self.uncertain_creations.retain(|pending| pending.catalog_check != Some(admission));
+    }
+
     pub(super) fn clear_selection(&mut self) {
         self.selected = None;
         self.instance = None;
@@ -135,10 +180,15 @@ impl State {
     }
 
     pub(super) fn close_scope(&mut self) {
+        self.did_navigate();
         self.pending_scope = None;
         self.root_open = false;
         self.selected_role = None;
         self.scope_in_session = false;
+    }
+
+    pub(super) fn did_navigate(&mut self) {
+        self.navigation_revision = self.navigation_revision.wrapping_add(1);
     }
 
     fn rebuild(
@@ -215,11 +265,6 @@ impl State {
                 .then_with(|| a.identity.app_id.cmp(&b.identity.app_id))
         });
         self.apps = apps;
-        if self.uncertain_creation.is_some()
-            && !self.apps.iter().any(|app| self.creation_uncertain(app))
-        {
-            self.uncertain_creation = None;
-        }
         if self
             .selected
             .as_ref()
@@ -294,6 +339,9 @@ impl Shell {
             });
         }
         self.rebuild_application_list();
+        self.applications
+            .uncertain_creations
+            .retain(|pending| pending.awaits_catalog_change(&self.applications.apps));
         if let Some(session) = self
             .selected_session_id()
             .and_then(|id| self.applications.catalog.iter().find(|session| session.id == id))

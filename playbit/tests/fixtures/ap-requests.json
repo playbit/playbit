@@ -503,6 +503,17 @@
     "after": null
   },
   {
+    "op": "set_app_build_notes",
+    "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
+    "app": {
+      "publisher": "NCX9PNbvZtwyXe5YjATFzi",
+      "app_id": "test"
+    },
+    "build_id": "CZ8YUVdk7znjrUmnb5n7kgySk9yRAsQDYmyCxzfSky9t",
+    "notes": "Corrected release note",
+    "expected_revision": 1
+  },
+  {
     "op": "set_app_enabled",
     "operation_id": "NCX9PNbvZtwyXe5YjATFzi",
     "enabled": true,

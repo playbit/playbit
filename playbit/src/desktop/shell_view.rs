@@ -550,6 +550,7 @@ impl Render for Shell {
         self.rendered_host_text = 0;
         let _timing = crate::trace::Span::new("ui.build_elements");
         if self.channel_switching {
+            self.sync_application_details(None, cx);
             return div()
                 .size_full()
                 .p_6()
@@ -563,6 +564,7 @@ impl Render for Shell {
             "ui.build_empty_sessions"
         });
         if self.signing_out {
+            self.sync_application_details(None, cx);
             let mut content = div()
                 .size_full()
                 .p_6()
@@ -595,6 +597,7 @@ impl Render for Shell {
             return content.into_any_element();
         }
         if self.enrolled.is_none() {
+            self.sync_application_details(None, cx);
             return div().into_any_element();
         }
         self.focus_volume_rename(window, cx);

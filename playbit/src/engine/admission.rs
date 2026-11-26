@@ -12,11 +12,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod app_watch;
 mod bundle;
 mod gauges;
 
 const MAX_PENDING: usize = 32;
 const MAX_CHANGE_WAITERS: usize = 4;
+const MAX_APP_WATCHES: usize = 4;
 const MAX_MESSAGE: usize = 4 * 1024 * 1024;
 // Keep serializer scratch inside the aggregate 16-MiB IPC budget, including
 // while a reply archive and its source request are both alive.
@@ -148,6 +150,7 @@ request_routes! {
     OrderSessions { .. } => None, Concurrent,
     ForgetSession { .. } => None, Concurrent,
     WaitChanges { .. } => None, Concurrent,
+    WatchAppBuilds { .. } => None, Concurrent,
     FileCreate { .. } => None, Network,
     FileCreateIn { .. } => None, Network,
     FileWrite { .. } => None, Network,
@@ -201,9 +204,11 @@ request_routes! {
     SignPackage { .. } => None, Network,
     AuthenticatePackage { .. } => None, Network,
     ListApps { .. } => None, Network,
+    ListAppBuilds { .. } => None, Network,
     GetAppDisplay { .. } => None, Network,
     GetAccountDisplayNames { .. } => None, Network,
     SetAppEnabled { .. } => None, Network,
+    SetAppBuildNotes { .. } => None, Network,
     DeleteApp { .. } => None, Network,
     PublishApp { .. } => None, Network,
     UpdateSession { .. } => None, Network,
@@ -279,6 +284,7 @@ enum State {
     WaitingChanges {
         after: crate::engine::ChangeToken,
     },
+    AppWatch(Box<app_watch::Watch>),
     Writing {
         header: [u8; codec::HEADER_LEN],
         body: codec::Bytes,
@@ -299,7 +305,7 @@ impl Pending {
         if matches!(self.state, State::InstanceEvents { .. }) {
             return true;
         }
-        false
+        matches!(self.state, State::AppWatch(_))
     }
     fn new(token: usize, stream: UnixStream) -> Self {
         let accepted = Instant::now();
@@ -330,7 +336,7 @@ impl Pending {
             State::NetworkRequest { owned_bytes, .. }
             | State::LocalBundle { owned_bytes }
             | State::PreparedNetwork { owned_bytes, .. } => 1024 + owned_bytes,
-            State::WaitingChanges { .. } => 1024,
+            State::WaitingChanges { .. } | State::AppWatch(_) => 1024,
         }
     }
     fn receiving_channels(&self) -> bool {
@@ -373,6 +379,7 @@ impl Pending {
     }
     fn interest(&self) -> Event {
         match self.state {
+            State::AppWatch(ref watch) => Event::new(self.token, true, watch.writing()),
             #[cfg(all(not(target_os = "ios"), feature = "process"))]
             State::InstanceEvents { ref channel } => {
                 Event::new(self.token, true, channel.writing())
@@ -495,6 +502,9 @@ impl Pending {
     }
 
     fn write(&mut self, budget: &mut usize) -> Result<bool> {
+        if let State::AppWatch(watch) = &mut self.state {
+            return watch.write(&mut self.stream, budget);
+        }
         #[cfg(all(not(target_os = "ios"), feature = "process"))]
         if let State::InstanceEvents { channel } = &mut self.state {
             return channel.write(&mut self.stream, budget);
@@ -918,6 +928,12 @@ impl AdmissionQueue {
     fn finish_change_waits(&mut self, engine: &mut Engine) -> Result<()> {
         let current = engine.change_token();
         for index in 0..self.pending.len() {
+            if let State::AppWatch(watch) = &mut self.pending[index].state {
+                if watch.refresh(engine)? {
+                    self.rearm(index)?;
+                }
+                continue;
+            }
             let State::WaitingChanges { after } = self.pending[index].state else { continue };
             if after == current {
                 continue;
@@ -1138,7 +1154,9 @@ impl AdmissionQueue {
                     #[cfg(not(all(not(target_os = "ios"), feature = "process")))]
                     let event_writing = false;
                     let writing = matches!(self.pending[index].state, State::Writing { .. })
-                        || (event_writing && event.writable);
+                        || ((event_writing
+                            || matches!(&self.pending[index].state, State::AppWatch(watch) if watch.writing()))
+                            && event.writable);
                     let credit = MAX_RECEIVED.saturating_sub(self.allocated());
                     let result = if writing {
                         self.pending[index].write(budget)
@@ -1481,6 +1499,22 @@ impl AdmissionQueue {
         Ok(())
     }
     fn dispatch_wait(&mut self, index: usize, engine: &Engine, request: &Request) -> Result<bool> {
+        if let Request::WatchAppBuilds { app } = request {
+            if self.pending.iter().filter(|p| matches!(p.state, State::AppWatch(_))).count()
+                >= MAX_APP_WATCHES
+            {
+                self.error_reply(index, "App history observer limit reached".into())?;
+            } else {
+                match app_watch::Watch::new(app.clone()) {
+                    Ok(watch) => {
+                        self.pending[index].state = State::AppWatch(Box::new(watch));
+                        self.rearm(index)?;
+                    }
+                    Err(error) => self.error_reply(index, error.to_string())?,
+                }
+            }
+            return Ok(true);
+        }
         if let Request::WaitChanges { after } = request {
             let current = engine.change_token();
             if after.is_some_and(|after| {

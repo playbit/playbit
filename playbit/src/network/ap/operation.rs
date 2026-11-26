@@ -12,6 +12,9 @@ mod denial;
 pub use denial::{MAX_DENIAL_BYTES, ServiceDenial};
 
 pub const SERVICE_DESTINATION: &[u8] = b"service";
+pub(crate) const MAX_APP_NOTES_BYTES: usize = 32 * 1024;
+#[cfg(feature = "network")]
+pub(crate) const APP_BUILD_PAGE_BYTES: usize = 128 * 1024;
 pub const BUILD_DISPLAY_LIMIT: usize = 132 * 1024;
 /// At most one inspector page, including its owner row.
 pub const ACCOUNT_DISPLAY_NAMES_MAX: usize = 17;
@@ -215,6 +218,11 @@ pub fn app_update_channel(app: &crate::package::AppIdentity) -> Result<[u8; 32],
     app.update_channel_id()
 }
 
+/// Public publication-history address. Note edits wake readers of the app overview.
+pub fn app_history_channel(app: &crate::package::AppIdentity) -> Result<[u8; 32], &'static str> {
+    Ok(blake3::derive_key("app.playbit.app-history.v1", &app.update_channel_id()?))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServiceRequest {
@@ -373,6 +381,13 @@ pub enum ServiceRequest {
         operation_id: String,
         app: crate::package::AppIdentity,
         enabled: bool,
+        expected_revision: u64,
+    },
+    SetAppBuildNotes {
+        operation_id: String,
+        app: crate::package::AppIdentity,
+        build_id: String,
+        notes: String,
         expected_revision: u64,
     },
     DeleteApp {
@@ -590,6 +605,7 @@ impl ServiceRequest {
             | Self::ListApps { operation_id, .. }
             | Self::ListAppBuilds { operation_id, .. }
             | Self::SetAppEnabled { operation_id, .. }
+            | Self::SetAppBuildNotes { operation_id, .. }
             | Self::DeleteApp { operation_id, .. }
             | Self::PublishApp { operation_id, .. }
             | Self::ResolveSession { operation_id, .. }
@@ -646,13 +662,12 @@ impl ServiceRequest {
             | Self::InvalidateFileProviderAccountPush { token, bundle, .. } => {
                 validate_provider_push(token, bundle)
             }
-            Self::GetBuildIdentity { build_id, .. } => {
-                validate_id32(build_id, "invalid build identity")
-            }
-            Self::ListAppBuilds { .. }
+            Self::GetBuildIdentity { .. }
+            | Self::ListAppBuilds { .. }
             | Self::GetApp { .. }
             | Self::GetAppDisplay { .. }
             | Self::SetAppEnabled { .. }
+            | Self::SetAppBuildNotes { .. }
             | Self::DeleteApp { .. }
             | Self::PublishApp { .. } => self.validate_app(),
             Self::ListApps { .. } => self.validate_list_apps(),
@@ -798,9 +813,13 @@ impl ServiceRequest {
 
     fn validate_app(&self) -> Result<(), &'static str> {
         let app = match self {
+            Self::GetBuildIdentity { build_id, .. } => {
+                return validate_id32(build_id, "invalid build identity");
+            }
             Self::GetApp { app, .. }
             | Self::GetAppDisplay { app, .. }
             | Self::SetAppEnabled { app, .. }
+            | Self::SetAppBuildNotes { app, .. }
             | Self::DeleteApp { app, .. }
             | Self::PublishApp { app, .. }
             | Self::ListAppBuilds { app, .. } => app,
@@ -819,7 +838,8 @@ impl ServiceRequest {
         ) {
             return Err("invalid app revision");
         }
-        if let Self::PublishApp { build_id, notes, expected_revision, .. } = self
+        if let Self::PublishApp { build_id, notes, expected_revision, .. }
+        | Self::SetAppBuildNotes { build_id, notes, expected_revision, .. } = self
             && (!crate::identifier::valid(build_id, 32)
                 || !valid_app_notes(notes)
                 || *expected_revision == u64::MAX)
@@ -1229,7 +1249,7 @@ pub const SESSION_PROOF_DOMAIN: &[u8] = b"app.playbit.session.join.v1\0";
 
 /// Bound stored/returned JSON, including escapes, not just source string bytes.
 pub fn valid_app_notes(notes: &str) -> bool {
-    notes.len() <= 32768
+    notes.len() <= MAX_APP_NOTES_BYTES
         && notes
             .bytes()
             .try_fold(0usize, |size, byte| {
@@ -1238,7 +1258,7 @@ pub fn valid_app_notes(notes: &str) -> bool {
                     0..=31 => 6,
                     _ => 1,
                 };
-                (size + encoded <= 32768).then_some(size + encoded)
+                (size + encoded <= MAX_APP_NOTES_BYTES).then_some(size + encoded)
             })
             .is_some()
 }
@@ -1289,11 +1309,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn publication_and_code_observers_have_distinct_stable_addresses() {
+        let app = crate::package::AppIdentity {
+            publisher: crate::store::Id::parse("NCX9PNbvZtwyXe5YjATFzi").unwrap(),
+            app_id: "test".into(),
+        };
+        assert_eq!(
+            crate::identifier::encode(&app_update_channel(&app).unwrap()),
+            "AdpCU7eSiVo4sGJGuCnGuVVno6qKwHvhoGcK66vCeYQK"
+        );
+        assert_eq!(
+            crate::identifier::encode(&app_history_channel(&app).unwrap()),
+            "2kWLDfhBr4cnUm6EGtBRrfxuuSgxYMwSGSWVkU3rmDR8"
+        );
+    }
+
+    #[test]
     fn every_operation_kind_validates_identity_and_round_trips() {
         // Exercise every wire operation with valid fields, then corrupt each identity.
         let fixtures: Vec<serde_json::Value> =
             serde_json::from_str(include_str!("../../../tests/fixtures/ap-requests.json")).unwrap();
-        assert_eq!(fixtures.len(), 53);
+        assert_eq!(fixtures.len(), 54);
         for fixture in fixtures {
             let request: ServiceRequest = serde_json::from_value(fixture.clone()).unwrap();
             assert_eq!(request.validate(), Ok(()), "{}", fixture["op"]);
@@ -1411,6 +1447,18 @@ mod tests {
         assert!(!valid_app_notes(&"\n".repeat(16385)));
         assert!(!valid_app_notes(&"\u{0001}".repeat(5462)));
         let operation_id = crate::identifier::encode(&[0x11; 16]);
+        let app = crate::package::AppIdentity {
+            publisher: crate::store::Id::from_bytes([0x22; 16]),
+            app_id: "test".into(),
+        };
+        let edit = serde_json::json!({
+            "op": "set_app_build_notes", "operation_id": operation_id, "app": app,
+            "build_id": crate::identifier::encode(&[0x33; 32]), "expected_revision": 1,
+        });
+        assert!(
+            serde_json::from_value::<ServiceRequest>(edit).is_err(),
+            "clearing notes requires explicit text"
+        );
         for after in [None, Some("test.app".into())] {
             let request = ServiceRequest::ListApps { operation_id: operation_id.clone(), after };
             assert!(request.validate().is_ok());
@@ -1434,19 +1482,20 @@ mod tests {
             for request in [
                 ServiceRequest::SetAppEnabled {
                     operation_id: operation_id.clone(),
-                    app: crate::package::AppIdentity {
-                        publisher: crate::store::Id::from_bytes([0x22; 16]),
-                        app_id: "test".into(),
-                    },
+                    app: app.clone(),
                     enabled: false,
                     expected_revision: revision,
                 },
                 ServiceRequest::DeleteApp {
                     operation_id: operation_id.clone(),
-                    app: crate::package::AppIdentity {
-                        publisher: crate::store::Id::from_bytes([0x22; 16]),
-                        app_id: "test".into(),
-                    },
+                    app: app.clone(),
+                    expected_revision: revision,
+                },
+                ServiceRequest::SetAppBuildNotes {
+                    operation_id: operation_id.clone(),
+                    app: app.clone(),
+                    build_id: crate::identifier::encode(&[0x33; 32]),
+                    notes: String::new(),
                     expected_revision: revision,
                 },
             ] {

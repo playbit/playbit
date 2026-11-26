@@ -131,6 +131,11 @@ pub(crate) struct NetworkHandles {
 }
 
 impl NetworkHandles {
+    #[cfg(feature = "app-host")]
+    pub(super) fn sync_transport(&self) -> Option<Arc<ApConnection>> {
+        self.sync_connection.lock().expect("connection lock is not poisoned").clone()
+    }
+
     /// This observation affects scheduling only. Shared admission and World access
     /// still use the current store policies. It survives network worker handoffs.
     #[cfg(feature = "app-host")]
@@ -140,8 +145,7 @@ impl NetworkHandles {
 
     #[cfg(feature = "app-host")]
     pub(crate) fn refresh_builds(&self, store: Arc<LocalStore>, wake: Arc<Wake>) -> Result<()> {
-        let connection =
-            self.sync_connection.lock().expect("connection lock is not poisoned").clone();
+        let connection = self.sync_transport();
         self.builds.refresh(store, connection, self.runtime.handle(), wake)
     }
     /// Readiness remains visible while a bulk operation owns Remote. It cannot
@@ -734,7 +738,7 @@ impl Remote {
                     stream.cancel();
                     Err(CanceledOperation.into())
                 }
-                response = wire::response(&mut stream, request.operation_id()) => response,
+                response = wire::request_response(&mut stream, request) => response,
             }
         })
     }
@@ -822,6 +826,39 @@ impl Remote {
         }
         Ok(value)
     }
+    #[cfg(feature = "app-host")]
+    pub(super) fn list_app_builds(
+        &mut self,
+        store: &LocalStore,
+        app: &crate::package::AppIdentity,
+        after: Option<&str>,
+    ) -> Result<super::reply::AppBuildPage> {
+        self.connect(store)?;
+        let read = |request: ServiceRequest| -> Result<serde_json::Value> {
+            self.app_request(&request)?
+                .data
+                .ok_or_else(|| "missing AP service response data".into())
+        };
+        // GetApp gives a typed absence for unpublished apps and publications hidden
+        // from this account. A failing history or transport read is still an error.
+        if after.is_none() {
+            let current = read(ServiceRequest::GetApp {
+                operation_id: Id::generate()?.to_string(),
+                app: app.clone(),
+            })?;
+            if current["revision"].as_u64() == Some(0)
+                && current.get("app") == Some(&serde_json::Value::Null)
+            {
+                return Ok(super::reply::AppBuildPage::default());
+            }
+        }
+        let value = read(ServiceRequest::ListAppBuilds {
+            operation_id: Id::generate()?.to_string(),
+            app: app.clone(),
+            after: after.map(str::to_owned),
+        })?;
+        super::reply::AppBuildPage::from_ap(value, after)
+    }
     /// Display payloads stay on the bounded background network lane.
     pub fn get_app_display(
         &mut self,
@@ -855,6 +892,25 @@ impl Remote {
                 operation_id: Id::generate()?.to_string(),
                 app: app.clone(),
                 enabled,
+                expected_revision,
+            },
+        )
+    }
+    pub fn set_app_build_notes(
+        &mut self,
+        store: &LocalStore,
+        app: crate::package::AppIdentity,
+        build_id: String,
+        notes: String,
+        expected_revision: u64,
+    ) -> Result<serde_json::Value> {
+        self.service_data(
+            store,
+            &ServiceRequest::SetAppBuildNotes {
+                operation_id: Id::generate()?.to_string(),
+                app,
+                build_id,
+                notes,
                 expected_revision,
             },
         )

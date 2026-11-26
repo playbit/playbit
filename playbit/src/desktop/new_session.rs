@@ -1414,24 +1414,26 @@ mod tests {
             },
             root_name: "Playbit".into(),
         };
-        let label = |invitation: &ReceivedInvitation, realm| {
-            host.read_with(cx, |host, _| {
-                Form::invitation(invitation, host.send.clone())
-                    .review
-                    .unwrap()
-                    .published_name(realm)
+        let mut label = |invitation: &ReceivedInvitation, realm| {
+            host.update(cx, |host, _| {
+                host.channel = realm;
+                let review = Form::invitation(invitation, host.send.clone()).review.unwrap();
+                host.app_publisher_name(review.app.as_ref().unwrap(), &review.build)
             })
         };
-        assert_eq!(label(&invitation, ReleaseChannel::Testing), Some("Playbit"));
-        assert_eq!(label(&invitation, ReleaseChannel::Public), None);
+        assert_eq!(label(&invitation, ReleaseChannel::Testing), "Playbit");
+        assert_eq!(label(&invitation, ReleaseChannel::Public), publisher.to_string());
         invitation.session.app.app_id = "pretender".into();
-        assert_eq!(label(&invitation, ReleaseChannel::Testing), None);
+        assert_eq!(label(&invitation, ReleaseChannel::Testing), publisher.to_string());
         invitation.session.app.app_id = "football".into();
         invitation.session.app.publisher = Id::from_bytes([4; 16]);
-        assert_eq!(label(&invitation, ReleaseChannel::Testing), None);
+        assert_eq!(
+            label(&invitation, ReleaseChannel::Testing),
+            invitation.session.app.publisher.to_string()
+        );
         invitation.session.app.publisher = publisher;
         invitation.session.resolved_build_id = crate::identifier::encode(&[5; 32]);
-        assert_eq!(label(&invitation, ReleaseChannel::Testing), None);
+        assert_eq!(label(&invitation, ReleaseChannel::Testing), publisher.to_string());
     }
 
     #[gpui::test]

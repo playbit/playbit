@@ -26,6 +26,7 @@ mod scrolling;
 mod values;
 mod volume_invitation;
 pub(super) use failure::Failure;
+pub(super) use files::format_byte_size;
 pub(super) use navigation::ListNavigation;
 pub(super) use records::settle_record_publication;
 #[cfg(test)]
@@ -49,6 +50,7 @@ impl gpui::EventEmitter<Notice> for Browser {}
 
 pub struct Browser {
     pub volume: Volume,
+    pub(super) interaction_revision: u64,
     pub(super) volume_invitation: Option<super::volume_invitations::Review>,
     pub(super) owner_name: Option<String>,
     invitation_link_focus: gpui::FocusHandle,
@@ -138,6 +140,7 @@ impl Browser {
                 .is_ok()
         });
         let mut browser = Self {
+            interaction_revision: 0,
             volume_invitation: None,
             owner_name: None,
             invitation_link_focus: cx.focus_handle().tab_stop(true),
@@ -314,6 +317,7 @@ impl Browser {
         self.open_target = None;
         self.name.update(cx, |editor, cx| editor.clear(cx));
         if self.selected != Some(entry) {
+            self.did_interact();
             self.catalog_navigation_changed();
         }
         self.selected = Some(entry);
@@ -407,6 +411,10 @@ impl Browser {
         self.selected.is_none()
     }
 
+    fn did_interact(&mut self) {
+        self.interaction_revision = self.interaction_revision.wrapping_add(1);
+    }
+
     pub(in crate::desktop) fn has_pending_entry_operation(&self) -> bool {
         self.creating_entry.is_some() || self.files.busy() || self.renaming.is_some()
     }
@@ -414,6 +422,9 @@ impl Browser {
     pub(in crate::desktop) fn show_volume(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.prepare_navigation(cx) {
             return false;
+        }
+        if !self.is_showing_volume() {
+            self.did_interact();
         }
         self.clear_selected_view(cx);
         true
@@ -765,6 +776,7 @@ impl Browser {
         let activate: controls::Activate = Rc::new(move |_, cx| {
             let _ = weak.update(cx, |this, cx| {
                 let _timing = crate::trace::Span::new("ui.browser.action");
+                this.did_interact();
                 activate(this, cx);
                 cx.notify();
             });
@@ -814,6 +826,7 @@ impl Browser {
             control.set_activation(Rc::new(move |id, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     let _timing = crate::trace::Span::new("ui.browser.action");
+                    this.did_interact();
                     activate(id, this, cx);
                     cx.notify();
                 });

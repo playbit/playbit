@@ -367,7 +367,7 @@ fn table_row() -> gpui::Div {
         .text_color(rgba(0x000000e6))
 }
 
-fn initial(name: &str, filled: bool) -> gpui::Div {
+pub(super) fn initial(name: &str, filled: bool) -> gpui::Div {
     div()
         .size(ui(16.))
         .flex_none()

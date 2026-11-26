@@ -47,19 +47,22 @@ pub async fn begin_with_features(
     required_features: &[&str],
 ) -> Result<ApStream> {
     require_features(connection, required_features).await?;
-    let provider_operation = match request {
+    let optional_operation = match request {
         ServiceRequest::RegisterFileProviderAccountPush { .. } => {
-            Some("register_file_provider_account_push")
+            Some(("register_file_provider_account_push", "account File Provider push"))
         }
         ServiceRequest::InvalidateFileProviderAccountPush { .. } => {
-            Some("invalidate_file_provider_account_push")
+            Some(("invalidate_file_provider_account_push", "account File Provider push"))
+        }
+        ServiceRequest::SetAppBuildNotes { .. } => {
+            Some(("set_app_build_notes", "editing release notes"))
         }
         _ => None,
     };
-    if let Some(operation) = provider_operation {
+    if let Some((operation, label)) = optional_operation {
         let description = connection.describe().await?;
         if !description.operations.iter().any(|supported| supported == operation) {
-            return Err("account File Provider push is unavailable on this AP server".into());
+            return Err(format!("{label} is unavailable on this AP server").into());
         }
     }
     let _timing = crate::trace::Interval::new("ap.request_send");
@@ -72,6 +75,24 @@ pub async fn begin_with_features(
 pub async fn response(stream: &mut ApStream, operation_id: &str) -> Result<ServiceResponse> {
     let _timing = crate::trace::Interval::new("ap.response_wait");
     service::response(stream.answer().await?, operation_id)
+}
+
+pub(crate) async fn request_response(
+    stream: &mut ApStream,
+    request: &ServiceRequest,
+) -> Result<ServiceResponse> {
+    // AP charges escaped notes or encoded history rows. The wire body also
+    // includes timing, the service envelope, app identity or page cursor, and JSON punctuation.
+    const OVERHEAD: usize = super::timing::MAX_ENCODED_BYTES + 1024;
+    let limit = match request {
+        ServiceRequest::GetApp { .. } | ServiceRequest::SetAppBuildNotes { .. } => {
+            MAX_APP_NOTES_BYTES + OVERHEAD
+        }
+        ServiceRequest::ListAppBuilds { .. } => APP_BUILD_PAGE_BYTES + OVERHEAD,
+        _ => return response(stream, request.operation_id()).await,
+    };
+    let _timing = crate::trace::Interval::new("ap.response_wait");
+    service::response(stream.answer_with_body_limit(limit).await?, request.operation_id())
 }
 
 /// Observe readiness on the existing AP connection; no periodic freshness reads.
@@ -128,7 +149,7 @@ pub async fn request(
     }
     let mut stream = begin(connection, request).await?;
     stream.finish()?;
-    response(&mut stream, request.operation_id()).await
+    request_response(&mut stream, request).await
 }
 
 pub async fn send_data(stream: &mut ApStream, bytes: &[u8]) -> Result<()> {

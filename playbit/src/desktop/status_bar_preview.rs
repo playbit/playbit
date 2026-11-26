@@ -334,6 +334,10 @@ fn run(updates: bool, sidebar: Option<Option<std::path::PathBuf>>, session: Opti
                 if mode == "new" {
                     return;
                 }
+                if matches!(mode.as_str(), "app" | "app-empty") {
+                    host.preview_app_browser(mode == "app-empty", cx);
+                    return;
+                }
                 if matches!(mode.as_str(), "active" | "empty" | "stopped" | "instance") {
                     host.preview_session_browser(mode, cx);
                 } else {
@@ -392,6 +396,9 @@ fn run(updates: bool, sidebar: Option<Option<std::path::PathBuf>>, session: Opti
             .sessions_window
             .expect("preview window")
             .update(cx, |_, window, _| {
+                if matches!(session.as_deref(), Some("app" | "app-empty")) {
+                    window.resize(size(px(1041.), px(640.)));
+                }
                 window.set_window_title(if session.is_some() {
                     "Playbit — Session preview"
                 } else if sidebar.is_some() {

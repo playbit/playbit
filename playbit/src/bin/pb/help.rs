@@ -154,6 +154,12 @@ const COMMANDS: &[Command] = &[
         core: false,
     },
     Command {
+        usage: "pb app set-notes PUBLISHER/APP-ID BUILD-ID --notes TEXT",
+        description: "Edit a published build’s release notes as its publisher. Use an empty string to clear them.",
+        command: &["app", "set-notes"],
+        core: false,
+    },
+    Command {
         usage: "pb session create APP.pbapp [--root-volume ID] [--user-volume ID]",
         description: "Create a retained session from a verified package without launching it. Its default World root derives from the package publisher/app ID. New sessions get distinct Shared, User-session and Local-session scopes. Overrides select existing authorized data and remain bound on resume. Print session metadata as JSON; use pb session join SESSION to open it.",
         command: &["session", "create"],
@@ -398,6 +404,7 @@ pub(super) fn render(args: &[String]) -> Option<String> {
     let mut output = String::new();
 
     match args {
+        ["app", "set-notes", _, _, "--notes", _] => return None,
         [] | ["help"] | ["--help"] => {
             COMMANDS.iter().filter(|c| c.core).for_each(|c| c.add_to_output(&mut output));
             output.push_str("Run again with --help-all for a complete list\n");

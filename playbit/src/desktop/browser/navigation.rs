@@ -267,12 +267,6 @@ impl Browser {
     }
 
     fn select_navigation_target(&mut self, target: &Target, cx: &mut Context<Self>) -> bool {
-        if let Target::LocalDraft(id) = target {
-            return self.open_local_draft(*id, cx);
-        }
-        if let Target::Key(key) = target {
-            return self.navigate_kv_key(key, cx);
-        }
         let already_selected = match target {
             Target::Entry(id) => {
                 self.selected == Some(*id)
@@ -286,10 +280,10 @@ impl Browser {
         if already_selected {
             return true;
         }
-        if !self.prepare_entry_navigation(cx) {
-            return false;
-        }
-        match target {
+        let opened = match target {
+            Target::LocalDraft(id) => self.open_local_draft(*id, cx),
+            Target::Key(key) => self.navigate_kv_key(key, cx),
+            _ if !self.prepare_entry_navigation(cx) => false,
             Target::Entry(id) => {
                 self.select(*id, cx);
                 self.selected == Some(*id)
@@ -303,7 +297,11 @@ impl Browser {
                 self.records.selected == Some(*id)
             }
             _ => false,
+        };
+        if opened {
+            self.did_interact();
         }
+        opened
     }
 }
 

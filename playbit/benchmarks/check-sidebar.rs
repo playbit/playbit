@@ -4,10 +4,12 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let first = args.next();
     let (icons, session) = if first.as_deref() == Some("--session") {
-        let mode = args.next().expect("active, stopped, empty or new session preview");
+        let mode = args.next().expect("app or session preview mode");
         assert!(matches!(
             mode.as_str(),
-            "active"
+            "app"
+                | "app-empty"
+                | "active"
                 | "instance"
                 | "stopped"
                 | "empty"

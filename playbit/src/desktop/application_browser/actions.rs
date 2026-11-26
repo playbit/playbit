@@ -70,6 +70,23 @@ impl Shell {
                 if !self.prepare_browser_navigation(cx) {
                     return false;
                 }
+                if let Some(pending) = self
+                    .applications
+                    .uncertain_creations
+                    .iter_mut()
+                    .find(|p| p.app == identity && p.settled)
+                {
+                    // User reselected the app to check whether a session was created.
+                    // A stale status or an unrelated rebuild cannot rearm the button.
+                    match self.send.enqueue(Request::Status) {
+                        Ok(admission) => pending.catalog_check = Some(admission),
+                        Err(error) => {
+                            self.error = format!(
+                                "Could not refresh the session list. Select the app again to retry. {error}"
+                            );
+                        }
+                    }
+                }
                 self.applications.clear_selection();
                 self.applications.selected = Some(identity);
                 self.sidebar_session = None;
@@ -197,7 +214,11 @@ impl Shell {
                 binding = Some(id);
             }
         }
-        self.select_volume_in(volume, binding, cx)
+        let selected = self.select_volume_in(volume, binding, cx);
+        if selected && self.applications.selected_role != Some(role) {
+            self.applications.did_navigate();
+        }
+        selected
     }
 
     fn open_application_scope(
@@ -321,131 +342,70 @@ impl Shell {
 
     fn start_application_session(&mut self, app: Application, cx: &mut Context<Self>) {
         if self.applications.action_busy
-            || self.applications.creation_uncertain(&app)
+            || self.applications.creating
+            || self.applications.creation_uncertain(&app.identity)
             || !self.prepare_browser_navigation(cx)
         {
             return;
         }
-        self.applications.action_busy = true;
+        let Some(origin) = self.application_creation_view(&app.identity, cx) else { return };
+        if self.applications.catalog.len() >= MAX_SESSIONS {
+            self.error = format!("Playbit can display up to {MAX_SESSIONS} retained sessions.");
+            cx.notify();
+            return;
+        }
+        self.applications.creating = true;
+        self.applications.details.cancel();
         let profile = profile_path();
         let account = self.account.id;
         let sender = self.send.clone();
         let identity = app.identity.clone();
         let build = app.build.clone();
         let work = cx.background_executor().spawn(async move {
-            let mut created = None;
-            let mut uncertain = false;
-            let result: crate::engine::Result<_> = (|| {
-                let response = match ipc::call_archive(
-                    &profile,
-                    &Request::CreateBuildSession { build: build.clone(), root: None, user: None },
-                ) {
-                    Ok(response) => response,
-                    Err(error) => {
-                        uncertain = true;
-                        return Err(error);
-                    }
-                };
-                let response = match response.into_owned() {
-                    Ok(response) => response,
-                    Err(error) => {
-                        uncertain = true;
-                        return Err(error);
-                    }
-                };
-                let session = match response {
-                    Reply::Developer(crate::engine::reply::DeveloperReply::Session(session)) => {
-                        session
-                    }
-                    Reply::Error { error } => return Err(error.into()),
-                    _ => {
-                        uncertain = true;
-                        return Err("The session creation result needs inspection".into());
-                    }
-                };
-                if session.app != identity || session.resolved_build_id != build {
-                    return Err("The created session differs from the selected app".into());
-                }
-                created = Some(session.clone());
-                let prepared = match ipc::call_archive(
-                    &profile,
-                    &Request::PrepareSession { session: session.id.clone() },
-                )?
-                .into_owned()?
-                {
-                    Reply::SessionPrepared(prepared)
-                        if prepared.session.same_identity(&session) =>
+            let mut socket = match std::os::unix::net::UnixStream::connect(
+                profile.join(crate::paths::ENGINE_SOCKET),
+            ) {
+                Ok(socket) => socket,
+                Err(error) => return (false, Err(error.into())),
+            };
+            let request =
+                Request::CreateBuildSession { build: build.clone(), root: None, user: None };
+            let result = ipc::call_stream_archive(&mut socket, &request).and_then(|reply| {
+                match reply.into_owned()? {
+                    Reply::Developer(crate::engine::reply::DeveloperReply::Session(session))
+                        if session.creator == account
+                            && session.app == identity
+                            && session.resolved_build_id == build =>
                     {
-                        prepared
+                        Ok(session)
                     }
-                    Reply::Error { error } => return Err(error.into()),
-                    _ => return Err("The created session could not be prepared".into()),
-                };
-                let instance = guest_app::launch_confirmed(
-                    &profile,
-                    &prepared.session,
-                    false,
-                    true,
-                    Vec::new(),
-                    true,
-                )?;
-                Ok((prepared, instance))
-            })();
-            (created, uncertain, result)
+                    _ => Err("The session creation result needs inspection".into()),
+                }
+            });
+            (true, result)
         });
         cx.spawn(async move |host, cx| {
-            let (created, uncertain, result) = work.await;
+            let (connected, result) = work.await;
             let _ = host.update(cx, |host, cx| {
                 if host.signing_out || !host.send.same_worker(&sender) || host.account.id != account
                 {
                     return;
                 }
-                host.applications.action_busy = false;
-                let select = host.applications.selected.as_ref() == Some(&app.identity)
-                    && host.selected_session_id().is_none();
-                if let Some(session) = created {
-                    if !host.sessions.iter().any(|row| row.id == session.id)
-                        && host.sessions.len() < MAX_SESSIONS
-                    {
-                        host.sessions.push(SessionRow {
-                            reference: String::new(),
-                            id: session.id.clone(),
-                            resolved_build_id: session.resolved_build_id.clone(),
-                            app_name: Some(app.name.clone()),
-                            build_state: crate::engine::builds::BuildState::Ready,
-                        });
-                    }
-                    if !host.applications.catalog.iter().any(|row| row.id == session.id)
-                        && host.applications.catalog.len() < MAX_SESSIONS
-                    {
-                        host.applications.catalog.push(session.clone());
-                    }
-                    if select {
-                        host.sidebar_session = Some(session.id);
-                    }
-                    host.rebuild_application_list();
-                    if select {
-                        host.select_application_session(cx);
-                    }
-                }
+                host.applications.creating = false;
                 match result {
-                    Ok((prepared, instance)) if select => {
-                        host.selected = Some(prepared);
-                        host.applications.instance = Some(instance.instance);
-                        host.refresh_logs(cx);
-                    }
-                    Ok(_) => {}
+                    Ok(session) => host.open_created_application_session(app, session, origin, cx),
+                    Err(error) if !connected => host.error = format!("Could not contact the local engine. {error}"),
                     Err(error) => {
-                        host.error = if uncertain {
-                            host.applications.uncertain_creation =
-                                Some((app.identity, app.sessions.into_iter().collect()));
-                            format!(
-                                "The session may have been created. \
-                                 Check retained sessions before opening again. {error}"
-                            )
+                        // Only a terminal engine rejection allows a later explicit
+                        // Status with no new session to rearm creation.
+                        let settled = error.downcast_ref::<ipc::RejectedReply>().is_some();
+                        host.error = if !host.applications.register_uncertain_creation(app, settled) {
+                            format!("Could not confirm the launch. Check the updated session list. {error}")
+                        } else if settled {
+                            format!("The session may have been created. Select the app again to check its sessions. {error}")
                         } else {
-                            error.to_string()
-                        }
+                            format!("The session may still be starting. Check the session list before starting another. {error}")
+                        };
                     }
                 }
                 host.applications.refresh_needed = true;
@@ -455,6 +415,67 @@ impl Shell {
         })
         .detach();
         cx.notify();
+    }
+
+    pub(super) fn application_creation_view(
+        &self,
+        app: &AppIdentity,
+        cx: &App,
+    ) -> Option<CreationView> {
+        if self.applications.selected.as_ref() != Some(app)
+            || self.selected_session_id().is_some()
+            || self.sidebar_volumes
+            || self.applications.pending_scope.is_some()
+            || self.new_session.is_some()
+            || self.personal.is_some()
+            || self.invitation.is_some()
+            || self.modal_open(cx)
+        {
+            return None;
+        }
+        let scope = if self.applications.root_open {
+            let browser = self.browser.as_ref()?;
+            Some((
+                self.applications.selected_role?,
+                browser.entity_id(),
+                browser.read(cx).interaction_revision,
+            ))
+        } else {
+            None
+        };
+        Some(CreationView { navigation_revision: self.applications.navigation_revision, scope })
+    }
+
+    pub(super) fn open_created_application_session(
+        &mut self,
+        app: Application,
+        session: Session,
+        origin: CreationView,
+        cx: &mut Context<Self>,
+    ) {
+        // Retain the creation even when navigation supersedes the foreground launch.
+        let select = self.application_creation_view(&app.identity, cx) == Some(origin);
+        if !self.sessions.iter().any(|row| row.id == session.id)
+            && self.sessions.len() < MAX_SESSIONS
+        {
+            self.sessions.push(SessionRow {
+                reference: String::new(),
+                id: session.id.clone(),
+                resolved_build_id: session.resolved_build_id.clone(),
+                app_name: Some(app.name),
+                build_state: crate::engine::builds::BuildState::Ready,
+            });
+        }
+        let id = session.id.clone();
+        if !self.applications.catalog.iter().any(|row| row.id == id)
+            && self.applications.catalog.len() < MAX_SESSIONS
+        {
+            self.applications.catalog.push(session);
+        }
+        self.rebuild_application_list();
+        if select {
+            self.open_retained_session(id, cx);
+        }
     }
 
     pub(super) fn create_application_instance(&mut self, cx: &mut Context<Self>) {

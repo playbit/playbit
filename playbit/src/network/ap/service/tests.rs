@@ -7,7 +7,7 @@ fn all_operation_requests_keep_the_same_validated_wire_shape() {
     // Existing independent operation fixtures cover every supported request.
     let fixtures: Vec<serde_json::Value> =
         serde_json::from_str(include_str!("../../../../tests/fixtures/ap-requests.json")).unwrap();
-    assert_eq!(fixtures.len(), 53);
+    assert_eq!(fixtures.len(), 54);
     for fixture in fixtures {
         let typed: ServiceRequest = serde_json::from_value(fixture.clone()).unwrap();
         let frame = request(&typed).unwrap();

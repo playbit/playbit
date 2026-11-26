@@ -455,7 +455,22 @@ session invitation links.
 Unknown accounts fail without changing permissions. The successful JSON result
 reports the resolved account and access; progress goes to stderr.
 
-Publication notes may contain at most 32 KiB of JSON-escaped text.
+To correct release notes, sign in as the publisher and use the exact `build_id`
+from that build's `pb publish` output or from `list-app-builds` in the
+[Playbit MCP tool](mcp.md). You can edit any published build, including an
+older one. The app keeps its current build selection and each build keeps its
+original publication date.
+
+```sh
+pb app set-notes PUBLISHER/APP-ID BUILD-ID --notes "Corrected release notes"
+pb app set-notes PUBLISHER/APP-ID BUILD-ID --notes ""
+```
+
+The command edits publication metadata directly. An open desktop app overview
+receives the correction automatically. The second command clears the notes.
+The JSON result describes the current publication, even when you edit an older
+build. Use `list-app-builds` to read back that build's notes. Release notes may
+contain at most 32 KiB of JSON-escaped text.
 
 `pb app list` streams bounded catalog pages. `pb app disable PUBLISHER/APP-ID`
 prevents new app-based runs; `enable` permits them again. Existing sessions,

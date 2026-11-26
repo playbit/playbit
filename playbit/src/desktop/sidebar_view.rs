@@ -967,6 +967,9 @@ impl Shell {
                     if leave_volume && !this.prepare_browser_navigation(cx) {
                         return;
                     }
+                    if this.sidebar_volumes != volumes {
+                        this.applications.did_navigate();
+                    }
                     this.sidebar_volumes = volumes;
                     this.new_session = None;
                     if leave_volume {

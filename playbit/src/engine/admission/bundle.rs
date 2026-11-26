@@ -29,7 +29,7 @@ impl Drop for Notify {
 impl Task {
     pub fn start(engine: &Engine, token: usize, request: Request) -> Result<Self> {
         if !matches!(&request, Request::DuplicateVolume { .. } | Request::DuplicateEntry { .. }) {
-            crate::engine::developer::validate(&request)?;
+            crate::engine::developer::validate(&request, &engine.services.store)?;
         }
         let build: Option<String> = match &request {
             Request::InstanceCompile { context, .. } => {

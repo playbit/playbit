@@ -762,6 +762,56 @@ fn visible_record(window: gpui::WindowHandle<Shell>, id: Id, cx: &mut gpui::Test
 }
 
 #[gpui::test]
+fn record_page_navigation_supersedes_a_pending_launch_even_after_returning(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (_host, window, browser, _requests) = fixture(cx);
+    let ids = long_record_page(&browser, cx);
+    let cursor = ids[63];
+    let start = browser.update(cx, |browser, cx| {
+        browser.records.selected = None;
+        browser.records.object = None;
+        let page = browser.records.page.as_mut().expect("record list");
+        Arc::make_mut(page).next = Some(cursor);
+        cx.notify();
+        browser.interaction_revision
+    });
+    cx.run_until_parked();
+    let press = |key: &str, cx: &mut gpui::TestAppContext| {
+        window
+            .update(cx, |_, window, cx| browser.read(cx).controls[key].read(cx).focus(window))
+            .expect("browser window");
+        test_support::press(window, "enter", cx);
+    };
+    press("records-first", cx);
+    browser.read_with(cx, |browser, _| assert_eq!(browser.interaction_revision, start));
+    press("records-next", cx);
+    let next = browser.update(cx, |browser, cx| {
+        assert_eq!(browser.records.after, Some(cursor));
+        assert_eq!(browser.records.selected, None);
+        assert_ne!(browser.interaction_revision, start);
+        let next = browser.interaction_revision;
+        browser.receive(
+            Reply::Objects(crate::engine::reply::ObjectPageResult {
+                database: browser.database_address().expect("record database"),
+                type_id: browser.records.type_id.expect("record type"),
+                after: Some(cursor),
+                page: crate::store::ObjectPage { objects: vec![], next: None },
+            }),
+            cx,
+        );
+        next
+    });
+    cx.run_until_parked();
+    browser.read_with(cx, |browser, _| assert_eq!(browser.interaction_revision, next));
+    press("records-first", cx);
+    browser.read_with(cx, |browser, _| {
+        assert_eq!(browser.records.after, None);
+        assert_ne!(browser.interaction_revision, start);
+    });
+}
+
+#[gpui::test]
 fn arrows_reveal_virtualized_records_and_horizontal_return_restores_the_selected_row(
     cx: &mut gpui::TestAppContext,
 ) {

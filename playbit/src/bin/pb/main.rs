@@ -204,7 +204,12 @@ fn run() -> Result<()> {
             "enable" | "disable" | "delete" => {
                 serde_json::to_value(developer::app_lifecycle(&args[1..], &call)?)?
             }
-            _ => return Err(usage_error("expected pb app list, enable, disable or delete")),
+            "set-notes" => serde_json::to_value(developer::set_app_notes(&args[2..], &call)?)?,
+            _ => {
+                return Err(usage_error(
+                    "expected pb app list, enable, disable, delete or set-notes",
+                ));
+            }
         },
         "session" => match argument(&args, 1)? {
             "create" => output(developer::create_session(&args[2..], &std::env::current_dir()?)?)?,

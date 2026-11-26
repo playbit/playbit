@@ -1227,5 +1227,27 @@ pub(super) fn app_lifecycle(
     call(request)
 }
 
+pub(super) fn set_app_notes(
+    args: &[String],
+    call: &impl Fn(Request) -> Result<Reply>,
+) -> Result<Reply> {
+    let usage = || usage_error("expected pb app set-notes PUBLISHER/APP-ID BUILD-ID --notes TEXT");
+    let [app, build, options @ ..] = args else { return Err(usage()) };
+    let notes = match options {
+        [flag, text] if flag == "--notes" => Some(text.as_str()),
+        [inline] => inline.strip_prefix("--notes="),
+        _ => None,
+    }
+    .ok_or_else(usage)?;
+    let app = app_identity(app).map_err(usage_error)?;
+    if !valid_id(build, 32) {
+        return Err(usage_error("invalid build ID"));
+    }
+    if !playbit::network::ap::operation::valid_app_notes(notes) {
+        return Err(usage_error("publication notes exceed 32 KiB of JSON-escaped text"));
+    }
+    call(Request::SetAppBuildNotes { app, build: build.clone(), notes: notes.to_owned() })
+}
+
 #[cfg(test)]
 mod tests;

@@ -40,6 +40,7 @@ pub const OPERATION_NAMES: &[&str] = &[
     "list_apps",
     "list_app_builds",
     "set_app_enabled",
+    "set_app_build_notes",
     "delete_app",
     "publish_app",
     "resolve_session",
