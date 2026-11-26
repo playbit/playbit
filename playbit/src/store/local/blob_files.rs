@@ -312,7 +312,9 @@ impl LocalStore {
         access: &Access,
         version: &BlobVersion,
     ) -> Result<VerifiedBlob> {
-        self.verify_blob_for(access, version, Permission::Read)
+        self.check_blob_version(access, version, Permission::Read)?;
+        let preparation = entry_blobs::Preparation::enter(&self.entry_blobs)?;
+        self.verify_blob_for(access, version, Permission::Read, &preparation)
     }
 
     /// Reserve storage for one captured revision before exposing a read view.
@@ -382,16 +384,15 @@ impl LocalStore {
         Ok(lease)
     }
 
-    /// Transport-only Write verification never supplies a plaintext read lease
-    /// to an app. Public readers always enter through verify_blob_version.
+    /// Caller admits this version and holds one preparation slot through the
+    /// read. Verify current authority again before returning the descriptor.
     pub(super) fn verify_blob_for(
         &self,
         access: &Access,
         version: &BlobVersion,
         permission: Permission,
+        _preparation: &entry_blobs::Preparation<'_>,
     ) -> Result<VerifiedBlob> {
-        self.check_blob_version(access, version, permission)?;
-        let _preparation = entry_blobs::Preparation::enter(&self.entry_blobs.active)?;
         let file = {
             let _cache = self
                 .blob_cache

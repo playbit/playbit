@@ -139,7 +139,7 @@ impl LocalStore {
     ) -> Result<VolumeEntry> {
         volume_index::validate_name(name)?;
         let source = self.recovery_source(access, address, name, revision, cut)?;
-        let _credit = entry_blobs::Preparation::enter(&self.entry_blobs.active)?;
+        let _credit = entry_blobs::Preparation::enter(&self.entry_blobs)?;
         let id = EntryId::generate()?;
         let mut info = EntryInfo {
             namespace: Default::default(),

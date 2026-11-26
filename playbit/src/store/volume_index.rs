@@ -27,6 +27,8 @@ mod publication;
 pub(crate) use projection::NamespaceCache;
 #[cfg(any(feature = "connected-engine", target_arch = "wasm32"))]
 pub(crate) use publication::blob_versions as published_blob_versions;
+#[cfg(feature = "connected-engine")]
+pub(crate) use publication::changes_permissions;
 mod reconciliation;
 mod recovery;
 mod schema;
@@ -234,6 +236,16 @@ pub enum DirectoryListing {
     },
 }
 
+/// A process-local observation of a readable private file revision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "app-host", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
+pub struct FileAvailability {
+    /// Last notice included in this observation, including unrelated files.
+    pub through: u64,
+    /// Latest matching file or reconnect notice, or the end of discarded history.
+    pub invalidated: u64,
+}
+
 /// Known-ID editing metadata requires catalog Read, retained entry Read, or
 /// current Write/Append. Content and history retain their separate Read checks;
 /// an excluded owner can repair an override without gaining content access.
@@ -241,6 +253,9 @@ pub enum DirectoryListing {
 #[cfg_attr(feature = "app-host", derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize))]
 pub struct EntryDetails {
     pub entry: VolumeEntry,
+    /// Local IPC observation for an open private file. Never persists or conveys authority.
+    #[serde(skip)]
+    pub file_availability: FileAvailability,
     pub permissions: EntryAcl,
     /// Device-local configured grants, including when volume defaults are active.
     #[serde(default)]

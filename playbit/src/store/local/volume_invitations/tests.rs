@@ -1,6 +1,9 @@
 #![allow(clippy::unwrap_used, reason = "Tests exercise isolated account and volume stores.")]
 use super::*;
 
+#[cfg(feature = "connected-engine")]
+mod private_files;
+
 fn unlock(store: &LocalStore) {
     store
         .save_recovery_state(&RecoveryState {

@@ -23,6 +23,25 @@ enum BlobReceipt {
     PendingUpload,
     #[cfg(feature = "connected-engine")]
     PrivatePeer,
+    #[cfg(feature = "connected-engine")]
+    PrivateUpload,
+}
+
+impl BlobReceipt {
+    fn uploaded_by_peer(self) -> bool {
+        #[cfg(feature = "connected-engine")]
+        {
+            self == Self::PrivateUpload
+        }
+        #[cfg(not(feature = "connected-engine"))]
+        {
+            false
+        }
+    }
+
+    fn permission(self) -> Permission {
+        if self.uploaded_by_peer() { Permission::Write } else { Permission::Read }
+    }
 }
 
 pub struct BlobUploadPage {
@@ -33,7 +52,9 @@ pub struct BlobUploadPage {
 #[derive(Default)]
 pub(super) struct BlobPreparations {
     pub(super) active: AtomicUsize,
-    #[cfg(test)]
+    #[cfg(feature = "connected-engine")]
+    released: tokio::sync::Notify,
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(clippy::type_complexity, reason = "The hook stops exactly at blob index publication.")]
     pub(super) before_publish: Mutex<Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>>,
     #[cfg(test)]
@@ -45,22 +66,57 @@ fn next_preparation(active: usize) -> Option<usize> {
     if active < MAX_PREPARATIONS { Some(active + 1) } else { None }
 }
 
-pub(super) struct Preparation<'a>(&'a AtomicUsize);
+#[cfg(feature = "connected-engine")]
+impl BlobPreparations {
+    async fn available(&self) {
+        loop {
+            let released = self.released.notified();
+            if self.active.load(Ordering::Acquire) < MAX_PREPARATIONS {
+                return;
+            }
+            released.await;
+        }
+    }
+}
+
+#[cfg(feature = "connected-engine")]
+impl LocalStore {
+    /// A live stream can arm this even after the original bulk request ended.
+    /// The next transfer still needs to acquire its own preparation credit.
+    pub(crate) async fn file_preparation_available(&self) {
+        self.entry_blobs.available().await;
+    }
+}
+
+pub(super) struct Preparation<'a>(&'a BlobPreparations);
 impl<'a> Preparation<'a> {
-    pub(super) fn enter(active: &'a AtomicUsize) -> Result<Self> {
-        active
+    pub(super) fn enter(slots: &'a BlobPreparations) -> Result<Self> {
+        slots
+            .active
             .try_update(Ordering::AcqRel, Ordering::Acquire, next_preparation)
             .map_err(|_| Error::LocalContention("Both blob preparation slots are in use"))?;
-        Ok(Self(active))
+        Ok(Self(slots))
+    }
+
+    #[cfg(feature = "connected-engine")]
+    async fn for_transfer(slots: &'a BlobPreparations) -> Self {
+        loop {
+            if let Ok(slot) = Self::enter(slots) {
+                return slot;
+            }
+            slots.available().await;
+        }
     }
 }
 impl Drop for Preparation<'_> {
     fn drop(&mut self) {
-        let previous = self.0.fetch_sub(1, Ordering::AcqRel);
+        let previous = self.0.active.fetch_sub(1, Ordering::AcqRel);
         assert!(
             previous > 0 && previous <= MAX_PREPARATIONS,
             "preparation releases its own credit"
         );
+        #[cfg(feature = "connected-engine")]
+        self.0.released.notify_waiters();
     }
 }
 
@@ -86,14 +142,32 @@ fn pending_count_key(digest: &[u8; 32]) -> String {
     format!("entry-pending-content/{}", hex(digest))
 }
 
+fn add_content_pin(tx: &mut kvdb::WriteTxn<'_, RedbStorage>, digest: &[u8; 32]) -> Result<()> {
+    let count = pending_count_key(digest);
+    let active =
+        tx.get(count.as_bytes())?.map(|bytes| decode::<u64>(&bytes)).transpose()?.unwrap_or(0);
+    let next = active.checked_add(1).ok_or(Error::LimitExceeded)?;
+    tx.put(count.as_bytes(), &encode(&next)?)?;
+    Ok(())
+}
+
+/// Private peer copies contribute one durable retention reference per digest.
+/// Older cache eviction code honors this same counter. The marker makes lost
+/// receipts and other private versions of the same bytes idempotent.
+#[cfg(feature = "connected-engine")]
+fn pin_private_content(tx: &mut kvdb::WriteTxn<'_, RedbStorage>, digest: &[u8; 32]) -> Result<()> {
+    let marker = format!("entry-private-content/{}", hex(digest));
+    if !tx.has(marker.as_bytes())? {
+        add_content_pin(tx, digest)?;
+        tx.put(marker.as_bytes(), &[])?;
+    }
+    Ok(())
+}
+
 fn queue_upload(tx: &mut kvdb::WriteTxn<'_, RedbStorage>, version: &BlobVersion) -> Result<()> {
     let upload = upload_key(version);
     if tx.get(upload.as_bytes())?.is_none() {
-        let count = pending_count_key(&version.digest);
-        let active =
-            tx.get(count.as_bytes())?.map(|bytes| decode::<u64>(&bytes)).transpose()?.unwrap_or(0);
-        let next = active.checked_add(1).ok_or(Error::LimitExceeded)?;
-        tx.put(count.as_bytes(), &encode(&next)?)?;
+        add_content_pin(tx, &version.digest)?;
         tx.put(upload.as_bytes(), &encode(version)?)?;
     }
     Ok(())
@@ -329,7 +403,7 @@ impl LocalStore {
                 Err(error) => return Err(error),
             }
         }
-        let _preparation = Preparation::enter(&self.entry_blobs.active)?;
+        let _preparation = Preparation::enter(&self.entry_blobs)?;
         let id = EntryId::generate()?;
         let revision = EntryId::generate()?;
         let kind = self.prepare_entry_blob(volume, id, revision, source)?;
@@ -390,7 +464,7 @@ impl LocalStore {
     ) -> Result<VolumeEntry> {
         let _timing = crate::trace::Span::new("storage.blob_write");
         self.admit_blob_mutation(access, volume, Some(entry))?;
-        let _preparation = Preparation::enter(&self.entry_blobs.active)?;
+        let _preparation = Preparation::enter(&self.entry_blobs)?;
         let revision = EntryId::generate()?;
         let mut kind = self.prepare_entry_blob(volume, entry, revision, source)?;
         self.before_entry_blob_publication()?;
@@ -659,6 +733,9 @@ impl LocalStore {
                 address.entry,
                 revision.ok_or(Error::InvalidInput("upload revision required"))?,
             )?;
+            if access.invitation_peer.is_some() {
+                self.authorize_private_file_owner(&policy, &snapshot, address)?;
+            }
         } else if permission == Permission::Read && revision.is_some() {
             snapshot.authorize_retained_read(
                 policy.volume(),
@@ -691,6 +768,30 @@ impl LocalStore {
             return Err(Error::LimitExceeded);
         }
         Ok(version)
+    }
+
+    /// The owner can decrypt the incoming envelope. Entry overrides can remove
+    /// their content access while still allowing them to manage the policy.
+    fn authorize_private_file_owner(
+        &self,
+        policy: &MetadataPolicy,
+        snapshot: &IndexSnapshot<'_, RedbStorage>,
+        address: EntryAddress,
+    ) -> Result<()> {
+        let owner = policy.volume().owner;
+        self.check_authority(&Access::owner(owner), address.volume, Some(address.entry))?;
+        snapshot
+            .authorize(
+                policy.volume(),
+                policy.default_permissions(),
+                owner,
+                address.entry,
+                Permission::Read,
+            )
+            .map_err(|error| match error {
+                Error::AccessDenied(_) => Error::AccessDenied(Error::PRIVATE_FILE_OWNER_READ),
+                other => other,
+            })
     }
 
     pub(super) fn admitted_blob_creation(
@@ -742,7 +843,7 @@ impl LocalStore {
         use std::io::Read;
         self.check_blob_version(access, version, Permission::Read)?;
         let BlobVersion { len_bytes, digest, .. } = *version;
-        let _preparation = Preparation::enter(&self.entry_blobs.active)?;
+        let _preparation = Preparation::enter(&self.entry_blobs)?;
         let file = self.open_entry_blob(&digest).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 Error::NotFound("blob content")
@@ -765,7 +866,23 @@ impl LocalStore {
     /// Sealing and hashing run outside the authorization boundary. Recheck the
     /// exact retained version and current write rights before returning bytes.
     pub fn encrypt_blob_version(&self, access: &Access, version: &BlobVersion) -> Result<fs::File> {
-        self.seal_blob_version(access, version, Permission::Write)
+        self.check_blob_version(access, version, Permission::Write)?;
+        let slot = Preparation::enter(&self.entry_blobs)?;
+        self.seal_blob_version(access, version, Permission::Write, slot)
+    }
+
+    /// The private transfer worker has its own deadline and cancellation.
+    /// Its one slot covers verification and sealing without a second race.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) async fn encrypt_peer_blob_upload(
+        &self,
+        access: &Access,
+        version: &BlobVersion,
+    ) -> Result<fs::File> {
+        self.validate_peer_blob_upload(access, version)?;
+        let slot = Preparation::for_transfer(&self.entry_blobs).await;
+        self.check_blob_version(access, version, Permission::Write)?;
+        self.seal_blob_version(access, version, Permission::Write, slot)
     }
 
     /// Serve only an authenticated reader's exact retained file revision.
@@ -778,7 +895,9 @@ impl LocalStore {
         if access.invitation_peer.is_none() {
             return Err(Error::AccessDenied("private file reader required"));
         }
-        self.seal_blob_version(access, version, Permission::Read)
+        self.check_blob_version(access, version, Permission::Read)?;
+        let slot = Preparation::enter(&self.entry_blobs)?;
+        self.seal_blob_version(access, version, Permission::Read, slot)
     }
 
     fn seal_blob_version(
@@ -786,11 +905,10 @@ impl LocalStore {
         access: &Access,
         version: &BlobVersion,
         permission: Permission,
+        slot: Preparation<'_>,
     ) -> Result<fs::File> {
         use std::io::Seek;
-        self.check_blob_version(access, version, permission)?;
-        let mut plaintext = self.verify_blob_for(access, version, permission)?;
-        let _preparation = Preparation::enter(&self.entry_blobs.active)?;
+        let mut plaintext = self.verify_blob_for(access, version, permission, &slot)?;
         let mut ciphertext =
             super::blob_files::blob_transfer_file(&self.path.join(crate::paths::STAGING))?;
         let encrypted_key = crate::store::seal_blob_to(
@@ -821,7 +939,7 @@ impl LocalStore {
         durable: bool,
     ) -> Result<()> {
         let receipt = if durable { BlobReceipt::Hosted } else { BlobReceipt::PendingUpload };
-        self.receive_blob(access, version, ciphertext, receipt)
+        self.receive_blob(access, version, ciphertext, receipt).map(|_| ())
     }
 
     /// A file received from its private owner remains pinned for offline use.
@@ -835,7 +953,50 @@ impl LocalStore {
     ) -> Result<()> {
         let mut access = access.clone();
         access.invitation_peer = Some(self.volume(version.address.volume)?.owner);
-        self.receive_blob(&access, version, ciphertext, BlobReceipt::PrivatePeer)
+        self.receive_blob(&access, version, ciphertext, BlobReceipt::PrivatePeer).map(|_| ())
+    }
+
+    /// Called for a writer-to-owner Push on either endpoint. File publication
+    /// admits Append only for the creation body, and requires Write for edits.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn validate_peer_blob_upload(
+        &self,
+        access: &Access,
+        version: &BlobVersion,
+    ) -> Result<()> {
+        self.check_peer_blob_writer(access, version)?;
+        self.check_blob_version(access, version, Permission::Write)
+    }
+
+    #[cfg(feature = "connected-engine")]
+    fn check_peer_blob_writer(&self, access: &Access, version: &BlobVersion) -> Result<()> {
+        let owner = self.volume(version.address.volume)?.owner;
+        let peer = if self.account.id == owner { access.account } else { owner };
+        if access.session_id.is_some()
+            || access.account == owner
+            || access.invitation_peer != Some(peer)
+        {
+            return Err(Error::AccessDenied("private file writer required"));
+        }
+        Ok(())
+    }
+
+    /// Retain the body of a previously admitted version on the private owner.
+    /// A true result wakes readers after the store records its scoped change.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) async fn receive_peer_blob_upload(
+        &self,
+        access: &Access,
+        version: &BlobVersion,
+        ciphertext: &mut impl std::io::Read,
+    ) -> Result<bool> {
+        if access.account == self.account.id {
+            return Err(Error::AccessDenied("private file upload requires its owner as receiver"));
+        }
+        self.validate_peer_blob_upload(access, version)?;
+        let slot = Preparation::for_transfer(&self.entry_blobs).await;
+        self.check_blob_version(access, version, Permission::Write)?;
+        self.receive_blob_admitted(access, version, ciphertext, BlobReceipt::PrivateUpload, slot)
     }
 
     fn receive_blob(
@@ -844,9 +1005,20 @@ impl LocalStore {
         version: &BlobVersion,
         ciphertext: &mut impl std::io::Read,
         receipt: BlobReceipt,
-    ) -> Result<()> {
-        self.check_blob_version(access, version, Permission::Read)?;
-        let _preparation = Preparation::enter(&self.entry_blobs.active)?;
+    ) -> Result<bool> {
+        self.check_blob_version(access, version, receipt.permission())?;
+        let slot = Preparation::enter(&self.entry_blobs)?;
+        self.receive_blob_admitted(access, version, ciphertext, receipt, slot)
+    }
+
+    fn receive_blob_admitted(
+        &self,
+        access: &Access,
+        version: &BlobVersion,
+        ciphertext: &mut impl std::io::Read,
+        receipt: BlobReceipt,
+        _slot: Preparation<'_>,
+    ) -> Result<bool> {
         let mut plaintext = super::blob_files::BlobStage::new(
             &self.blob_stage_directory(receipt == BlobReceipt::Hosted)?,
         )?;
@@ -866,7 +1038,7 @@ impl LocalStore {
         version: &BlobVersion,
         plaintext: &super::blob_files::BlobStage,
         receipt: BlobReceipt,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let durable = receipt == BlobReceipt::Hosted;
         for _ in 0..2 {
             let mut destinations = vec![self.blob_path(&version.digest, durable)];
@@ -878,10 +1050,21 @@ impl LocalStore {
                 .iter()
                 .map(|destination| self.inspect_blob(version, destination))
                 .collect::<Result<Vec<_>>>()?;
+            // A private owner acknowledges this local copy as durable. An
+            // ordinary File close can leave an identical unsynced inode/link.
+            if receipt.uploaded_by_peer()
+                && let super::blob_files::ExistingBlob::Verified(_) = &inspections[0]
+            {
+                let target = &destinations[0];
+                if !inspections[0].sync_verified(target)? {
+                    continue;
+                }
+                super::initialization::sync_directory(target.parent().expect("blob parent"))?;
+            }
             self.before_entry_blob_publication()?;
             let operations = self.access_operations(access, version.address.volume)?;
             let _guards = operations.lock()?;
-            self.check_blob_version_locked(access, version, Permission::Read)?;
+            self.check_blob_version_locked(access, version, receipt.permission())?;
             let _profile = self.lock_profile()?;
             let _cache = self
                 .blob_cache
@@ -895,30 +1078,44 @@ impl LocalStore {
                 continue;
             }
             super::initialization::sync_directory(&self.path)?;
-            self.retain_received_entry_blob(version, receipt)?;
-            let database = self.db(version.address.volume, crate::store::DatabaseId::Index)?;
-            let current = match IndexSnapshot::new(database.begin_read()?)
-                .blob_version(version.address, None)
-            {
-                Ok(current) => Some(current),
-                Err(Error::NotFound("retired entry")) => None,
-                Err(error) => return Err(error),
-            };
-            if current.as_ref() == Some(version) {
-                let mut tx = database.begin_write(now_unix_secs())?;
-                volume_index::mark_backing_ready(&mut tx, version.address.entry)?;
-                tx.commit()?;
+            let new_version = self.retain_received_entry_blob(version, receipt)?;
+            let became_ready = self.mark_received_file_ready(version)?;
+            let restored = !matches!(&inspections[0], super::blob_files::ExistingBlob::Verified(_));
+            let available = new_version || became_ready || restored;
+            if receipt.uploaded_by_peer() && available {
+                self.private_file_available(
+                    version.address.volume,
+                    Some((version.address.entry, version.revision)),
+                );
             }
-            return Ok(());
+            return Ok(available);
         }
         Err(Error::LocalContention("blob cache changed during verified publication"))
+    }
+
+    /// The caller holds the volume gate through admission and readiness.
+    /// A historical body stays available without selecting an older head.
+    fn mark_received_file_ready(&self, version: &BlobVersion) -> Result<bool> {
+        let database = self.db(version.address.volume, crate::store::DatabaseId::Index)?;
+        let snapshot = IndexSnapshot::new(database.begin_read()?);
+        match snapshot.blob_version(version.address, None) {
+            Ok(current)
+                if current == *version && !snapshot.backing_ready(version.address.entry)? => {}
+            Ok(_) | Err(Error::NotFound("retired entry")) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+        drop(snapshot);
+        let mut tx = database.begin_write(now_unix_secs())?;
+        volume_index::mark_backing_ready(&mut tx, version.address.entry)?;
+        tx.commit()?;
+        Ok(true)
     }
 
     fn retain_received_entry_blob(
         &self,
         version: &BlobVersion,
         receipt: BlobReceipt,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let key = format!(
             "{}{}/{}/{}",
             pin_prefix(&version.digest),
@@ -927,7 +1124,12 @@ impl LocalStore {
             version.revision
         );
         let mut tx = self.metadata.begin_write(now_unix_secs())?;
+        let new_version = !tx.has(key.as_bytes())?;
         tx.put(key.as_bytes(), &encode(version)?)?;
+        #[cfg(feature = "connected-engine")]
+        if matches!(receipt, BlobReceipt::PrivatePeer | BlobReceipt::PrivateUpload) {
+            pin_private_content(&mut tx, &version.digest)?;
+        }
         let changed =
             receipt == BlobReceipt::Hosted && tx.get(durable_key(version).as_bytes())?.is_none();
         if receipt == BlobReceipt::Hosted {
@@ -946,18 +1148,19 @@ impl LocalStore {
         if changed {
             self.changes.provider_status_changed(version.address.volume);
         }
-        Ok(())
+        Ok(new_version)
     }
 
     /// Page both live current and retained historical bodies. A metadata ack
-    /// never removes this queue: only verified AP body durability does.
+    /// never removes this queue. The appropriate hosted or private owner must
+    /// acknowledge the exact file transfer.
     pub fn pending_entry_blobs(
         &self,
         access: &Access,
         volume: Id,
         after: Option<(EntryId, EntryId)>,
     ) -> Result<BlobUploadPage> {
-        self.pending_blob_uploads(access, volume, None, after)
+        self.pending_blob_uploads(access, volume, None, after, UPLOAD_PAGE)
     }
 
     #[cfg(feature = "connected-engine")]
@@ -967,7 +1170,16 @@ impl LocalStore {
         address: EntryAddress,
         after: Option<(EntryId, EntryId)>,
     ) -> Result<BlobUploadPage> {
-        self.pending_blob_uploads(access, address.volume, Some(address.entry), after)
+        self.pending_blob_uploads(access, address.volume, Some(address.entry), after, UPLOAD_PAGE)
+    }
+
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn next_private_file_upload(
+        &self,
+        volume: Id,
+        after: Option<(EntryId, EntryId)>,
+    ) -> Result<BlobUploadPage> {
+        self.pending_blob_uploads(&Access::owner(self.account.id), volume, None, after, 1)
     }
 
     fn pending_blob_uploads(
@@ -976,11 +1188,22 @@ impl LocalStore {
         volume: Id,
         selected: Option<EntryId>,
         after: Option<(EntryId, EntryId)>,
+        limit: usize,
     ) -> Result<BlobUploadPage> {
         let operations = self.access_operations(access, volume)?;
         let _guards = operations.lock()?;
         let policy = self.index(volume)?;
         self.admit_access(access, &policy)?;
+        let mut access = access.clone();
+        if access.session_id.is_none()
+            && access.account == self.account.id
+            && policy.volume().personal
+            && !policy.volume().share_key_with_service
+            && policy.volume().owner != self.account.id
+            && self.has_direct_volume_grant(volume)?
+        {
+            access.invitation_peer = Some(policy.volume().owner);
+        }
         let prefix = selected.map_or_else(
             || format!("entry-upload/{volume}/"),
             |entry| format!("entry-upload/{volume}/{entry}/"),
@@ -992,12 +1215,15 @@ impl LocalStore {
             after.map(|(entry, revision)| format!("entry-upload/{volume}/{entry}/{revision}"));
         let tx = self.metadata.begin_read()?;
         let mut iter = tx.iter_from(start.as_ref().map_or(prefix.as_bytes(), |key| key.as_bytes()));
-        let mut versions = Vec::with_capacity(UPLOAD_PAGE);
+        let mut versions = Vec::with_capacity(limit);
         let mut scanned = 0;
         let mut next = None;
         while let Some((key, value)) = iter.next().transpose()? {
             if !key.starts_with(prefix.as_bytes()) {
                 break;
+            }
+            if scanned == UPLOAD_PAGE || versions.len() == limit {
+                return Ok(BlobUploadPage { versions, next });
             }
             let version: BlobVersion = decode(&value)?;
             if &key[..] != upload_key(&version).as_bytes() || version.address.volume != volume {
@@ -1007,12 +1233,9 @@ impl LocalStore {
             if Some(cursor) == after {
                 continue;
             }
-            if scanned == UPLOAD_PAGE {
-                break;
-            }
             scanned += 1;
             next = Some(cursor);
-            match self.check_blob_version_locked(access, &version, Permission::Write) {
+            match self.check_blob_version_locked(&access, &version, Permission::Write) {
                 Ok(()) => versions.push(version),
                 // Interrupted publication and permanent retirement retain pins,
                 // but never authorize a remote upload or resurrect an entry.
@@ -1070,6 +1293,60 @@ impl LocalStore {
         version: &BlobVersion,
     ) -> Result<()> {
         self.acknowledge_blob_version_inner(access, version, true)
+    }
+
+    /// The live index publication and explicit synchronization use the same
+    /// writer outbox. The upload itself separately authorizes current access.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn peer_blob_upload_pending(&self, version: &BlobVersion) -> Result<bool> {
+        let pending: Option<BlobVersion> = get(&self.metadata, upload_key(version).as_bytes())?;
+        Ok(pending.as_ref() == Some(version))
+    }
+
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn peer_blob_upload_eligible(&self, version: &BlobVersion) -> Result<bool> {
+        if !self.peer_blob_upload_pending(version)? {
+            return Ok(false);
+        }
+        let owner = self.volume(version.address.volume)?.owner;
+        let access = Access::private_volume_peer(self.account.id, owner);
+        match self.validate_peer_blob_upload(&access, version) {
+            Ok(()) => Ok(true),
+            // Match the durable outbox scan: concurrent retirement and
+            // permission changes leave this reference for future recovery.
+            Err(Error::NotFound(_) | Error::AccessDenied(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Retire only this writer's acknowledged version. Keep its local bytes
+    /// pinned even if an unrelated hosted entry has the same plaintext.
+    #[cfg(feature = "connected-engine")]
+    pub(crate) fn acknowledge_peer_blob_upload(
+        &self,
+        access: &Access,
+        version: &BlobVersion,
+    ) -> Result<()> {
+        if access.account != self.account.id {
+            return Err(Error::AccessDenied("private file receipt requires its writer"));
+        }
+        let operations = self.access_operations(access, version.address.volume)?;
+        let _guards = operations.lock()?;
+        self.check_peer_blob_writer(access, version)?;
+        self.check_blob_version_locked(access, version, Permission::Write)?;
+        let _profile = self.lock_profile()?;
+        let mut tx = self.metadata.begin_write(now_unix_secs())?;
+        let Some(queued) = tx.get(upload_key(version).as_bytes())? else {
+            return Ok(());
+        };
+        if decode::<BlobVersion>(&queued)? != *version {
+            return Err(Error::InvalidInput("private file receipt differs from queued version"));
+        }
+        drop(queued);
+        pin_private_content(&mut tx, &version.digest)?;
+        retire_upload(&mut tx, version)?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Trusted transport calls this only after the service acknowledged the
@@ -1166,6 +1443,20 @@ impl LocalStore {
                 tx.get(format!("volume/{id}").as_bytes())?.ok_or(Error::NotFound("volume"))?;
             let volume: Volume = decode(&record)?;
             if !volume.share_key_with_service {
+                // A local/private owner already holds its files. Only a current
+                // invitation writer can have work to send to a private owner.
+                if volume.owner != self.account.id && self.has_direct_volume_grant(id)? {
+                    let writer = Access::private_volume_peer(self.account.id, volume.owner);
+                    match self.check_blob_version(&writer, &version, Permission::Write) {
+                        Ok(()) => return Ok(true),
+                        Err(
+                            Error::NotFound(_)
+                            | Error::AccessDenied(_)
+                            | Error::ParticipantRevoked { .. },
+                        ) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
                 continue;
             }
             let operations = self.operations(&[volume.id])?;
@@ -1181,7 +1472,7 @@ impl LocalStore {
     }
 
     pub(super) fn before_entry_blob_publication(&self) -> Result<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let hook = self
                 .entry_blobs
@@ -1196,12 +1487,12 @@ impl LocalStore {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(
         clippy::type_complexity,
         reason = "Tests pause exactly before final authorization and publication."
     )]
-    pub(crate) fn set_blob_publication_hook(
+    pub fn set_blob_publication_hook(
         &self,
         hook: Option<Arc<dyn Fn() -> Result<()> + Send + Sync>>,
     ) -> Result<()> {

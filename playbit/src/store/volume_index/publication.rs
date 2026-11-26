@@ -2,6 +2,16 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[cfg(feature = "connected-engine")]
+pub(crate) fn changes_permissions(bytes: &[u8]) -> Result<bool> {
+    let mut changed = false;
+    kvdb::sync::visit_delta(bytes, crate::store::MAX_REPLICA_DELTA_BYTES, |key, _| {
+        changed |= key == crate::store::catalog::DEFAULT_PERMISSIONS_KEY
+            || key.starts_with(&[META_BYTE, PERMISSIONS]);
+    })?;
+    Ok(changed)
+}
+
 /// Never scan the current pending queue here: it can already contain newer
 /// revisions whose index declarations have not reached AP yet. The delta byte
 /// limit also bounds the number of declarations retained by this job.

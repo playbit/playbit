@@ -2612,7 +2612,9 @@ impl Remote {
             return controls.map(|_| ());
         }
         let mut volumes = publisher.take_initializations();
-        for id in self.take_ready_peer_invitations(super::publisher::VOLUME_LIMIT - volumes.len()) {
+        for id in
+            self.take_ready_peer_invitations(super::publisher::VOLUME_LIMIT - volumes.len())?
+        {
             if store.has_direct_volume_grant(id)? {
                 if !volumes.contains(&id) {
                     volumes.push(id);
@@ -2625,6 +2627,10 @@ impl Remote {
         self.initializations.select(&mut volumes, Instant::now());
         volumes.retain(|volume| self.scope.read().admits(*volume));
         if volumes.is_empty() && matches!(controls, Ok(false)) {
+            if self.upload_ready_private_files(store)? && self.pending_availability {
+                // Other volumes or registrations can still be pending after the last receipt.
+                self.refresh_availability(store)?;
+            }
             return Ok(());
         }
         let mut first_error = controls.err();
@@ -2695,6 +2701,9 @@ impl Remote {
                     self.private_peer_waiting = true;
                 }
             }
+        }
+        if let Err(error) = self.upload_ready_private_files(store) {
+            initialization::retain_error(&mut first_error, error);
         }
         if let Err(error) = self.refresh_availability(store) {
             initialization::retain_error(&mut first_error, error);
@@ -3314,31 +3323,57 @@ impl Remote {
             |id| Access::session(store.account().id, id),
         );
         let mut after = None;
+        let mut first_file_error = None;
         loop {
             let page = store.pending_entry_blobs(&access, volume, after)?;
             if !page.versions.is_empty() {
                 if private_personal && session.is_none() {
-                    return Err(
-                        "private file version is available only on the device that created it"
-                            .into(),
-                    );
+                    if let Some(error) = self.upload_private_page(store, volume, page.versions)? {
+                        first_file_error.get_or_insert(error);
+                    }
+                } else {
+                    let live = self.live.as_ref().ok_or("live replication is unavailable")?;
+                    self.runtime
+                        .block_on(live.publisher().fence(&[volume]))
+                        .map_err(|e| live.resolve_failure(e))?;
+                    self.blob_transport().upload_pending(
+                        store,
+                        &access,
+                        session,
+                        volume,
+                        page.versions,
+                    )?;
                 }
-                let live = self.live.as_ref().ok_or("live replication is unavailable")?;
-                self.runtime
-                    .block_on(live.publisher().fence(&[volume]))
-                    .map_err(|e| live.resolve_failure(e))?;
-                self.blob_transport().upload_pending(
-                    store,
-                    &access,
-                    session,
-                    volume,
-                    page.versions,
-                )?;
             }
             let Some(next) = page.next else { break };
             after = Some(next);
         }
-        Ok(())
+        first_file_error.map_or(Ok(()), |error| Err(error.into()))
+    }
+
+    fn upload_private_page(
+        &self,
+        store: &LocalStore,
+        volume: Id,
+        versions: Vec<crate::store::volume_index::BlobVersion>,
+    ) -> Result<Option<crate::store::Error>> {
+        // Capture the durable page before fencing: newer local declarations
+        // can already be queued while the live publisher drains its prefix.
+        if versions.is_empty() {
+            return Ok(None);
+        }
+        self.checkpoint_direct_volume(volume)?;
+        let result = self.blob_transport().upload_private_page(
+            store,
+            self.connection.as_ref().ok_or("AP disconnected")?,
+            versions,
+        );
+        if let Err(error) = &result
+            && let Some(busy) = error.downcast_ref::<super::peer::personal::PreparationBusy>()
+        {
+            self.private_checkpoint(volume)?.wait_for_preparation(*busy);
+        }
+        result
     }
 
     fn checkpoint_pending_changes(&mut self, store: &Arc<LocalStore>) -> Result<()> {

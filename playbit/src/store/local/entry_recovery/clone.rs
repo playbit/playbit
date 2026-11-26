@@ -55,7 +55,7 @@ impl LocalStore {
             }
             source_cut
         };
-        let _credit = entry_blobs::Preparation::enter(&self.entry_blobs.active)?;
+        let _credit = entry_blobs::Preparation::enter(&self.entry_blobs)?;
         let prepared = self.prepare_recovered_database(access, source, destination, &source_cut)?;
         if expected.is_some() {
             self.before_entry_recovery_publication()?;

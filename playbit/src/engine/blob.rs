@@ -329,6 +329,35 @@ impl BlobTransport {
         Ok(self.transfers.uploads.clone().acquire_owned().await?)
     }
 
+    /// Keep damaged local bodies pending and report the first one after the
+    /// remaining pages. Transport or authority failures end this capture.
+    pub(super) fn upload_private_page(
+        &self,
+        store: &LocalStore,
+        connection: &ApConnection,
+        versions: Vec<BlobVersion>,
+    ) -> Result<Option<Error>> {
+        let runtime = self.handle.as_ref().ok_or("connected blob runtime is unavailable")?;
+        let _upload = runtime.block_on(self.upload_credit())?;
+        let mut first_error = None;
+        for version in versions {
+            if !store.peer_blob_upload_eligible(&version)? {
+                continue;
+            }
+            let _bulk = self.credit()?;
+            if let Err(error) = super::peer::push_file(runtime, connection, store, &version) {
+                match *error.downcast::<Error>()? {
+                    Error::AccessDenied(Error::PRIVATE_FILE_OWNER_READ) => {}
+                    error @ (Error::Corrupt(_) | Error::NotFound(_)) => {
+                        first_error.get_or_insert(error);
+                    }
+                    other => return Err(other.into()),
+                }
+            }
+        }
+        Ok(first_error)
+    }
+
     pub(super) fn upload_pending_admitted(
         &self,
         store: &LocalStore,

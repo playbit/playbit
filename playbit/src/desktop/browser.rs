@@ -650,7 +650,10 @@ impl Browser {
         if details.entry.deleted || !details.readable || self.entry_is_hidden(details.entry.id) {
             self.clear_blob_preview(cx);
         }
-        let Some(details) = self.project_deleted_details(details, cx) else { return true };
+        let Some(mut details) = self.project_deleted_details(details, cx) else { return true };
+        // Availability observations belong to the selected preview. Advancing
+        // past an unrelated hint leaves cached entry metadata and size intact.
+        let availability = std::mem::take(&mut details.file_availability);
         if self.database_open {
             self.database_open = false;
             if details.entry.deleted
@@ -706,8 +709,8 @@ impl Browser {
             self.clear_selected_view(cx);
             return true;
         }
-        self.refresh_blob_preview(cx);
-        changed || opening || history_changed || kv_changed
+        let preview_changed = self.refresh_blob_preview(availability, cx);
+        changed || opening || history_changed || kv_changed || preview_changed
     }
 
     fn deleted_name_discard(

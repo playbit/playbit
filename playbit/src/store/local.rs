@@ -27,6 +27,7 @@ mod entry_blobs;
 mod file_namespace;
 mod file_provider;
 mod file_provider_publication;
+mod private_file_hints;
 mod provider_uploads;
 #[cfg(feature = "connected-engine")]
 pub(crate) use blob_files::blob_transfer_file;
@@ -926,6 +927,7 @@ pub struct LocalStore {
     /// Cache invalidation only. Active verified reads may outlive file eviction.
     blob_eviction_generation: std::sync::atomic::AtomicU64,
     entry_blobs: entry_blobs::BlobPreparations,
+    private_file_hints: Mutex<private_file_hints::FileHints>,
     snapshots: snapshot::SnapshotCaptures,
     received: received::ReceivePreparations,
     volume_operations: Mutex<VolumeRegistry>,
@@ -1230,6 +1232,7 @@ impl LocalStore {
             build_publication: Mutex::new(()),
             blob_eviction_generation: std::sync::atomic::AtomicU64::new(0),
             entry_blobs: Default::default(),
+            private_file_hints: Default::default(),
             snapshots: Default::default(),
             received: Default::default(),
             volume_operations: Mutex::new(std::array::from_fn(|_| None)),

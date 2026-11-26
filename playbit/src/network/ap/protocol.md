@@ -1712,13 +1712,62 @@ designation and keeps the authenticated duplex stream until a policy advance or
 disconnection. The existing `PeerReply` binds the responder's connection and
 request ID. The source checks the current data policy for each transfer.
 After an unavailable peer returns, the recipient receives `peer_available`
-on its inbox stream.
+on its inbox stream. AP also wakes a waiting writer when a finite relay slot
+becomes available or an owner claims an offer after its setup deadline.
+An inbox gap triggers a new grant snapshot. A writer with an active
+subscription resumes pending file delivery from its current catalog on
+either the readiness notice or the snapshot. AP keeps the selected owner
+device for later requests, even after its recipients disconnect. A later
+reader obtains metadata and file bodies from the same replica while that
+owner is listening and has reconciled the current ACL revision. If it
+disconnects or falls behind the committed ACL, AP may route to another
+eligible owner. That device can serve
+the file versions for which it has both metadata and retained bytes.
+
+A finite relay closes after 30 seconds without a complete frame forwarded
+in either direction, or after 120 seconds total. A file sender can stream the
+body while the receiver waits to acknowledge the complete version.
 
 A direct peer pull identifies a database, a file version, or an append-log page
 inside the encrypted stream. File bodies travel in bounded chunks. The receiver
 checks the authorized version and digest before admitting the bytes to its
 local cache. Append-log pages use the same source cut as the other backings in
 the volume snapshot, including an empty log.
+
+A direct file push names the entry in the authenticated `PeerEvent`. Its
+encrypted selector carries the exact `BlobVersion` linked in the owner's
+index. The owner checks the writer's current permission and replies ready.
+The writer streams the sealed body in chunks of at most 64 KiB. The owner
+rechecks authority, verifies the body and durably retains it, then returns
+the exact version in an encrypted receipt. Starting at READY, the writer
+allows 60 seconds for body transfer and another 30 seconds for the receipt.
+This includes time for buffered writes to reach the owner. The receipt settles that
+version in the writer's local upload queue. A missing receipt leaves it
+pending, so a reconnect may send the same version again.
+The receiving owner must also have effective Read on the entry. The sealed
+`private_file_owner_read` refusal defers that version while other eligible
+files can continue. A later grant of Read permits delivery of the pending body.
+
+When both file preparation slots are occupied, the private bulk worker waits
+for a slot within the transfer deadline. An owner whose slots stay full
+returns the sealed `private_file_owner_preparation_busy` refusal.
+A writer receiving that exact refusal may send a live `CHECKPOINT` with an
+empty payload. The owner returns an empty `RECEIPT` when a slot is available.
+Each subscription coalesces repeated waits while ordinary 16-byte checkpoints
+and catalog updates continue. The writer retries its durable outbox after
+that receipt, or on local slot release when its own preparation was deferred.
+Only a receipt carrying the exact uploaded version settles the outbox.
+
+A recipient that supports file availability notices sends a checkpoint with a
+16-byte all-zero nonce at the start of its encrypted live stream. The owner
+echoes the checkpoint before emitting notices on that stream. After retaining
+a writer's upload, it may send a `FILE_AVAILABLE` frame (kind 11) containing
+the 15-byte entry ID and 15-byte revision ID. The owner checks that the
+recipient can read that exact current version. The hint lets a recipient
+retry a failed file read or preview. Every fetch still verifies current Read
+permission, the file version and its digest. Older readers receive their
+ordinary live deltas. Older owners echo the checkpoint and continue serving
+their supported operations.
 
 When a recipient explicitly synchronizes a private volume, its publisher drains
 the committed local changes and sends a checkpoint on the live stream after

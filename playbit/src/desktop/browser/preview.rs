@@ -5,7 +5,7 @@ use crate::{
     desktop::worker_queue::Gate,
     engine::tool_client::DataContext,
     runtime::host::{DataCall, DataOperation, DataResult},
-    store::volume_index::EntryAddress,
+    store::volume_index::{EntryAddress, FileAvailability},
 };
 use gpui::{AnyWindowHandle, EntityId, Global, RenderImage, WeakEntity};
 use image::ImageDecoder;
@@ -37,6 +37,11 @@ struct Target {
     epoch: u64,
 }
 
+enum LoadFailure {
+    Read,
+    Other,
+}
+
 #[derive(Default)]
 pub(super) struct Preview {
     generation: u64,
@@ -44,6 +49,9 @@ pub(super) struct Preview {
     image: Option<Arc<RenderImage>>,
     window: Option<AnyWindowHandle>,
     loading: bool,
+    read_failed: bool,
+    observed_hints: u64,
+    retry_pending: bool,
 }
 
 impl Preview {
@@ -167,11 +175,26 @@ impl Browser {
         })
     }
 
-    pub(super) fn refresh_blob_preview(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn refresh_blob_preview(
+        &mut self,
+        availability: FileAvailability,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let target = self.blob_preview_target();
         if self.preview.target == target {
-            return;
+            self.preview.retry_pending |= availability.invalidated > self.preview.observed_hints;
+            self.preview.observed_hints = self.preview.observed_hints.max(availability.through);
+            if !self.preview.read_failed || !self.preview.retry_pending {
+                return false;
+            }
+        } else {
+            self.preview.observed_hints = availability.through;
         }
+        self.start_blob_preview(target, cx);
+        true
+    }
+
+    fn start_blob_preview(&mut self, target: Option<Target>, cx: &mut Context<Self>) {
         self.clear_blob_preview(cx);
         self.preview.target = target;
         let Some(target) = target else { return };
@@ -201,6 +224,8 @@ impl Browser {
             self.preview.generation.checked_add(1).expect("preview generation must not wrap");
         self.preview.target = None;
         self.preview.loading = false;
+        self.preview.read_failed = false;
+        self.preview.retry_pending = false;
         self.preview.retire_image(cx);
         retire(cx.entity_id(), cx);
     }
@@ -267,9 +292,8 @@ fn start_latest(cx: &mut App) {
     let profile = crate::engine::profile_path();
     let target = pending.target;
     let gate = pending.gate.clone();
-    let job = cx.background_executor().spawn(async move {
-        load(&profile, target, &gate, &cancellation).map_err(|error| error.to_string())
-    });
+    let job =
+        cx.background_executor().spawn(async move { load(&profile, target, &gate, &cancellation) });
     cx.spawn(async move |cx| {
         let result = job.await;
         let _ = cx.update(|cx| {
@@ -281,7 +305,7 @@ fn start_latest(cx: &mut App) {
     .detach();
 }
 
-fn deliver(pending: Pending, result: Result<Arc<RenderImage>, String>, cx: &mut App) {
+fn deliver(pending: Pending, result: Result<Arc<RenderImage>, LoadFailure>, cx: &mut App) {
     let installed = pending
         .owner
         .update(cx, |this, cx| {
@@ -290,9 +314,14 @@ fn deliver(pending: Pending, result: Result<Arc<RenderImage>, String>, cx: &mut 
             {
                 if this.blob_preview_target() == Some(pending.target) {
                     this.preview.retire_image(cx);
+                    this.preview.read_failed = matches!(result, Err(LoadFailure::Read));
                     this.preview.image = result.ok();
                 }
                 this.preview.loading = false;
+                if this.preview.read_failed && this.preview.retry_pending {
+                    // A readiness notice may have arrived before this older read completed.
+                    this.start_blob_preview(Some(pending.target), cx);
+                }
                 cx.notify();
                 return this.preview.image.is_some();
             }
@@ -309,24 +338,26 @@ fn load(
     target: Target,
     gate: &Gate,
     cancellation: &Cancellation,
-) -> crate::engine::Result<Arc<RenderImage>> {
+) -> Result<Arc<RenderImage>, LoadFailure> {
     let exchange = |request| cancellation.exchange(profile, request, gate, target.epoch);
-    let mut context = DataContext::open_browser(target.address.volume, target.session, &exchange)?;
+    let mut context = DataContext::open_browser(target.address.volume, target.session, &exchange)
+        .map_err(|_| LoadFailure::Other)?;
     let mut execute = |operation| {
         context.execute(DataCall { volume: *target.address.volume.as_bytes(), operation })
     };
-    let result = (|| {
-        let bytes = read_bytes(target, &mut execute, || cancellation.check(gate, target.epoch))?;
+    let bytes = read_bytes(target, &mut execute, || cancellation.check(gate, target.epoch));
+    let failure = if bytes.is_err() { LoadFailure::Read } else { LoadFailure::Other };
+    let result = bytes.and_then(|bytes| {
         let image = decode(&bytes)
             .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?;
         cancellation.check(gate, target.epoch)?;
         check_metadata(target, &mut execute)?;
         Ok(image)
-    })();
-    let result = context.finish(result);
+    });
+    let result = context.finish(result).map_err(|_| failure);
     // Finishing retains cleanup ownership even after cancellation. A success
     // prepared before that close cannot cross back into a later selection.
-    cancellation.check(gate, target.epoch)?;
+    cancellation.check(gate, target.epoch).map_err(|_| LoadFailure::Other)?;
     result
 }
 
@@ -759,12 +790,12 @@ mod tests {
         for byte in [3, 4] {
             browser.update(cx, |this, cx| {
                 select_blob(this, byte);
-                this.refresh_blob_preview(cx);
+                this.refresh_blob_preview(FileAvailability::default(), cx);
             });
         }
         replacement.update(cx, |this, cx| {
             select_blob(this, 5);
-            this.refresh_blob_preview(cx);
+            this.refresh_blob_preview(FileAvailability::default(), cx);
         });
         cx.update(|cx| {
             let coordinator = cx.global::<Coordinator>();
@@ -844,6 +875,65 @@ mod tests {
     }
 
     #[gpui::test]
+    fn failed_preview_retries_for_new_or_missed_hints_only(cx: &mut gpui::TestAppContext) {
+        let (send, _requests, _) = crate::desktop::worker_queue::channel();
+        let browser = cx.new(|cx| Browser::new(super::super::tests::volume(1), send, cx));
+        cx.update(|cx| {
+            cx.set_global(Coordinator {
+                active: Some(Active {
+                    owner: browser.entity_id(),
+                    cancellation: Default::default(),
+                }),
+                ..Default::default()
+            })
+        });
+        browser.update(cx, |this, cx| {
+            select_blob(this, 3);
+            this.refresh_blob_preview(FileAvailability::default(), cx);
+        });
+        let first = cx.update(|cx| cx.global_mut::<Coordinator>().latest.take().unwrap());
+        let observe = |cx: &mut gpui::TestAppContext, through, invalidated| {
+            browser.update(cx, |this, cx| {
+                let mut details = (**this.details.as_ref().unwrap()).clone();
+                details.file_availability = FileAvailability { through, invalidated };
+                this.receive_details(details, cx);
+            });
+        };
+        // Unrelated notices keep the observation current as the 32-slot window
+        // turns over, including while the original byte read is in flight.
+        for through in 1u64..=40 {
+            observe(cx, through, through.saturating_sub(32));
+        }
+        cx.update(|cx| deliver(first, Err(LoadFailure::Read), cx));
+        for through in 41..=80 {
+            observe(cx, through, through - 32);
+        }
+        assert!(cx.update(|cx| cx.global::<Coordinator>().latest.is_none()));
+
+        // Exactly the next 32 notices fit. Missing a 33rd requires one retry.
+        observe(cx, 112, 80);
+        assert!(cx.update(|cx| cx.global::<Coordinator>().latest.is_none()));
+        observe(cx, 145, 113);
+        let lagged = cx.update(|cx| cx.global_mut::<Coordinator>().latest.take().unwrap());
+        // More than one matching notice can arrive while that read is in flight.
+        observe(cx, 146, 146);
+        observe(cx, 148, 147);
+        assert!(cx.update(|cx| cx.global::<Coordinator>().latest.is_none()));
+        cx.update(|cx| deliver(lagged, Err(LoadFailure::Read), cx));
+        let retry = cx.update(|cx| cx.global_mut::<Coordinator>().latest.take().unwrap());
+        cx.update(|cx| deliver(retry, Err(LoadFailure::Read), cx));
+        observe(cx, 149, 147);
+        assert!(cx.update(|cx| cx.global::<Coordinator>().latest.is_none()));
+
+        // An exact matching notice retries an already-failed read immediately.
+        observe(cx, 150, 150);
+        let latest = cx.update(|cx| cx.global_mut::<Coordinator>().latest.take().unwrap());
+        cx.update(|cx| deliver(latest, Err(LoadFailure::Other), cx));
+        observe(cx, 151, 151);
+        assert!(cx.update(|cx| cx.global::<Coordinator>().latest.is_none()));
+    }
+
+    #[gpui::test]
     fn returning_to_the_same_blob_rejects_an_earlier_selection_completion(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -862,13 +952,13 @@ mod tests {
         });
         browser.update(cx, |this, cx| {
             select_blob(this, 3);
-            this.refresh_blob_preview(cx);
+            this.refresh_blob_preview(FileAvailability::default(), cx);
         });
         let first = cx.update(|cx| cx.global_mut::<Coordinator>().latest.take().unwrap());
         for byte in [4, 3] {
             browser.update(cx, |this, cx| {
                 select_blob(this, byte);
-                this.refresh_blob_preview(cx);
+                this.refresh_blob_preview(FileAvailability::default(), cx);
             });
         }
         let latest = cx.update(|cx| cx.global_mut::<Coordinator>().latest.take().unwrap());

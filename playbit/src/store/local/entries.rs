@@ -138,8 +138,7 @@ impl LocalStore {
         if catalog_directory {
             snapshot.project_directory_details(&mut record)?;
         }
-        let volume = policy.volume();
-        let defaults = policy.default_permissions();
+        let (volume, defaults) = (policy.volume(), policy.default_permissions());
         let principal = self.data_actor(access, volume)?;
         let permits = |permission| {
             if !current {
@@ -167,6 +166,7 @@ impl LocalStore {
         let retained_permissions =
             self.configured_permissions(access, volume.id, entry, &acl, manage_permissions)?;
         let details = EntryDetails {
+            file_availability: Default::default(),
             entry: record,
             retained_permissions,
             permissions: acl,
@@ -188,7 +188,7 @@ impl LocalStore {
         &self,
         access: &Access,
         policy: &MetadataPolicy,
-        details: EntryDetails,
+        mut details: EntryDetails,
     ) -> Result<EntryDetails> {
         if access.account != policy.volume().owner
             && !details.retained_readable
@@ -196,6 +196,18 @@ impl LocalStore {
             && !granted(self.authorize(access, policy, Permission::Read))?
         {
             return Err(Error::AccessDenied("entry access or catalog Read required"));
+        }
+        if details.readable
+            && !policy.volume().share_key_with_service
+            && matches!(details.entry.info.kind, EntryKind::Blob { .. })
+        {
+            let address =
+                volume_index::EntryAddress { volume: policy.volume().id, entry: details.entry.id };
+            details.file_availability = self
+                .private_file_hints
+                .lock()
+                .expect("private file availability lock")
+                .observation(address, details.entry.content_revision);
         }
         Ok(details)
     }

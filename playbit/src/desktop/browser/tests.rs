@@ -1562,6 +1562,7 @@ fn identical_details_keep_the_scene_and_authority_changes_still_notify(
 
 pub(super) fn details(byte: u8, permissions: EntryAcl) -> EntryDetails {
     EntryDetails {
+        file_availability: Default::default(),
         schema_pending: false,
         entry: entry(byte),
         permissions,

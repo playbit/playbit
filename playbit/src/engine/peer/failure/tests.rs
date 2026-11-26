@@ -6,6 +6,29 @@ fn failures_are_typed_bounded_and_do_not_accept_raw_text_or_mixed_fields() {
     // Exercise the actual sender formatter/encoder and receiving decoder.
     let volume = Id::from_bytes([1; 16]);
     let account = Id::from_bytes([2; 16]);
+    let denied = crate::store::Error::AccessDenied(crate::store::Error::PRIVATE_FILE_OWNER_READ);
+    assert!(matches!(
+        Failure::decode(&encode(&denied).unwrap()).unwrap(),
+        Failure::PrivateFileOwnerRead {}
+    ));
+    assert!(
+        Failure::decode(br#"{"cause":"private_file_owner_read","message":"unscoped"}"#).is_err()
+    );
+    // Unstructured diagnostic text does not establish an owner's policy.
+    let text = crate::store::Error::System(denied.to_string());
+    assert!(matches!(Failure::decode(&encode(&text).unwrap()).unwrap(), Failure::Operation { .. }));
+    let busy = crate::store::Error::LocalContention(personal::OWNER_BUSY);
+    let bytes = encode(&busy).unwrap();
+    assert_eq!(bytes.as_slice(), br#"{"cause":"private_file_owner_preparation_busy"}"#);
+    assert!(matches!(
+        Failure::decode(&bytes).unwrap(),
+        Failure::PrivateFileOwnerPreparationBusy {}
+    ));
+    let diagnostic = crate::store::Error::System(busy.to_string());
+    assert!(matches!(
+        Failure::decode(&encode(&diagnostic).unwrap()).unwrap(),
+        Failure::Operation { .. }
+    ));
     let bytes = encode(&crate::store::Error::ParticipantRevoked { volume, account }).unwrap();
     assert!(matches!(Failure::decode(&bytes).unwrap(), Failure::ParticipantRevoked {
         volume: got_volume, account: got_account

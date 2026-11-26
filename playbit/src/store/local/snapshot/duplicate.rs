@@ -14,7 +14,7 @@ impl LocalStore {
                 "volume data is unavailable; connect a device that has it before duplicating",
             ));
         }
-        let _credit = entry_blobs::Preparation::enter(&self.entry_blobs.active)?;
+        let _credit = entry_blobs::Preparation::enter(&self.entry_blobs)?;
         let snapshot = self.capture_volume(&access, source)?;
         let original = snapshot.with_database(DatabaseId::Index, |tx| {
             Ok(MetadataPolicy::read_snapshot(&tx, MetadataPolicy::MAX_MATERIALIZED_BYTES)?

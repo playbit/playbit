@@ -40,7 +40,7 @@ use tokio::{
 mod contents;
 mod failure;
 pub(super) mod personal;
-pub(super) use contents::{pull_file, pull_log_page};
+pub(super) use contents::{pull_file, pull_log_page, push_file};
 pub(super) use failure::VerifiedDenial;
 pub(super) use personal::{LiveUpdates, PrivateFeeds, prepare_subscription};
 
@@ -53,8 +53,10 @@ const READY: u8 = 5;
 const PULL_DATABASE: u8 = 7;
 const PULL_FILE: u8 = 8;
 const PULL_LOG: u8 = 9;
+const PUSH_FILE: u8 = 10;
 const IDLE: Duration = Duration::from_secs(30);
 const MAX_RESPONSES: usize = 2;
+const MAX_LIVE_METADATA_JOBS: usize = 2;
 pub(super) const SUBSCRIPTION_BUSY: &str = "private volume subscription capacity exhausted";
 
 // Shared by all session listeners in this process. The blocking job owns its
@@ -62,6 +64,22 @@ pub(super) const SUBSCRIPTION_BUSY: &str = "private volume subscription capacity
 fn response_slots() -> Arc<Semaphore> {
     static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     SLOTS.get_or_init(|| Arc::new(Semaphore::new(MAX_RESPONSES))).clone()
+}
+
+/// Reserve the owner's local worker capacity in an isolated integration-test process.
+#[cfg(feature = "test-support")]
+pub async fn hold_response_slots_for_test() -> tokio::sync::OwnedSemaphorePermit {
+    response_slots()
+        .acquire_many_owned(MAX_RESPONSES as u32)
+        .await
+        .expect("private response admission is never closed")
+}
+
+// Projection and durable apply never wait for a network frame while holding
+// these credits. Private file transfers can occupy both response workers.
+fn live_metadata_slots() -> Arc<Semaphore> {
+    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SLOTS.get_or_init(|| Arc::new(Semaphore::new(MAX_LIVE_METADATA_JOBS))).clone()
 }
 
 struct Cipher {
@@ -146,8 +164,23 @@ async fn send_data(stream: &mut ApStream, cipher: &mut Cipher, data: &[u8]) -> R
     Ok(())
 }
 async fn receive(stream: &mut ApStream, cipher: &mut Cipher) -> Result<(u8, Vec<u8>)> {
-    let encrypted = tokio::time::timeout(IDLE, wire::receive_data(stream)).await??;
-    let (kind, data) = cipher.open(encrypted)?;
+    receive_bounded(stream, cipher, CHUNK).await
+}
+async fn receive_bounded(
+    stream: &mut ApStream,
+    cipher: &mut Cipher,
+    max_payload: usize,
+) -> Result<(u8, Vec<u8>)> {
+    tokio::time::timeout(IDLE, read_peer_frame(stream, cipher, max_payload)).await?
+}
+async fn read_peer_frame(
+    stream: &mut ApStream,
+    cipher: &mut Cipher,
+    max_payload: usize,
+) -> Result<(u8, Vec<u8>)> {
+    // 12-byte nonce, one encrypted frame kind and 16-byte tag.
+    let frame = stream.receive_with_body_limit(max_payload + 29).await?;
+    let (kind, data) = cipher.open(crate::network::ap::service::data(frame)?)?;
     if kind == ERROR {
         return Err(failure::Failure::decode(&data)?.into());
     }
@@ -247,9 +280,11 @@ async fn listen_for(
                 .acquire_owned()
                 .await
                 .expect("private response admission is never closed");
+            let updates = private.as_ref().map(|(_, updates)| updates.clone());
             tokio::task::spawn_blocking(move || {
                 let _credit = credit;
-                if let Err(error) = respond(&runtime, &connection, &store, &event) {
+                if let Err(error) = respond(&runtime, &connection, &store, &event, updates.as_ref())
+                {
                     crate::diagnostic!("Private database transfer ended: {error}");
                 }
             });
@@ -515,6 +550,7 @@ fn respond(
     connection: &ApConnection,
     store: &LocalStore,
     event: &PeerEvent,
+    updates: Option<&LiveUpdates>,
 ) -> Result<()> {
     let account = Id::parse(&event.requester_account_id)?;
     let volume = Id::parse(&event.volume_id)?;
@@ -532,7 +568,9 @@ fn respond(
     } else {
         Access::session_version(account, &event.session_id, &event.build_id)
     };
-    if contents::respond(runtime, store, &access, event, &mut stream, &mut cipher)? {
+    if let Some(updates) = updates
+        && contents::respond(runtime, store, &access, event, &mut stream, &mut cipher, updates)?
+    {
         return Ok(());
     }
     // A retained catalog can precede its ordinary database backing.
@@ -550,7 +588,10 @@ fn respond(
             &mut cipher,
         ),
         SyncDirection::Push => {
-            runtime.block_on(ready(&mut stream, &mut cipher))?;
+            // A direct push consumed READY while selecting its operation.
+            if !event.session_id.is_empty() {
+                runtime.block_on(ready(&mut stream, &mut cipher))?;
+            }
             respond_push(
                 runtime,
                 store,
@@ -743,6 +784,20 @@ async fn pull(
 #[allow(clippy::unwrap_used, reason = "Tests assert successful fixture operations.")]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn saturated_private_transfers_leave_bounded_live_metadata_capacity() -> Result<()> {
+        // Occupy both finite response workers as two in-flight uploads would.
+        let _transfers = response_slots().acquire_many_owned(MAX_RESPONSES as u32).await?;
+        let live = live_metadata_slots();
+        let _metadata = tokio::time::timeout(
+            Duration::from_secs(5),
+            live.clone().acquire_many_owned(MAX_LIVE_METADATA_JOBS as u32),
+        )
+        .await??;
+        assert!(live.try_acquire_owned().is_err());
+        Ok(())
+    }
     fn event() -> PeerEvent {
         PeerEvent {
             live: false,

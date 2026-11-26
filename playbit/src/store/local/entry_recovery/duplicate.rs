@@ -219,7 +219,7 @@ impl LocalStore {
                 Some(&source),
             );
         }
-        let _credit = entry_blobs::Preparation::enter(&self.entry_blobs.active)?;
+        let _credit = entry_blobs::Preparation::enter(&self.entry_blobs)?;
         let mut info = EntryInfo {
             namespace: namespace::Birth { parent, ..Default::default() },
             origin: namespace::Origin { installation: self.installation(), label: None },

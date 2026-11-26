@@ -678,7 +678,7 @@ impl LocalStore {
                 let _guards = operations.lock()?;
                 self.validate_file_destination_with_session(access, target, retained)?;
             }
-            let _preparation = entry_blobs::Preparation::enter(&self.entry_blobs.active)?;
+            let _preparation = entry_blobs::Preparation::enter(&self.entry_blobs)?;
             let revision = EntryId::generate()?;
             let mut kind =
                 self.prepare_file_blob(target.volume, target.entry, revision, source, sync)?;

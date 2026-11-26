@@ -11,6 +11,8 @@ const _: () = assert!(MESSAGE_BYTES * 6 + 128 <= MAX_BYTES);
 #[serde(tag = "cause", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Failure {
     ParticipantRevoked { volume: Id, account: Id },
+    PrivateFileOwnerRead {},
+    PrivateFileOwnerPreparationBusy {},
     Operation { message: String },
 }
 impl Failure {
@@ -31,6 +33,10 @@ impl fmt::Display for Failure {
             Self::ParticipantRevoked { .. } => {
                 formatter.write_str("peer reports participant revoked")
             }
+            Self::PrivateFileOwnerRead {} => {
+                formatter.write_str(crate::store::Error::PRIVATE_FILE_OWNER_READ)
+            }
+            Self::PrivateFileOwnerPreparationBusy {} => formatter.write_str(personal::OWNER_BUSY),
             Self::Operation { message } => formatter.write_str(message),
         }
     }
@@ -51,6 +57,12 @@ pub(super) fn encode(error: &crate::store::Error) -> Result<Vec<u8>> {
     let failure = match error {
         crate::store::Error::ParticipantRevoked { volume, account } => {
             Failure::ParticipantRevoked { volume: *volume, account: *account }
+        }
+        crate::store::Error::AccessDenied(crate::store::Error::PRIVATE_FILE_OWNER_READ) => {
+            Failure::PrivateFileOwnerRead {}
+        }
+        crate::store::Error::LocalContention(personal::OWNER_BUSY) => {
+            Failure::PrivateFileOwnerPreparationBusy {}
         }
         _ => {
             let mut message = Message(String::with_capacity(MESSAGE_BYTES));

@@ -22,13 +22,19 @@ struct PrivateStream {
     checkpoint: crate::engine::peer::personal::Checkpoint,
 }
 
+enum Notice {
+    Reconcile(Id),
+    PeerAvailable(Id),
+}
+
 pub(super) struct Watch {
     private: BTreeMap<Id, PrivateStream>,
     pub(super) rescan: Arc<Notify>,
     connection: Arc<ApConnection>,
     task: tokio::task::JoinHandle<()>,
-    pending: mpsc::Receiver<Id>,
-    enqueue: mpsc::Sender<Id>,
+    pending: mpsc::Receiver<Notice>,
+    enqueue: mpsc::Sender<Notice>,
+    files: Arc<crate::engine::peer::personal::FileNotices>,
 }
 
 impl Drop for Watch {
@@ -86,8 +92,15 @@ impl Remote {
                 crate::diagnostic!("Volume invitation delivery interrupted: {error}");
             }
         });
-        self.volume_invitation_watch =
-            Some(Watch { connection, task, pending, enqueue, rescan, private: BTreeMap::new() });
+        self.volume_invitation_watch = Some(Watch {
+            connection,
+            task,
+            pending,
+            enqueue,
+            rescan,
+            files: Arc::default(),
+            private: BTreeMap::new(),
+        });
         Ok(())
     }
     pub(super) fn sync_direct_volume(&mut self, store: &Arc<LocalStore>, volume: Id) -> Result<()> {
@@ -161,24 +174,28 @@ impl Remote {
                 .as_mut()
                 .expect("subscription is scoped to this watch");
             let enqueue = watch.enqueue.clone();
+            let files = watch.files.clone();
             let wake = self.completion.clone();
             let dirty = self.volume_invitations_changed.clone();
             let ended = Arc::new(AtomicBool::new(false));
             let finished = ended.clone();
             let checkpoint = subscription.checkpoint();
             let task = self.runtime.spawn(async move {
-                let result = subscription.run(dirty, wake.clone()).await;
+                let result = subscription.run(dirty, wake.clone(), Some(files)).await;
                 finished.store(true, Ordering::Release);
                 if let Err(error) = result {
                     crate::diagnostic!("Private volume subscription ended for {volume}: {error}");
                     // This stream already completed bootstrap. A subsequent loss is an
                     // explicit gap. If the owner is now offline, PeerAvailable wakes it.
-                    if enqueue.send(volume).await.is_ok() {
+                    if enqueue.send(Notice::Reconcile(volume)).await.is_ok() {
                         wake.notify();
                     }
                 }
             });
             watch.private.insert(volume, PrivateStream { task, ended, checkpoint });
+            // The live cursor covers new commits. Replay retained bodies whose
+            // original commit notifications predate this connection or process.
+            watch.files.schedule(volume, &self.completion)?;
             return Ok(received.pending_backing);
         }
         // Register the live stream before capturing the source. Publications during
@@ -211,7 +228,34 @@ impl Remote {
     }
 
     pub(super) fn peer_invitations_ready(&self) -> bool {
-        self.volume_invitation_watch.as_ref().is_some_and(|watch| !watch.pending.is_empty())
+        self.volume_invitation_watch
+            .as_ref()
+            .is_some_and(|watch| !watch.pending.is_empty() || watch.files.ready())
+    }
+
+    /// Upload at most one file per turn. Report when this turn drains the
+    /// scheduled file work so cached account availability can be refreshed.
+    pub(super) fn upload_ready_private_files(&self, store: &LocalStore) -> Result<bool> {
+        let Some(watch) = &self.volume_invitation_watch else { return Ok(false) };
+        let Some(work) = watch.files.take() else { return Ok(false) };
+        let volume = work.volume;
+        if watch.files.ready() {
+            self.completion.notify();
+        }
+        if self.private_invitation_connected(volume)
+            && self.scope.read().admits(volume)
+            && store.has_direct_volume_grant(volume)?
+        {
+            let page = store.next_private_file_upload(volume, work.after)?;
+            let result = self
+                .upload_private_page(store, volume, page.versions)
+                .map_err(|error| sync_failure::volume(store, volume, error))?;
+            watch.files.resume(work, page.next, &self.completion)?;
+            if let Some(error) = result {
+                return Err(sync_failure::volume(store, volume, error));
+            }
+        }
+        Ok(!watch.files.ready())
     }
 
     pub(super) fn private_invitation_connected(&self, volume: Id) -> bool {
@@ -221,28 +265,46 @@ impl Remote {
             .is_some_and(|stream| !stream.ended.load(Ordering::Acquire))
     }
 
-    pub(super) fn checkpoint_direct_volume(&self, volume: Id) -> Result<()> {
-        let stream = self
-            .volume_invitation_watch
+    pub(super) fn private_checkpoint(
+        &self,
+        volume: Id,
+    ) -> Result<&crate::engine::peer::personal::Checkpoint> {
+        self.volume_invitation_watch
             .as_ref()
             .and_then(|watch| watch.private.get(&volume))
-            .ok_or("waiting for an authorized peer")?;
+            .map(|stream| &stream.checkpoint)
+            .ok_or_else(|| "waiting for an authorized peer".into())
+    }
+
+    pub(super) fn checkpoint_direct_volume(&self, volume: Id) -> Result<()> {
+        let checkpoint = self.private_checkpoint(volume)?;
         let publisher = self.live.as_ref().ok_or("live replication unavailable")?.publisher();
         self.runtime.block_on(async {
             publisher.drain_private_changes().await?;
-            stream.checkpoint.wait().await
+            checkpoint.wait().await
         })
     }
 
-    pub(super) fn take_ready_peer_invitations(&mut self, limit: usize) -> BTreeSet<Id> {
+    pub(super) fn take_ready_peer_invitations(&mut self, limit: usize) -> Result<BTreeSet<Id>> {
         let mut ready = BTreeSet::new();
         if let Some(watch) = &mut self.volume_invitation_watch {
             for _ in 0..limit {
-                let Ok(volume) = watch.pending.try_recv() else { break };
+                let Ok(notice) = watch.pending.try_recv() else { break };
+                let volume = match notice {
+                    Notice::Reconcile(id) | Notice::PeerAvailable(id) => id,
+                };
+                if watch.private.get(&volume).is_some_and(|s| !s.ended.load(Ordering::Acquire)) {
+                    // A fresh inbox snapshot can replace a lost file wake while the
+                    // authorized catalog stream stays connected across the gap.
+                    watch.files.schedule(volume, &self.completion)?;
+                    if matches!(notice, Notice::PeerAvailable(_)) {
+                        continue;
+                    }
+                }
                 ready.insert(volume);
             }
         }
-        ready
+        Ok(ready)
     }
 }
 
@@ -253,7 +315,7 @@ struct Inbox {
     connection: Arc<ApConnection>,
     wake: Arc<Wake>,
     dirty: Arc<AtomicBool>,
-    enqueue: mpsc::Sender<Id>,
+    enqueue: mpsc::Sender<Notice>,
 }
 
 impl Inbox {
@@ -335,9 +397,9 @@ impl Inbox {
                     .await?;
                     match result {
                         Ok(changed) => {
-                            // Reconnect also replaces the live transports for retained offers.
+                            // Reconcile retained grants and replay their pending files on a gap.
                             if snapshot || changed {
-                                self.enqueue.send(volume).await?;
+                                self.enqueue.send(Notice::Reconcile(volume)).await?;
                             }
                             snapshot || changed
                         }
@@ -359,7 +421,7 @@ impl Inbox {
                     })
                     .await??;
                     if changed {
-                        self.enqueue.send(volume).await?;
+                        self.enqueue.send(Notice::Reconcile(volume)).await?;
                     }
                     changed
                 }
@@ -368,7 +430,7 @@ impl Inbox {
                     false
                 }
                 Event::PeerAvailable { volume } => {
-                    self.enqueue.send(volume).await?;
+                    self.enqueue.send(Notice::PeerAvailable(volume)).await?;
                     true
                 }
                 Event::Ready => {

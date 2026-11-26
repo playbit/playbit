@@ -56,6 +56,8 @@ impl fmt::Display for Error {
 }
 
 impl Error {
+    #[cfg(feature = "local-store")]
+    pub(crate) const PRIVATE_FILE_OWNER_READ: &'static str = "private file owner lacks entry Read";
     #[cfg(feature = "connected-engine")]
     pub(crate) const OWNER_CAPTURE_CHANGED: &'static str = "owner volume changed during capture";
     #[cfg(all(not(target_arch = "wasm32"), feature = "local-store"))]

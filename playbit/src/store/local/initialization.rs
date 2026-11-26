@@ -390,7 +390,7 @@ impl LocalStore {
         tx.commit()?;
         #[cfg(test)]
         checkpoint(1)?;
-        let _preparation = entry_blobs::Preparation::enter(&self.entry_blobs.active)?;
+        let _preparation = entry_blobs::Preparation::enter(&self.entry_blobs)?;
         self.prepare_initial_root(&volume, &credentials, declaration, purpose)?;
         sync_directory(&directory)?;
         sync_directory(&self.path.join(crate::paths::VOLUMES))?;
