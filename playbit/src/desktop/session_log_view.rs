@@ -6,6 +6,8 @@ use crate::ui::desktop::typography::tabular_numerals;
 use crate::ui::desktop::zoom::{length as ui, scaled};
 use gpui::{AvailableSpace, Pixels};
 
+mod selection;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MarkerKind {
     Started,
@@ -52,6 +54,7 @@ pub(super) struct LogView {
     // The final offset is the bottom of the last row.
     offsets: Vec<Pixels>,
     follow_pending: bool,
+    selection: selection::LogSelection,
 }
 impl LogView {
     pub(super) fn new(cx: &mut Context<Self>) -> Self {
@@ -76,6 +79,7 @@ impl LogView {
             message_heights: Vec::new(),
             offsets: Vec::new(),
             follow_pending: false,
+            selection: selection::LogSelection::new(cx),
         }
     }
     pub(super) fn select(&mut self, session: &str, instance: Option<Id>, cx: &mut Context<Self>) {
@@ -115,6 +119,7 @@ impl LogView {
         lines: &[crate::ui::app_control::LogEntry],
         cx: &mut Context<Self>,
     ) {
+        self.selection.reset();
         self.message_heights.clear();
         self.replace_lines(session, lines.to_vec(), cx);
     }
@@ -154,6 +159,7 @@ impl LogView {
             }
         }
         self.rows = rows;
+        self.rebuild_selection_text();
         self.offsets.clear();
         let ids = Arc::make_mut(&mut self.text_ids);
         ids.truncate(count);
@@ -167,6 +173,7 @@ impl LogView {
     }
 
     pub(super) fn clear(&mut self, cx: &mut Context<Self>) {
+        self.selection.reset();
         self.lines = Arc::new(Vec::new());
         self.text_ids = Arc::new(Vec::new());
         self.timestamps = Arc::new(Vec::new());
@@ -182,7 +189,8 @@ impl LogView {
     }
     pub(super) fn receive(&mut self, session: &str, update: log::Update, cx: &mut Context<Self>) {
         let handle = self.scroll.clone();
-        let follow = handle.offset().y + handle.max_offset().height <= px(0.5);
+        let follow =
+            !self.selection.active() && handle.offset().y + handle.max_offset().height <= px(0.5);
         match update {
             log::Update::Running(owner) => {
                 if self.last_owner != Some(owner) && self.lines.is_empty() {
@@ -254,16 +262,19 @@ impl LogView {
                     let mut removed_height: Pixels =
                         self.message_heights.drain(..measured).fold(px(0.), |sum, h| sum + h);
                     let scale = self.layout_key.map_or(1., |(_, rem, _)| f32::from(rem) / 16.);
+                    let mut removed_rows = removed;
                     markers.retain_mut(|marker| {
                         if marker.before < removed
                             || (marker.before == removed && marker.kind == MarkerKind::Stopped)
                         {
+                            removed_rows += 1;
                             removed_height += px(marker.height() * scale);
                             return false;
                         }
                         marker.before -= removed;
                         true
                     });
+                    self.selection.remove_prefix(removed_rows);
                     if !follow && !self.follow_pending {
                         // Keep the same visible text when the bounded prefix is evicted.
                         let offset = handle.offset();
@@ -327,7 +338,12 @@ fn calendar_time(now: libc::time_t) -> String {
 }
 
 impl LogView {
-    fn row(&self, index: usize, window: &Window) -> gpui::Div {
+    fn row(
+        &self,
+        index: usize,
+        window: &Window,
+        layouts: &mut Vec<selection::TextCell>,
+    ) -> gpui::Div {
         let (id, time_id) = text_editor::accessibility_text_ids(self.text_ids[index].entity_id());
         let container = div().w_full().px(ui(8.));
         let (text, timestamp, error, stopped) = match self.rows[index] {
@@ -348,11 +364,11 @@ impl LogView {
                         .text_color(rgba(0x0000004d))
                         .child(rule())
                         .child(
-                            tabular_numerals(host_text::element(
+                            tabular_numerals(self.selectable_text(
                                 format!("Started {}", marker.timestamp).into(),
                                 id,
-                                false,
-                                false,
+                                self.selection.row_starts[index],
+                                layouts,
                             ))
                             .flex_none()
                             .whitespace_nowrap(),
@@ -391,22 +407,42 @@ impl LogView {
             }))
             .when(!timestamp.is_empty(), |row| {
                 row.child(
-                    host_text::element(timestamp.into(), time_id, false, false)
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .text_color(rgba(if error { 0xcc333380 } else { 0x00000059 })),
+                    self.selectable_text(
+                        timestamp.clone().into(),
+                        time_id,
+                        self.selection.row_starts[index],
+                        layouts,
+                    )
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_color(rgba(if error {
+                        0xcc333380
+                    } else {
+                        0x00000059
+                    })),
                 )
             })
             .child(
-                host_text::element(text.into(), id, false, false)
-                    .flex_1()
-                    .min_w_0()
-                    .whitespace_normal()
-                    .when(stopped, |label| label.whitespace_nowrap()),
+                self.selectable_text(
+                    text.into(),
+                    id,
+                    self.selection.row_starts[index]
+                        + if timestamp.is_empty() { 0 } else { timestamp.len() + 1 },
+                    layouts,
+                )
+                .flex_1()
+                .min_w_0()
+                .whitespace_normal()
+                .when(stopped, |label| label.whitespace_nowrap()),
             )
     }
 
-    fn viewport(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) -> gpui::Div {
+    fn viewport(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let width =
             (bounds.size.width - self.scrollbars.read(cx).gutter_width(window, cx)).max(px(0.));
         let key = (width, window.rem_size(), window.scale_factor());
@@ -424,7 +460,7 @@ impl LogView {
                     RowContent::Message(i) => {
                         if i == self.message_heights.len() {
                             let height = self
-                                .row(index, window)
+                                .row(index, window, &mut Vec::new())
                                 .w(width)
                                 .into_any_element()
                                 .layout_as_root(
@@ -444,9 +480,12 @@ impl LogView {
         let inset = scaled(window, 4.);
         let height = self.offsets[self.rows.len()] + inset * 2.;
         let maximum = (height - bounds.size.height).max(px(0.));
+        self.drag_scroll(bounds, window);
         let at_bottom = self.scroll.offset().y + self.scroll.max_offset().height <= px(0.5);
-        if self.follow_pending
-            || (at_bottom && (resized || bounds.size.height != self.scroll.bounds().size.height))
+        if !self.selection.active()
+            && (self.follow_pending
+                || (at_bottom
+                    && (resized || bounds.size.height != self.scroll.bounds().size.height)))
         {
             self.scroll.set_offset(gpui::point(px(0.), -maximum));
             self.follow_pending = false;
@@ -455,10 +494,15 @@ impl LogView {
         let start = self.offsets[1..].partition_point(|bottom| *bottom <= top);
         let end =
             self.offsets[..self.rows.len()].partition_point(|y| *y < top + bounds.size.height);
+        let mut layouts = Vec::new();
         let content =
             div().relative().w_full().h(height).flex_none().children((start..end).map(|index| {
-                self.row(index, window).absolute().left_0().top(self.offsets[index] + inset)
+                self.row(index, window, &mut layouts)
+                    .absolute()
+                    .left_0()
+                    .top(self.offsets[index] + inset)
             }));
+        self.selection.cells = layouts;
         div()
             .size_full()
             .relative()
@@ -466,6 +510,10 @@ impl LogView {
             .child(
                 div()
                     .id("session-log")
+                    .cursor_text()
+                    .track_focus(&self.selection.focus)
+                    .key_context("ArchipelagoTextEditor")
+                    .map(|pane| self.selection_handlers(pane, cx))
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
@@ -476,8 +524,24 @@ impl LogView {
 }
 
 impl Render for LogView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.selection.focus_observers.is_none() {
+            self.selection.focus_observers = Some([
+                cx.on_blur(&self.selection.focus, window, |view, window, cx| {
+                    view.selection.blur(window.is_window_active());
+                    cx.notify();
+                }),
+                cx.observe_window_activation(window, |view, window, cx| {
+                    // Blur arrives after drawing; stop auto-scrolling before that frame.
+                    if !window.is_window_active() {
+                        view.selection.blur(false);
+                        cx.notify();
+                    }
+                }),
+            ]);
+        }
         let view = cx.entity();
+        let painted = view.clone();
         // The pane can resize independently of the window. Lay out its virtualized
         // content at the actual pane bounds in the same frame.
         gpui::canvas(
@@ -487,7 +551,13 @@ impl Render for LogView {
                 viewport.prepaint_as_root(bounds.origin, bounds.size.map(Into::into), window, cx);
                 viewport
             },
-            |_, mut viewport, window, cx| viewport.paint(window, cx),
+            move |_, mut viewport, window, cx| {
+                viewport.paint(window, cx);
+                painted.update(cx, |view, cx| {
+                    view.selection_drag_handlers(window, cx);
+                    view.drag_after_layout(cx);
+                });
+            },
         )
         .size_full()
     }
