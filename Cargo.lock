@@ -1850,7 +1850,7 @@ dependencies = [
 
 [[package]]
 name = "docdb"
-version = "0.1.5-beta"
+version = "0.1.6-beta"
 dependencies = [
  "libc",
 ]
@@ -3524,7 +3524,7 @@ dependencies = [
 
 [[package]]
 name = "kvdb"
-version = "0.1.5-beta"
+version = "0.1.6-beta"
 dependencies = [
  "blake3",
  "libc",
@@ -4610,7 +4610,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "playbit"
-version = "0.1.5-beta"
+version = "0.1.6-beta"
 dependencies = [
  "async-channel",
  "base64 0.22.1",
@@ -4680,7 +4680,7 @@ dependencies = [
 
 [[package]]
 name = "playbit-api"
-version = "0.1.5-beta"
+version = "0.1.6-beta"
 dependencies = [
  "docdb",
 ]
@@ -4696,18 +4696,18 @@ dependencies = [
 
 [[package]]
 name = "playbit-macos-runtime"
-version = "0.1.5-beta"
+version = "0.1.6-beta"
 dependencies = [
  "playbit",
 ]
 
 [[package]]
 name = "playbit-test-fixtures"
-version = "0.1.5-beta"
+version = "0.1.6-beta"
 
 [[package]]
 name = "playbit-trace"
-version = "0.1.5-beta"
+version = "0.1.6-beta"
 dependencies = [
  "libc",
  "mach2",
